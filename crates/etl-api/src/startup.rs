@@ -1,10 +1,11 @@
-use std::{net::TcpListener, sync::Arc};
+use std::{io, net::TcpListener, sync::Arc};
 
-use actix_web::{App, HttpServer, dev::Server, middleware, web};
-use actix_web_httpauth::middleware::HttpAuthentication;
-use actix_web_metrics::ActixWebMetricsBuilder;
 use anyhow::Context;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
+use axum::{
+    Extension, Router, middleware,
+    routing::{get, post, put},
+};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::{
     Environment,
@@ -13,8 +14,9 @@ use etl_config::{
 use etl_telemetry::metrics::init_metrics_handle;
 use kube::config::KubeConfigOptions;
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use tower::ServiceBuilder;
+use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
-use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -24,6 +26,7 @@ use crate::{
     configs::encryption,
     data::publications::Publication,
     feature_flags::{FeatureFlagsClient, init_feature_flags},
+    http_metrics::record_http_metrics,
     k8s::{K8sClient, K8sError, TrustedRootCertsCache, http::HttpK8sClient},
     routes::{
         destinations::{
@@ -78,9 +81,18 @@ use crate::{
             CreateTenantSourceRequest, CreateTenantSourceResponse, create_tenant_and_source,
         },
     },
-    sentry_scrubbing::mark_sensitive_sentry_scope,
-    span_builder::ApiRootSpanBuilder,
+    sentry_scrubbing::{capture_server_errors, mark_sensitive_sentry_scope},
+    span_builder,
 };
+
+/// Running API server task.
+pub type Server = tokio::task::JoinHandle<io::Result<()>>;
+
+/// Minimum number of connections for the API metadata database pool.
+///
+/// The API pool is lazy and should not keep metadata database connections open
+/// while the server is idle.
+const MIN_DATABASE_POOL_CONNECTIONS: u32 = 0;
 
 /// ETL API application server wrapper.
 ///
@@ -129,7 +141,13 @@ impl Application {
 
         let k8s_client = match kube_client_result {
             Some(client) => match HttpK8sClient::new(client, config.k8s.clone()) {
-                Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
+                Ok(client) => {
+                    client
+                        .preflight(config.source.tls_enabled)
+                        .await
+                        .context("Checking Kubernetes prerequisites")?;
+                    Some(Arc::new(client) as Arc<dyn K8sClient>)
+                }
                 Err(e) => {
                     warn!(
                         error = %e,
@@ -176,8 +194,8 @@ impl Application {
     }
 
     /// Runs the server until it receives a shutdown signal.
-    pub async fn run_until_stopped(self) -> Result<(), std::io::Error> {
-        self.server.await
+    pub async fn run_until_stopped(self) -> io::Result<()> {
+        self.server.await.map_err(io::Error::other)?
     }
 }
 
@@ -240,7 +258,9 @@ fn decode_encryption_key(
 /// Connects to the API's own metadata database using server defaults (no custom
 /// options).
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
-    PgPoolOptions::new().connect_lazy_with(config.with_db(None))
+    PgPoolOptions::new()
+        .min_connections(MIN_DATABASE_POOL_CONNECTIONS)
+        .connect_lazy_with(config.with_db(None))
 }
 
 /// Creates and configures the HTTP server with all routes and middleware.
@@ -257,13 +277,10 @@ pub fn run(
     trusted_root_certs_cache: Option<TrustedRootCertsCache>,
     feature_flags_client: Option<FeatureFlagsClient>,
 ) -> Result<Server, anyhow::Error> {
-    let prometheus_handle = web::ThinData(init_metrics_handle()?);
-    let config = web::Data::new(config);
-    let connection_pool = web::Data::new(connection_pool);
-    let encryption_keyring = web::Data::new(encryption_keyring);
-    let k8s_client: Option<web::Data<dyn K8sClient>> = k8s_client.map(Into::into);
-    let trusted_root_certs_cache = trusted_root_certs_cache.map(web::Data::new);
-    let feature_flags_client = feature_flags_client.map(web::Data::new);
+    let prometheus_handle = init_metrics_handle()?;
+    let config = Arc::new(config);
+    let encryption_keyring = Arc::new(encryption_keyring);
+    let trusted_root_certs_cache = trusted_root_certs_cache.map(Arc::new);
 
     #[derive(OpenApi)]
     #[openapi(
@@ -379,118 +396,124 @@ pub fn run(
 
     let openapi = ApiDoc::openapi();
 
-    let server = HttpServer::new(move || {
-        let actix_metrics = ActixWebMetricsBuilder::new().build();
-        let tracing_logger = TracingLogger::<ApiRootSpanBuilder>::new();
-        let authentication = HttpAuthentication::bearer(auth_validator);
-        let app = App::new()
-            .wrap(actix_metrics)
-            .wrap(tracing_logger)
-            .wrap(
-                sentry::integrations::actix::Sentry::builder()
-                    .capture_server_errors(true)
-                    .start_transaction(true)
-                    .finish(),
-            )
-            .service(health_check)
-            .service(metrics)
-            .service(
-                SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", openapi.clone()),
-            )
-            .service(
-                web::scope("v1")
-                    .wrap(authentication)
-                    // tenants
-                    .service(create_tenant)
-                    .service(create_or_update_tenant)
-                    .service(read_tenant)
-                    .service(update_tenant)
-                    .service(delete_tenant)
-                    .service(read_all_tenants)
-                    // images
-                    .service(create_image)
-                    .service(read_image)
-                    .service(update_image)
-                    .service(delete_image)
-                    .service(read_all_images)
-                    // Routes in this scope can carry source/destination credentials,
-                    // connection config, table/publication metadata, replication config, or
-                    // source-derived data. Keep new routes here when their request, response,
-                    // path/query values, validation errors, or Sentry extras may include secrets
-                    // or customer data. Leave only low-sensitivity metadata routes outside.
-                    .service(
-                        web::scope("")
-                            .wrap(middleware::from_fn(mark_sensitive_sentry_scope))
-                            // sources
-                            .service(create_source)
-                            .service(validate_source)
-                            .service(read_source)
-                            .service(update_source)
-                            .service(delete_source)
-                            .service(read_all_sources)
-                            // destinations
-                            .service(validate_destination)
-                            .service(create_destination)
-                            .service(read_destination)
-                            .service(update_destination)
-                            .service(delete_destination)
-                            .service(read_all_destinations)
-                            // pipelines
-                            .service(validate_pipeline)
-                            .service(create_pipeline)
-                            .service(read_pipeline)
-                            .service(update_pipeline)
-                            .service(delete_pipeline)
-                            .service(read_all_pipelines)
-                            .service(start_pipeline)
-                            .service(stop_pipeline)
-                            .service(stop_all_pipelines)
-                            .service(get_pipeline_status)
-                            .service(get_pipeline_version)
-                            .service(get_pipeline_replication_status)
-                            .service(rollback_tables)
-                            .service(update_pipeline_version)
-                            // tables
-                            .service(read_table_names)
-                            // publications
-                            .service(create_publication)
-                            .service(read_publication)
-                            .service(update_publication)
-                            .service(delete_publication)
-                            .service(read_all_publications)
-                            .service(add_tables_to_publication)
-                            .service(drop_tables_from_publication)
-                            .service(set_publication_tables)
-                            // tenants_sources
-                            .service(create_tenant_and_source)
-                            // destinations-pipelines
-                            .service(create_destination_and_pipeline)
-                            .service(update_destination_and_pipeline)
-                            .service(delete_destination_and_pipeline),
-                    ),
-            )
-            .app_data(prometheus_handle.clone())
-            .app_data(config.clone())
-            .app_data(connection_pool.clone())
-            .app_data(encryption_keyring.clone());
+    let sensitive_routes = Router::new()
+        // Routes in this scope can carry source/destination credentials,
+        // connection config, table/publication metadata, replication config, or
+        // source-derived data. Keep new routes here when their request, response,
+        // path/query values, validation errors, or Sentry extras may include secrets
+        // or customer data. Leave only low-sensitivity metadata routes outside.
+        // sources
+        .route("/sources", post(create_source).get(read_all_sources))
+        .route("/sources/validate", post(validate_source))
+        .route("/sources/{source_id}", get(read_source).post(update_source).delete(delete_source))
+        .route("/sources/{source_id}/tables", get(read_table_names))
+        // publications
+        .route(
+            "/sources/{source_id}/publications",
+            post(create_publication).get(read_all_publications),
+        )
+        .route(
+            "/sources/{source_id}/publications/{publication_name}",
+            get(read_publication).post(update_publication).delete(delete_publication),
+        )
+        .route(
+            "/sources/{source_id}/publications/{publication_name}/tables",
+            post(add_tables_to_publication)
+                .put(set_publication_tables)
+                .delete(drop_tables_from_publication),
+        )
+        // destinations
+        .route("/destinations", post(create_destination).get(read_all_destinations))
+        .route("/destinations/validate", post(validate_destination))
+        .route(
+            "/destinations/{destination_id}",
+            get(read_destination).post(update_destination).delete(delete_destination),
+        )
+        // pipelines
+        .route("/pipelines", post(create_pipeline).get(read_all_pipelines))
+        .route("/pipelines/validate", post(validate_pipeline))
+        .route("/pipelines/stop", post(stop_all_pipelines))
+        .route(
+            "/pipelines/{pipeline_id}",
+            get(read_pipeline).post(update_pipeline).delete(delete_pipeline),
+        )
+        .route("/pipelines/{pipeline_id}/start", post(start_pipeline))
+        .route("/pipelines/{pipeline_id}/stop", post(stop_pipeline))
+        .route("/pipelines/{pipeline_id}/status", get(get_pipeline_status))
+        .route(
+            "/pipelines/{pipeline_id}/version",
+            get(get_pipeline_version).post(update_pipeline_version),
+        )
+        .route("/pipelines/{pipeline_id}/replication-status", get(get_pipeline_replication_status))
+        .route("/pipelines/{pipeline_id}/rollback-tables", post(rollback_tables))
+        // tenants_sources
+        .route("/tenants-sources", post(create_tenant_and_source))
+        // destinations-pipelines
+        .route("/destinations-pipelines", post(create_destination_and_pipeline))
+        .route(
+            "/destinations-pipelines/{destination_id}/{pipeline_id}",
+            post(update_destination_and_pipeline).delete(delete_destination_and_pipeline),
+        )
+        .layer(middleware::from_fn(mark_sensitive_sentry_scope));
 
-        let app =
-            if let Some(k8s_client) = k8s_client.clone() { app.app_data(k8s_client) } else { app };
+    let v1_routes = Router::new()
+        // tenants
+        .route("/tenants", post(create_tenant).get(read_all_tenants))
+        .route(
+            "/tenants/{tenant_id}",
+            put(create_or_update_tenant).get(read_tenant).post(update_tenant).delete(delete_tenant),
+        )
+        // images
+        .route("/images", post(create_image).get(read_all_images))
+        .route("/images/{image_id}", get(read_image).post(update_image).delete(delete_image))
+        .merge(sensitive_routes)
+        .layer(middleware::from_fn_with_state(Arc::clone(&config), auth_validator));
 
-        let app = if let Some(trusted_root_certs_cache) = trusted_root_certs_cache.clone() {
-            app.app_data(trusted_root_certs_cache)
-        } else {
-            app
-        };
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(span_builder::make_span)
+        .on_request(span_builder::on_request)
+        .on_response(span_builder::on_response)
+        .on_failure(span_builder::on_failure);
+    let sentry_layer =
+        ServiceBuilder::new()
+            .layer(
+                sentry::integrations::tower::NewSentryLayer::<axum::extract::Request>::new_from_top(
+                ),
+            )
+            .layer(sentry::integrations::tower::SentryHttpLayer::new().enable_transaction());
 
-        if let Some(feature_flags_client) = feature_flags_client.clone() {
-            app.app_data(feature_flags_client)
-        } else {
-            app
-        }
-    })
-    .listen(listener)?
-    .run();
+    let app = Router::new()
+        .route("/health_check", get(health_check))
+        .route("/metrics", get(metrics))
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", openapi))
+        .nest("/v1", v1_routes)
+        .layer(Extension(prometheus_handle))
+        .layer(Extension(Arc::clone(&config)))
+        .layer(Extension(connection_pool))
+        .layer(Extension(Arc::clone(&encryption_keyring)))
+        .layer(middleware::from_fn(record_http_metrics))
+        .layer(middleware::from_fn(capture_server_errors))
+        .layer(sentry_layer)
+        .layer(trace_layer);
+
+    let app =
+        if let Some(k8s_client) = k8s_client { app.layer(Extension(k8s_client)) } else { app };
+
+    let app = if let Some(trusted_root_certs_cache) = trusted_root_certs_cache {
+        app.layer(Extension(trusted_root_certs_cache))
+    } else {
+        app
+    };
+
+    let app = if let Some(feature_flags_client) = feature_flags_client {
+        app.layer(Extension(feature_flags_client))
+    } else {
+        app
+    };
+
+    listener.set_nonblocking(true)?;
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    let server = tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
 
     Ok(server)
 }

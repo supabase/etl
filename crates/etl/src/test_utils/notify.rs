@@ -31,6 +31,11 @@ impl TimedNotify {
         Self { notify, timeout_duration }
     }
 
+    /// Returns a copy of this notification with a custom timeout duration.
+    pub fn wait_for(&self, timeout_duration: Duration) -> Self {
+        Self { notify: Arc::clone(&self.notify), timeout_duration }
+    }
+
     /// Waits for a notification with timeout.
     ///
     /// # Panics

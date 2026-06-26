@@ -33,7 +33,7 @@ pub(crate) enum ClickHouseValue {
     UInt128(u128),
     Float32(f32),
     Float64(f64),
-    /// TEXT, NUMERIC (string), TIME (string), JSON, BYTEA (hex-encoded)
+    /// TEXT, NUMERIC, TIME, TIMETZ, INTERVAL, JSON, and BYTEA as strings.
     String(String),
     /// Days from Unix epoch (ClickHouse `Date32` on wire = Int32 LE). The
     /// signed offset lets us represent pre-1970 dates that ClickHouse `Date`
@@ -66,6 +66,7 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> EtlResult<ClickHouseValue>
         Cell::Numeric(n) => ClickHouseValue::String(n.to_string()),
         Cell::Date(d) => ClickHouseValue::Date32(date_to_date32_days(d)?),
         Cell::Time(t) => ClickHouseValue::String(t.to_string()),
+        Cell::TimeTz(t) => ClickHouseValue::String(t.to_string()),
         Cell::Timestamp(dt) => ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()),
         Cell::TimestampTz(dt) => ClickHouseValue::DateTime64(dt.timestamp_micros()),
         Cell::Uuid(u) => ClickHouseValue::Uuid(*u.as_bytes()),
@@ -97,6 +98,7 @@ fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> EtlResult<Vec<Click
             try_map_array(v, |d| Ok(ClickHouseValue::Date32(date_to_date32_days(d)?)))?
         }
         ArrayCell::Time(v) => map_array(v, |t| ClickHouseValue::String(t.to_string())),
+        ArrayCell::TimeTz(v) => map_array(v, |t| ClickHouseValue::String(t.to_string())),
         ArrayCell::Timestamp(v) => {
             map_array(v, |dt| ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()))
         }

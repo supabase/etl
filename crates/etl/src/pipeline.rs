@@ -4,7 +4,7 @@
 //! replication with destination systems. Manages worker lifecycles, shutdown
 //! coordination, and error handling.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use tokio::sync::Semaphore;
@@ -19,7 +19,7 @@ use crate::{
     etl_error,
     metrics::register_metrics,
     migrations,
-    replication::{SharedTableCache, client::PgReplicationClient},
+    replication::{OutOfBandSourcePool, SharedTableCache, client::PgReplicationClient},
     state::TableState,
     store::PipelineStore,
     types::{PipelineId, TableId},
@@ -158,6 +158,7 @@ where
         // are loaded in the cache.
         self.store.load_destination_tables_metadata().await?;
         self.store.load_table_schemas().await?;
+        self.destination.startup().await?;
 
         // We load the table states by checking the table ids of a publication and
         // loading/creating the table states based on the current
@@ -178,6 +179,13 @@ where
         // replication mask for each table.
         let shared_table_cache = SharedTableCache::new();
 
+        // We create a shared lazy pool for low-frequency, out-of-band source
+        // database queries that should not use the replication connection.
+        let out_of_band_source_pool = OutOfBandSourcePool::new(
+            &self.config.pg_connection,
+            Duration::from_millis(self.config.replication_lag_refresh_interval_ms),
+        );
+
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
             self.config.id,
@@ -186,6 +194,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             shared_table_cache,
+            out_of_band_source_pool,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
             memory_monitor.clone(),
@@ -321,10 +330,10 @@ where
     /// initialized to [`TableState::Init`].
     ///
     /// Also detects tables for which we have stored state but are no longer
-    /// part of the publication, performs a best-effort cleanup of their table
-    /// sync replication slots, and deletes their stored state (replication
-    /// state, destination table metadata, and table schemas) without touching
-    /// the actual destination tables.
+    /// part of the publication, deletes their stored state (replication state,
+    /// destination table metadata, table schemas, and durable table-sync
+    /// progress), and performs best-effort cleanup of their table sync
+    /// replication slots without touching the actual destination tables.
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,
@@ -349,38 +358,6 @@ where
             table_count = publication_table_ids.len(),
             "publication tables loaded"
         );
-
-        // Validate that the publication is configured correctly for partitioned tables.
-        //
-        // When `publish_via_partition_root = false`, logical replication messages
-        // contain child partition OIDs instead of parent table OIDs. Since our
-        // schema cache only contains parent table IDs (from
-        // `get_publication_table_ids`), relation messages with child OIDs would
-        // cause pipeline failures.
-        let publish_via_partition_root = replication_client
-            .get_publish_via_partition_root(&self.config.publication_name)
-            .await?;
-
-        if !publish_via_partition_root {
-            let has_partitioned_tables =
-                replication_client.has_partitioned_tables(&publication_table_ids).await?;
-
-            if has_partitioned_tables {
-                bail!(
-                    ErrorKind::ConfigError,
-                    "Invalid publication configuration for partitioned tables",
-                    format!(
-                        "The publication '{}' contains partitioned tables but has \
-                         publish_via_partition_root=false. This configuration causes replication \
-                         messages to use child partition OIDs, which are not tracked by the \
-                         pipeline and will cause failures. Please recreate the publication with \
-                         publish_via_partition_root=true or use: ALTER PUBLICATION {} SET \
-                         (publish_via_partition_root = true);",
-                        self.config.publication_name, self.config.publication_name
-                    )
-                );
-            }
-        }
 
         // We load the current table states.
         self.store.load_table_states().await?;
@@ -407,13 +384,19 @@ where
 
                 // We delete all table state before removing the slot, so that we don't
                 // incur in the case where we have a slot tied to an invalid state.
-                self.store.delete_table_pipeline_state(table_id).await?;
+                self.store.delete_table_state(table_id).await?;
 
                 // We try to delete the replication slot.
                 let slot_name: String =
                     EtlReplicationSlot::for_table_sync_worker(self.config.id, table_id)
                         .try_into()?;
                 replication_client.delete_slot_if_exists(&slot_name).await?;
+
+                info!(
+                    table_id = table_id.0,
+                    slot_name,
+                    "purged stored state and table sync slot for table removed from publication"
+                );
             }
         }
 

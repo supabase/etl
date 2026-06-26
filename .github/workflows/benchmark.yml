@@ -56,6 +56,7 @@ on:
         options:
           - "null"
           - bigquery
+          - clickhouse
           - snowflake
         default: "null"
       bq_project_id:
@@ -91,6 +92,10 @@ env:
   POSTGRES_HOST: localhost
   BENCHMARK_SAMPLES: 3
   BENCHMARK_WARMUP_SAMPLES: 1
+  BENCH_CLICKHOUSE_URL: http://localhost:8123
+  BENCH_CLICKHOUSE_USER: etl
+  BENCH_CLICKHOUSE_PASSWORD: etl
+  BENCH_CLICKHOUSE_DATABASE: default
 
 permissions:
   actions: read
@@ -106,10 +111,10 @@ jobs:
     runs-on: ${{ inputs.benchmark_runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -154,35 +159,20 @@ jobs:
           fi
           printf '%s' "${BQ_SA_KEY_JSON}" > "$RUNNER_TEMP/bigquery-key.json"
 
-      - name: Prepare Snowflake credentials
+      - name: Start ClickHouse
+        if: inputs.destination == 'clickhouse'
+        run: docker compose -f scripts/docker/docker-compose.yaml up -d --wait clickhouse
+
+      - name: Check Snowflake connection
         if: inputs.destination == 'snowflake'
         env:
-          # Format: account:user:database:schema
-          SF_CONNECTION: ${{ secrets.BENCH_SNOWFLAKE_CONNECTION }}
-          SF_PRIVATE_KEY: ${{ secrets.BENCH_SNOWFLAKE_PRIVATE_KEY }}
+          BENCH_SNOWFLAKE_CONNECTION: ${{ secrets.BENCH_SNOWFLAKE_CONNECTION }}
         run: |
           set -euo pipefail
-          if [[ -z "${SF_CONNECTION}" ]]; then
+          if [[ -z "${BENCH_SNOWFLAKE_CONNECTION}" ]]; then
             echo "BENCH_SNOWFLAKE_CONNECTION secret is required for Snowflake benchmarks." >&2
             exit 1
           fi
-          if [[ -z "${SF_PRIVATE_KEY}" ]]; then
-            echo "BENCH_SNOWFLAKE_PRIVATE_KEY secret is required for Snowflake benchmarks." >&2
-            exit 1
-          fi
-          IFS=':' read -r account user database schema <<< "${SF_CONNECTION}"
-          for field in account user database schema; do
-            if [[ -z "${!field}" ]]; then
-              echo "BENCH_SNOWFLAKE_CONNECTION is missing ${field} (format: account:user:database:schema)." >&2
-              exit 1
-            fi
-          done
-          {
-            echo "BENCH_SNOWFLAKE_ACCOUNT=${account}"
-            echo "BENCH_SNOWFLAKE_USER=${user}"
-            echo "BENCH_SNOWFLAKE_DATABASE=${database}"
-            echo "BENCH_SNOWFLAKE_SCHEMA=${schema}"
-          } >> "$GITHUB_ENV"
 
       - name: Record benchmark environment
         env:
@@ -248,7 +238,7 @@ jobs:
           STREAMING_DURATION_SECONDS_INPUT: ${{ inputs.streaming_duration_seconds }}
           TPCC_THREADS_INPUT: ${{ inputs.tpcc_threads }}
           WAREHOUSES_INPUT: ${{ inputs.warehouses }}
-          BENCH_SNOWFLAKE_PRIVATE_KEY: ${{ secrets.BENCH_SNOWFLAKE_PRIVATE_KEY }}
+          BENCH_SNOWFLAKE_CONNECTION: ${{ secrets.BENCH_SNOWFLAKE_CONNECTION }}
         run: |
           set -euo pipefail
 

@@ -13,11 +13,11 @@ homepage.workspace = true
 test-utils = ["etl-postgres/test-utils"]
 failpoints = ["fail/failpoints"]
 egress = []
+fuzzing = []
 default = []
 
 [dependencies]
 
-byteorder = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 etl-config = { workspace = true }

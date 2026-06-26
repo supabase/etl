@@ -35,6 +35,17 @@ pub trait Destination {
         async { Ok(()) }
     }
 
+    /// Initializes destination state after the pipeline store cache is loaded.
+    ///
+    /// ETL calls this hook during pipeline startup, after destination table
+    /// metadata and table schemas have been loaded from persistent state and
+    /// before workers begin submitting table-specific writes. Destinations can
+    /// use it to reconcile durable destination state with their physical
+    /// objects after a process restart. The default implementation is a no-op.
+    fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send {
+        async { Ok(()) }
+    }
+
     /// Drops destination objects before restarting a table copy.
     ///
     /// This operation is called when table synchronization intentionally
@@ -93,6 +104,13 @@ pub trait Destination {
     /// stream. Events include inserts, updates, deletes, and transaction
     /// boundaries. ETL may call this method multiple times with different
     /// streaming batches.
+    ///
+    /// Streaming batches are built from size and time limits, not schema
+    /// change boundaries. A single call may contain zero, one, or many
+    /// [`Event::Relation`] events, including multiple schema changes for the
+    /// same table. Implementations that apply destination DDL should process
+    /// events in order and update their active table schema each time a
+    /// relation event appears.
     ///
     /// The main ordering guarantee is per table: ETL preserves the required
     /// order for streaming operations on the same table.

@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "etl-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+etl = { path = "../crates/etl", default-features = false, features = ["fuzzing"] }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "parse_bytea_hex_string"
+path = "fuzz_targets/parse_bytea_hex_string.rs"
+test = false
+doc = false
+bench = false

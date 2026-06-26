@@ -30,6 +30,8 @@ use tokio_postgres::{
     types::{ToSql, Type},
 };
 
+use crate::support::partition::{create_nested_partition_hierarchy, partition_table_name};
+
 /// Creates a test column schema with sensible defaults.
 fn test_column(
     name: &str,
@@ -38,14 +40,8 @@ fn test_column(
     nullable: bool,
     primary_key: bool,
 ) -> ColumnSchema {
-    ColumnSchema::new(
-        name.to_owned(),
-        typ,
-        -1,
-        ordinal_position,
-        if primary_key { Some(1) } else { None },
-        nullable,
-    )
+    ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, nullable)
+        .with_primary_key_ordinal_position(if primary_key { Some(1) } else { None })
 }
 
 fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
@@ -68,14 +64,165 @@ fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
                 convert_type_oid_to_type(column["atttypid"].as_u64().unwrap() as u32),
                 column["atttypmod"].as_i64().unwrap() as i32,
                 column["attnum"].as_i64().unwrap() as i32,
-                primary_key_positions.get(&(column["attnum"].as_i64().unwrap() as i32)).copied(),
                 !column["attnotnull"].as_bool().unwrap(),
+            )
+            .with_primary_key_ordinal_position(
+                primary_key_positions.get(&(column["attnum"].as_i64().unwrap() as i32)).copied(),
+            )
+            .with_default_expression_option(
+                column["default_expression"].as_str().map(ToOwned::to_owned),
             )
         })
         .collect::<Vec<_>>();
     columns.sort_by_key(|column| column.ordinal_position);
 
     columns
+}
+
+#[derive(Clone, Copy)]
+enum PublishedPartitionTarget {
+    Top,
+    Middle,
+    Leaf,
+}
+
+#[derive(Clone, Copy)]
+enum PublicationExpansion {
+    AllTables,
+    Schema,
+}
+
+async fn assert_publication_table_ids_for_partition_hierarchy(
+    test_name: &str,
+    published_partition_target: PublishedPartitionTarget,
+    publish_via_partition_root: bool,
+) {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let hierarchy = create_nested_partition_hierarchy(&database, test_table_name(test_name)).await;
+
+    let publication_table_name = match published_partition_target {
+        PublishedPartitionTarget::Top => hierarchy.root_table_name.clone(),
+        PublishedPartitionTarget::Middle => hierarchy.p_2026_table_name.clone(),
+        PublishedPartitionTarget::Leaf => partition_table_name(&hierarchy.p_2026_table_name, "01"),
+    };
+    let publication_name = format!("pub_{test_name}");
+    database
+        .create_publication_with_config(
+            &publication_name,
+            std::slice::from_ref(&publication_table_name),
+            publish_via_partition_root,
+        )
+        .await
+        .unwrap();
+
+    let expected_table_ids = match (published_partition_target, publish_via_partition_root) {
+        (PublishedPartitionTarget::Top, true) => HashSet::from([hierarchy.root_table_id]),
+        (PublishedPartitionTarget::Top, false) => HashSet::from([
+            hierarchy.p_2025_01_table_id,
+            hierarchy.p_2025_02_table_id,
+            hierarchy.p_2026_01_table_id,
+            hierarchy.p_2026_02_table_id,
+        ]),
+        (PublishedPartitionTarget::Middle, true) => HashSet::from([hierarchy.p_2026_table_id]),
+        (PublishedPartitionTarget::Middle, false) => {
+            HashSet::from([hierarchy.p_2026_01_table_id, hierarchy.p_2026_02_table_id])
+        }
+        (PublishedPartitionTarget::Leaf, _) => HashSet::from([hierarchy.p_2026_01_table_id]),
+    };
+    let table_ids = client
+        .get_publication_table_ids(&publication_name)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect::<HashSet<_>>();
+
+    assert_eq!(table_ids, expected_table_ids);
+}
+
+async fn assert_publication_table_ids_for_expanded_publication(
+    test_name: &str,
+    expansion: PublicationExpansion,
+    publish_via_partition_root: bool,
+) {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    if matches!(expansion, PublicationExpansion::Schema)
+        && below_version!(database.server_version(), POSTGRES_15)
+    {
+        return;
+    }
+
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let table_name = test_table_name(test_name);
+    let (parent_table_id, partition_table_ids) = create_partitioned_table(
+        &database,
+        table_name.clone(),
+        &[("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+    let regular_table_id = database
+        .create_table(test_table_name(&format!("{test_name}_regular")), true, &[("age", "integer")])
+        .await
+        .unwrap();
+
+    let publication_name = format!("pub_{test_name}");
+    match expansion {
+        PublicationExpansion::AllTables => {
+            database
+                .run_sql(&format!(
+                    "create publication {} for all tables with (publish_via_partition_root = {})",
+                    quote_identifier(&publication_name),
+                    publish_via_partition_root
+                ))
+                .await
+                .unwrap();
+        }
+        PublicationExpansion::Schema => {
+            database
+                .run_sql(&format!(
+                    "create publication {} for tables in schema {} with \
+                     (publish_via_partition_root = {})",
+                    quote_identifier(&publication_name),
+                    quote_identifier(&table_name.schema),
+                    publish_via_partition_root
+                ))
+                .await
+                .unwrap();
+        }
+    }
+
+    let table_ids = client
+        .get_publication_table_ids(&publication_name)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let expected_table_ids = if publish_via_partition_root {
+        HashSet::from([parent_table_id, regular_table_id])
+    } else {
+        let mut expected_table_ids = partition_table_ids.iter().copied().collect::<HashSet<_>>();
+        expected_table_ids.insert(regular_table_id);
+        expected_table_ids
+    };
+
+    match expansion {
+        PublicationExpansion::AllTables => {
+            assert!(expected_table_ids.iter().all(|table_id| table_ids.contains(table_id)));
+        }
+        PublicationExpansion::Schema => {
+            assert_eq!(table_ids, expected_table_ids);
+        }
+    }
+
+    if publish_via_partition_root {
+        assert!(partition_table_ids.iter().all(|table_id| !table_ids.contains(table_id)));
+    } else {
+        assert!(!table_ids.contains(&parent_table_id));
+    }
 }
 
 async fn count_stream_rows(stream: CopyOutStream) -> u64 {
@@ -1349,29 +1496,103 @@ async fn publication_creation_and_check() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn publication_table_ids_collapse_partitioned_root() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-
-    // We create a partitioned parent with two child partitions.
-    let table_name = test_table_name("part_parent");
-    let (parent_table_id, _children) = create_partitioned_table(
-        &database,
-        table_name.clone(),
-        &[("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")],
+async fn publication_table_ids_use_published_partition_root() {
+    assert_publication_table_ids_for_partition_hierarchy(
+        "part_parent",
+        PublishedPartitionTarget::Top,
+        true,
     )
-    .await
-    .unwrap();
+    .await;
+}
 
-    let publication_name = "pub_part_root";
-    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_use_leaf_partitions_without_partition_root() {
+    assert_publication_table_ids_for_partition_hierarchy(
+        "part_parent_without_root",
+        PublishedPartitionTarget::Top,
+        false,
+    )
+    .await;
+}
 
-    let id = client.get_publication_table_ids(publication_name).await.unwrap();
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_use_explicit_leaf_with_partition_root() {
+    assert_publication_table_ids_for_partition_hierarchy(
+        "explicit_leaf_root",
+        PublishedPartitionTarget::Leaf,
+        true,
+    )
+    .await;
+}
 
-    // We expect to get only the parent table id.
-    assert_eq!(id, vec![parent_table_id]);
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_use_explicit_leaf_without_partition_root() {
+    assert_publication_table_ids_for_partition_hierarchy(
+        "explicit_leaf_no_root",
+        PublishedPartitionTarget::Leaf,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_use_published_partition_ancestor() {
+    assert_publication_table_ids_for_partition_hierarchy(
+        "nested_part_root",
+        PublishedPartitionTarget::Middle,
+        true,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_use_leaf_partitions_for_published_subtree_without_partition_root() {
+    assert_publication_table_ids_for_partition_hierarchy(
+        "nested_leaf_root",
+        PublishedPartitionTarget::Middle,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_for_all_tables_use_partition_roots() {
+    assert_publication_table_ids_for_expanded_publication(
+        "all_tables_part_parent",
+        PublicationExpansion::AllTables,
+        true,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_for_all_tables_use_leaf_partitions_without_partition_root() {
+    assert_publication_table_ids_for_expanded_publication(
+        "all_tables_leaf_parent",
+        PublicationExpansion::AllTables,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_for_schema_use_partition_roots() {
+    assert_publication_table_ids_for_expanded_publication(
+        "schema_part_parent",
+        PublicationExpansion::Schema,
+        true,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_for_schema_use_leaf_partitions_without_partition_root() {
+    assert_publication_table_ids_for_expanded_publication(
+        "schema_leaf_parent",
+        PublicationExpansion::Schema,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1591,6 +1812,89 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
         replica_identity_columns.iter().any(|column| column["attname"] == "full_name"),
         "replica identity change should keep the current post-ddl schema snapshot"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("ddl_default_payload");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("status", "text not null default 'pending'")])
+        .await
+        .unwrap();
+
+    let publication_name = "ddl_default_payload_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("ddl_default_payload_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "alter table {quoted_table_name} alter column status set default lower('QUEUED'::text)"
+        ))
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!("alter table {quoted_table_name} alter column status drop default"))
+        .await
+        .unwrap();
+
+    let messages = collect_ddl_messages(stream, 2).await;
+    let set_default_message = &messages[0];
+    let drop_default_message = &messages[1];
+
+    let set_columns =
+        set_default_message["columns"].as_array().expect("columns should be an array");
+    let set_status_column =
+        set_columns.iter().find(|column| column["attname"] == "status").unwrap();
+    assert_eq!(set_status_column["atthasdef"], true);
+    let set_default_expression = set_status_column["default_expression"]
+        .as_str()
+        .expect("set default expression should be present");
+    assert!(
+        set_default_expression.contains("lower")
+            && set_default_expression.contains("QUEUED")
+            && set_default_expression.contains("text"),
+        "set default expression should include the pg_get_expr output: {set_default_expression}"
+    );
+
+    let set_column_schemas = column_schemas_from_ddl_message(set_default_message);
+    let set_status_schema =
+        set_column_schemas.iter().find(|column| column.name == "status").unwrap();
+    assert_eq!(set_status_schema.default_expression.as_deref(), Some(set_default_expression));
+
+    let drop_columns =
+        drop_default_message["columns"].as_array().expect("columns should be an array");
+    let drop_status_column =
+        drop_columns.iter().find(|column| column["attname"] == "status").unwrap();
+    assert_eq!(drop_status_column["atthasdef"], false);
+    assert_eq!(drop_status_column["default_expression"], serde_json::Value::Null);
+
+    let drop_column_schemas = column_schemas_from_ddl_message(drop_default_message);
+    let drop_status_schema =
+        drop_column_schemas.iter().find(|column| column.name == "status").unwrap();
+    assert_eq!(drop_status_schema.default_expression, None);
+
+    let mut introspection_client =
+        PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let (transaction, _) = introspection_client
+        .create_slot_with_transaction(&test_slot_name("ddl_default_payload_read"))
+        .await
+        .unwrap();
+    let table_schema = transaction.get_table_schema(table_id).await.unwrap();
+    transaction.commit().await.unwrap();
+
+    assert_eq!(drop_column_schemas, table_schema.column_schemas);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2040,7 +2344,7 @@ async fn table_copy_stream_with_ctid_partition() {
     let (transaction, _) =
         client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
 
-    let column_schemas = &[ColumnSchema::new("age".to_owned(), Type::INT4, -1, 1, None, true)];
+    let column_schemas = &[ColumnSchema::new("age".to_owned(), Type::INT4, -1, 1, true)];
 
     let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
     assert!(!partitions.is_empty(), "expected at least one partition for non-empty table");

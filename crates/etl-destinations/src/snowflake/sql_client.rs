@@ -65,7 +65,7 @@ pub(crate) struct StatementResponse {
 
 impl<T: TokenProvider> SqlClient<T> {
     pub fn new(config: Config, auth: Arc<T>, http: Client) -> Self {
-        Self { config, http, auth }
+        Self { config: config.without_credentials(), http, auth }
     }
 
     /// Execute a DDL statement (runs on Cloud Services, no warehouse required).
@@ -113,15 +113,23 @@ impl<T: TokenProvider> SqlClient<T> {
     }
 
     /// Add a nullable column to an existing table.
+    ///
+    /// When `default_clause` is present, Snowflake populates existing rows with
+    /// that default as part of the add-column operation.
     pub async fn add_column(
         &self,
         table_name: &str,
         column_name: &str,
         column_type: &str,
+        default_clause: Option<&str>,
     ) -> Result<()> {
         let fqn = self.fully_qualified_name(table_name);
         let col = quote_identifier(column_name);
-        self.execute_ddl(&format!("ALTER TABLE {fqn} ADD COLUMN {col} {column_type}")).await
+        let default_clause = default_clause.unwrap_or_default();
+        self.execute_ddl(&format!(
+            "ALTER TABLE {fqn} ADD COLUMN {col} {column_type}{default_clause}"
+        ))
+        .await
     }
 
     /// Remove a column from an existing table.

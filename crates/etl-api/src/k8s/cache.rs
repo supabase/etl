@@ -177,6 +177,7 @@ mod tests {
         async fn create_or_update_ducklake_secret(
             &self,
             _prefix: &str,
+            _catalog_url: &str,
             _s3_access_key_id: &str,
             _s3_secret_access_key: &str,
         ) -> Result<(), K8sError> {

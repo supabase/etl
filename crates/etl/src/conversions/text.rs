@@ -1,16 +1,17 @@
 use core::str;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
-use etl_postgres::types::{
-    DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, TIMESTAMPTZ_FORMAT_HHMM,
-    is_array_type,
-};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use etl_postgres::types::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, is_array_type};
 use tokio_postgres::types::Type;
 use uuid::Uuid;
 
 use crate::{
     bail,
-    conversions::{bool::parse_bool, hex},
+    conversions::{
+        bool::parse_bool,
+        hex,
+        time::{parse_postgres_timestamptz, parse_postgres_timetz},
+    },
     error::{ErrorKind, EtlResult},
     types::{ArrayCell, Cell},
 };
@@ -32,19 +33,6 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             str,
             |str| Ok(Some(parse_bool(str)?)),
             ArrayCell::Bool,
-        ),
-        Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT | Type::MONEY => {
-            Ok(Cell::String(str.to_owned()))
-        }
-        Type::CHAR_ARRAY
-        | Type::BPCHAR_ARRAY
-        | Type::VARCHAR_ARRAY
-        | Type::NAME_ARRAY
-        | Type::TEXT_ARRAY
-        | Type::MONEY_ARRAY => parse_cell_from_postgres_text_array(
-            str,
-            |str| Ok(Some(str.to_owned())),
-            ArrayCell::String,
         ),
         Type::INT2 => Ok(Cell::I16(str.parse()?)),
         Type::INT2_ARRAY => {
@@ -96,6 +84,15 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             |str| Ok(Some(NaiveTime::parse_from_str(str, TIME_FORMAT)?)),
             ArrayCell::Time,
         ),
+        Type::TIMETZ => {
+            let val = parse_postgres_timetz(str)?;
+            Ok(Cell::TimeTz(val))
+        }
+        Type::TIMETZ_ARRAY => parse_cell_from_postgres_text_array(
+            str,
+            |str| Ok(Some(parse_postgres_timetz(str)?)),
+            ArrayCell::TimeTz,
+        ),
         Type::TIMESTAMP => {
             let val = NaiveDateTime::parse_from_str(str, TIMESTAMP_FORMAT)?;
             Ok(Cell::Timestamp(val))
@@ -106,38 +103,14 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             ArrayCell::Timestamp,
         ),
         Type::TIMESTAMPTZ => {
-            // PostgreSQL can render UTC offsets either as `+00` or `+00:00`,
-            // so we accept both text formats here.
-            let val = match DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HHMM) {
-                Ok(val) => val,
-                Err(_) => DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HH_MM)?,
-            };
+            let val = parse_postgres_timestamptz(str)?;
             Ok(Cell::TimestampTz(val.into()))
         }
-        Type::TIMESTAMPTZ_ARRAY => {
-            match parse_cell_from_postgres_text_array(
-                str,
-                |str| {
-                    Ok(Some(
-                        DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HHMM)?
-                            .into(),
-                    ))
-                },
-                ArrayCell::TimestampTz,
-            ) {
-                Ok(val) => Ok(val),
-                Err(_) => parse_cell_from_postgres_text_array(
-                    str,
-                    |str| {
-                        Ok(Some(
-                            DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HH_MM)?
-                                .into(),
-                        ))
-                    },
-                    ArrayCell::TimestampTz,
-                ),
-            }
-        }
+        Type::TIMESTAMPTZ_ARRAY => parse_cell_from_postgres_text_array(
+            str,
+            |str| Ok(Some(parse_postgres_timestamptz(str)?.into())),
+            ArrayCell::TimestampTz,
+        ),
         Type::UUID => {
             let val = Uuid::parse_str(str)?;
             Ok(Cell::Uuid(val))
@@ -163,6 +136,10 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         Type::OID_ARRAY => {
             parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::U32)
         }
+        // [`Cell`] is only the internal Rust value representation. The source
+        // Postgres type is still available from the corresponding
+        // [`ColumnSchema`], so values that do not need a specialized Rust type
+        // preserve their Postgres text output here.
         _ if is_array_type(typ) => parse_cell_from_postgres_text_array(
             str,
             |str| Ok(Some(str.to_owned())),
@@ -230,6 +207,14 @@ where
                     break;
                 }
             }
+        }
+
+        if in_quotes {
+            bail!(ErrorKind::ConversionError, "Array input contains an unterminated quote");
+        }
+
+        if in_escape {
+            bail!(ErrorKind::ConversionError, "Array input contains an unterminated escape");
         }
 
         // PostgreSQL treats unquoted `NULL` as a null array element, while
@@ -563,6 +548,25 @@ mod tests {
     }
 
     #[test]
+    fn try_from_str_timetz() {
+        let cell = parse_cell_from_postgres_text(&Type::TIMETZ, "14:30:45.123+02").unwrap();
+        if let Cell::TimeTz(time) = cell {
+            assert_eq!(time.to_string(), "14:30:45.123+02");
+        } else {
+            panic!("Expected TimeTz cell");
+        }
+
+        let cell =
+            parse_cell_from_postgres_text(&Type::TIMETZ_ARRAY, r#"{"14:30:45+02",NULL}"#).unwrap();
+        assert_eq!(
+            cell,
+            Cell::Array(ArrayCell::TimeTz(vec![Some("14:30:45+02".parse().unwrap()), None,]))
+        );
+
+        assert!(parse_cell_from_postgres_text(&Type::TIMETZ, "invalid-time").is_err());
+    }
+
+    #[test]
     fn try_from_str_timestamp() {
         let cell =
             parse_cell_from_postgres_text(&Type::TIMESTAMP, "2023-12-25 14:30:45.123").unwrap();
@@ -585,9 +589,13 @@ mod tests {
             panic!("Expected TimeStampTz cell");
         }
 
-        // Test fallback format
         let cell = parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00")
             .unwrap();
+        assert!(matches!(cell, Cell::TimestampTz(_)));
+
+        let cell =
+            parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00:00:15")
+                .unwrap();
         assert!(matches!(cell, Cell::TimestampTz(_)));
     }
 
@@ -696,6 +704,9 @@ mod tests {
 
     #[test]
     fn unsupported_builtin_arrays_preserve_array_shape_as_strings() {
+        let cell = parse_cell_from_postgres_text(&Type::INTERVAL, "1 day 02:03:04").unwrap();
+        assert_eq!(cell, Cell::String("1 day 02:03:04".to_owned()));
+
         let cell =
             parse_cell_from_postgres_text(&Type::INTERVAL_ARRAY, r#"{"1 day",NULL,"2 hours"}"#)
                 .unwrap();
@@ -755,6 +766,10 @@ mod tests {
         assert!(parse_cell_from_postgres_text(&Type::INT4_ARRAY, "{").is_err());
         assert!(parse_cell_from_postgres_text(&Type::INT4_ARRAY, "}").is_err());
         assert!(parse_cell_from_postgres_text(&Type::INT4_ARRAY, "").is_err());
+
+        // Unterminated quote or escape.
+        assert!(parse_cell_from_postgres_text(&Type::TEXT_ARRAY, r#"{"unterminated}"#).is_err());
+        assert!(parse_cell_from_postgres_text(&Type::TEXT_ARRAY, r#"{dangling\}"#).is_err());
     }
 
     #[test]
@@ -779,16 +794,16 @@ mod tests {
 
     #[test]
     fn parse_timestamptz_array_fallback() {
-        // Test the fallback parsing for timestamptz arrays
         let cell = parse_cell_from_postgres_text(
             &Type::TIMESTAMPTZ_ARRAY,
-            "{\"2023-01-01 12:00:00.000+00\"}",
+            "{\"2023-01-01 12:00:00.000+00\",\"2023-01-01 12:00:00.000+00:00:15\"}",
         )
         .unwrap();
         match cell {
             Cell::Array(ArrayCell::TimestampTz(v)) => {
-                assert_eq!(v.len(), 1);
+                assert_eq!(v.len(), 2);
                 assert!(v[0].is_some());
+                assert!(v[1].is_some());
             }
             _ => panic!("Expected TIMESTAMPTZ array"),
         }

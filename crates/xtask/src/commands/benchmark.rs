@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
+use pg_escape::{quote_identifier, quote_literal};
 use serde_json::{Map, Number, Value};
 
 const DEFAULT_DB_HOST: &str = "localhost";
@@ -24,6 +25,7 @@ const DEFAULT_TPCC_MIN_THREADS: usize = 8;
 const DEFAULT_TPCC_MAX_THREADS: usize = 64;
 const MEMORY_BACKPRESSURE_ACTIVATE_THRESHOLD: f32 = 0.85;
 const MEMORY_BACKPRESSURE_RESUME_THRESHOLD: f32 = 0.75;
+const BENCH_SNOWFLAKE_CONNECTION_ENV: &str = "BENCH_SNOWFLAKE_CONNECTION";
 
 #[derive(Args)]
 pub(crate) struct BenchmarkArgs {
@@ -76,24 +78,18 @@ pub(crate) struct BenchmarkArgs {
     /// BigQuery service account key file.
     #[arg(long, env = "BQ_SA_KEY_FILE")]
     bq_sa_key_file: Option<PathBuf>,
-    /// Snowflake account identifier.
-    #[arg(long, env = "BENCH_SNOWFLAKE_ACCOUNT")]
-    sf_account: Option<String>,
-    /// Snowflake username.
-    #[arg(long, env = "BENCH_SNOWFLAKE_USER")]
-    sf_user: Option<String>,
-    /// Snowflake private key: PEM contents or path to a .p8 key file.
-    #[arg(long, env = "BENCH_SNOWFLAKE_PRIVATE_KEY")]
-    sf_private_key: Option<String>,
-    /// Snowflake database.
-    #[arg(long, env = "BENCH_SNOWFLAKE_DATABASE")]
-    sf_database: Option<String>,
-    /// Snowflake schema.
-    #[arg(long, env = "BENCH_SNOWFLAKE_SCHEMA")]
-    sf_schema: Option<String>,
-    /// Snowflake role.
-    #[arg(long, env = "BENCH_SNOWFLAKE_ROLE")]
-    sf_role: Option<String>,
+    /// ClickHouse HTTP URL (for example, `http://localhost:8123`).
+    #[arg(long, env = "BENCH_CLICKHOUSE_URL")]
+    clickhouse_url: Option<String>,
+    /// ClickHouse username.
+    #[arg(long, env = "BENCH_CLICKHOUSE_USER")]
+    clickhouse_user: Option<String>,
+    /// ClickHouse password.
+    #[arg(long, env = "BENCH_CLICKHOUSE_PASSWORD")]
+    clickhouse_password: Option<String>,
+    /// ClickHouse database. Must already exist.
+    #[arg(long, env = "BENCH_CLICKHOUSE_DATABASE")]
+    clickhouse_database: Option<String>,
     /// Run the TPC-C streaming workload for this many seconds.
     #[arg(long)]
     streaming_duration_seconds: Option<u64>,
@@ -134,6 +130,8 @@ enum Destination {
     Null,
     #[value(name = "bigquery")]
     BigQuery,
+    #[value(name = "clickhouse")]
+    ClickHouse,
     #[value(name = "snowflake")]
     Snowflake,
 }
@@ -274,25 +272,24 @@ impl BenchmarkArgs {
             }
         }
 
+        if matches!(self.destination, Destination::ClickHouse) {
+            if self.clickhouse_url.as_deref().is_none_or(|u| u.trim().is_empty()) {
+                bail!("--clickhouse-url is required for --destination clickhouse");
+            }
+
+            if self.clickhouse_user.as_deref().is_none_or(|u| u.trim().is_empty()) {
+                bail!("--clickhouse-user is required for --destination clickhouse");
+            }
+
+            if self.clickhouse_database.as_deref().is_none_or(|d| d.trim().is_empty()) {
+                bail!("--clickhouse-database is required for --destination clickhouse");
+            }
+        }
+
         if matches!(self.destination, Destination::Snowflake) {
-            if self.sf_account.as_deref().is_none_or(|id| id.trim().is_empty()) {
-                bail!("--sf-account is required for --destination snowflake");
-            }
-
-            if self.sf_user.as_deref().is_none_or(|user| user.trim().is_empty()) {
-                bail!("--sf-user is required for --destination snowflake");
-            }
-
-            if self.sf_private_key.as_deref().is_none_or(|key| key.trim().is_empty()) {
-                bail!("--sf-private-key is required for --destination snowflake");
-            }
-
-            if self.sf_database.as_deref().is_none_or(|db| db.trim().is_empty()) {
-                bail!("--sf-database is required for --destination snowflake");
-            }
-
-            if self.sf_schema.as_deref().is_none_or(|schema| schema.trim().is_empty()) {
-                bail!("--sf-schema is required for --destination snowflake");
+            let connection = std::env::var(BENCH_SNOWFLAKE_CONNECTION_ENV).ok();
+            if connection.as_deref().is_none_or(|connection| connection.trim().is_empty()) {
+                bail!("{BENCH_SNOWFLAKE_CONNECTION_ENV} is required for --destination snowflake");
             }
         }
 
@@ -311,7 +308,7 @@ impl BenchmarkArgs {
 
         self.psql_status(
             "postgres",
-            &format!("create database {}", quote_identifier(&self.database)?),
+            &format!("create database {}", quote_identifier(&self.database)),
         )
         .context("failed to create benchmark database")
     }
@@ -437,8 +434,8 @@ impl BenchmarkArgs {
     fn fetch_expected_row_count(&self, tables: &[String]) -> Result<u64> {
         let query = tables
             .iter()
-            .map(|table| Ok(format!("(select count(*) from {})", quote_identifier(table)?)))
-            .collect::<Result<Vec<_>>>()?
+            .map(|table| format!("(select count(*) from {})", quote_identifier(table)))
+            .collect::<Vec<_>>()
             .join(" + ");
         let count = self.psql_query(&self.database, &format!("select {query}"))?;
 
@@ -446,11 +443,11 @@ impl BenchmarkArgs {
     }
 
     fn create_publication(&self, publication_name: &str, tables: &[String]) -> Result<()> {
-        let publication_name = quote_identifier(publication_name)?;
+        let publication_name = quote_identifier(publication_name);
         let table_list = tables
             .iter()
-            .map(|table| quote_identifier(table))
-            .collect::<Result<Vec<_>>>()?
+            .map(|table| quote_identifier(table).into_owned())
+            .collect::<Vec<_>>()
             .join(", ");
         self.psql_status(
             &self.database,
@@ -463,7 +460,7 @@ impl BenchmarkArgs {
     }
 
     fn drop_publication(&self, publication_name: &str) -> Result<()> {
-        let publication_name = quote_identifier(publication_name)?;
+        let publication_name = quote_identifier(publication_name);
         self.psql_status(&self.database, &format!("drop publication if exists {publication_name}"))
             .context("failed to drop benchmark publication")
     }
@@ -711,38 +708,24 @@ impl BenchmarkArgs {
                     args.extend(["--bq-sa-key-file".to_owned(), sa_key_file.display().to_string()]);
                 }
             }
-            Destination::Snowflake => {
-                if let Some(account) = &self.sf_account {
-                    args.extend(["--sf-account".to_owned(), account.clone()]);
+            Destination::ClickHouse => {
+                if let Some(url) = &self.clickhouse_url {
+                    args.extend(["--clickhouse-url".to_owned(), url.clone()]);
                 }
 
-                if let Some(user) = &self.sf_user {
-                    args.extend(["--sf-user".to_owned(), user.clone()]);
+                if let Some(user) = &self.clickhouse_user {
+                    args.extend(["--clickhouse-user".to_owned(), user.clone()]);
                 }
 
-                if let Some(key) = &self.sf_private_key {
-                    let pem = if key.starts_with("-----") {
-                        key.clone()
-                    } else {
-                        std::fs::read_to_string(key).with_context(|| {
-                            format!("failed to read Snowflake private key file: {key}")
-                        })?
-                    };
-                    args.extend(["--sf-private-key".to_owned(), pem]);
+                if let Some(password) = &self.clickhouse_password {
+                    args.extend(["--clickhouse-password".to_owned(), password.clone()]);
                 }
 
-                if let Some(database) = &self.sf_database {
-                    args.extend(["--sf-database".to_owned(), database.clone()]);
-                }
-
-                if let Some(schema) = &self.sf_schema {
-                    args.extend(["--sf-schema".to_owned(), schema.clone()]);
-                }
-
-                if let Some(role) = &self.sf_role {
-                    args.extend(["--sf-role".to_owned(), role.clone()]);
+                if let Some(database) = &self.clickhouse_database {
+                    args.extend(["--clickhouse-database".to_owned(), database.clone()]);
                 }
             }
+            Destination::Snowflake => {}
             Destination::Null => {}
         }
 
@@ -795,6 +778,7 @@ impl Destination {
         match self {
             Self::Null => "null",
             Self::BigQuery => "bigquery",
+            Self::ClickHouse => "clickhouse",
             Self::Snowflake => "snowflake",
         }
     }
@@ -804,8 +788,9 @@ fn recommended_threads(warehouses: u16) -> u16 {
     let warehouse_threads =
         usize::from(warehouses).saturating_mul(DEFAULT_TPCC_THREADS_PER_WAREHOUSE);
     let cpu_threads = std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get().saturating_mul(DEFAULT_TPCC_THREADS_PER_CPU))
-        .unwrap_or(DEFAULT_TPCC_MIN_THREADS);
+        .map_or(DEFAULT_TPCC_MIN_THREADS, |parallelism| {
+            parallelism.get().saturating_mul(DEFAULT_TPCC_THREADS_PER_CPU)
+        });
     warehouse_threads.max(cpu_threads).clamp(DEFAULT_TPCC_MIN_THREADS, DEFAULT_TPCC_MAX_THREADS)
         as u16
 }
@@ -1148,11 +1133,8 @@ fn run_benchmark_binary(
 ) -> Result<Value> {
     let mut command = Command::new("cargo");
     command.args(["run", "--quiet", "-p", "etl-benchmarks", "--release"]);
-    if matches!(destination, Destination::BigQuery) {
-        command.args(["--features", "bigquery"]);
-    }
-    if matches!(destination, Destination::Snowflake) {
-        command.args(["--features", "snowflake"]);
+    if !matches!(destination, Destination::Null) {
+        command.args(["--features", destination.as_arg()]);
     }
     command.args(["--bin", binary_name, "--"]).args(binary_args);
 
@@ -1392,18 +1374,6 @@ fn format_integer(value: u64) -> String {
     }
 
     formatted
-}
-
-fn quote_identifier(identifier: &str) -> Result<String> {
-    if identifier.is_empty() {
-        bail!("identifier cannot be empty");
-    }
-
-    Ok(format!("\"{}\"", identifier.replace('"', "\"\"")))
-}
-
-fn quote_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(test)]

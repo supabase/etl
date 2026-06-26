@@ -5,10 +5,11 @@ test-threads = "num-cpus"
 # All tests that share the source Postgres cluster must run serially. Separate
 # nextest test groups do not serialize against each other, so cluster-wide
 # setting tests, etl replication tests, and PG-backed destination tests all
-# share one group. Local-only destination tests stay parallel.
+# share one group. Destination tests that do not use source Postgres stay
+# parallel.
 [test-groups.shared-pg]
 max-threads = 1
 
 [[profile.default.overrides]]
-filter = "test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & test(/^(bigquery|clickhouse|ducklake|iceberg|snowflake)::/)) | (binary_id(etl-destinations) & test(/ducklake::core::tests::postgres_backed::/))"
+filter = "test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & test(/^(bigquery|clickhouse|ducklake|iceberg)::/)) | (binary_id(etl-destinations) & test(/ducklake::core::tests::postgres_backed::/))"
 test-group = "shared-pg"

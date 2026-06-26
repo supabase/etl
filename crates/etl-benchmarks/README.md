@@ -23,6 +23,7 @@ Both benchmarks support:
   decoding, batching, and pipeline overhead without destination write cost.
 - `bigquery`: writes to BigQuery. Use this for end-to-end destination throughput.
 - `snowflake`: writes to Snowflake. Use this for end-to-end destination throughput.
+- `clickhouse`: writes to ClickHouse. Use this for end-to-end destination throughput.
 
 Both benchmarks print a human-readable summary. When `--report-path` is set, they
 also persist a pretty JSON report for automation. `xtask` always sets
@@ -217,7 +218,7 @@ tables and views inside it, but it does not create the dataset.
 
 Snowflake credentials are read from environment variables.
 
-Set them in `.env` (see `.env.example`) or pass them as CLI args:
+Set `BENCH_SNOWFLAKE_CONNECTION` in `.env` (see `crates/etl-destinations/src/snowflake/README.md`):
 
 ```bash
 cargo xtask benchmark \
@@ -226,17 +227,41 @@ cargo xtask benchmark \
   --streaming-duration-seconds 10
 ```
 
-Required environment variables (or their `--sf-*` CLI equivalents):
+`BENCH_SNOWFLAKE_CONNECTION` is the only Snowflake benchmark credential input. It is a JSON object with `account`, `user`, `database`, `schema`, optional `role`, optional `private_key_passphrase`, and `private_key`. Snowflake credentials are read from the environment and are not accepted as benchmark CLI arguments.
 
-- `BENCH_SNOWFLAKE_ACCOUNT`: account identifier in `ORG-ACCOUNT` format.
-- `BENCH_SNOWFLAKE_USER`: Snowflake user configured for key-pair auth.
-- `BENCH_SNOWFLAKE_PRIVATE_KEY`: PEM contents or path to the RSA private key file (.p8).
-- `BENCH_SNOWFLAKE_DATABASE`: target database.
-- `BENCH_SNOWFLAKE_SCHEMA`: target schema.
+## ClickHouse Runs
+
+Start the local ClickHouse server from `scripts/docker/docker-compose.yaml`:
+
+```bash
+docker compose -f scripts/docker/docker-compose.yaml up -d clickhouse
+```
+
+The defaults in `.env.example` (`BENCH_CLICKHOUSE_URL=http://localhost:8123`,
+`BENCH_CLICKHOUSE_USER=etl`, `BENCH_CLICKHOUSE_PASSWORD=etl`,
+`BENCH_CLICKHOUSE_DATABASE=default`) match the compose service. Override them
+to point at any other ClickHouse 23.5 or newer (required by the default
+`ReplacingMergeTree` engine).
+
+Run the benchmark:
+
+```bash
+cargo xtask benchmark \
+  --destination clickhouse \
+  --warehouses 1 \
+  --streaming-duration-seconds 10
+```
+
+Required environment variables (or their `--clickhouse-*` CLI equivalents):
+
+- `BENCH_CLICKHOUSE_URL`: ClickHouse HTTP URL.
+- `BENCH_CLICKHOUSE_USER`: ClickHouse user.
+- `BENCH_CLICKHOUSE_DATABASE`: target database. Must already exist; the
+  destination creates tables but not databases.
 
 Optional:
 
-- `BENCH_SNOWFLAKE_ROLE`: Snowflake role to assume.
+- `BENCH_CLICKHOUSE_PASSWORD`: ClickHouse password. Omit if the user has none.
 
 ## GitHub Actions
 
@@ -275,7 +300,7 @@ Important workflow inputs:
   bytes. Defaults to `0.2`.
 - `enable_memory_backpressure`: opt into ETL memory backpressure. Defaults to
   `false` for benchmark runs.
-- `destination`: `null`, `bigquery`, or `snowflake`.
+- `destination`: `null`, `bigquery`, `clickhouse`, or `snowflake`.
 - `force_prepare`: drop and regenerate TPC-C tables before running.
 - `skip_table_copy`: skip table copy.
 - `skip_table_streaming`: skip table streaming.
@@ -284,10 +309,11 @@ For BigQuery workflow runs, set the repository secret
 `BENCHMARK_BQ_SA_KEY_JSON`, then pass `destination=bigquery`,
 `bq_project_id`, and an existing `bq_dataset_id`.
 
-For Snowflake workflow runs, set two repository secrets and pass `destination=snowflake`:
+For Snowflake workflow runs, set the `BENCH_SNOWFLAKE_CONNECTION` repository secret and pass `destination=snowflake`.
 
-- `BENCH_SNOWFLAKE_CONNECTION`: colon-separated `account:user:database:schema`.
-- `BENCH_SNOWFLAKE_PRIVATE_KEY`: full PEM contents of the RSA private key.
+For ClickHouse workflow runs, pass `destination=clickhouse`. The workflow
+starts the `clickhouse` service from `scripts/docker/docker-compose.yaml` and points
+the benchmark at it (user `etl`, database `default`); no secrets are needed.
 
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs
 `cargo xtask benchmark` with three measured samples plus one warmup sample,

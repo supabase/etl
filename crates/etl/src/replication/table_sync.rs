@@ -5,12 +5,17 @@ use etl_postgres::{
     replication::slots::EtlReplicationSlot,
     types::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
 };
+#[cfg(feature = "failpoints")]
+use fail::fail_point;
 use metrics::histogram;
 use tokio_postgres::types::PgLsn;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, etl_fail_point};
+use crate::failpoints::{
+    START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
+    etl_fail_point,
+};
 use crate::{
     bail,
     concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
@@ -22,7 +27,7 @@ use crate::{
     etl_error,
     metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL},
     replication::{client::PgReplicationClient, table_cache::SharedTableCache},
-    state::{TableState, TableStateType},
+    state::{DestinationTableMetadata, TableState, TableStateType},
     store::{PipelineStore, schema::SchemaStore, state::StateStore},
     types::PipelineId,
     workers::{TableCopyResult, TableSyncWorkerState, table_copy},
@@ -48,14 +53,14 @@ pub(crate) enum TableSyncResult {
     },
 }
 
-/// Returns the existing [`ReplicatedTableSchema`] if one exists.
+/// Returns existing destination metadata and schema if they exist.
 ///
 /// A [`ReplicatedTableSchema`] could be there when starting a table copy
 /// because it was either interrupted or the state was reset.
 async fn get_existing_replicated_table_schema<S>(
     store: &S,
     table_id: TableId,
-) -> EtlResult<Option<ReplicatedTableSchema>>
+) -> EtlResult<Option<(DestinationTableMetadata, ReplicatedTableSchema)>>
 where
     S: StateStore + SchemaStore + Send + 'static,
 {
@@ -73,9 +78,9 @@ where
     };
 
     let existing_replicated_table_schema =
-        ReplicatedTableSchema::from_mask(table_schema, current_metadata.replication_mask);
+        ReplicatedTableSchema::from_mask(table_schema, current_metadata.replication_mask.clone());
 
-    Ok(Some(existing_replicated_table_schema))
+    Ok(Some((current_metadata, existing_replicated_table_schema)))
 }
 
 /// Starts table synchronization for a specific table.
@@ -187,9 +192,16 @@ where
             // (id = 2).
             //
             // Fix: Always drop the destination table before starting a copy.
-            if let Some(current_replication_table_schema) =
+            if let Some((current_metadata, current_replication_table_schema)) =
                 get_existing_replicated_table_schema(&store, table_id).await?
             {
+                warn!(
+                    table_id = table_id.0,
+                    destination_table_id = %current_metadata.destination_table_id,
+                    snapshot_id = %current_metadata.snapshot_id,
+                    "dropping pre-existing destination table before table copy"
+                );
+
                 let (drop_result, pending_drop_result) = DropTableForCopyResult::new(());
                 destination
                     .drop_table_for_copy(&current_replication_table_schema, drop_result)
@@ -202,13 +214,14 @@ where
             // successfully.
             replication_client.delete_slot_if_exists(&slot_name).await?;
 
-            // We clear durable and in-memory table-copy state only after external cleanup
-            // succeeds. The shared cache removal is idempotent: a first copy has no cached
-            // state yet, while an in-process retry can still hold the previous ready
-            // runtime schema. The fresh `0/0` copy schema below is the only state allowed
-            // to repopulate the cache.
-            store.clear_table_copy_state(table_id).await?;
+            // We prepare durable and in-memory table-copy state only after the
+            // destination drop succeeds. The shared cache removal is idempotent: a
+            // first copy has no cached state yet, while an in-process retry can still
+            // hold the previous ready runtime schema. The fresh `0/0` copy schema
+            // below is the only state allowed to repopulate the cache.
+            store.prepare_table_state_for_copy(table_id).await?;
             shared_table_cache.remove_table(table_id).await;
+            debug!(table_id = table_id.0, "prepared table state before copy");
 
             // We are ready to start copying table data, and we update the state
             // accordingly.
@@ -245,14 +258,6 @@ where
             info!(%table_id, "fetching table schema");
             let (table_schema, identity) =
                 replication_transaction.get_table_schema_with_identity(table_id).await?;
-
-            if !table_schema.has_primary_keys() {
-                bail!(
-                    ErrorKind::SourceSchemaError,
-                    "Primary key not found",
-                    format!("Table '{}' has no primary key", table_schema.name)
-                );
-            }
 
             // We store the table schema in the schema store to be able to retrieve it even
             // when the pipeline is restarted, since it's outside the lifecycle
@@ -367,6 +372,9 @@ where
             // message will be received, so we want the apply worker to already be able to
             // start decoding.
             shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
+
+            #[cfg(feature = "failpoints")]
+            fail_point!(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
             slot.consistent_point
         }

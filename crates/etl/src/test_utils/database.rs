@@ -17,7 +17,8 @@
 //! wal_sender_timeout = 10s
 //! ```
 //!
-//! See `scripts/docker-compose.yaml` for the test database configuration.
+//! See `scripts/docker/docker-compose.yaml` for the test database
+//! configuration.
 
 use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig};
 use etl_postgres::{
@@ -39,6 +40,7 @@ const DEFAULT_DATABASE_HOST: &str = "localhost";
 const DEFAULT_DATABASE_PORT: &str = "5430";
 const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
+const READ_REPLICA_PORT_OFFSET: u16 = 1000;
 /// Creates a [`TableName`] in the test schema.
 ///
 /// This helper function constructs a [`TableName`] with the schema set to the
@@ -82,6 +84,32 @@ fn local_pg_connection_config() -> PgConnectionConfig {
         tls: local_tls_config_from_env(),
         keepalive: TcpKeepaliveConfig::default(),
     }
+}
+
+/// Generates Postgres connection configuration for the test read replica.
+///
+/// The database name and credentials are inherited from `source_config`, while
+/// the host and port default to the local Docker Compose replica convention.
+/// Override them with `TESTS_DATABASE_REPLICA_HOST` and
+/// `TESTS_DATABASE_REPLICA_PORT` when running against a custom standby.
+pub fn local_pg_read_replica_connection_config(
+    source_config: &PgConnectionConfig,
+) -> PgConnectionConfig {
+    let default_replica_port = source_config
+        .port
+        .checked_add(READ_REPLICA_PORT_OFFSET)
+        .expect("source Postgres port plus read replica offset should fit in the valid port range");
+
+    let mut replica_config = source_config.clone();
+    replica_config.host =
+        std::env::var("TESTS_DATABASE_REPLICA_HOST").unwrap_or_else(|_| source_config.host.clone());
+    replica_config.hostaddr = None;
+    replica_config.port = std::env::var("TESTS_DATABASE_REPLICA_PORT")
+        .unwrap_or_else(|_| default_replica_port.to_string())
+        .parse()
+        .expect("TESTS_DATABASE_REPLICA_PORT must be a valid port number");
+
+    replica_config
 }
 
 /// Creates a new test database instance with a unique name and runs migrations.

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use etl::{
     state::destination_table_metadata::DestinationTableMetadata,
@@ -18,12 +18,17 @@ use etl_destinations::snowflake::{
 
 use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
 
+const DESTINATION_OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const DESTINATION_OFFSET_MAX_ATTEMPTS: usize = 90;
+
+type SnowflakeTestDestination = Destination<
+    NotifyingStore,
+    AuthManager<HttpExchanger>,
+    RestStreamClient<AuthManager<HttpExchanger>>,
+>;
+
 struct TestHarness {
-    destination: Destination<
-        NotifyingStore,
-        AuthManager<HttpExchanger>,
-        RestStreamClient<AuthManager<HttpExchanger>>,
-    >,
+    destination: SnowflakeTestDestination,
     sql: SqlClient<AuthManager<HttpExchanger>>,
     config: Config,
     store: NotifyingStore,
@@ -31,13 +36,17 @@ struct TestHarness {
 
 impl TestHarness {
     fn new() -> Self {
-        let config = load_test_config();
+        let config = load_test_config().clone_without_credentials();
         let auth = build_auth();
-        let sql = SqlClient::new(config.clone(), Arc::clone(&auth), reqwest::Client::new());
+        let sql = SqlClient::new(
+            config.clone_without_credentials(),
+            Arc::clone(&auth),
+            reqwest::Client::new(),
+        );
         let store = NotifyingStore::new();
         let pipeline_id: PipelineId = 1;
 
-        let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
+        let client = Client::new(Arc::clone(&auth), pipeline_id);
         let destination = Destination::new(client, store.clone());
 
         Self { destination, sql, config, store }
@@ -60,8 +69,8 @@ async fn poll_and_query_rows(
         &harness.destination,
         table_id,
         expected_offset,
-        std::time::Duration::from_secs(5),
-        18,
+        DESTINATION_OFFSET_POLL_INTERVAL,
+        DESTINATION_OFFSET_MAX_ATTEMPTS,
     )
     .await;
     assert_eq!(
@@ -82,10 +91,136 @@ fn make_table_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableId::new(table_id),
         TableName::new(schema.to_owned(), table.to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
         ],
     )
+}
+
+/// Builds the schema used by existing-column default change tests.
+fn status_default_schema(
+    table_id: TableId,
+    table: &str,
+    snapshot_lsn: Option<u64>,
+    default_expression: Option<&str>,
+) -> TableSchema {
+    let mut status_column = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, true);
+    if let Some(default_expression) = default_expression {
+        status_column = status_column.with_default_expression(default_expression.to_owned());
+    }
+
+    let columns = vec![
+        ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+        status_column,
+    ];
+    let table_name = TableName::new("public".to_owned(), table.to_owned());
+
+    match snapshot_lsn {
+        Some(snapshot_lsn) => TableSchema::with_snapshot_id(
+            table_id,
+            table_name,
+            columns,
+            SnapshotId::new(PgLsn::from(snapshot_lsn)),
+        ),
+        None => TableSchema::new(table_id, table_name, columns),
+    }
+}
+
+/// Applies a single Snowflake relation event for schema evolution tests.
+async fn apply_relation_event(
+    destination: &SnowflakeTestDestination,
+    replicated_table_schema: ReplicatedTableSchema,
+    lsn: u64,
+    context: &str,
+) {
+    destination
+        .process_events(vec![Event::Relation(RelationEvent {
+            start_lsn: PgLsn::from(lsn),
+            commit_lsn: PgLsn::from(lsn),
+            tx_ordinal: 0,
+            replicated_table_schema,
+        })])
+        .await
+        .unwrap_or_else(|error| panic!("process_events ({context}) failed: {error}"));
+}
+
+/// Inserts a row while omitting `status`, allowing Snowflake defaults to apply.
+async fn insert_row_omitting_status(
+    sql: &SqlClient<AuthManager<HttpExchanger>>,
+    fqn: &str,
+    id: i32,
+    sequence_number: &str,
+    context: &str,
+) {
+    sql.execute_ddl(&format!(
+        "INSERT INTO {fqn} (\"id\", \"_cdc_operation\", \"_cdc_sequence_number\") VALUES ({id}, \
+         'insert', '{sequence_number}')"
+    ))
+    .await
+    .unwrap_or_else(|error| panic!("insert {context} failed: {error}"));
+}
+
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn create_table_with_simulator_defaults() {
+    fn make_simulator_defaults_table_schema(
+        table_id: u32,
+        schema: &str,
+        table: &str,
+    ) -> TableSchema {
+        TableSchema::new(
+            TableId::new(table_id),
+            TableName::new(schema.to_owned(), table.to_owned()),
+            vec![
+                ColumnSchema::new("text_col".to_owned(), Type::TEXT, -1, 1, true)
+                    .with_default_expression("'base_text_literal'::text".to_owned()),
+                ColumnSchema::new("varchar_col".to_owned(), Type::VARCHAR, 255, 2, true)
+                    .with_default_expression(
+                        "'base_varchar_literal'::character varying".to_owned(),
+                    ),
+                ColumnSchema::new("smallint_col".to_owned(), Type::INT2, -1, 3, true)
+                    .with_default_expression("7".to_owned()),
+                ColumnSchema::new("integer_col".to_owned(), Type::INT4, -1, 4, true)
+                    .with_default_expression("42".to_owned()),
+                ColumnSchema::new("numeric_col".to_owned(), Type::NUMERIC, -1, 5, true)
+                    .with_default_expression("(10 + 5)".to_owned()),
+                ColumnSchema::new("boolean_col".to_owned(), Type::BOOL, -1, 6, true)
+                    .with_default_expression("false".to_owned()),
+                ColumnSchema::new("date_col".to_owned(), Type::DATE, -1, 7, true)
+                    .with_default_expression("'2026-01-01'::date".to_owned()),
+                ColumnSchema::new("timestamp_col".to_owned(), Type::TIMESTAMP, -1, 8, true)
+                    .with_default_expression("'2026-01-01 12:30:00'::timestamp".to_owned()),
+                ColumnSchema::new("timestamptz_col".to_owned(), Type::TIMESTAMPTZ, -1, 9, true)
+                    .with_default_expression("now()".to_owned()),
+                ColumnSchema::new("time_col".to_owned(), Type::TIME, -1, 10, true)
+                    .with_default_expression("'12:30:00'::time".to_owned()),
+                ColumnSchema::new("jsonb_col".to_owned(), Type::JSONB, -1, 11, true)
+                    .with_default_expression(r#"'{"source": "base"}'::jsonb"#.to_owned()),
+                ColumnSchema::new("json_col".to_owned(), Type::JSON, -1, 12, true)
+                    .with_default_expression(r#"'{"source": "base"}'::json"#.to_owned()),
+            ],
+        )
+    }
+    let harness = TestHarness::new();
+    let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+
+    let table_schema = make_simulator_defaults_table_schema(1012, "public", &src_table);
+    let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
+
+    harness.store.store_table_schema(table_schema).await.unwrap();
+
+    with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        harness
+            .destination
+            .write_table_rows(&schema, vec![])
+            .await
+            .expect("write_table_rows with simulator defaults failed");
+
+        let exists = harness.sql.table_exists(&sf_table).await.expect("table_exists failed");
+        assert!(exists, "table with simulator defaults should have been created");
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -299,8 +434,8 @@ async fn schema_evolution_add_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
         ],
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
@@ -310,9 +445,9 @@ async fn schema_evolution_add_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
         ],
         new_snapshot_id,
     );
@@ -341,8 +476,8 @@ async fn schema_evolution_add_column() {
             &harness.destination,
             table_id,
             &zero,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert!(committed.is_some(), "initial data should commit before DDL");
@@ -386,8 +521,8 @@ async fn schema_evolution_add_column() {
             &harness.destination,
             table_id,
             &expected_offset,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
@@ -415,6 +550,257 @@ async fn schema_evolution_add_column() {
 
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
+async fn schema_evolution_add_column_defaults() {
+    let harness = TestHarness::new();
+    let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+
+    let table_id = TableId::new(1011);
+    let zero = OffsetToken::zero();
+
+    let initial_schema = TableSchema::new(
+        table_id,
+        TableName::new("public".to_owned(), src_table.clone()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+        ],
+    );
+    let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
+
+    let new_snapshot_id = SnapshotId::new(PgLsn::from(100u64));
+    let evolved_schema = TableSchema::with_snapshot_id(
+        table_id,
+        TableName::new("public".to_owned(), src_table.clone()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 3, true)
+                .with_default_expression("'new'::text".to_owned()),
+            ColumnSchema::new("score".to_owned(), Type::INT4, -1, 4, true)
+                .with_default_expression("15".to_owned()),
+            ColumnSchema::new("active".to_owned(), Type::BOOL, -1, 5, true)
+                .with_default_expression("true".to_owned()),
+        ],
+        new_snapshot_id,
+    );
+    let evolved_replicated = ReplicatedTableSchema::all(Arc::new(evolved_schema.clone()));
+
+    harness.store.store_table_schema(initial_schema).await.unwrap();
+    harness.store.store_table_schema(evolved_schema).await.unwrap();
+
+    with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        harness
+            .destination
+            .write_table_rows(
+                &initial_replicated,
+                vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())])],
+            )
+            .await
+            .expect("initial write_table_rows failed");
+
+        let committed = poll_destination_offset(
+            &harness.destination,
+            table_id,
+            &zero,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
+        )
+        .await;
+        assert!(committed.is_some(), "initial data should commit before DDL");
+
+        let initial_metadata = DestinationTableMetadata::new_applied(
+            sf_table.clone(),
+            SnapshotId::initial(),
+            initial_replicated.replication_mask().clone(),
+        );
+        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+
+        harness
+            .destination
+            .process_events(vec![Event::Relation(RelationEvent {
+                start_lsn: PgLsn::from(100u64),
+                commit_lsn: PgLsn::from(100u64),
+                tx_ordinal: 0,
+                replicated_table_schema: evolved_replicated.clone(),
+            })])
+            .await
+            .expect("process_events (RelationEvent defaults) failed");
+
+        harness
+            .destination
+            .process_events(vec![Event::Insert(InsertEvent {
+                start_lsn: PgLsn::from(101u64),
+                commit_lsn: PgLsn::from(101u64),
+                tx_ordinal: 0,
+                replicated_table_schema: evolved_replicated.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Bob".into()),
+                    Cell::String("new".into()),
+                    Cell::I32(15),
+                    Cell::Bool(true),
+                ]),
+            })])
+            .await
+            .expect("process_events (Insert with defaults) failed");
+
+        let expected_offset = OffsetToken::new(PgLsn::from(101u64), 0);
+        let committed = poll_destination_offset(
+            &harness.destination,
+            table_id,
+            &expected_offset,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
+        )
+        .await;
+        assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
+
+        let fqn = format!(
+            "\"{}\".\"{}\".\"{sf_table}\"",
+            harness.config.database(),
+            harness.config.schema()
+        );
+        let rows = query_rows(
+            &harness.sql,
+            &format!(
+                "SELECT \"id\"::VARCHAR, \"status\", \"score\"::VARCHAR, \"active\"::VARCHAR FROM \
+                 {fqn} ORDER BY \"id\""
+            ),
+        )
+        .await
+        .expect("query for defaulted rows failed");
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    serde_json::json!("1"),
+                    serde_json::json!("new"),
+                    serde_json::json!("15"),
+                    serde_json::json!("true"),
+                ],
+                vec![
+                    serde_json::json!("2"),
+                    serde_json::json!("new"),
+                    serde_json::json!("15"),
+                    serde_json::json!("true"),
+                ],
+            ]
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn schema_evolution_existing_column_default_changes() {
+    let harness = TestHarness::new();
+    let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+
+    let table_id = TableId::new(1012);
+
+    let initial_schema = status_default_schema(table_id, &src_table, None, None);
+    let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
+
+    let set_default_schema =
+        status_default_schema(table_id, &src_table, Some(100), Some("'pending'::text"));
+    let set_default_replicated = ReplicatedTableSchema::all(Arc::new(set_default_schema.clone()));
+
+    let unsupported_default_schema = status_default_schema(
+        table_id,
+        &src_table,
+        Some(200),
+        Some("array['unsupported']::text[]"),
+    );
+    let unsupported_default_replicated =
+        ReplicatedTableSchema::all(Arc::new(unsupported_default_schema.clone()));
+
+    let reset_default_schema =
+        status_default_schema(table_id, &src_table, Some(300), Some("'queued'::text"));
+    let reset_default_replicated =
+        ReplicatedTableSchema::all(Arc::new(reset_default_schema.clone()));
+
+    let drop_default_schema = status_default_schema(table_id, &src_table, Some(400), None);
+    let drop_default_replicated = ReplicatedTableSchema::all(Arc::new(drop_default_schema.clone()));
+
+    harness.store.store_table_schema(initial_schema).await.unwrap();
+    harness.store.store_table_schema(set_default_schema).await.unwrap();
+    harness.store.store_table_schema(unsupported_default_schema).await.unwrap();
+    harness.store.store_table_schema(reset_default_schema).await.unwrap();
+    harness.store.store_table_schema(drop_default_schema).await.unwrap();
+
+    with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        harness
+            .destination
+            .prepare_table_for_streaming(&initial_replicated)
+            .await
+            .expect("prepare table for streaming failed");
+
+        let fqn = format!(
+            "\"{}\".\"{}\".\"{sf_table}\"",
+            harness.config.database(),
+            harness.config.schema()
+        );
+
+        apply_relation_event(&harness.destination, set_default_replicated, 100, "set default")
+            .await;
+        insert_row_omitting_status(&harness.sql, &fqn, 1, "manual-1", "after skipped set default")
+            .await;
+
+        apply_relation_event(
+            &harness.destination,
+            unsupported_default_replicated,
+            200,
+            "unsupported default",
+        )
+        .await;
+        insert_row_omitting_status(
+            &harness.sql,
+            &fqn,
+            2,
+            "manual-2",
+            "after unsupported default is skipped",
+        )
+        .await;
+
+        apply_relation_event(&harness.destination, reset_default_replicated, 300, "reset default")
+            .await;
+        insert_row_omitting_status(
+            &harness.sql,
+            &fqn,
+            3,
+            "manual-3",
+            "after skipped reset default",
+        )
+        .await;
+
+        apply_relation_event(&harness.destination, drop_default_replicated, 400, "drop default")
+            .await;
+        insert_row_omitting_status(&harness.sql, &fqn, 4, "manual-4", "after skipped drop default")
+            .await;
+
+        let rows = query_rows(
+            &harness.sql,
+            &format!("SELECT \"id\"::VARCHAR, \"status\" FROM {fqn} ORDER BY \"id\""),
+        )
+        .await
+        .expect("query for existing-column default rows failed");
+        assert_eq!(
+            rows,
+            vec![
+                vec![serde_json::json!("1"), serde_json::Value::Null],
+                vec![serde_json::json!("2"), serde_json::Value::Null],
+                vec![serde_json::json!("3"), serde_json::Value::Null],
+                vec![serde_json::json!("4"), serde_json::Value::Null],
+            ]
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
 async fn schema_evolution_rename_column() {
     let harness = TestHarness::new();
     let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
@@ -427,8 +813,8 @@ async fn schema_evolution_rename_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
         ],
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
@@ -438,8 +824,8 @@ async fn schema_evolution_rename_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, true),
         ],
         new_snapshot_id,
     );
@@ -464,8 +850,8 @@ async fn schema_evolution_rename_column() {
             &harness.destination,
             table_id,
             &zero,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert!(committed.is_some(), "initial data should commit before DDL");
@@ -505,8 +891,8 @@ async fn schema_evolution_rename_column() {
             &harness.destination,
             table_id,
             &expected_offset,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
@@ -554,9 +940,9 @@ async fn schema_evolution_drop_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
         ],
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
@@ -566,8 +952,8 @@ async fn schema_evolution_drop_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
         ],
         new_snapshot_id,
     );
@@ -596,8 +982,8 @@ async fn schema_evolution_drop_column() {
             &harness.destination,
             table_id,
             &zero,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert!(committed.is_some(), "initial data should commit before DDL");
@@ -637,8 +1023,8 @@ async fn schema_evolution_drop_column() {
             &harness.destination,
             table_id,
             &expected_offset,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
@@ -679,8 +1065,8 @@ async fn schema_evolution_interleaved_ddl_dml() {
         table_id,
         table_name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
         ],
     );
     let replicated_v1 = ReplicatedTableSchema::all(Arc::new(schema_v1.clone()));
@@ -690,9 +1076,9 @@ async fn schema_evolution_interleaved_ddl_dml() {
         table_id,
         table_name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
         ],
         SnapshotId::new(PgLsn::from(100u64)),
     );
@@ -703,9 +1089,9 @@ async fn schema_evolution_interleaved_ddl_dml() {
         table_id,
         table_name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, true),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
         ],
         SnapshotId::new(PgLsn::from(200u64)),
     );
@@ -716,8 +1102,8 @@ async fn schema_evolution_interleaved_ddl_dml() {
         table_id,
         table_name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, true),
         ],
         SnapshotId::new(PgLsn::from(300u64)),
     );
@@ -735,8 +1121,8 @@ async fn schema_evolution_interleaved_ddl_dml() {
                 &harness.destination,
                 table_id,
                 &expected,
-                std::time::Duration::from_secs(5),
-                18,
+                DESTINATION_OFFSET_POLL_INTERVAL,
+                DESTINATION_OFFSET_MAX_ATTEMPTS,
             )
             .await;
             assert_eq!(committed, Some(expected), "data should commit before next DDL");
@@ -760,8 +1146,8 @@ async fn schema_evolution_interleaved_ddl_dml() {
             &harness.destination,
             table_id,
             &zero,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert!(committed.is_some(), "initial data should commit before DDL");

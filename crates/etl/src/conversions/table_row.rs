@@ -106,10 +106,11 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
                 let actual_column_count = values.len() + 1;
                 bail!(
                     ErrorKind::ConversionError,
-                    "Column count mismatch between schema and row",
+                    "Postgres COPY row contains more columns than the table schema",
                     format!(
-                        "Expected {} columns but row contains at least {} columns",
-                        expected_column_count, actual_column_count
+                        "The table schema expects {} replicated columns, but the COPY row \
+                         contains at least {}. The first extra field is at position {}.",
+                        expected_column_count, actual_column_count, actual_column_count
                     )
                 );
             };
@@ -149,14 +150,18 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
     // Validate that all expected columns were present in the row
     // If there are still columns left in the schema iterator, it means the row
     // had fewer fields than expected, which is an error
-    if column_schemas.next().is_some() {
+    if let Some(missing_column_schema) = column_schemas.next() {
         let actual_column_count = values.len();
         bail!(
             ErrorKind::ConversionError,
-            "Column count mismatch between schema and row",
+            "Postgres COPY row contains fewer columns than the table schema",
             format!(
-                "Expected {} columns but row contains {} columns",
-                expected_column_count, actual_column_count
+                "The table schema expects {} replicated columns, but the COPY row contains {}. \
+                 The next missing column is '{}' at position {}.",
+                expected_column_count,
+                actual_column_count,
+                missing_column_schema.name,
+                actual_column_count + 1
             )
         );
     }
@@ -180,14 +185,8 @@ mod tests {
         nullable: bool,
         primary_key: bool,
     ) -> ColumnSchema {
-        ColumnSchema::new(
-            name.to_owned(),
-            typ,
-            -1,
-            ordinal_position,
-            if primary_key { Some(1) } else { None },
-            nullable,
-        )
+        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, nullable)
+            .with_primary_key_ordinal_position(if primary_key { Some(1) } else { None })
     }
 
     fn create_test_column_schemas() -> Vec<ColumnSchema> {
@@ -292,26 +291,46 @@ mod tests {
 
     #[test]
     fn try_from_column_count_mismatch() {
-        let column_schemas = create_test_column_schemas(); // Expects 3 columns
-        let row_data = b"123\tJohn\n"; // Only 2 values - this should actually fail at parsing the bool because there's no third column
+        let column_schemas = create_test_column_schemas();
+        let row_data = b"123\tJohn\n";
 
         let result_empty =
             parse_table_row_from_postgres_copy_bytes(row_data, column_schemas.iter());
         assert!(result_empty.is_err());
         let err = result_empty.unwrap_err();
-        assert!(err.to_string().contains("Expected 3 columns but row contains 2 columns"));
+        assert_eq!(
+            err.description(),
+            Some("Postgres COPY row contains fewer columns than the table schema")
+        );
+        assert_eq!(
+            err.detail(),
+            Some(
+                "The table schema expects 3 replicated columns, but the COPY row contains 2. The \
+                 next missing column is 'active' at position 3."
+            )
+        );
     }
 
     #[test]
     fn try_from_too_many_columns() {
-        let column_schemas = create_test_column_schemas(); // Expects 3 columns
+        let column_schemas = create_test_column_schemas();
         let row_data = b"123\tJohn\tt\textra\n";
 
         let result = parse_table_row_from_postgres_copy_bytes(row_data, column_schemas.iter());
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("Expected 3 columns but row contains at least 4 columns"));
+        assert_eq!(
+            err.description(),
+            Some("Postgres COPY row contains more columns than the table schema")
+        );
+        assert_eq!(
+            err.detail(),
+            Some(
+                "The table schema expects 3 replicated columns, but the COPY row contains at \
+                 least 4. The first extra field is at position 4."
+            )
+        );
     }
 
     #[test]

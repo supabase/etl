@@ -138,10 +138,14 @@ impl TryFrom<EtlReplicationSlot> for String {
 /// Builds a SQL `LIKE` pattern that matches all table-sync replication slots
 /// belonging to the given pipeline.
 ///
+/// Table-sync slots include a table id suffix, so callers use this pattern when
+/// they need all table-sync slots for a pipeline and do not already know the
+/// table ids.
+///
 /// The pattern escapes the literal `_` characters in the slot prefix so that
 /// LIKE does not treat them as single-character wildcards. Must be used with
 /// `LIKE ... ESCAPE '\'`.
-fn table_sync_like_pattern(pipeline_id: u64) -> Result<String, EtlReplicationSlotError> {
+pub(super) fn table_sync_like_pattern(pipeline_id: u64) -> Result<String, EtlReplicationSlotError> {
     let prefix = EtlReplicationSlot::table_sync_prefix(pipeline_id)?;
     Ok(format!("{}%", prefix.replace('_', r"\_")))
 }

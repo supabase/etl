@@ -1,4 +1,5 @@
 use etl_api::{
+    data,
     k8s::PodStatus,
     routes::{
         destinations::ReadDestinationResponse,
@@ -8,6 +9,7 @@ use etl_api::{
         },
         pipelines::ReadPipelineResponse,
     },
+    startup::get_connection_pool,
 };
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::sqlx::test_utils::drop_pg_database;
@@ -21,8 +23,8 @@ use crate::support::{
         create_default_image,
         destinations::{
             create_destination, new_bigquery_destination_config,
-            new_iceberg_supabase_destination_config, new_name, updated_destination_config,
-            updated_iceberg_supabase_destination_config, updated_name,
+            new_iceberg_supabase_destination_config, new_name, new_snowflake_destination_config,
+            updated_destination_config, updated_iceberg_supabase_destination_config, updated_name,
         },
         pipelines::{new_pipeline_config, updated_pipeline_config},
         sources::create_source,
@@ -162,6 +164,52 @@ async fn iceberg_supabase_destination_and_pipeline_can_be_created() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn snowflake_destination_and_pipeline_can_be_created() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    create_default_image(&app).await;
+
+    // Act
+    let destination_pipeline = CreateDestinationPipelineRequest {
+        destination_name: "Snowflake Destination".to_owned(),
+        destination_config: new_snowflake_destination_config(),
+        source_id,
+        pipeline_config: new_pipeline_config(),
+    };
+    let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.destination_id, 1);
+    assert_eq!(response.pipeline_id, 1);
+
+    let destination_id = response.destination_id;
+    let pipeline_id = response.pipeline_id;
+
+    let response = app.read_destination(tenant_id, destination_id).await;
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.id, destination_id);
+    assert_eq!(response.name, destination_pipeline.destination_name);
+    insta::assert_debug_snapshot!(response.config);
+
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.id, pipeline_id);
+    assert_eq!(&response.tenant_id, tenant_id);
+    assert_eq!(response.source_id, source_id);
+    assert_eq!(response.destination_id, destination_id);
+    assert_eq!(response.replicator_id, 1);
+    insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn tenant_cannot_create_more_than_max_destinations_pipelines() {
     use etl_api::data::pipelines::MAX_PIPELINES_PER_TENANT;
 
@@ -194,7 +242,7 @@ async fn tenant_cannot_create_more_than_max_destinations_pipelines() {
     let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -226,7 +274,7 @@ async fn destination_and_pipeline_with_another_tenants_source_cannot_be_created(
     let response = app.create_destination_pipeline(tenant1_id, &destination_pipeline).await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -377,7 +425,58 @@ async fn destination_and_pipeline_with_another_tenants_source_cannot_be_updated(
         .await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_destination_pipeline_to_duplicate_source_destination_returns_conflict() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let image_id = create_default_image(&app).await;
+    let source1_id = create_source(&app, tenant_id).await;
+    let source2_id = create_source(&app, tenant_id).await;
+
+    let destination_pipeline = CreateDestinationPipelineRequest {
+        destination_name: new_name(),
+        destination_config: new_bigquery_destination_config(),
+        source_id: source1_id,
+        pipeline_config: new_pipeline_config(),
+    };
+    let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
+    assert!(response.status().is_success());
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let CreateDestinationPipelineResponse { destination_id, pipeline_id } = response;
+
+    let pool = get_connection_pool(app.database_config());
+    let mut txn = pool.begin().await.expect("failed to begin transaction");
+    data::pipelines::create_pipeline(
+        &mut txn,
+        tenant_id,
+        source2_id,
+        destination_id,
+        image_id,
+        new_pipeline_config(),
+    )
+    .await
+    .expect("failed to create duplicate-conflict fixture pipeline");
+    txn.commit().await.expect("failed to commit transaction");
+
+    // Act
+    let destination_pipeline = UpdateDestinationPipelineRequest {
+        destination_name: updated_name(),
+        destination_config: updated_destination_config(),
+        source_id: source2_id,
+        pipeline_config: updated_pipeline_config(),
+    };
+    let response = app
+        .update_destination_pipeline(tenant_id, destination_id, pipeline_id, &destination_pipeline)
+        .await;
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -429,7 +528,7 @@ async fn destination_and_pipeline_with_another_tenants_destination_cannot_be_upd
         .await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -492,7 +591,7 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cannot_be_update
         .await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 // TODO: Re-enable these tests once MAX_PIPELINES_PER_TENANT is lifted from 1.

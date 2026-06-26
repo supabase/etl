@@ -10,6 +10,49 @@ use etl_destinations::bigquery::test_utils::parse_table_cell;
 use gcp_bigquery_client::model::{table_cell::TableCell, table_row::TableRow};
 use uuid::Uuid;
 
+const BIGQUERY_DATETIME_FORMATS: [&str; 2] = ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"];
+
+fn parse_unix_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    value.parse::<f64>().ok().and_then(|timestamp| {
+        let secs = timestamp.trunc() as i64;
+        let nanos = ((timestamp.fract()) * 1_000_000_000.0).round() as u32;
+        DateTime::from_timestamp(secs, nanos)
+    })
+}
+
+fn parse_unix_timestamp_from_cell(table_cell: TableCell) -> Option<DateTime<Utc>> {
+    table_cell.value.and_then(|value| value.as_str().and_then(parse_unix_timestamp))
+}
+
+fn parse_bigquery_datetime(value: &str) -> Option<NaiveDateTime> {
+    BIGQUERY_DATETIME_FORMATS
+        .into_iter()
+        .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
+}
+
+fn parse_bigquery_datetime_from_cell(table_cell: TableCell) -> Option<NaiveDateTime> {
+    table_cell.value.and_then(|value| value.as_str().and_then(parse_bigquery_datetime))
+}
+
+fn parse_array_cell_with<T>(
+    table_cell: TableCell,
+    mut parse: impl FnMut(&str) -> Option<T>,
+) -> Option<Vec<T>> {
+    table_cell.value.and_then(|value| {
+        value.as_array().map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.as_object()
+                        .and_then(|object| object.get("v"))
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(&mut parse)
+                })
+                .collect()
+        })
+    })
+}
+
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct BigQueryUser {
     id: i32,
@@ -54,6 +97,50 @@ impl From<TableRow> for BigQueryOrder {
         BigQueryOrder {
             id: parse_table_cell(columns[0].clone()).unwrap(),
             description: parse_table_cell(columns[1].clone()).unwrap(),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct BigQueryDefaultsRow {
+    pub(crate) id: i32,
+    pub(crate) name: String,
+    pub(crate) status: Option<String>,
+    pub(crate) score: Option<i32>,
+    pub(crate) active: Option<bool>,
+}
+
+impl From<TableRow> for BigQueryDefaultsRow {
+    fn from(value: TableRow) -> Self {
+        let columns = value.columns.unwrap();
+
+        BigQueryDefaultsRow {
+            id: parse_table_cell(columns[0].clone()).unwrap(),
+            name: parse_table_cell(columns[1].clone()).unwrap(),
+            status: parse_table_cell(columns[2].clone()),
+            score: parse_table_cell(columns[3].clone()),
+            active: parse_table_cell(columns[4].clone()),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct BigQuerySchemaChangeRow {
+    pub(crate) id: i32,
+    pub(crate) full_name: String,
+    pub(crate) age: i32,
+    pub(crate) email: Option<String>,
+}
+
+impl From<TableRow> for BigQuerySchemaChangeRow {
+    fn from(value: TableRow) -> Self {
+        let columns = value.columns.unwrap();
+
+        BigQuerySchemaChangeRow {
+            id: parse_table_cell(columns[0].clone()).unwrap(),
+            full_name: parse_table_cell(columns[1].clone()).unwrap(),
+            age: parse_table_cell(columns[2].clone()).unwrap(),
+            email: parse_table_cell(columns[3].clone()),
         }
     }
 }
@@ -187,29 +274,6 @@ impl From<TableRow> for NullableColsScalar {
             table_cell.value.and_then(|v| v.as_str().and_then(|s| BASE64_STANDARD.decode(s).ok()))
         }
 
-        // Helper function to parse Unix timestamp from TableCell to DateTime<Utc>
-        fn parse_unix_timestamp_from_cell(table_cell: TableCell) -> Option<DateTime<Utc>> {
-            table_cell
-                .value
-                .and_then(|v| v.as_str().map(ToString::to_string))
-                .and_then(|s| s.parse::<f64>().ok())
-                .and_then(|timestamp| {
-                    let secs = timestamp.trunc() as i64;
-                    let nanos = ((timestamp.fract()) * 1_000_000_000.0).round() as u32;
-                    DateTime::from_timestamp(secs, nanos)
-                })
-        }
-
-        // Helper function to parse Unix timestamp to NaiveDateTime
-        fn parse_unix_timestamp_naive(table_cell: TableCell) -> Option<NaiveDateTime> {
-            parse_unix_timestamp_from_cell(table_cell).map(|dt| dt.naive_utc())
-        }
-
-        // Helper function to parse Unix timestamp to DateTime<Utc>
-        fn parse_unix_timestamp_utc(table_cell: TableCell) -> Option<DateTime<Utc>> {
-            parse_unix_timestamp_from_cell(table_cell)
-        }
-
         NullableColsScalar {
             id: parse_table_cell(columns[0].clone()).unwrap(),
             b: parse_table_cell(columns[1].clone()),
@@ -223,8 +287,8 @@ impl From<TableRow> for NullableColsScalar {
             by: parse_bytes(columns[9].clone()),
             d: parse_table_cell(columns[10].clone()),
             ti: parse_table_cell(columns[11].clone()),
-            ts: parse_unix_timestamp_naive(columns[12].clone()),
-            tstz: parse_unix_timestamp_utc(columns[13].clone()),
+            ts: parse_bigquery_datetime_from_cell(columns[12].clone()),
+            tstz: parse_unix_timestamp_from_cell(columns[13].clone()),
             u: parse_table_cell(columns[14].clone()),
             j: parse_json_value(columns[15].clone()),
             jb: parse_json_value(columns[16].clone()),
@@ -417,34 +481,6 @@ impl From<TableRow> for NullableColsArray {
             })
         }
 
-        // Helper function to parse array of timestamps
-        fn parse_timestamp_array(table_cell: TableCell) -> Option<Vec<DateTime<Utc>>> {
-            table_cell.value.and_then(|v| {
-                v.as_array().map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            item.as_object()
-                                .and_then(|obj| obj.get("v"))
-                                .and_then(|val| val.as_str())
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .and_then(|timestamp| {
-                                    let secs = timestamp.trunc() as i64;
-                                    let nanos =
-                                        ((timestamp.fract()) * 1_000_000_000.0).round() as u32;
-                                    DateTime::from_timestamp(secs, nanos)
-                                })
-                        })
-                        .collect()
-                })
-            })
-        }
-
-        // Helper function to parse array of naive datetimes
-        fn parse_naive_datetime_array(table_cell: TableCell) -> Option<Vec<NaiveDateTime>> {
-            parse_timestamp_array(table_cell)
-                .map(|timestamps| timestamps.into_iter().map(|dt| dt.naive_utc()).collect())
-        }
-
         // Helper function to parse array of byte arrays (decode from base64)
         fn parse_bytes_array(table_cell: TableCell) -> Option<Vec<Vec<u8>>> {
             table_cell.value.and_then(|v| {
@@ -474,8 +510,8 @@ impl From<TableRow> for NullableColsArray {
             by_arr: parse_bytes_array(columns[9].clone()),
             d_arr: parse_array_cell(columns[10].clone()),
             ti_arr: parse_array_cell(columns[11].clone()),
-            ts_arr: parse_naive_datetime_array(columns[12].clone()),
-            tstz_arr: parse_timestamp_array(columns[13].clone()),
+            ts_arr: parse_array_cell_with(columns[12].clone(), parse_bigquery_datetime),
+            tstz_arr: parse_array_cell_with(columns[13].clone(), parse_unix_timestamp),
             u_arr: parse_array_cell(columns[14].clone()),
             j_arr: parse_json_array(columns[15].clone()),
             jb_arr: parse_json_array(columns[16].clone()),
@@ -612,25 +648,6 @@ impl From<TableRow> for NonNullableColsScalar {
                 .unwrap()
         }
 
-        // Helper function to parse Unix timestamp from TableCell to DateTime<Utc>
-        fn parse_unix_timestamp_from_cell(table_cell: TableCell) -> DateTime<Utc> {
-            table_cell
-                .value
-                .and_then(|v| v.as_str().map(ToString::to_string))
-                .and_then(|s| s.parse::<f64>().ok())
-                .and_then(|timestamp| {
-                    let secs = timestamp.trunc() as i64;
-                    let nanos = ((timestamp.fract()) * 1_000_000_000.0).round() as u32;
-                    DateTime::from_timestamp(secs, nanos)
-                })
-                .unwrap()
-        }
-
-        // Helper function to parse Unix timestamp to NaiveDateTime
-        fn parse_unix_timestamp_naive(table_cell: TableCell) -> NaiveDateTime {
-            parse_unix_timestamp_from_cell(table_cell).naive_utc()
-        }
-
         NonNullableColsScalar {
             id: parse_table_cell(columns[0].clone()).unwrap(),
             b: parse_table_cell(columns[1].clone()).unwrap(),
@@ -644,8 +661,8 @@ impl From<TableRow> for NonNullableColsScalar {
             by: parse_bytes(columns[9].clone()),
             d: parse_table_cell(columns[10].clone()).unwrap(),
             ti: parse_table_cell(columns[11].clone()).unwrap(),
-            ts: parse_unix_timestamp_naive(columns[12].clone()),
-            tstz: parse_unix_timestamp_from_cell(columns[13].clone()),
+            ts: parse_bigquery_datetime_from_cell(columns[12].clone()).unwrap(),
+            tstz: parse_unix_timestamp_from_cell(columns[13].clone()).unwrap(),
             u: parse_table_cell(columns[14].clone()).unwrap(),
             j: parse_json_value(columns[15].clone()),
             jb: parse_json_value(columns[16].clone()),

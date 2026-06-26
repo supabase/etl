@@ -70,10 +70,10 @@ pub enum FullApiDestinationConfig {
         config: FullApiIcebergConfig,
     },
     Ducklake {
-        #[schema(example = "postgres://user:pass@localhost:5432/ducklake_catalog")]
-        #[serde(deserialize_with = "crate::utils::trim_string")]
-        catalog_url: String,
-        #[schema(example = "file:///absolute/path/to/lake_data")]
+        #[schema(value_type = String, example = "postgres://localhost:5432/ducklake_catalog")]
+        #[serde(deserialize_with = "crate::utils::trim_secret_string")]
+        catalog_url: SerializableSecretString,
+        #[schema(example = "s3://bucket/path")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         data_path: String,
         #[schema(example = 4)]
@@ -124,14 +124,7 @@ pub enum FullApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         metadata_schema: Option<String>,
-        #[schema(example = "150MB")]
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "crate::utils::trim_option_string"
-        )]
-        duckdb_memory_cache_limit: Option<String>,
-        #[schema(example = "10MB")]
+        #[schema(example = "500MB")]
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -151,7 +144,7 @@ pub enum FullApiDestinationConfig {
     },
     Snowflake {
         #[schema(example = "ORGNAME-ACCOUNTNAME")]
-        #[serde(deserialize_with = "crate::utils::trim_string")]
+        #[serde(deserialize_with = "crate::utils::trim_snowflake_account_id")]
         account_id: String,
         #[schema(example = "ETL_USER")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
@@ -244,7 +237,6 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -259,7 +251,6 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -305,7 +296,7 @@ pub enum StoredDestinationConfig {
         config: StoredIcebergConfig,
     },
     Ducklake {
-        catalog_url: String,
+        catalog_url: SerializableSecretString,
         data_path: String,
         pool_size: u32,
         s3_access_key_id: Option<SerializableSecretString>,
@@ -315,7 +306,6 @@ pub enum StoredDestinationConfig {
         s3_url_style: Option<String>,
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
-        duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
         maintenance_mode: DuckLakeMaintenanceMode,
@@ -405,12 +395,11 @@ impl StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
             } => DestinationConfig::Ducklake {
-                catalog_url,
+                catalog_url: catalog_url.into(),
                 data_path,
                 pool_size,
                 s3_access_key_id: s3_access_key_id.map(Into::into),
@@ -420,7 +409,6 @@ impl StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -515,7 +503,6 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -530,7 +517,6 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -660,11 +646,12 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
             } => {
+                let encrypted_catalog_url =
+                    encrypt_text(catalog_url.expose_secret().to_owned(), encryption_key)?;
                 let s3_access_key_id = s3_access_key_id
                     .map(|value| encrypt_text(value.expose_secret().to_owned(), encryption_key))
                     .transpose()?;
@@ -673,7 +660,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     .transpose()?;
 
                 Ok(EncryptedStoredDestinationConfig::Ducklake {
-                    catalog_url,
+                    catalog_url: encrypted_catalog_url.into(),
                     data_path,
                     pool_size,
                     s3_access_key_id,
@@ -683,7 +670,6 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     s3_url_style,
                     s3_use_ssl,
                     metadata_schema,
-                    duckdb_memory_cache_limit,
                     maintenance_target_file_size,
                     expire_snapshots_older_than,
                     maintenance_mode,
@@ -718,6 +704,56 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
     }
 }
 
+/// Stored DuckLake catalog URL encrypted for new writes.
+///
+/// The plaintext variant is accepted only for rows written before catalog URLs
+/// were encrypted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum EncryptedStoredCatalogUrl {
+    /// Newly written encrypted catalog URL.
+    Encrypted(EncryptedValue),
+    /// Legacy plaintext catalog URL from older metadata rows.
+    Plaintext(String),
+}
+
+impl EncryptedStoredCatalogUrl {
+    /// Decrypts or upgrades the stored catalog URL into an API secret string.
+    fn into_secret_string(
+        self,
+        encryption_key: &EncryptionKeyring,
+    ) -> Result<SerializableSecretString, DecryptionError> {
+        match self {
+            Self::Encrypted(value) => {
+                decrypt_text(value, encryption_key).map(SerializableSecretString::from)
+            }
+            Self::Plaintext(value) => Ok(SerializableSecretString::from(value)),
+        }
+    }
+}
+
+impl From<EncryptedValue> for EncryptedStoredCatalogUrl {
+    /// Wraps an encrypted value for storage.
+    fn from(value: EncryptedValue) -> Self {
+        Self::Encrypted(value)
+    }
+}
+
+impl Serialize for EncryptedStoredCatalogUrl {
+    /// Serializes encrypted catalog URLs and rejects legacy plaintext values.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Encrypted(value) => value.serialize(serializer),
+            Self::Plaintext(_) => Err(serde::ser::Error::custom(
+                "Cannot serialize legacy plaintext DuckLake catalog URL",
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptedStoredDestinationConfig {
@@ -742,7 +778,7 @@ pub enum EncryptedStoredDestinationConfig {
         config: EncryptedStoredIcebergConfig,
     },
     Ducklake {
-        catalog_url: String,
+        catalog_url: EncryptedStoredCatalogUrl,
         data_path: String,
         #[serde(default = "default_ducklake_pool_size")]
         pool_size: u32,
@@ -753,7 +789,6 @@ pub enum EncryptedStoredDestinationConfig {
         s3_url_style: Option<String>,
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
-        duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
         #[serde(default)]
@@ -890,12 +925,11 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
             } => Ok(StoredDestinationConfig::Ducklake {
-                catalog_url,
+                catalog_url: catalog_url.into_secret_string(encryption_key)?,
                 data_path,
                 pool_size,
                 s3_access_key_id: s3_access_key_id
@@ -913,7 +947,6 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -974,7 +1007,7 @@ pub enum StoredIcebergConfig {
 pub enum FullApiIcebergConfig {
     Supabase {
         #[schema(example = "abcdefghijklmnopqrst")]
-        #[serde(deserialize_with = "crate::utils::trim_string")]
+        #[serde(deserialize_with = "crate::utils::trim_supabase_project_ref")]
         project_ref: String,
         #[schema(example = "my-warehouse")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
@@ -1049,10 +1082,13 @@ mod tests {
 
     #[test]
     fn stored_destination_config_encryption_decryption_bigquery() {
+        let service_account_key_plaintext = "{\"test\": \"key\"}";
         let config = StoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
-            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
+            service_account_key: SerializableSecretString::from(
+                service_account_key_plaintext.to_owned(),
+            ),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
         };
@@ -1063,6 +1099,14 @@ mod tests {
         });
 
         let encrypted = config.clone().encrypt(&key).unwrap();
+        let encrypted_json = serde_json::to_string(&encrypted).unwrap();
+        assert!(!encrypted_json.contains(r#"{\"test\": \"key\"}"#));
+        match &encrypted {
+            EncryptedStoredDestinationConfig::BigQuery { service_account_key, .. } => {
+                assert_ne!(service_account_key.value, service_account_key_plaintext);
+            }
+            _ => panic!("Config types don't match"),
+        }
         let decrypted = encrypted.decrypt(&key).unwrap();
 
         match (config, decrypted) {
@@ -1593,7 +1637,9 @@ mod tests {
     #[test]
     fn stored_destination_config_encryption_decryption_ducklake() {
         let config = StoredDestinationConfig::Ducklake {
-            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
+            catalog_url: SerializableSecretString::from(
+                "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
+            ),
             data_path: "s3://bucket/path".to_owned(),
             pool_size: 8,
             s3_access_key_id: Some(SerializableSecretString::from("access".to_owned())),
@@ -1603,7 +1649,6 @@ mod tests {
             s3_url_style: Some("path".to_owned()),
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_owned()),
-            duckdb_memory_cache_limit: Some("50MB".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
@@ -1630,7 +1675,6 @@ mod tests {
                     s3_url_style: u1,
                     s3_use_ssl: ssl1,
                     metadata_schema: m1,
-                    duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
                     maintenance_mode: mode1,
@@ -1646,13 +1690,12 @@ mod tests {
                     s3_url_style: u2,
                     s3_use_ssl: ssl2,
                     metadata_schema: m2,
-                    duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
                     maintenance_mode: mode2,
                 },
             ) => {
-                assert_eq!(c1, c2);
+                assert_eq!(c1.expose_secret(), c2.expose_secret());
                 assert_eq!(d1, d2);
                 assert_eq!(p1, p2);
                 assert_eq!(
@@ -1668,7 +1711,6 @@ mod tests {
                 assert_eq!(u1, u2);
                 assert_eq!(ssl1, ssl2);
                 assert_eq!(m1, m2);
-                assert_eq!(memory1, memory2);
                 assert_eq!(target1, target2);
                 assert_eq!(expire1, expire2);
                 assert_eq!(mode1, mode2);
@@ -1697,6 +1739,34 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_stored_destination_config_ducklake_decrypts_legacy_catalog_url() {
+        let config: EncryptedStoredDestinationConfig = serde_json::from_value(serde_json::json!({
+            "ducklake": {
+                "catalog_url": "postgres://user:pass@localhost:5432/ducklake_catalog",
+                "data_path": "s3://bucket/path",
+                "pool_size": 8
+            }
+        }))
+        .unwrap();
+        let key = EncryptionKeyring::from(EncryptionKey {
+            id: 1,
+            key: generate_random_key::<32>().unwrap(),
+        });
+
+        let decrypted = config.decrypt(&key).unwrap();
+
+        match decrypted {
+            StoredDestinationConfig::Ducklake { catalog_url, .. } => {
+                assert_eq!(
+                    catalog_url.expose_secret(),
+                    "postgres://user:pass@localhost:5432/ducklake_catalog"
+                );
+            }
+            _ => panic!("Config type doesn't match"),
+        }
+    }
+
+    #[test]
     fn full_api_destination_config_ducklake_defaults_maintenance_mode() {
         let config: FullApiDestinationConfig = serde_json::from_value(serde_json::json!({
             "ducklake": {
@@ -1717,8 +1787,10 @@ mod tests {
     #[test]
     fn full_api_destination_config_conversion_ducklake() {
         let full_config = FullApiDestinationConfig::Ducklake {
-            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
-            data_path: "file:///absolute/path/to/lake_data".to_owned(),
+            catalog_url: SerializableSecretString::from(
+                "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
+            ),
+            data_path: "s3://bucket/path".to_owned(),
             pool_size: None,
             s3_access_key_id: None,
             s3_secret_access_key: None,
@@ -1727,7 +1799,6 @@ mod tests {
             s3_url_style: None,
             s3_use_ssl: None,
             metadata_schema: Some("ducklake".to_owned()),
-            duckdb_memory_cache_limit: None,
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
@@ -1743,7 +1814,6 @@ mod tests {
                     data_path: d1,
                     pool_size: p1,
                     metadata_schema: m1,
-                    duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
                     ..
@@ -1753,18 +1823,16 @@ mod tests {
                     data_path: d2,
                     pool_size: p2,
                     metadata_schema: m2,
-                    duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
                     ..
                 },
             ) => {
-                assert_eq!(c1, c2);
+                assert_eq!(c1.expose_secret(), c2.expose_secret());
                 assert_eq!(d1, d2);
                 assert_eq!(p1, None);
                 assert_eq!(p2, Some(DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE));
                 assert_eq!(m1, m2);
-                assert_eq!(memory1, memory2);
                 assert_eq!(target1, target2);
                 assert_eq!(expire1, expire2);
             }
@@ -1775,7 +1843,9 @@ mod tests {
     #[test]
     fn full_api_destination_config_serialization_ducklake() {
         let full_config = FullApiDestinationConfig::Ducklake {
-            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
+            catalog_url: SerializableSecretString::from(
+                "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
+            ),
             data_path: "s3://bucket/path".to_owned(),
             pool_size: Some(4),
             s3_access_key_id: Some(SerializableSecretString::from("access".to_owned())),
@@ -1785,7 +1855,6 @@ mod tests {
             s3_url_style: Some("path".to_owned()),
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_owned()),
-            duckdb_memory_cache_limit: Some("50MB".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
@@ -1808,7 +1877,6 @@ mod tests {
                     s3_url_style: u1,
                     s3_use_ssl: ssl1,
                     metadata_schema: m1,
-                    duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
                     maintenance_mode: mode1,
@@ -1824,13 +1892,12 @@ mod tests {
                     s3_url_style: u2,
                     s3_use_ssl: ssl2,
                     metadata_schema: m2,
-                    duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
                     maintenance_mode: mode2,
                 },
             ) => {
-                assert_eq!(c1, &c2);
+                assert_eq!(c1.expose_secret(), c2.expose_secret());
                 assert_eq!(d1, &d2);
                 assert_eq!(p1, &p2);
                 assert_eq!(
@@ -1846,7 +1913,6 @@ mod tests {
                 assert_eq!(u1, &u2);
                 assert_eq!(ssl1, &ssl2);
                 assert_eq!(m1, &m2);
-                assert_eq!(memory1, &memory2);
                 assert_eq!(target1, &target2);
                 assert_eq!(expire1, &expire2);
                 assert_eq!(mode1, &mode2);

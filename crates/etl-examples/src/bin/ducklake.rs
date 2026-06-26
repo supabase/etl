@@ -7,13 +7,13 @@ data from Postgres to DuckLake using change data capture (CDC).
 
 DuckLake separates storage into two components:
 - Catalog: metadata stored in a PostgreSQL database
-- Data: row data written as Parquet files (local directory or S3 / S3-compatible object storage)
+- Data: row data written as Parquet files in S3 / S3-compatible object storage
 
 Prerequisites:
 1. Postgres server with logical replication enabled (wal_level = logical)
 2. A publication created in Postgres (CREATE PUBLICATION my_pub FOR ALL TABLES;)
 3. A PostgreSQL database for the DuckLake catalog
-4. A local directory or S3 / S3-compatible bucket for Parquet files
+4. An S3 / S3-compatible bucket for Parquet files
 
 Usage:
     cargo run --bin ducklake -p etl-examples -- \
@@ -23,11 +23,8 @@ Usage:
         --db-username postgres \
         --db-password mypassword \
         --catalog-url postgres://user:pass@localhost:5432/ducklake_catalog \
-        --data-path file:///absolute/path/to/lake_data \
+        --data-path s3://bucket/lake_data \
         --publication my_pub
-
-Plain local paths such as `./lake_data/` are also accepted and normalized to
-absolute `file://` URLs before the destination is created.
 
 */
 
@@ -36,8 +33,9 @@ use std::{error::Error, sync::Once};
 use clap::{Args, Parser};
 use etl::{
     config::{
-        BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig, parse_ducklake_url,
+        BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig,
+        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig, parse_ducklake_s3_data_path,
+        parse_ducklake_url,
     },
     pipeline::Pipeline,
     store::PostgresStore,
@@ -97,10 +95,8 @@ struct DuckLakeArgs {
     /// DuckLake catalog URL (e.g., postgres://user:pass@host/db)
     #[arg(long, value_parser = parse_ducklake_url)]
     catalog_url: Url,
-    /// Local directory or S3 / S3-compatible URI for Parquet files (e.g., file:///tmp/lake_data or s3://bucket/)
-    ///
-    /// Plain local paths are accepted and converted to absolute `file://` URLs.
-    #[arg(long, value_parser = parse_ducklake_url)]
+    /// S3 / S3-compatible URI for Parquet files (e.g., s3://bucket/)
+    #[arg(long, value_parser = parse_ducklake_s3_data_path)]
     data_path: Url,
     /// DuckDB connection pool size
     #[arg(long, default_value = "4")]
@@ -112,13 +108,13 @@ struct DuckLakeArgs {
     #[arg(long, default_value = "4")]
     max_table_sync_workers: u16,
 
-    // S3 / S3-compatible storage credentials (required when --data-path is an s3:// URI)
+    // S3 / S3-compatible storage credentials.
     /// S3 access key ID
-    #[arg(long, requires = "s3_secret_access_key")]
-    s3_access_key_id: Option<String>,
+    #[arg(long)]
+    s3_access_key_id: String,
     /// S3 secret access key
-    #[arg(long, requires = "s3_access_key_id")]
-    s3_secret_access_key: Option<String>,
+    #[arg(long)]
+    s3_secret_access_key: String,
     /// S3 region (default: us-east-1)
     #[arg(long, default_value = "us-east-1")]
     s3_region: String,
@@ -200,6 +196,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         id: pipeline_id,
         publication_name: args.publication,
         pg_connection: pg_connection_config,
+        store_pg_connection: None,
         batch: BatchConfig {
             max_fill_ms: args.ducklake_args.max_batch_fill_duration_ms,
             memory_budget_ratio: 0.2,
@@ -209,15 +206,16 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.ducklake_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
-        memory_backpressure: Some(MemoryBackpressureConfig::default()),
+        replication_lag_refresh_interval_ms: 10000,
+        memory_backpressure: None,
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
-        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        max_copy_connections_per_table: 2,
     };
 
-    let s3_config = args.ducklake_args.s3_access_key_id.map(|key_id| S3Config {
-        access_key_id: key_id,
-        secret_access_key: args.ducklake_args.s3_secret_access_key.unwrap(),
+    let s3_config = Some(S3Config {
+        access_key_id: args.ducklake_args.s3_access_key_id,
+        secret_access_key: args.ducklake_args.s3_secret_access_key,
         region: args.ducklake_args.s3_region,
         endpoint: args.ducklake_args.s3_endpoint,
         url_style: args.ducklake_args.s3_url_style,
@@ -230,7 +228,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.ducklake_args.pool_size,
         s3_config,
         args.ducklake_args.metadata_schema,
-        None,
         None,
         None,
         store.clone(),

@@ -5,7 +5,7 @@ use std::{
     error, fmt, process,
     sync::{
         Arc, LazyLock, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -50,6 +50,122 @@ const DUCKDB_BLOCKING_OPERATION_KIND: &str = "foreground";
 /// interrupt() has been called. If the operation is still stuck after this,
 /// the process is no longer safe to keep running.
 const BLOCKING_ABORT_GRACE: Duration = Duration::from_secs(30);
+/// Description used when DuckLake rejects new blocking work during shutdown.
+const DUCKLAKE_SHUTDOWN_REQUESTED: &str = "DuckLake shutdown requested";
+
+/// Reason recorded for the first interrupt sent to a DuckLake connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DuckLakeInterruptReason {
+    None = 0,
+    QueryTimeout = 1,
+    DestinationShutdown = 2,
+    ProcessShutdown = 3,
+    ExternalInterrupt = 4,
+}
+
+impl DuckLakeInterruptReason {
+    /// Returns the stable label used in logs and error details.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::QueryTimeout => "query_timeout",
+            Self::DestinationShutdown => "destination_shutdown",
+            Self::ProcessShutdown => "process_shutdown",
+            Self::ExternalInterrupt => "external_interrupt",
+        }
+    }
+
+    /// Converts one stored atomic value back into an interrupt reason.
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::QueryTimeout,
+            2 => Self::DestinationShutdown,
+            3 => Self::ProcessShutdown,
+            4 => Self::ExternalInterrupt,
+            _ => Self::None,
+        }
+    }
+}
+
+/// Shared interrupt state for one managed DuckDB connection.
+#[derive(Default)]
+struct DuckLakeInterruptState {
+    reason: AtomicU8,
+}
+
+impl DuckLakeInterruptState {
+    /// Clears the previously recorded interrupt reason before a new query.
+    fn clear(&self) {
+        self.reason.store(DuckLakeInterruptReason::None as u8, Ordering::Relaxed);
+    }
+
+    /// Records the first reason that interrupted the current query.
+    fn record(&self, reason: DuckLakeInterruptReason) {
+        let _ = self.reason.compare_exchange(
+            DuckLakeInterruptReason::None as u8,
+            reason as u8,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Returns the currently recorded interrupt reason.
+    fn reason(&self) -> DuckLakeInterruptReason {
+        DuckLakeInterruptReason::from_u8(self.reason.load(Ordering::Relaxed))
+    }
+}
+
+/// Context for one DuckDB blocking operation.
+pub(super) struct DuckLakeBlockingOperationContext {
+    operation_id: u64,
+    operation_kind: &'static str,
+    timeout: Duration,
+    interrupt_state: Arc<DuckLakeInterruptState>,
+}
+
+impl DuckLakeBlockingOperationContext {
+    /// Creates context for one blocking DuckDB operation.
+    fn new(
+        operation_id: u64,
+        operation_kind: &'static str,
+        timeout: Duration,
+        interrupt_state: Arc<DuckLakeInterruptState>,
+    ) -> Self {
+        Self { operation_id, operation_kind, timeout, interrupt_state }
+    }
+
+    /// Returns the operation id assigned to the blocking DuckDB operation.
+    pub(super) fn operation_id(&self) -> u64 {
+        self.operation_id
+    }
+
+    /// Returns the stable operation-kind label.
+    pub(super) fn operation_kind(&self) -> &'static str {
+        self.operation_kind
+    }
+
+    /// Returns the operation timeout in milliseconds.
+    pub(super) fn timeout_ms(&self) -> u64 {
+        self.timeout.as_millis() as u64
+    }
+
+    /// Returns the currently recorded interrupt reason label.
+    pub(super) fn interrupt_reason_label(&self) -> &'static str {
+        self.interrupt_state.reason().as_str()
+    }
+
+    /// Creates a minimal context for unit tests that call batch helpers
+    /// directly.
+    #[cfg(test)]
+    pub(super) fn for_tests() -> Self {
+        Self::new(
+            0,
+            DUCKDB_BLOCKING_OPERATION_KIND,
+            Duration::ZERO,
+            Arc::new(DuckLakeInterruptState::default()),
+        )
+    }
+}
 
 trait DuckDbQueryInterrupt: Send + Sync + 'static {
     fn interrupt(&self);
@@ -63,15 +179,44 @@ impl DuckDbQueryInterrupt for duckdb::InterruptHandle {
 
 type DuckDbQueryInterruptHandle = Arc<dyn DuckDbQueryInterrupt>;
 
-fn remaining_ms_until(deadline: Instant) -> u64 {
-    deadline.checked_duration_since(Instant::now()).unwrap_or(Duration::ZERO).as_millis() as u64
+/// Interrupt handle registered for one managed DuckLake connection.
+struct RegisteredDuckLakeInterrupt {
+    handle: Arc<duckdb::InterruptHandle>,
+    state: Arc<DuckLakeInterruptState>,
+}
+
+impl RegisteredDuckLakeInterrupt {
+    /// Creates a registered interrupt handle for one DuckDB connection.
+    fn new(handle: Arc<duckdb::InterruptHandle>) -> Self {
+        Self { handle, state: Arc::new(DuckLakeInterruptState::default()) }
+    }
+
+    /// Clears the previously recorded interrupt reason before a new query.
+    fn clear_reason(&self) {
+        self.state.clear();
+    }
+
+    /// Returns the shared interrupt state for context passed to callers.
+    fn interrupt_state(&self) -> Arc<DuckLakeInterruptState> {
+        Arc::clone(&self.state)
+    }
+
+    /// Interrupts the connection and records why the interrupt was sent.
+    fn interrupt_with_reason(&self, reason: DuckLakeInterruptReason) {
+        self.state.record(reason);
+        self.handle.interrupt();
+    }
+}
+
+impl DuckDbQueryInterrupt for RegisteredDuckLakeInterrupt {
+    fn interrupt(&self) {
+        self.interrupt_with_reason(DuckLakeInterruptReason::QueryTimeout);
+    }
 }
 
 /// Async watchdog that interrupts one timed DuckDB query when its deadline
 /// expires.
 pub(super) struct DuckDbQueryWatchdog {
-    operation_id: u64,
-    timeout: Duration,
     timed_out: Arc<AtomicBool>,
     interrupt_tx: Option<oneshot::Sender<DuckDbQueryInterruptHandle>>,
     done_tx: Option<oneshot::Sender<()>>,
@@ -79,187 +224,51 @@ pub(super) struct DuckDbQueryWatchdog {
 }
 
 impl DuckDbQueryWatchdog {
-    #[cfg(test)]
     fn spawn(deadline: Instant) -> Self {
-        Self::spawn_with_context(deadline, 0, Duration::ZERO)
-    }
-
-    fn spawn_with_context(deadline: Instant, operation_id: u64, timeout: Duration) -> Self {
-        let operation_kind = DUCKDB_BLOCKING_OPERATION_KIND;
         let timed_out = Arc::new(AtomicBool::new(false));
         let timeout_flag = Arc::clone(&timed_out);
         let (interrupt_tx, interrupt_rx) = oneshot::channel::<DuckDbQueryInterruptHandle>();
         let (done_tx, done_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
-            info!(
-                operation_id,
-                operation_kind = operation_kind,
-                timeout_ms = timeout.as_millis() as u64,
-                deadline_remaining_ms = remaining_ms_until(deadline),
-                "ducklake query watchdog task started: operation_id={}, operation_kind={}, \
-                 timeout_ms={}, deadline_remaining_ms={}",
-                operation_id,
-                operation_kind,
-                timeout.as_millis(),
-                remaining_ms_until(deadline)
-            );
             let mut interrupt_rx = Box::pin(interrupt_rx);
             let mut done_rx = Box::pin(done_rx);
             let interrupt_handle = tokio::select! {
                 biased;
-                _ = &mut done_rx => {
-                    info!(
-                        operation_id,
-                        operation_kind = operation_kind,
-                        "ducklake query watchdog finished before interrupt handle: operation_id={}, operation_kind={}",
-                        operation_id,
-                        operation_kind
-                    );
-                    return;
-                },
+                _ = &mut done_rx => return,
                 result = &mut interrupt_rx => match result {
-                    Ok(handle) => {
-                        info!(
-                            operation_id,
-                            operation_kind = operation_kind,
-                            deadline_remaining_ms = remaining_ms_until(deadline),
-                            "ducklake query watchdog received interrupt handle before deadline: \
-                             operation_id={}, operation_kind={}, deadline_remaining_ms={}",
-                            operation_id,
-                            operation_kind,
-                            remaining_ms_until(deadline)
-                        );
-                        handle
-                    },
-                    Err(_) => {
-                        warn!(
-                            operation_id,
-                            operation_kind = operation_kind,
-                            "ducklake query watchdog interrupt sender dropped before deadline: \
-                             operation_id={}, operation_kind={}",
-                            operation_id,
-                            operation_kind
-                        );
-                        return;
-                    },
+                    Ok(handle) => handle,
+                    Err(_) => return,
                 },
                 _ = tokio::time::sleep_until(deadline) => {
                     timeout_flag.store(true, Ordering::Relaxed);
-                    warn!(
-                        operation_id,
-                        operation_kind = operation_kind,
-                        timeout_ms = timeout.as_millis() as u64,
-                        "ducklake query watchdog deadline elapsed before interrupt handle: \
-                         operation_id={}, operation_kind={}, timeout_ms={}",
-                        operation_id,
-                        operation_kind,
-                        timeout.as_millis()
-                    );
                     // If we didn't receive the interrupt_rx yet, make sure to get it to call interrupt() later
                     tokio::select! {
                         biased;
-                        _ = &mut done_rx => {
-                            info!(
-                                operation_id,
-                                operation_kind = operation_kind,
-                                "ducklake query watchdog received done after deadline before interrupt handle: \
-                                 operation_id={}, operation_kind={}",
-                                operation_id,
-                                operation_kind
-                            );
-                            return;
-                        },
+                        _ = &mut done_rx => return,
                         result = &mut interrupt_rx => match result {
-                            Ok(handle) => {
-                                warn!(
-                                    operation_id,
-                                    operation_kind = operation_kind,
-                                    "ducklake query watchdog received interrupt handle after deadline: \
-                                     operation_id={}, operation_kind={}",
-                                    operation_id,
-                                    operation_kind
-                                );
-                                handle
-                            },
-                            Err(_) => {
-                                warn!(
-                                    operation_id,
-                                    operation_kind = operation_kind,
-                                    "ducklake query watchdog interrupt sender dropped after deadline: \
-                                     operation_id={}, operation_kind={}",
-                                    operation_id,
-                                    operation_kind
-                                );
-                                return;
-                            },
+                            Ok(handle) => handle,
+                            Err(_) => return,
                         },
                     }
                 },
             };
 
             if timeout_flag.load(Ordering::Relaxed) {
-                warn!(
-                    operation_id,
-                    operation_kind = operation_kind,
-                    "ducklake query watchdog calling interrupt after timeout: operation_id={}, \
-                     operation_kind={}",
-                    operation_id,
-                    operation_kind
-                );
                 interrupt_handle.interrupt();
-                warn!(
-                    operation_id,
-                    operation_kind = operation_kind,
-                    "ducklake query watchdog interrupt returned after timeout: operation_id={}, \
-                     operation_kind={}",
-                    operation_id,
-                    operation_kind
-                );
                 return;
             }
 
             tokio::select! {
                 biased;
-                _ = &mut done_rx => {
-                    info!(
-                        operation_id,
-                        operation_kind = operation_kind,
-                        deadline_remaining_ms = remaining_ms_until(deadline),
-                        "ducklake query watchdog received done before deadline after interrupt handle: \
-                         operation_id={}, operation_kind={}, deadline_remaining_ms={}",
-                        operation_id,
-                        operation_kind,
-                        remaining_ms_until(deadline)
-                    );
-                }
+                _ = &mut done_rx => {}
                 _ = tokio::time::sleep_until(deadline) => {
                     timeout_flag.store(true, Ordering::Relaxed);
-                    warn!(
-                        operation_id,
-                        operation_kind = operation_kind,
-                        timeout_ms = timeout.as_millis() as u64,
-                        "ducklake query watchdog deadline elapsed after interrupt handle; calling interrupt: \
-                         operation_id={}, operation_kind={}, timeout_ms={}",
-                        operation_id,
-                        operation_kind,
-                        timeout.as_millis()
-                    );
                     interrupt_handle.interrupt();
-                    warn!(
-                        operation_id,
-                        operation_kind = operation_kind,
-                        "ducklake query watchdog interrupt returned after handle/deadline path: \
-                         operation_id={}, operation_kind={}",
-                        operation_id,
-                        operation_kind
-                    );
                 }
             }
         });
 
         Self {
-            operation_id,
-            timeout,
             timed_out,
             interrupt_tx: Some(interrupt_tx),
             done_tx: Some(done_tx),
@@ -267,59 +276,19 @@ impl DuckDbQueryWatchdog {
         }
     }
 
-    fn publish_interrupt_handle(&mut self, handle: Arc<duckdb::InterruptHandle>) {
+    fn publish_interrupt_handle(&mut self, handle: DuckDbQueryInterruptHandle) {
         self.publish_query_interrupt_handle(handle);
     }
 
     fn publish_query_interrupt_handle(&mut self, handle: DuckDbQueryInterruptHandle) {
         if let Some(interrupt_tx) = self.interrupt_tx.take() {
-            info!(
-                operation_id = self.operation_id,
-                operation_kind = DUCKDB_BLOCKING_OPERATION_KIND,
-                timeout_ms = self.timeout.as_millis() as u64,
-                "ducklake query watchdog publishing interrupt handle: operation_id={}, \
-                 operation_kind={}, timeout_ms={}",
-                self.operation_id,
-                DUCKDB_BLOCKING_OPERATION_KIND,
-                self.timeout.as_millis()
-            );
             let _ = interrupt_tx.send(handle);
-        } else {
-            warn!(
-                operation_id = self.operation_id,
-                operation_kind = DUCKDB_BLOCKING_OPERATION_KIND,
-                "ducklake query watchdog interrupt handle publish skipped because sender is gone: \
-                 operation_id={}, operation_kind={}",
-                self.operation_id,
-                DUCKDB_BLOCKING_OPERATION_KIND
-            );
         }
     }
 
     fn finish(&mut self) {
         if let Some(done_tx) = self.done_tx.take() {
-            info!(
-                operation_id = self.operation_id,
-                operation_kind = DUCKDB_BLOCKING_OPERATION_KIND,
-                timed_out = self.timed_out(),
-                "ducklake query watchdog finish signal sent: operation_id={}, operation_kind={}, \
-                 timed_out={}",
-                self.operation_id,
-                DUCKDB_BLOCKING_OPERATION_KIND,
-                self.timed_out()
-            );
             let _ = done_tx.send(());
-        } else {
-            warn!(
-                operation_id = self.operation_id,
-                operation_kind = DUCKDB_BLOCKING_OPERATION_KIND,
-                timed_out = self.timed_out(),
-                "ducklake query watchdog finish skipped because sender is gone: operation_id={}, \
-                 operation_kind={}, timed_out={}",
-                self.operation_id,
-                DUCKDB_BLOCKING_OPERATION_KIND,
-                self.timed_out()
-            );
         }
     }
 
@@ -340,12 +309,12 @@ impl DuckDbQueryWatchdog {
 /// Shared registry of interrupt handles for live DuckLake connections.
 #[derive(Default)]
 pub(super) struct DuckLakeInterruptRegistry {
-    handles: Mutex<Vec<Weak<duckdb::InterruptHandle>>>,
+    handles: Mutex<Vec<Weak<RegisteredDuckLakeInterrupt>>>,
 }
 
 impl DuckLakeInterruptRegistry {
     /// Registers one live DuckLake connection interrupt handle.
-    fn register(&self, handle: &Arc<duckdb::InterruptHandle>) {
+    fn register(&self, handle: &Arc<RegisteredDuckLakeInterrupt>) {
         self.handles
             .lock()
             .expect("ducklake interrupt registry mutex should not be poisoned")
@@ -353,7 +322,13 @@ impl DuckLakeInterruptRegistry {
     }
 
     /// Interrupts all currently live registered DuckLake connections.
+    #[cfg(test)]
     pub(super) fn interrupt_all(&self) -> usize {
+        self.interrupt_all_with_reason(DuckLakeInterruptReason::ExternalInterrupt)
+    }
+
+    /// Interrupts all live connections and records one shared reason.
+    fn interrupt_all_with_reason(&self, reason: DuckLakeInterruptReason) -> usize {
         let mut interrupted = 0;
         let mut handles =
             self.handles.lock().expect("ducklake interrupt registry mutex should not be poisoned");
@@ -361,7 +336,7 @@ impl DuckLakeInterruptRegistry {
             let Some(handle) = handle.upgrade() else {
                 return false;
             };
-            handle.interrupt();
+            handle.interrupt_with_reason(reason);
             interrupted += 1;
             true
         });
@@ -384,6 +359,8 @@ pub(super) struct DuckLakeConnectionManager {
     pub(super) disable_extension_autoload: bool,
     /// Shared registry of interrupt handles for live connections.
     pub(super) interrupt_registry: Arc<DuckLakeInterruptRegistry>,
+    /// Set once process or destination shutdown should stop new DuckDB work.
+    pub(super) shutdown_requested: Arc<AtomicBool>,
     /// Counts successfully initialized DuckDB connections for tests.
     #[cfg(feature = "test-utils")]
     pub(super) open_count: Arc<AtomicUsize>,
@@ -392,7 +369,15 @@ pub(super) struct DuckLakeConnectionManager {
 /// DuckDB connection state tracked while a pooled connection is checked out.
 pub(super) struct ManagedDuckLakeConnection {
     conn: duckdb::Connection,
+    interrupt_handle: Arc<RegisteredDuckLakeInterrupt>,
+    shutdown_requested: Arc<AtomicBool>,
     broken: bool,
+}
+
+/// DuckDB connection and registered interrupt handle opened by the manager.
+struct OpenDuckLakeConnection {
+    conn: duckdb::Connection,
+    interrupt_handle: Arc<RegisteredDuckLakeInterrupt>,
 }
 
 /// Error returned while opening or validating one DuckLake pooled connection.
@@ -435,16 +420,28 @@ impl fmt::Display for DuckLakeConnectionError {
 impl error::Error for DuckLakeConnectionError {}
 
 impl DuckLakeConnectionManager {
+    /// Records DuckLake shutdown and interrupts all live managed connections.
+    pub(super) fn interrupt_all_connections_for_shutdown(&self) -> usize {
+        self.shutdown_requested.store(true, Ordering::Relaxed);
+        self.interrupt_registry
+            .interrupt_all_with_reason(DuckLakeInterruptReason::DestinationShutdown)
+    }
+
+    /// Records process shutdown and interrupts all live managed connections.
+    pub(super) fn interrupt_all_connections_for_process_shutdown(&self) -> usize {
+        self.shutdown_requested.store(true, Ordering::Relaxed);
+        self.interrupt_registry.interrupt_all_with_reason(DuckLakeInterruptReason::ProcessShutdown)
+    }
+
     /// Interrupts all currently live managed DuckLake connections.
+    #[cfg(test)]
     pub(super) fn interrupt_all_connections(&self) -> usize {
         self.interrupt_registry.interrupt_all()
     }
 
     /// Opens one fully initialized DuckDB connection and attaches the lake
     /// catalog.
-    pub(super) fn open_duckdb_connection(
-        &self,
-    ) -> Result<duckdb::Connection, DuckLakeConnectionError> {
+    fn open_duckdb_connection(&self) -> Result<OpenDuckLakeConnection, DuckLakeConnectionError> {
         let connection_init_id = NEXT_CONNECTION_INIT_ID.fetch_add(1, Ordering::Relaxed);
         let conn = if self.disable_extension_autoload {
             duckdb::Connection::open_in_memory_with_flags(
@@ -456,7 +453,9 @@ impl DuckLakeConnectionManager {
         } else {
             duckdb::Connection::open_in_memory().map_err(DuckLakeConnectionError::validation)?
         };
-        self.interrupt_registry.register(&conn.interrupt_handle());
+        let interrupt_handle = Arc::new(RegisteredDuckLakeInterrupt::new(conn.interrupt_handle()));
+        self.interrupt_registry.register(&interrupt_handle);
+
         for step in self.setup_plan.steps() {
             let phase_started = Instant::now();
             info!(
@@ -476,7 +475,7 @@ impl DuckLakeConnectionManager {
         }
         #[cfg(feature = "test-utils")]
         self.open_count.fetch_add(1, Ordering::Relaxed);
-        Ok(conn)
+        Ok(OpenDuckLakeConnection { conn, interrupt_handle })
     }
 
     /// Returns the number of successfully initialized DuckDB connections.
@@ -491,13 +490,24 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
     type Error = DuckLakeConnectionError;
 
     fn connect(&self) -> Result<ManagedDuckLakeConnection, DuckLakeConnectionError> {
-        Ok(ManagedDuckLakeConnection { conn: self.open_duckdb_connection()?, broken: false })
+        let OpenDuckLakeConnection { conn, interrupt_handle } = self.open_duckdb_connection()?;
+
+        Ok(ManagedDuckLakeConnection {
+            conn,
+            interrupt_handle,
+            shutdown_requested: Arc::clone(&self.shutdown_requested),
+            broken: false,
+        })
     }
 
     fn is_valid(
         &self,
         conn: &mut ManagedDuckLakeConnection,
     ) -> Result<(), DuckLakeConnectionError> {
+        if conn.shutdown_requested.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         conn.conn.execute_batch("SELECT 1").map_err(DuckLakeConnectionError::validation)?;
         Ok(())
     }
@@ -593,22 +603,23 @@ pub(super) fn duckdb_blocking_timeout_error(timeout: Duration, stage: &'static s
     )
 }
 
-fn abort_stuck_duckdb_blocking_operation(
-    operation_id: u64,
-    timeout: Duration,
-    abort_grace: Duration,
-) -> ! {
+/// Builds the error returned when shutdown has stopped new DuckDB work.
+pub(super) fn ducklake_shutdown_requested_error() -> EtlError {
+    etl_error!(ErrorKind::DestinationConnectionFailed, DUCKLAKE_SHUTDOWN_REQUESTED)
+}
+
+/// Returns whether an error was produced by DuckLake shutdown admission checks.
+pub(super) fn is_ducklake_shutdown_requested_error(error: &EtlError) -> bool {
+    error.kind() == ErrorKind::DestinationConnectionFailed
+        && error.description() == Some(DUCKLAKE_SHUTDOWN_REQUESTED)
+}
+
+fn abort_stuck_duckdb_blocking_operation(timeout: Duration, abort_grace: Duration) -> ! {
     tracing::error!(
-        operation_id,
         operation_kind = DUCKDB_BLOCKING_OPERATION_KIND,
         timeout_ms = timeout.as_millis() as u64,
         abort_grace_ms = abort_grace.as_millis() as u64,
-        "ducklake blocking operation did not return after timeout interrupt; aborting process: \
-         operation_id={}, operation_kind={}, timeout_ms={}, abort_grace_ms={}",
-        operation_id,
-        DUCKDB_BLOCKING_OPERATION_KIND,
-        timeout.as_millis(),
-        abort_grace.as_millis()
+        "ducklake blocking operation did not return after timeout interrupt; aborting process"
     );
     process::abort();
 }
@@ -629,6 +640,27 @@ where
         .await
 }
 
+/// Runs one DuckDB operation with context for operation-local diagnostics.
+pub(super) async fn run_duckdb_blocking_with_context<R, F>(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    operation: F,
+) -> EtlResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&duckdb::Connection, &DuckLakeBlockingOperationContext) -> EtlResult<R>
+        + Send
+        + 'static,
+{
+    run_duckdb_blocking_with_timeout_and_context(
+        pool,
+        blocking_slots,
+        FOREGROUND_QUERY_TIMEOUT,
+        operation,
+    )
+    .await
+}
+
 /// Runs one DuckDB operation with an explicit timeout budget.
 pub(super) async fn run_duckdb_blocking_with_timeout<R, F>(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
@@ -640,86 +672,37 @@ where
     R: Send + 'static,
     F: FnOnce(&duckdb::Connection) -> EtlResult<R> + Send + 'static,
 {
+    run_duckdb_blocking_with_timeout_and_context(pool, blocking_slots, timeout, move |conn, _| {
+        operation(conn)
+    })
+    .await
+}
+
+/// Runs one DuckDB operation with an explicit timeout and diagnostic context.
+async fn run_duckdb_blocking_with_timeout_and_context<R, F>(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    timeout: Duration,
+    operation: F,
+) -> EtlResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&duckdb::Connection, &DuckLakeBlockingOperationContext) -> EtlResult<R>
+        + Send
+        + 'static,
+{
     let operation_kind = DUCKDB_BLOCKING_OPERATION_KIND;
     let operation_id = NEXT_DUCKDB_BLOCKING_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
     let deadline = Instant::now() + timeout;
-    info!(
-        operation_id,
-        operation_kind = operation_kind,
-        timeout_ms = timeout.as_millis() as u64,
-        abort_grace_ms = BLOCKING_ABORT_GRACE.as_millis() as u64,
-        available_permits = blocking_slots.available_permits(),
-        "ducklake blocking operation starting: operation_id={}, operation_kind={}, timeout_ms={}, \
-         abort_grace_ms={}, available_permits={}",
-        operation_id,
-        operation_kind,
-        timeout.as_millis(),
-        BLOCKING_ABORT_GRACE.as_millis(),
-        blocking_slots.available_permits()
-    );
     let slot_wait_started = Instant::now();
-    info!(
-        operation_id,
-        operation_kind = operation_kind,
-        deadline_remaining_ms = remaining_ms_until(deadline),
-        available_permits = blocking_slots.available_permits(),
-        "ducklake blocking operation waiting for semaphore slot: operation_id={}, \
-         operation_kind={}, deadline_remaining_ms={}, available_permits={}",
-        operation_id,
-        operation_kind,
-        remaining_ms_until(deadline),
-        blocking_slots.available_permits()
-    );
-    let permit = match tokio::time::timeout_at(
-        deadline,
-        Arc::clone(&blocking_slots).acquire_owned(),
-    )
-    .await
-    {
-        Ok(Ok(permit)) => permit,
-        Ok(Err(_)) => {
-            tracing::error!(
-                operation_id,
-                operation_kind = operation_kind,
-                "ducklake blocking operation semaphore closed: operation_id={}, operation_kind={}",
-                operation_id,
-                operation_kind
-            );
-            return Err(etl_error!(
-                ErrorKind::ApplyWorkerPanic,
-                "DuckLake blocking slot acquisition failed"
-            ));
-        }
-        Err(_) => {
-            warn!(
-                operation_id,
-                operation_kind = operation_kind,
-                timeout_ms = timeout.as_millis() as u64,
-                slot_wait_ms = slot_wait_started.elapsed().as_millis() as u64,
-                "ducklake blocking operation timed out waiting for semaphore slot: \
-                 operation_id={}, operation_kind={}, timeout_ms={}, slot_wait_ms={}",
-                operation_id,
-                operation_kind,
-                timeout.as_millis(),
-                slot_wait_started.elapsed().as_millis()
-            );
-            return Err(duckdb_blocking_timeout_error(timeout, "slot_wait"));
-        }
-    };
+    let permit = tokio::time::timeout_at(deadline, Arc::clone(&blocking_slots).acquire_owned())
+        .await
+        .map_err(|_| duckdb_blocking_timeout_error(timeout, "slot_wait"))?
+        .map_err(|_| {
+            etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake blocking slot acquisition failed")
+        })?;
     histogram!(ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS)
         .record(slot_wait_started.elapsed().as_secs_f64());
-    info!(
-        operation_id,
-        operation_kind = operation_kind,
-        slot_wait_ms = slot_wait_started.elapsed().as_millis() as u64,
-        deadline_remaining_ms = remaining_ms_until(deadline),
-        "ducklake blocking operation acquired semaphore slot: operation_id={}, operation_kind={}, \
-         slot_wait_ms={}, deadline_remaining_ms={}",
-        operation_id,
-        operation_kind,
-        slot_wait_started.elapsed().as_millis(),
-        remaining_ms_until(deadline)
-    );
     trace!(
         wait_ms = slot_wait_started.elapsed().as_millis() as u64,
         "wait for ducklake blocking slot"
@@ -728,170 +711,67 @@ where
     // This is needed to make sure we properly interrupt the blocking operation if
     // it exceeds the timeout, we don't just cancel the task and leave the
     // connection active.
-    let mut watchdog = DuckDbQueryWatchdog::spawn_with_context(deadline, operation_id, timeout);
+    let mut watchdog = DuckDbQueryWatchdog::spawn(deadline);
     let watchdog_task = watchdog.async_task_handle()?;
-    let watchdog_timed_out = Arc::clone(&watchdog.timed_out);
     let abort_deadline = deadline + BLOCKING_ABORT_GRACE;
 
     let blocking_task = tokio::task::spawn_blocking(move || -> EtlResult<R> {
-        info!(
-            operation_id,
-            operation_kind = operation_kind,
-            deadline_remaining_ms = remaining_ms_until(deadline),
-            "ducklake blocking operation entered spawn_blocking task: operation_id={}, \
-             operation_kind={}, deadline_remaining_ms={}",
-            operation_id,
-            operation_kind,
-            remaining_ms_until(deadline)
-        );
         // Please if you modify the code inside this blocking task do not add any
         // blocking operations that could delay other tasks waiting on this slot.
         let _permit = permit;
         let checkout_timeout =
             deadline.checked_duration_since(Instant::now()).unwrap_or(Duration::ZERO);
         if checkout_timeout.is_zero() {
-            warn!(
-                operation_id,
-                operation_kind = operation_kind,
-                "ducklake blocking operation deadline reached before pool checkout: \
-                 operation_id={}, operation_kind={}",
-                operation_id,
-                operation_kind
-            );
             return Err(duckdb_blocking_timeout_error(timeout, "pool_checkout"));
         }
         let checkout_started = Instant::now();
-        info!(
-            operation_id,
-            operation_kind = operation_kind,
-            checkout_timeout_ms = checkout_timeout.as_millis() as u64,
-            "ducklake blocking operation checking out pooled connection: operation_id={}, \
-             operation_kind={}, checkout_timeout_ms={}",
-            operation_id,
-            operation_kind,
-            checkout_timeout.as_millis()
-        );
-        let mut pooled_conn = match pool.get_timeout(checkout_timeout) {
-            Ok(pooled_conn) => pooled_conn,
-            Err(e) if Instant::now() >= deadline => {
-                warn!(
-                    operation_id,
-                    operation_kind = operation_kind,
-                    checkout_wait_ms = checkout_started.elapsed().as_millis() as u64,
-                    timeout_ms = timeout.as_millis() as u64,
-                    error = %e,
-                    "ducklake blocking operation timed out checking out pooled connection: \
-                     operation_id={}, operation_kind={}, checkout_wait_ms={}, timeout_ms={}, error={}",
-                    operation_id,
-                    operation_kind,
-                    checkout_started.elapsed().as_millis(),
-                    timeout.as_millis(),
-                    e
-                );
-                return Err(duckdb_blocking_timeout_error(timeout, "pool_checkout"));
-            }
-            Err(e) => {
-                warn!(
-                    operation_id,
-                    operation_kind = operation_kind,
-                    checkout_wait_ms = checkout_started.elapsed().as_millis() as u64,
-                    error = %e,
-                    "ducklake blocking operation failed checking out pooled connection: operation_id={}, \
-                     operation_kind={}, checkout_wait_ms={}, error={}",
-                    operation_id,
-                    operation_kind,
-                    checkout_started.elapsed().as_millis(),
-                    e
-                );
-                return Err(etl_error!(
+        let mut pooled_conn = pool.get_timeout(checkout_timeout).map_err(|e| {
+            if Instant::now() >= deadline {
+                duckdb_blocking_timeout_error(timeout, "pool_checkout")
+            } else {
+                etl_error!(
                     ErrorKind::DestinationConnectionFailed,
                     "Failed to check out DuckLake connection",
                     source: e
-                ));
+                )
             }
-        };
+        })?;
         histogram!(ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS)
             .record(checkout_started.elapsed().as_secs_f64());
-        info!(
-            operation_id,
-            operation_kind = operation_kind,
-            checkout_wait_ms = checkout_started.elapsed().as_millis() as u64,
-            deadline_remaining_ms = remaining_ms_until(deadline),
-            "ducklake blocking operation checked out pooled connection: operation_id={}, \
-             operation_kind={}, checkout_wait_ms={}, deadline_remaining_ms={}",
-            operation_id,
-            operation_kind,
-            checkout_started.elapsed().as_millis(),
-            remaining_ms_until(deadline)
-        );
         trace!(
             wait_ms = checkout_started.elapsed().as_millis() as u64,
             "wait for ducklake pool checkout"
         );
+        if pooled_conn.shutdown_requested.load(Ordering::Relaxed) {
+            warn!(
+                operation_id,
+                operation_kind = operation_kind,
+                "ducklake blocking operation skipped because shutdown was requested"
+            );
+            return Err(ducklake_shutdown_requested_error());
+        }
         let operation_timeout =
             deadline.checked_duration_since(Instant::now()).unwrap_or(Duration::ZERO);
         if operation_timeout.is_zero() {
-            warn!(
-                operation_id,
-                operation_kind = operation_kind,
-                "ducklake blocking operation deadline reached before query execution: \
-                 operation_id={}, operation_kind={}",
-                operation_id,
-                operation_kind
-            );
             return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
         }
-        let interrupt_handle = pooled_conn.conn.interrupt_handle();
-        info!(
-            operation_id,
-            operation_kind = operation_kind,
-            operation_timeout_ms = operation_timeout.as_millis() as u64,
-            "ducklake blocking operation publishing interrupt handle before query execution: \
-             operation_id={}, operation_kind={}, operation_timeout_ms={}",
+        pooled_conn.interrupt_handle.clear_reason();
+        let operation_context = DuckLakeBlockingOperationContext::new(
             operation_id,
             operation_kind,
-            operation_timeout.as_millis()
+            timeout,
+            pooled_conn.interrupt_handle.interrupt_state(),
         );
+        let interrupt_handle: Arc<RegisteredDuckLakeInterrupt> =
+            Arc::clone(&pooled_conn.interrupt_handle);
+        let interrupt_handle: DuckDbQueryInterruptHandle = interrupt_handle;
         watchdog.publish_interrupt_handle(interrupt_handle);
         if watchdog.timed_out() {
-            warn!(
-                operation_id,
-                operation_kind = operation_kind,
-                "ducklake blocking operation timed out before query started; marking pooled \
-                 connection broken: operation_id={}, operation_kind={}",
-                operation_id,
-                operation_kind
-            );
             pooled_conn.broken = true;
             return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
         }
         let operation_started = Instant::now();
-        info!(
-            operation_id,
-            operation_kind = operation_kind,
-            deadline_remaining_ms = remaining_ms_until(deadline),
-            "ducklake blocking operation invoking DuckDB closure: operation_id={}, \
-             operation_kind={}, deadline_remaining_ms={}",
-            operation_id,
-            operation_kind,
-            remaining_ms_until(deadline)
-        );
-        let res = operation(&pooled_conn.conn);
-        let operation_duration_ms = operation_started.elapsed().as_millis() as u64;
-        info!(
-            operation_id,
-            operation_kind = operation_kind,
-            duration_ms = operation_duration_ms,
-            timed_out = watchdog.timed_out(),
-            result_is_error = res.is_err(),
-            "ducklake blocking operation DuckDB closure returned: operation_id={}, \
-             operation_kind={}, duration_ms={}, timed_out={}, result_is_error={}",
-            operation_id,
-            operation_kind,
-            operation_duration_ms,
-            watchdog.timed_out(),
-            res.is_err()
-        );
+        let res = operation(&pooled_conn.conn, &operation_context);
         watchdog.finish();
         histogram!(ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS)
             .record(operation_started.elapsed().as_secs_f64());
@@ -900,57 +780,16 @@ where
             "ducklake blocking operation finished"
         );
         if watchdog.timed_out() {
-            warn!(
-                operation_id,
-                operation_kind = operation_kind,
-                duration_ms = operation_duration_ms,
-                "ducklake blocking operation returned after timeout; marking pooled connection \
-                 broken: operation_id={}, operation_kind={}, duration_ms={}",
-                operation_id,
-                operation_kind,
-                operation_duration_ms
-            );
             pooled_conn.broken = true;
             return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
         }
         if res.is_err() {
-            warn!(
-                operation_id,
-                operation_kind = operation_kind,
-                duration_ms = operation_duration_ms,
-                "ducklake blocking operation returned error; marking pooled connection broken: \
-                 operation_id={}, operation_kind={}, duration_ms={}",
-                operation_id,
-                operation_kind,
-                operation_duration_ms
-            );
             pooled_conn.broken = true;
-        } else {
-            info!(
-                operation_id,
-                operation_kind = operation_kind,
-                duration_ms = operation_duration_ms,
-                "ducklake blocking operation returned success; pooled connection remains healthy: \
-                 operation_id={}, operation_kind={}, duration_ms={}",
-                operation_id,
-                operation_kind,
-                operation_duration_ms
-            );
         }
 
         res
     });
 
-    info!(
-        operation_id,
-        operation_kind = operation_kind,
-        abort_deadline_remaining_ms = remaining_ms_until(abort_deadline),
-        "ducklake blocking operation waiting for blocking task or abort deadline: \
-         operation_id={}, operation_kind={}, abort_deadline_remaining_ms={}",
-        operation_id,
-        operation_kind,
-        remaining_ms_until(abort_deadline)
-    );
     let blocking_result = tokio::select! {
         biased;
         result = blocking_task => result,
@@ -961,89 +800,15 @@ where
             // the stuck native call also keeps holding its semaphore permit and
             // blocking thread, so restarting the process is the recoverable
             // boundary.
-            abort_stuck_duckdb_blocking_operation(operation_id, timeout, BLOCKING_ABORT_GRACE);
+            abort_stuck_duckdb_blocking_operation(timeout, BLOCKING_ABORT_GRACE);
         }
     };
 
-    match &blocking_result {
-        Ok(Ok(_)) => info!(
-            operation_id,
-            operation_kind = operation_kind,
-            timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-            "ducklake blocking operation task joined with success: operation_id={}, \
-             operation_kind={}, timed_out={}",
-            operation_id,
-            operation_kind,
-            watchdog_timed_out.load(Ordering::Relaxed)
-        ),
-        Ok(Err(error)) => warn!(
-            operation_id,
-            operation_kind = operation_kind,
-            timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-            error = ?error,
-            "ducklake blocking operation task joined with error: operation_id={}, operation_kind={}, \
-             timed_out={}, error={:?}",
-            operation_id,
-            operation_kind,
-            watchdog_timed_out.load(Ordering::Relaxed),
-            error
-        ),
-        Err(error) => tracing::error!(
-            operation_id,
-            operation_kind = operation_kind,
-            timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-            error = %error,
-            "ducklake blocking operation task join failed: operation_id={}, operation_kind={}, \
-             timed_out={}, error={}",
-            operation_id,
-            operation_kind,
-            watchdog_timed_out.load(Ordering::Relaxed),
-            error
-        ),
-    }
-
     // Await the watchdog so it cannot outlive the finished blocking task and
     // accidentally interrupt a later operation that reuses the connection.
-    info!(
-        operation_id,
-        operation_kind = operation_kind,
-        timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-        "ducklake blocking operation awaiting watchdog task: operation_id={}, operation_kind={}, \
-         timed_out={}",
-        operation_id,
-        operation_kind,
-        watchdog_timed_out.load(Ordering::Relaxed)
-    );
-    match watchdog_task.await {
-        Ok(()) => info!(
-            operation_id,
-            operation_kind = operation_kind,
-            timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-            "ducklake blocking operation watchdog task joined: operation_id={}, \
-             operation_kind={}, timed_out={}",
-            operation_id,
-            operation_kind,
-            watchdog_timed_out.load(Ordering::Relaxed)
-        ),
-        Err(error) => {
-            tracing::error!(
-                operation_id,
-                operation_kind = operation_kind,
-                timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-                error = %error,
-                "ducklake blocking operation watchdog task panicked: operation_id={}, operation_kind={}, \
-                 timed_out={}, error={}",
-                operation_id,
-                operation_kind,
-                watchdog_timed_out.load(Ordering::Relaxed),
-                error
-            );
-            return Err(etl_error!(
-                ErrorKind::ApplyWorkerPanic,
-                "DuckLake query watchdog task panicked"
-            ));
-        }
-    }
+    watchdog_task.await.map_err(|_| {
+        etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake query watchdog task panicked")
+    })?;
 
     blocking_result.map_err(|_| {
         etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake blocking operation task panicked")
@@ -1066,6 +831,7 @@ mod tests {
             setup_plan: Arc::new(DuckLakeSetupPlan::default()),
             disable_extension_autoload: cfg!(target_os = "linux"),
             interrupt_registry: Arc::new(DuckLakeInterruptRegistry::default()),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         }
@@ -1268,6 +1034,42 @@ mod tests {
     }
 
     #[test]
+    fn ducklake_interrupt_state_records_first_reason() {
+        let state = DuckLakeInterruptState::default();
+
+        assert_eq!(state.reason(), DuckLakeInterruptReason::None);
+
+        state.record(DuckLakeInterruptReason::DestinationShutdown);
+        state.record(DuckLakeInterruptReason::QueryTimeout);
+
+        assert_eq!(state.reason(), DuckLakeInterruptReason::DestinationShutdown);
+
+        state.clear();
+
+        assert_eq!(state.reason(), DuckLakeInterruptReason::None);
+    }
+
+    #[test]
+    fn ducklake_blocking_operation_context_reports_interrupt_reason() {
+        let state = Arc::new(DuckLakeInterruptState::default());
+        let context = DuckLakeBlockingOperationContext::new(
+            42,
+            DUCKDB_BLOCKING_OPERATION_KIND,
+            Duration::from_millis(250),
+            Arc::clone(&state),
+        );
+
+        assert_eq!(context.operation_id(), 42);
+        assert_eq!(context.operation_kind(), DUCKDB_BLOCKING_OPERATION_KIND);
+        assert_eq!(context.timeout_ms(), 250);
+        assert_eq!(context.interrupt_reason_label(), "none");
+
+        state.record(DuckLakeInterruptReason::ProcessShutdown);
+
+        assert_eq!(context.interrupt_reason_label(), "process_shutdown");
+    }
+
+    #[test]
     fn redact_ducklake_connection_error_message_masks_quoted_password() {
         let message = "timed out waiting for connection: attach failed: postgres:host='localhost' \
                        user='ducklake' password='pa\\'ss\\\\word' dbname='catalog'";
@@ -1306,6 +1108,33 @@ mod tests {
             DuckLakeConnectionError::setup_phase(&step, error).to_string(),
             "ducklake duckdb connection setup phase `attach_catalog` failed: attach failed: \
              postgres:host='localhost' user='ducklake' password='[redacted]'"
+        );
+    }
+
+    #[test]
+    fn open_duckdb_connection_registers_interrupt_before_setup_sql() {
+        let manager = DuckLakeConnectionManager {
+            setup_plan: Arc::new(DuckLakeSetupPlan::from_steps(vec![DuckLakeSetupStep {
+                label: "failing_setup",
+                sql: "SELECT * FROM missing_setup_table;".to_owned(),
+            }])),
+            ..make_blocking_test_manager()
+        };
+
+        let Err(error) = manager.open_duckdb_connection() else {
+            panic!("setup should fail");
+        };
+
+        assert!(error.to_string().contains("failing_setup"), "unexpected setup error: {error}");
+        assert_eq!(
+            manager
+                .interrupt_registry
+                .handles
+                .lock()
+                .expect("ducklake interrupt registry mutex should not be poisoned")
+                .len(),
+            1,
+            "interrupt handle should be registered before setup SQL runs"
         );
     }
 
@@ -1579,14 +1408,14 @@ mod tests {
 
     #[tokio::test]
     async fn query_watchdog_marks_timeout_when_handle_arrives_after_deadline() {
-        let conn = make_blocking_test_manager()
+        let opened = make_blocking_test_manager()
             .open_duckdb_connection()
             .expect("failed to open blocking test connection");
         let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + Duration::from_millis(10));
         let watchdog_task = watchdog.async_task_handle().expect("failed to extract watchdog task");
 
         tokio::time::sleep(Duration::from_millis(20)).await;
-        watchdog.publish_interrupt_handle(conn.interrupt_handle());
+        watchdog.publish_interrupt_handle(opened.conn.interrupt_handle());
 
         watchdog_task.await.expect("watchdog task should not panic");
 
@@ -1652,5 +1481,21 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
         assert_eq!(error.description(), Some("DuckLake interrupt test query failed"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_requested_skips_new_blocking_operations() {
+        let manager = make_blocking_test_manager();
+        let pool = Arc::new(
+            build_warm_ducklake_pool(manager.clone(), 1, "shutdown-skip-test")
+                .await
+                .expect("failed to build blocking test pool"),
+        );
+        let blocking_slots = Arc::new(Semaphore::new(1));
+
+        manager.interrupt_all_connections_for_shutdown();
+
+        let error = run_duckdb_blocking(pool, blocking_slots, |_| Ok(())).await.unwrap_err();
+        assert!(is_ducklake_shutdown_requested_error(&error));
     }
 }

@@ -3,6 +3,7 @@ pub mod config;
 pub mod configs;
 pub mod data;
 pub mod feature_flags;
+mod http_metrics;
 pub mod k8s;
 pub mod routes;
 pub mod sentry_scrubbing;

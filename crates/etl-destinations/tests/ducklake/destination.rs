@@ -29,11 +29,12 @@ use duckdb::Connection;
 use etl::{
     destination::Destination,
     error::ErrorKind,
-    store::{both::memory::MemoryStore, schema::SchemaStore},
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    store::{both::memory::MemoryStore, schema::SchemaStore, state::StateStore},
     types::{
         Cell, ColumnSchema, DeleteEvent, Event, IdentityMask, OldTableRow, PartialTableRow, PgLsn,
-        ReplicatedTableSchema, ReplicationMask, TableId, TableName, TableRow, TableSchema,
-        Type as PgType, UpdatedTableRow,
+        ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableName, TableRow,
+        TableSchema, Type as PgType, UpdatedTableRow,
     },
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
@@ -74,9 +75,22 @@ fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableId::new(table_id),
         TableName::new(schema.to_owned(), table.to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
         ],
+    )
+}
+
+fn make_schema_with_email(previous_schema: &TableSchema, snapshot_id: u64) -> TableSchema {
+    TableSchema::with_snapshot_id(
+        previous_schema.id,
+        previous_schema.name.clone(),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
+        ],
+        SnapshotId::from(snapshot_id),
     )
 }
 
@@ -85,11 +99,11 @@ fn make_rich_schema(table_id: u32) -> TableSchema {
         TableId::new(table_id),
         TableName::new("public".to_owned(), "rich".to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("label".to_owned(), PgType::VARCHAR, -1, 2, None, true),
-            ColumnSchema::new("score".to_owned(), PgType::FLOAT8, -1, 3, None, true),
-            ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 4, None, true),
-            ColumnSchema::new("birthday".to_owned(), PgType::DATE, -1, 5, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("label".to_owned(), PgType::VARCHAR, -1, 2, true),
+            ColumnSchema::new("score".to_owned(), PgType::FLOAT8, -1, 3, true),
+            ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 4, true),
+            ColumnSchema::new("birthday".to_owned(), PgType::DATE, -1, 5, true),
         ],
     )
 }
@@ -132,8 +146,7 @@ fn lake_table_exists(conn: &Connection, table_name: &str) -> bool {
         [],
         |row| row.get::<_, i64>(0),
     )
-    .map(|count| count > 0)
-    .unwrap_or(false)
+    .is_ok_and(|count| count > 0)
 }
 
 async fn open_lake_conn_when_tables_visible(
@@ -161,6 +174,25 @@ async fn open_lake_conn_when_tables_visible(
     }
 }
 
+async fn new_test_destination(
+    catalog_url: &Url,
+    data_url: &Url,
+    store: MemoryStore,
+) -> DuckLakeDestination<MemoryStore> {
+    DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .expect("failed to create DuckLake destination")
+}
+
 fn count_rows(conn: &Connection, table_name: &str) -> i64 {
     conn.query_row(
         &format!(
@@ -172,6 +204,21 @@ fn count_rows(conn: &Connection, table_name: &str) -> i64 {
         |r| r.get(0),
     )
     .expect("count query failed")
+}
+
+fn table_column_names(conn: &Connection, table_name: &str) -> Vec<String> {
+    conn.prepare(&format!(
+        "select column_name from information_schema.columns where table_catalog = {} and \
+         table_schema = {} and table_name = {} order by ordinal_position",
+        quote_literal("lake"),
+        quote_literal("main"),
+        quote_literal(table_name),
+    ))
+    .expect("failed to prepare column query")
+    .query_map([], |row| row.get::<_, String>(0))
+    .expect("failed to query table columns")
+    .collect::<Result<Vec<_>, _>>()
+    .expect("failed to read table columns")
 }
 
 fn count_applied_batches(conn: &Connection, table_name: &str, batch_kind: &str) -> i64 {
@@ -282,7 +329,6 @@ async fn write_table_rows_basic() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -341,7 +387,6 @@ async fn write_table_rows_small_batch_stays_inlined_after_return() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -385,7 +430,6 @@ async fn ducklake_rejects_zero_pool_size() {
         None,
         None,
         None,
-        None,
         MemoryStore::new(),
     )
     .await
@@ -420,7 +464,6 @@ async fn ducklake_rejects_non_postgres_catalog_url() {
         None,
         None,
         None,
-        None,
         MemoryStore::new(),
     )
     .await
@@ -443,7 +486,6 @@ async fn ducklake_rejects_invalid_expire_snapshots_retention() {
         None,
         None,
         None,
-        None,
         Some("definitely not an interval".to_owned()),
         MemoryStore::new(),
     )
@@ -456,6 +498,35 @@ async fn ducklake_rejects_invalid_expire_snapshots_retention() {
         err.description(),
         Some("DuckLake expire_snapshots_older_than configuration failed")
     );
+}
+
+/// Destructive snapshot-retention intervals should fail during destination
+/// initialization.
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_rejects_destructive_expire_snapshots_retention() {
+    let lake = create_test_lake("ducklake_rejects_destructive_expire_snapshots_retention").await;
+
+    for retention in ["0 seconds", "-1 day", "23 hours"] {
+        let err = DuckLakeDestination::new(
+            lake.catalog_url.clone(),
+            lake.data_url.clone(),
+            1,
+            None,
+            None,
+            None,
+            Some(retention.to_owned()),
+            MemoryStore::new(),
+        )
+        .await
+        .err()
+        .expect("destructive expire_snapshots_older_than should fail");
+
+        assert_eq!(err.kind(), ErrorKind::ConfigError);
+        assert_eq!(
+            err.description(),
+            Some("DuckLake expire_snapshots_older_than configuration failed")
+        );
+    }
 }
 
 /// Repeated writes should reuse the warm pooled DuckDB connection.
@@ -480,7 +551,6 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -538,7 +608,6 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -602,7 +671,6 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -649,7 +717,6 @@ async fn concurrent_same_table_copy_batches_complete() {
             catalog_url.clone(),
             data_url.clone(),
             1,
-            None,
             None,
             None,
             None,
@@ -779,7 +846,6 @@ async fn write_table_rows_empty_creates_table() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -812,7 +878,6 @@ async fn truncate_clears_rows() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -877,7 +942,6 @@ async fn truncate_clears_copy_markers_for_recopy() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -918,7 +982,6 @@ async fn write_events() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -988,6 +1051,1153 @@ async fn write_events() {
     assert_eq!(name, "Gadget");
 }
 
+/// `write_events` preserves row/schema pairing when a single destination batch
+/// contains DML for multiple schema versions of the same table.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_splits_same_table_batch_by_replicated_schema() {
+    use etl::types::{InsertEvent, PgLsn};
+
+    let lake = create_test_lake("write_events_splits_same_table_batch_by_replicated_schema").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(47, "public", "schema_segmented_products");
+    let new_schema = make_schema_with_email(&old_schema, 200);
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema).await.unwrap();
+    store.store_table_schema(new_schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_events(vec![
+            Event::Insert(InsertEvent {
+                start_lsn: PgLsn::from(100_u64),
+                commit_lsn: PgLsn::from(100_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: old_replicated_table_schema,
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Before DDL".to_owned())]),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: PgLsn::from(201_u64),
+                commit_lsn: PgLsn::from(201_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated_table_schema,
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("After DDL".to_owned()),
+                    Cell::String("after@example.com".to_owned()),
+                ]),
+            }),
+        ])
+        .await
+        .expect("write_events should keep each row with its own schema");
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, name, email from {}.{} order by id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare segmented schema query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })
+        .expect("failed to query segmented schema table")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read segmented schema rows");
+
+    assert_eq!(
+        rows,
+        vec![
+            (1, "Before DDL".to_owned(), None),
+            (2, "After DDL".to_owned(), Some("after@example.com".to_owned())),
+        ]
+    );
+}
+
+/// `write_events` recovers interrupted DDL before handling a relation event.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_recovers_applying_metadata_before_relation_event() {
+    use etl::types::{InsertEvent, RelationEvent};
+
+    let lake =
+        create_test_lake("write_events_recovers_applying_metadata_before_relation_event").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(41, "public", "recover_relation");
+    let new_schema = TableSchema::with_snapshot_id(
+        old_schema.id,
+        old_schema.name.clone(),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
+        ],
+        SnapshotId::from(42_u64),
+    );
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let applying_metadata = DestinationTableMetadata::new_applied(
+        table_name.clone(),
+        old_schema.snapshot_id,
+        old_replicated_table_schema.replication_mask().clone(),
+    )
+    .with_schema_change(
+        new_schema.snapshot_id,
+        new_replicated_table_schema.replication_mask().clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
+
+    let lsn = PgLsn::from(42_u64);
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Bob".to_owned()),
+                    Cell::String("bob@example.com".to_owned()),
+                ]),
+            }),
+        ])
+        .await
+        .expect("write_events should recover applying schema metadata");
+
+    let metadata = store
+        .get_destination_table_metadata(old_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist");
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, name, email from {}.{} order by id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare state query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })
+        .expect("failed to query recovered table")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read recovered table rows");
+
+    assert_eq!(
+        rows,
+        vec![
+            (1, "Alice".to_owned(), None),
+            (2, "Bob".to_owned(), Some("bob@example.com".to_owned())),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_applies_defaulted_schema_change() {
+    use etl::types::{InsertEvent, RelationEvent};
+
+    let lake = create_test_lake("write_events_applies_defaulted_schema_change").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(43, "public", "defaulted_schema");
+    let new_schema = TableSchema::with_snapshot_id(
+        old_schema.id,
+        old_schema.name.clone(),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true)
+                .with_default_expression("'new'::text".to_owned()),
+            ColumnSchema::new("score".to_owned(), PgType::INT4, -1, 4, true)
+                .with_default_expression("15".to_owned()),
+            ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 5, true)
+                .with_default_expression("true".to_owned()),
+        ],
+        SnapshotId::from(44_u64),
+    );
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let initial_metadata = DestinationTableMetadata::new_applied(
+        table_name.clone(),
+        old_schema.snapshot_id,
+        old_replicated_table_schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(old_schema.id, initial_metadata).await.unwrap();
+
+    let lsn = PgLsn::from(44_u64);
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Bob".to_owned()),
+                    Cell::String("new".to_owned()),
+                    Cell::I32(15),
+                    Cell::Bool(true),
+                ]),
+            }),
+        ])
+        .await
+        .expect("write_events should apply defaulted schema change");
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let mut rows_statement = conn
+        .prepare(&format!(
+            "select id, name, status, score, active from {}.{} order by id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare defaulted row query");
+    let rows = rows_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i32>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<i32>>(3)?,
+                row.get::<_, Option<bool>>(4)?,
+            ))
+        })
+        .expect("failed to query defaulted rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read defaulted rows");
+
+    // DuckLake records supported add-time defaults as metadata without
+    // rewriting existing data files.
+    assert_eq!(
+        rows,
+        vec![
+            (1, "Alice".to_owned(), Some("new".to_owned()), Some(15), None),
+            (2, "Bob".to_owned(), Some("new".to_owned()), Some(15), Some(true)),
+        ]
+    );
+}
+
+/// `write_events` repairs physical DuckLake columns when metadata was already
+/// marked applied for a schema that was not fully applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_reconciles_missing_columns_after_applied_metadata() {
+    use etl::types::{InsertEvent, RelationEvent};
+
+    let lake =
+        create_test_lake("write_events_reconciles_missing_columns_after_applied_metadata").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(42, "public", "reconcile_applied");
+    let new_schema = TableSchema::with_snapshot_id(
+        old_schema.id,
+        old_schema.name.clone(),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
+        ],
+        SnapshotId::from(43_u64),
+    );
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let applied_metadata = DestinationTableMetadata::new_applied(
+        table_name.clone(),
+        new_schema.snapshot_id,
+        new_replicated_table_schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(old_schema.id, applied_metadata).await.unwrap();
+
+    let lsn = PgLsn::from(43_u64);
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Bob".to_owned()),
+                    Cell::String("bob@example.com".to_owned()),
+                ]),
+            }),
+        ])
+        .await
+        .expect("write_events should reconcile missing applied schema columns");
+
+    let metadata = store
+        .get_destination_table_metadata(old_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist");
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, name, email from {}.{} order by id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare state query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })
+        .expect("failed to query reconciled table")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read reconciled table rows");
+
+    assert_eq!(
+        rows,
+        vec![
+            (1, "Alice".to_owned(), None),
+            (2, "Bob".to_owned(), Some("bob@example.com".to_owned())),
+        ]
+    );
+}
+
+/// Drop-plus-add with the same column name should behave like a type-changing
+/// replacement while preserving replay safety.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_supports_drop_and_add_same_column_name() {
+    use etl::types::{InsertEvent, RelationEvent};
+
+    let lake = create_test_lake("write_events_supports_drop_and_add_same_column_name").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = TableSchema::new(
+        TableId::new(47),
+        TableName::new("public".to_owned(), "replace_column_type".to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true),
+        ],
+    );
+    let new_schema = TableSchema::with_snapshot_id(
+        old_schema.id,
+        old_schema.name.clone(),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 4, true),
+        ],
+        SnapshotId::from(48_u64),
+    );
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("Alice".to_owned()),
+                Cell::String("old-status".to_owned()),
+            ])],
+        )
+        .await
+        .unwrap();
+
+    let lsn = PgLsn::from(48_u64);
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Bob".to_owned()),
+                    Cell::I32(7),
+                ]),
+            }),
+        ])
+        .await
+        .expect("write_events should support replacing a column with the same name");
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let columns = table_column_names(&conn, &table_name);
+    assert!(!columns.iter().any(|column| column.starts_with("__etl_ducklake_dropped_")));
+    assert!(columns.contains(&"status".to_owned()));
+
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, name, status from {}.{} order by id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare state query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i32>>(2)?))
+        })
+        .expect("failed to query replaced column")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read replaced column rows");
+
+    assert_eq!(rows, vec![(1, "Alice".to_owned(), None), (2, "Bob".to_owned(), Some(7))]);
+}
+
+/// Replacing the same column name multiple times should not leave physical
+/// tombstones or block later replacements.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_supports_repeated_drop_and_add_same_column_name() {
+    use etl::types::{InsertEvent, RelationEvent};
+
+    let lake =
+        create_test_lake("write_events_supports_repeated_drop_and_add_same_column_name").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let text_schema = TableSchema::new(
+        TableId::new(49),
+        TableName::new("public".to_owned(), "replace_column_twice".to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 2, true),
+        ],
+    );
+    let int_schema = TableSchema::with_snapshot_id(
+        text_schema.id,
+        text_schema.name.clone(),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 3, true),
+        ],
+        SnapshotId::from(50_u64),
+    );
+    let final_text_schema = TableSchema::with_snapshot_id(
+        text_schema.id,
+        text_schema.name.clone(),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 4, true),
+        ],
+        SnapshotId::from(51_u64),
+    );
+    let text_replicated_table_schema = make_replicated_table_schema(&text_schema);
+    let int_replicated_table_schema = make_replicated_table_schema(&int_schema);
+    let final_text_replicated_table_schema = make_replicated_table_schema(&final_text_schema);
+    let table_name = table_name_to_ducklake_table_name(&text_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(text_schema.clone()).await.unwrap();
+    store.store_table_schema(int_schema.clone()).await.unwrap();
+    store.store_table_schema(final_text_schema.clone()).await.unwrap();
+
+    let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    destination
+        .write_table_rows(
+            &text_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("old".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let int_lsn = PgLsn::from(50_u64);
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                start_lsn: int_lsn,
+                commit_lsn: int_lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: int_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: int_lsn,
+                commit_lsn: int_lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: int_replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::I32(7)]),
+            }),
+        ])
+        .await
+        .unwrap();
+
+    let text_lsn = PgLsn::from(51_u64);
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                start_lsn: text_lsn,
+                commit_lsn: text_lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: final_text_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: text_lsn,
+                commit_lsn: text_lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: final_text_replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(3), Cell::String("ready".to_owned())]),
+            }),
+        ])
+        .await
+        .expect("write_events should support replacing the same column name twice");
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let columns = table_column_names(&conn, &table_name);
+    assert!(!columns.iter().any(|column| column.starts_with("__etl_ducklake_dropped_")));
+    assert_eq!(columns, vec!["id", "status"]);
+
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, status from {}.{} order by id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare state query");
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, Option<String>>(1)?)))
+        .expect("failed to query replaced column")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read replaced column rows");
+
+    assert_eq!(rows, vec![(1, None), (2, None), (3, Some("ready".to_owned()))]);
+}
+
+/// Stale inactive tombstones must be dropped before a later schema can reuse
+/// the same physical column name.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_drops_stale_tombstone_before_reusing_tombstone_name() {
+    use etl::types::{InsertEvent, RelationEvent};
+
+    let lake = create_test_lake("write_events_drops_stale_tombstone_before_reuse").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let stale_tombstone_column = "__etl_ducklake_dropped_2_reused";
+
+    let old_schema = make_schema(52, "public", "reuse_stale_tombstone");
+    let new_schema = TableSchema::with_snapshot_id(
+        old_schema.id,
+        old_schema.name.clone(),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new(stale_tombstone_column.to_owned(), PgType::TEXT, -1, 3, true),
+        ],
+        SnapshotId::from(53_u64),
+    );
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = new_test_destination(&catalog_url, &data_url, store).await;
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("old".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    conn.execute_batch(&format!(
+        "alter table {}.{} add column {} varchar;
+         update {}.{} set {} = {};",
+        quote_identifier("lake"),
+        quote_identifier(&table_name),
+        quote_identifier(stale_tombstone_column),
+        quote_identifier("lake"),
+        quote_identifier(&table_name),
+        quote_identifier(stale_tombstone_column),
+        quote_literal("stale"),
+    ))
+    .expect("failed to seed stale tombstone column");
+    drop(conn);
+
+    let lsn = PgLsn::from(53_u64);
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("new".to_owned()),
+                    Cell::String("fresh".to_owned()),
+                ]),
+            }),
+        ])
+        .await
+        .expect("write_events should clean stale tombstones before reusing their names");
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", stale_tombstone_column]);
+
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, name, {} from {}.{} order by id",
+            quote_identifier(stale_tombstone_column),
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare reused tombstone query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })
+        .expect("failed to query reused tombstone column")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read reused tombstone rows");
+
+    assert_eq!(
+        rows,
+        vec![(1, "old".to_owned(), None), (2, "new".to_owned(), Some("fresh".to_owned())),]
+    );
+}
+
+/// Active source columns that happen to use the tombstone prefix must still be
+/// writable.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_table_rows_preserves_active_column_with_tombstone_prefix() {
+    let lake =
+        create_test_lake("write_table_rows_preserves_active_column_with_tombstone_prefix").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schema = TableSchema::new(
+        TableId::new(52),
+        TableName::new("public".to_owned(), "active_tombstone_prefix".to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new(
+                "__etl_ducklake_dropped_business".to_owned(),
+                PgType::TEXT,
+                -1,
+                2,
+                true,
+            ),
+        ],
+    );
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let destination = new_test_destination(&catalog_url, &data_url, MemoryStore::new()).await;
+    destination
+        .write_table_rows(
+            &replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("kept".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let value: String = conn
+        .query_row(
+            &format!(
+                "select {} from {}.{} where id = 1",
+                quote_identifier("__etl_ducklake_dropped_business"),
+                quote_identifier("lake"),
+                quote_identifier(&table_name)
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .expect("failed to query active prefix column");
+
+    assert_eq!(value, "kept");
+}
+
+/// Startup should repair persisted `Applied` metadata whose physical table is
+/// still missing replicated columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_after_restart_reconciles_applied_metadata_missing_columns() {
+    let lake =
+        create_test_lake("startup_after_restart_reconciles_applied_metadata_missing_columns").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(43, "public", "restart_applied");
+    let new_schema = make_schema_with_email(&old_schema, 44);
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let applied_metadata = DestinationTableMetadata::new_applied(
+        table_name.clone(),
+        new_schema.snapshot_id,
+        new_replicated_table_schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(old_schema.id, applied_metadata).await.unwrap();
+
+    destination.shutdown().await.unwrap();
+    drop(destination);
+
+    let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    restarted_destination.startup().await.unwrap();
+    restarted_destination
+        .write_table_rows(
+            &new_replicated_table_schema,
+            vec![TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("Bob".to_owned()),
+                Cell::String("bob@example.com".to_owned()),
+            ])],
+        )
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
+
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, name, email from {}.{} order by id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare state query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })
+        .expect("failed to query reconciled table")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read reconciled table rows");
+
+    assert_eq!(
+        rows,
+        vec![
+            (1, "Alice".to_owned(), None),
+            (2, "Bob".to_owned(), Some("bob@example.com".to_owned())),
+        ]
+    );
+}
+
+/// Startup should recover an interrupted schema change left in `Applying`.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_after_restart_recovers_applying_schema_change() {
+    let lake = create_test_lake("startup_after_restart_recovers_applying_schema_change").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(44, "public", "restart_applying_change");
+    let new_schema = make_schema_with_email(&old_schema, 45);
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let applying_metadata = DestinationTableMetadata::new_applied(
+        table_name.clone(),
+        old_schema.snapshot_id,
+        old_replicated_table_schema.replication_mask().clone(),
+    )
+    .with_schema_change(
+        new_schema.snapshot_id,
+        new_replicated_table_schema.replication_mask().clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
+
+    destination.shutdown().await.unwrap();
+    drop(destination);
+
+    let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    restarted_destination.startup().await.unwrap();
+
+    let metadata = store
+        .get_destination_table_metadata(old_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist");
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
+}
+
+/// Startup should recover when the target rename column already exists and a
+/// stale old physical column is still present.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
+    let lake =
+        create_test_lake("startup_after_restart_drops_stale_rename_source_when_target_exists")
+            .await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = TableSchema::new(
+        TableId::new(53),
+        TableName::new("public".to_owned(), "restart_stale_rename_source".to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("ddl_col_4_1".to_owned(), PgType::TEXT, -1, 4, true),
+        ],
+    );
+    let new_schema = TableSchema::with_snapshot_id(
+        old_schema.id,
+        old_schema.name.clone(),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("ddl_col_4_0".to_owned(), PgType::TEXT, -1, 4, true),
+        ],
+        SnapshotId::from(54_u64),
+    );
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("existing".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    conn.execute_batch(&format!(
+        "alter table {}.{} add column {} varchar;
+         update {}.{} set {} = {};",
+        quote_identifier("lake"),
+        quote_identifier(&table_name),
+        quote_identifier("ddl_col_4_0"),
+        quote_identifier("lake"),
+        quote_identifier(&table_name),
+        quote_identifier("ddl_col_4_0"),
+        quote_identifier("ddl_col_4_1"),
+    ))
+    .expect("failed to create stale physical rename-source shape");
+    drop(conn);
+
+    let applying_metadata = DestinationTableMetadata::new_applied(
+        table_name.clone(),
+        old_schema.snapshot_id,
+        old_replicated_table_schema.replication_mask().clone(),
+    )
+    .with_schema_change(
+        new_schema.snapshot_id,
+        new_replicated_table_schema.replication_mask().clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
+
+    destination.shutdown().await.unwrap();
+    drop(destination);
+
+    let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    restarted_destination.startup().await.unwrap();
+    restarted_destination
+        .write_table_rows(
+            &new_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("new".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let metadata = store
+        .get_destination_table_metadata(old_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist");
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "ddl_col_4_0"]);
+
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, ddl_col_4_0 from {}.{} order by id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare state query");
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
+        .expect("failed to query recovered rename table")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read recovered rename rows");
+
+    assert_eq!(rows, vec![(1, "existing".to_owned()), (2, "new".to_owned())]);
+}
+
+/// Startup recovery may need to use an older retained schema when the exact
+/// previous schema snapshot has already been pruned.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_after_restart_recovers_applying_schema_change_with_pruned_previous_schema() {
+    let lake = create_test_lake(
+        "startup_after_restart_recovers_applying_schema_change_with_pruned_previous_schema",
+    )
+    .await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(46, "public", "restart_pruned_previous_schema");
+    let missing_previous_snapshot_id = SnapshotId::from(47_u64);
+    let new_schema = make_schema_with_email(&old_schema, 48);
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let applying_metadata = DestinationTableMetadata::new_applied(
+        table_name.clone(),
+        missing_previous_snapshot_id,
+        old_replicated_table_schema.replication_mask().clone(),
+    )
+    .with_schema_change(
+        new_schema.snapshot_id,
+        new_replicated_table_schema.replication_mask().clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
+
+    destination.shutdown().await.unwrap();
+    drop(destination);
+
+    let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    restarted_destination.startup().await.unwrap();
+
+    let metadata = store
+        .get_destination_table_metadata(old_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist");
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
+}
+
+/// Startup should recover an interrupted initial table creation.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_after_restart_recovers_initial_applying_metadata() {
+    let lake = create_test_lake("startup_after_restart_recovers_initial_applying_metadata").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let base_schema = make_schema(45, "public", "restart_initial_applying");
+    let schema = make_schema_with_email(&base_schema, 46);
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema.clone()).await.unwrap();
+    let applying_metadata = DestinationTableMetadata::new_applying(
+        table_name.clone(),
+        schema.snapshot_id,
+        replicated_table_schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(schema.id, applying_metadata).await.unwrap();
+
+    let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    restarted_destination.startup().await.unwrap();
+
+    let metadata = store
+        .get_destination_table_metadata(schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist");
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, schema.snapshot_id);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
+}
+
 /// Small CDC batches should remain inlined after the caller returns.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_small_batch_stays_inlined_after_return() {
@@ -1009,7 +2219,6 @@ async fn write_events_small_batch_stays_inlined_after_return() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -1062,7 +2271,6 @@ async fn write_events_with_old_row_update() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -1139,7 +2347,6 @@ async fn write_events_with_partial_updates() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -1236,7 +2443,6 @@ async fn write_events_without_replica_identity_rejects_mutations() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -1320,7 +2526,6 @@ async fn write_events_replay_is_idempotent() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -1420,7 +2625,6 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -1498,7 +2702,6 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
         None,
         None,
         None,
-        None,
         store.clone(),
     )
     .await
@@ -1536,7 +2739,6 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -1613,7 +2815,6 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -1704,7 +2905,6 @@ async fn applied_batches_table_uses_data_inlining() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -1750,7 +2950,6 @@ async fn write_events_mixed_multi_table_batches() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -1887,7 +3086,6 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -1978,7 +3176,6 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -2086,7 +3283,6 @@ async fn concurrent_writes_with_single_slot_complete() {
             None,
             None,
             None,
-            None,
             store,
         )
         .await
@@ -2147,7 +3343,6 @@ async fn type_mapping_round_trip() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,

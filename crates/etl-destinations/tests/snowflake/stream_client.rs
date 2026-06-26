@@ -19,7 +19,11 @@ fn build_clients(
         Arc::clone(&auth),
         reqwest::Client::new(),
     );
-    let sql = SqlClient::new(config.clone(), Arc::clone(&auth), reqwest::Client::new());
+    let sql = SqlClient::new(
+        config.clone_without_credentials(),
+        Arc::clone(&auth),
+        reqwest::Client::new(),
+    );
     (stream, sql)
 }
 
@@ -34,7 +38,7 @@ fn build_batch(cols: &[ColumnSchema], rows: &[TableRow], offset: &OffsetToken) -
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn channel_open_insert_status_drop() {
-    let config = load_test_config();
+    let config = load_test_config().clone_without_credentials();
     let (stream, sql) = build_clients(&config);
 
     let table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
@@ -56,8 +60,8 @@ async fn channel_open_insert_status_drop() {
 
         // Insert rows.
         let cols = [
-            ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true),
-            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".into(), Type::INT4, -1, 1, true),
+            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, true),
         ];
         let offset: OffsetToken = "0000000000000001/0000000000000001".parse().unwrap();
         let batch = build_batch(
@@ -109,7 +113,7 @@ async fn channel_open_insert_status_drop() {
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn channel_reopen_preserves_offset() {
-    let config = load_test_config();
+    let config = load_test_config().clone_without_credentials();
     let (stream, sql) = build_clients(&config);
 
     let table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
@@ -127,8 +131,8 @@ async fn channel_reopen_preserves_offset() {
             .expect("open_channel failed");
 
         let cols = [
-            ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true),
-            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".into(), Type::INT4, -1, 1, true),
+            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, true),
         ];
         let offset: OffsetToken = "0000000000000001/0000000000000000".parse().unwrap();
         let batch = build_batch(
@@ -180,7 +184,7 @@ async fn channel_reopen_preserves_offset() {
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn continuation_token() {
-    let config = load_test_config();
+    let config = load_test_config().clone_without_credentials();
     let (stream, sql) = build_clients(&config);
 
     let table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
@@ -231,8 +235,8 @@ async fn continuation_token() {
             .expect("open_channel failed");
 
         let cols = [
-            ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true),
-            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".into(), Type::INT4, -1, 1, true),
+            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, true),
         ];
 
         // Batch 1

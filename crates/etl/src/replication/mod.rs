@@ -5,6 +5,7 @@
 
 mod apply;
 pub mod client;
+mod out_of_band_pool;
 mod stream;
 mod table_cache;
 mod table_sync;
@@ -13,6 +14,7 @@ mod worker_type;
 pub(crate) use apply::{
     ApplyLoop, ApplyLoopResult, ApplyWorkerContext, TableSyncWorkerContext, WorkerContext,
 };
+pub(crate) use out_of_band_pool::OutOfBandSourcePool;
 pub(crate) use stream::{EventsStream, StatusUpdateResult, StatusUpdateType, TableCopyStream};
 pub(crate) use table_cache::SharedTableCache;
 pub(crate) use table_sync::{TableSyncResult, start_table_sync};

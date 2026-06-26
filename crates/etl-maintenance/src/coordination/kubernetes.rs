@@ -17,9 +17,9 @@ use tracing::info;
 use super::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
     ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
-    ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenanceReplicatorStatus,
-    ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun, ExternalMaintenanceState,
-    ExternalMaintenanceStore,
+    ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenancePausePolicy,
+    ExternalMaintenanceReplicatorStatus, ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun,
+    ExternalMaintenanceState, ExternalMaintenanceStore,
 };
 
 const CR_NAME_ENV: &str = "ETL_DUCKLAKE_MAINTENANCE_CR_NAME";
@@ -192,6 +192,7 @@ fn state_from_ducklake_maintenance_cr(resource: &DynamicObject) -> ExternalMaint
     state.replicator = replicator_status(resource);
     state.last_successful_operations = operation_history(resource);
     state.last_completed_at = last_completed_at(resource);
+    state.pause_policy = pause_policy(resource);
     state.operation_policy = operation_policy(resource);
     state
 }
@@ -218,6 +219,9 @@ fn active_run(resource: &DynamicObject) -> Option<ExternalMaintenanceRun> {
     Some(ExternalMaintenanceRun {
         run_id: active_run.get("runId")?.as_str()?.to_owned(),
         started_at: parse_rfc3339_value(active_run.get("startedAt")),
+        operations: active_run
+            .get("operations")
+            .map_or_else(|| operations_from_value(active_run), operations_from_value),
     })
 }
 
@@ -228,13 +232,7 @@ fn operation_request(resource: &DynamicObject) -> Option<ExternalMaintenanceOper
     }
 
     Some(ExternalMaintenanceOperationRequest {
-        operations: ExternalMaintenanceOperations {
-            inline_flush: bool_value(requests, "inlineFlush", false),
-            merge_adjacent_files: bool_value(requests, "mergeAdjacentFiles", false),
-            rewrite_data_files: bool_value(requests, "rewriteDataFiles", false),
-            expire_snapshots: bool_value(requests, "expireSnapshots", false),
-            cleanup_old_files: bool_value(requests, "cleanupOldFiles", false),
-        },
+        operations: operations_from_value(requests),
         inline_flush_min_inlined_bytes: requests
             .get("inlineFlushMinInlinedBytes")
             .and_then(Value::as_u64),
@@ -243,6 +241,16 @@ fn operation_request(resource: &DynamicObject) -> Option<ExternalMaintenanceOper
             .and_then(Value::as_i64),
         requested_at: parse_rfc3339_value(requests.get("requestedAt"))?,
     })
+}
+
+fn operations_from_value(value: &Value) -> ExternalMaintenanceOperations {
+    ExternalMaintenanceOperations {
+        inline_flush: bool_value(value, "inlineFlush", false),
+        merge_adjacent_files: bool_value(value, "mergeAdjacentFiles", false),
+        rewrite_data_files: bool_value(value, "rewriteDataFiles", false),
+        expire_snapshots: bool_value(value, "expireSnapshots", false),
+        cleanup_old_files: bool_value(value, "cleanupOldFiles", false),
+    }
 }
 
 fn replicator_status(resource: &DynamicObject) -> Option<ExternalMaintenanceReplicatorStatus> {
@@ -308,9 +316,23 @@ fn operation_policy(resource: &DynamicObject) -> ExternalMaintenanceOperationPol
         inline_flush_enabled: enabled_value(inline_flush, true),
         merge_adjacent_files_enabled: enabled_value(merge_adjacent_files, true),
         rewrite_data_files_enabled: enabled_value(rewrite_data_files, true),
-        expire_snapshots_enabled: enabled_value(expire_snapshots, false),
+        expire_snapshots_enabled: enabled_value(expire_snapshots, true),
         cleanup_old_files_enabled: enabled_value(cleanup_old_files, true),
     }
+}
+
+/// Reads the trusted pause policy from the DuckLake maintenance spec.
+fn pause_policy(resource: &DynamicObject) -> ExternalMaintenancePausePolicy {
+    let max_duration_seconds = resource
+        .data
+        .get("spec")
+        .and_then(|spec| spec.get("pause"))
+        .and_then(|pause| pause.get("maxDurationSeconds"))
+        .and_then(Value::as_u64)
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or_else(|| ExternalMaintenancePausePolicy::default().max_duration_seconds);
+
+    ExternalMaintenancePausePolicy { max_duration_seconds }
 }
 
 fn enabled_value(value: Option<&Value>, default: bool) -> bool {
@@ -340,7 +362,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn operation_policy_defaults_expire_snapshots_disabled() {
+    fn operation_policy_defaults_expire_snapshots_enabled() {
         let resource: DynamicObject = serde_json::from_value(json!({
             "apiVersion": "etl.supabase.com/v1alpha1",
             "kind": "DuckLakeMaintenance",
@@ -360,6 +382,54 @@ mod tests {
 
         assert!(policy.inline_flush_enabled);
         assert!(policy.rewrite_data_files_enabled);
-        assert!(!policy.expire_snapshots_enabled);
+        assert!(policy.expire_snapshots_enabled);
+    }
+
+    #[test]
+    fn pause_policy_reads_spec_max_duration_seconds() {
+        let resource: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "etl.supabase.com/v1alpha1",
+            "kind": "DuckLakeMaintenance",
+            "metadata": {
+                "name": "pipeline-maintenance"
+            },
+            "spec": {
+                "pause": {
+                    "maxDurationSeconds": 900
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(pause_policy(&resource).max_duration_seconds, 900);
+    }
+
+    #[test]
+    fn active_run_reads_nested_operations() {
+        let resource: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "etl.supabase.com/v1alpha1",
+            "kind": "DuckLakeMaintenance",
+            "metadata": {
+                "name": "pipeline-maintenance"
+            },
+            "status": {
+                "activeRun": {
+                    "runId": "run-1",
+                    "startedAt": "2026-05-12T12:00:00Z",
+                    "operations": {
+                        "inlineFlush": true,
+                        "expireSnapshots": true
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let run = active_run(&resource).expect("expected active run");
+
+        assert_eq!(run.run_id, "run-1");
+        assert!(run.operations.inline_flush);
+        assert!(run.operations.expire_snapshots);
+        assert!(!run.operations.rewrite_data_files);
     }
 }

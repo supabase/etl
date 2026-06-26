@@ -8,7 +8,6 @@ use etl_postgres::types::{
     ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
     TableName, TableSchema, convert_type_oid_to_type,
 };
-use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use serde::Deserialize;
 use tokio_postgres::types::PgLsn;
@@ -18,7 +17,6 @@ use crate::{
     conversions::text::parse_cell_from_postgres_text,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    metrics::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL},
     types::{
         BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, OldTableRow, PartialTableRow,
         TableRow, TruncateEvent, UpdateEvent, UpdatedTableRow,
@@ -71,9 +69,8 @@ impl SchemaChangeMessage {
     /// detected. The snapshot_id should be the start_lsn of the DDL
     /// message.
     pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
-        let table_id = self.table_id();
         build_table_schema(
-            table_id,
+            self.table_id(),
             TableName::new(self.nspname, self.relname),
             self.columns,
             self.identity.primary_key_attnums,
@@ -195,6 +192,8 @@ pub(crate) struct ColumnSchemaMessage {
     pub(crate) attnum: i32,
     /// Whether the column is marked `NOT NULL` in `pg_attribute.attnotnull`.
     pub(crate) attnotnull: bool,
+    /// The default expression from `pg_attrdef`, if one exists.
+    pub(crate) default_expression: Option<String>,
 }
 
 /// Builds [`ColumnSchema`] values from PostgreSQL-native schema and identity
@@ -226,9 +225,10 @@ pub(crate) fn build_column_schemas(
                 typ,
                 column.atttypmod,
                 column.attnum,
-                primary_key_positions.get(&column.attnum).copied(),
                 !column.attnotnull,
             )
+            .with_primary_key_ordinal_position(primary_key_positions.get(&column.attnum).copied())
+            .with_default_expression_option(column.default_expression)
         })
         .collect()
 }
@@ -257,7 +257,7 @@ pub(crate) fn build_table_schema(
 ///
 /// This is used only for coarse event-size metrics, so `NULL` and
 /// `UnchangedToast` fields contribute zero bytes.
-fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
+pub(crate) fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
     tuple_data
         .iter()
         .map(|data| match data {
@@ -267,6 +267,32 @@ fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
             }
         })
         .sum()
+}
+
+/// Calculates the payload size of an insert message.
+pub(crate) fn insert_message_payload_bytes(insert_body: &protocol::InsertBody) -> u64 {
+    calculate_tuple_bytes(insert_body.tuple().tuple_data())
+}
+
+/// Calculates the payload size of an update message.
+pub(crate) fn update_message_payload_bytes(update_body: &protocol::UpdateBody) -> u64 {
+    let new_tuple_data = update_body.new_tuple().tuple_data();
+    let mut total_bytes = calculate_tuple_bytes(new_tuple_data);
+
+    if let Some(identity) = update_body.old_tuple().or(update_body.key_tuple()) {
+        total_bytes += calculate_tuple_bytes(identity.tuple_data());
+    }
+
+    total_bytes
+}
+
+/// Calculates the payload size of a delete message.
+pub(crate) fn delete_message_payload_bytes(delete_body: &protocol::DeleteBody) -> u64 {
+    delete_body
+        .old_tuple()
+        .or(delete_body.key_tuple())
+        .map(|identity| calculate_tuple_bytes(identity.tuple_data()))
+        .unwrap_or_default()
 }
 
 /// Creates a [`BeginEvent`] from Postgres protocol data.
@@ -328,7 +354,7 @@ pub(crate) fn parse_replicated_column_names(
     let column_names = relation_body
         .columns()
         .iter()
-        .map(|column| column.name().map(ToString::to_string))
+        .map(|column| column.name().map(str::to_owned))
         .collect::<Result<HashSet<String>, _>>()?;
 
     Ok(column_names)
@@ -352,7 +378,7 @@ pub(crate) fn parse_replica_identity_column_names(
         protocol::ReplicaIdentity::Full => relation_body
             .columns()
             .iter()
-            .map(|column| column.name().map(ToString::to_string))
+            .map(|column| column.name().map(str::to_owned))
             .collect::<Result<HashSet<String>, _>>()?,
         _ => relation_body
             .columns()
@@ -361,7 +387,7 @@ pub(crate) fn parse_replica_identity_column_names(
             // LOGICALREP_IS_REPLICA_IDENTITY, so `& 1` tests only that bit
             // while ignoring any other protocol flags that may be present.
             .filter(|column| column.flags() & 1 == 1)
-            .map(|column| column.name().map(ToString::to_string))
+            .map(|column| column.name().map(str::to_owned))
             .collect::<Result<HashSet<String>, _>>()?,
     };
 
@@ -381,12 +407,6 @@ pub(crate) fn parse_event_from_insert_message(
     insert_body: &protocol::InsertBody,
 ) -> EtlResult<InsertEvent> {
     let tuple_data = insert_body.tuple().tuple_data();
-    let row_size_bytes = calculate_tuple_bytes(tuple_data);
-
-    counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "insert").increment(row_size_bytes);
-
-    histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "insert").record(row_size_bytes as f64);
-
     let table_row = convert_tuple_to_row(replicated_table_schema.column_schemas(), tuple_data)?;
 
     Ok(InsertEvent { start_lsn, commit_lsn, tx_ordinal, replicated_table_schema, table_row })
@@ -428,14 +448,7 @@ pub(crate) fn parse_event_from_update_message(
     // row acts only as a source for resolving `UnchangedToast`.
     let is_key = update_body.old_tuple().is_none();
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
-
-    // Calculate total bytes from both old and new tuple data.
     let new_tuple_data = update_body.new_tuple().tuple_data();
-    let mut total_bytes = calculate_tuple_bytes(new_tuple_data);
-    if let Some(identity) = &old_tuple {
-        total_bytes += calculate_tuple_bytes(identity.tuple_data());
-    }
-    counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "update").increment(total_bytes);
 
     let old_table_row = match old_tuple {
         Some(identity) if is_key => Some(OldTableRow::Key(normalize_key_tuple_to_row(
@@ -458,8 +471,6 @@ pub(crate) fn parse_event_from_update_message(
         new_tuple_data,
         old_table_row.as_ref(),
     )?;
-
-    histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "update").record(total_bytes as f64);
 
     Ok(UpdateEvent {
         start_lsn,
@@ -498,14 +509,6 @@ pub(crate) fn parse_event_from_delete_message(
     // preserve that shape here.
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
-
-    if let Some(identity) = &old_tuple {
-        let row_size_bytes = calculate_tuple_bytes(identity.tuple_data());
-
-        counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "delete").increment(row_size_bytes);
-
-        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "delete").record(row_size_bytes as f64);
-    }
 
     let old_table_row = match old_tuple {
         Some(identity) if is_key => Some(OldTableRow::Key(normalize_key_tuple_to_row(
@@ -547,7 +550,7 @@ pub(crate) fn parse_event_from_truncate_message(
 /// The tuple width must exactly match the number of provided column schemas.
 /// Every field must decode to a concrete [`Cell`]; `UnchangedToast` is
 /// therefore rejected here because full row images must be self-contained.
-fn convert_tuple_to_row<'a>(
+pub(crate) fn convert_tuple_to_row<'a>(
     column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
     tuple_data: &[protocol::TupleData],
 ) -> EtlResult<TableRow> {
@@ -1019,11 +1022,11 @@ mod tests {
 
     fn composite_primary_key_schema() -> ReplicatedTableSchema {
         event_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(2), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
-            ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, Some(1), false),
-            ColumnSchema::new("city".to_owned(), Type::TEXT, -1, 4, None, false),
-            ColumnSchema::new("large_text".to_owned(), Type::TEXT, -1, 5, None, false),
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(2),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+            ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, false).with_primary_key(1),
+            ColumnSchema::new("city".to_owned(), Type::TEXT, -1, 4, false),
+            ColumnSchema::new("large_text".to_owned(), Type::TEXT, -1, 5, false),
         ])
     }
 
@@ -1032,10 +1035,11 @@ mod tests {
             TableId::new(43),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(2), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, Some(1), false),
-                ColumnSchema::new("city".to_owned(), Type::TEXT, -1, 4, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(2),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("city".to_owned(), Type::TEXT, -1, 4, false),
             ],
         ));
 
@@ -1051,10 +1055,11 @@ mod tests {
             TableId::new(44),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(2), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, Some(1), false),
-                ColumnSchema::new("city".to_owned(), Type::TEXT, -1, 4, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(2),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("city".to_owned(), Type::TEXT, -1, 4, false),
             ],
         ));
 
@@ -1179,8 +1184,8 @@ mod tests {
             TableId::new(42),
             TableName::new("public".to_owned(), "test".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
-                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, false),
             ],
         );
         let replication_mask = ReplicationMask::all(&table_schema);
@@ -1207,8 +1212,8 @@ mod tests {
             TableId::new(42),
             TableName::new("public".to_owned(), "test".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
-                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, false),
             ],
         );
         let replication_mask = ReplicationMask::all(&table_schema);
@@ -1235,9 +1240,9 @@ mod tests {
             TableId::new(42),
             TableName::new("public".to_owned(), "test".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, Some(2), false),
-                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false).with_primary_key(2),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, false),
             ],
         );
         let replication_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
@@ -1258,9 +1263,9 @@ mod tests {
             TableId::new(42),
             TableName::new("public".to_owned(), "test".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, false),
             ],
         );
         let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 0]);
@@ -1281,8 +1286,8 @@ mod tests {
             TableId::new(42),
             TableName::new("public".to_owned(), "test".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
-                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, false),
             ],
         );
         let replication_mask = ReplicationMask::from_bytes(vec![1, 0]);
@@ -1300,8 +1305,8 @@ mod tests {
     #[test]
     fn convert_tuple_to_row_rejects_missing_non_nullable_columns_for_full_rows() {
         let column_schemas = [
-            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
-            ColumnSchema::new("d".to_owned(), Type::DATE, -1, 2, None, false),
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("d".to_owned(), Type::DATE, -1, 2, false),
         ];
         let tuple_data = [TupleData::Text(b"1".to_vec().into()), TupleData::Null];
 
@@ -1314,8 +1319,8 @@ mod tests {
     #[test]
     fn convert_update_tuple_to_new_table_row_returns_partial_when_toast_cannot_be_recovered() {
         let replicated_table_schema = event_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
-            ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 2, None, false),
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 2, false),
         ]);
         let tuple_data = [TupleData::Text(b"1".to_vec().into()), TupleData::UnchangedToast];
 
@@ -1336,8 +1341,8 @@ mod tests {
     #[test]
     fn convert_update_tuple_to_new_table_row_reuses_old_value_when_available() {
         let replicated_table_schema = event_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
-            ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 2, None, false),
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 2, false),
         ]);
         let tuple_data = [TupleData::Text(b"1".to_vec().into()), TupleData::UnchangedToast];
         let original_old_row = TableRow::new(vec![Cell::I64(1), Cell::String("toast".to_owned())]);
@@ -1363,8 +1368,8 @@ mod tests {
     #[test]
     fn convert_update_tuple_to_new_table_row_reuses_key_value_when_column_is_in_key() {
         let replicated_table_schema = event_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
-            ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 2, Some(2), false),
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 2, false).with_primary_key(2),
         ]);
         let tuple_data = [TupleData::Text(b"2".to_vec().into()), TupleData::UnchangedToast];
         let old_table_row =
@@ -1392,10 +1397,11 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(2), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, Some(1), false),
-                ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 4, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(2),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 4, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -1421,10 +1427,11 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(2), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, Some(1), false),
-                ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 4, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(2),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 4, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(

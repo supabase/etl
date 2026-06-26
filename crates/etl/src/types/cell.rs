@@ -1,10 +1,11 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use etl_postgres::types::PgTimeTz;
 use uuid::Uuid;
 
 use crate::{
     bail,
-    conversions::PgNumeric,
     error::{ErrorKind, EtlError},
+    types::PgNumeric,
 };
 
 macro_rules! convert_array_variant {
@@ -29,12 +30,14 @@ macro_rules! convert_array_variant {
 /// Represents a single database cell value with support for Postgres types.
 ///
 /// [`Cell`] is the primary data container for individual values during ETL
-/// processing. It supports all common Postgres data types including arrays,
-/// JSON, and temporal types. Each variant handles nullable data appropriately
-/// for the destination system.
+/// processing. It represents the ergonomic Rust value shape passed to
+/// destinations, not the source database schema type. The original Postgres
+/// type remains available on the corresponding [`crate::types::ColumnSchema`],
+/// so values without specialized Rust semantics can be preserved as
+/// [`Cell::String`] while destinations still know the source column type.
 ///
-/// The enum is designed to preserve type information and enable efficient
-/// conversion to destination formats while maintaining data fidelity.
+/// The enum is designed to make destination conversion efficient while
+/// maintaining data fidelity.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Cell {
     /// Represents a NULL database value
@@ -57,13 +60,15 @@ pub enum Cell {
     F64(f64),
     /// Postgres NUMERIC/DECIMAL type with arbitrary precision
     Numeric(PgNumeric),
-    /// Date without time information
+    /// Date without time information.
     Date(NaiveDate),
-    /// Time without date information
+    /// Time of day without time zone information.
     Time(NaiveTime),
-    /// Timestamp without timezone information
+    /// Time of day with a fixed UTC offset.
+    TimeTz(PgTimeTz),
+    /// Timestamp without time zone information.
     Timestamp(NaiveDateTime),
-    /// Timestamp with timezone information in UTC
+    /// Timestamp with time zone information normalized to UTC.
     TimestampTz(DateTime<Utc>),
     /// UUID (Universally Unique Identifier)
     Uuid(Uuid),
@@ -90,6 +95,7 @@ impl Cell {
             Cell::Numeric(n) => *n = PgNumeric::default(),
             Cell::Date(t) => *t = NaiveDate::default(),
             Cell::Time(t) => *t = NaiveTime::default(),
+            Cell::TimeTz(t) => *t = PgTimeTz::default(),
             Cell::Timestamp(t) => *t = NaiveDateTime::default(),
             Cell::TimestampTz(t) => *t = DateTime::<Utc>::default(),
             Cell::Uuid(u) => *u = Uuid::default(),
@@ -132,13 +138,16 @@ pub enum ArrayCell {
     F64(Vec<Option<f64>>),
     /// Array of nullable Postgres numeric values
     Numeric(Vec<Option<PgNumeric>>),
-    /// Array of nullable dates
+    /// Array of nullable dates.
     Date(Vec<Option<NaiveDate>>),
-    /// Array of nullable times
+    /// Array of nullable times of day without time zone information.
     Time(Vec<Option<NaiveTime>>),
-    /// Array of nullable timestamps
+    /// Array of nullable times of day with fixed UTC offsets.
+    TimeTz(Vec<Option<PgTimeTz>>),
+    /// Array of nullable timestamps without time zone information.
     Timestamp(Vec<Option<NaiveDateTime>>),
-    /// Array of nullable timestamps with timezone
+    /// Array of nullable timestamps with time zone information normalized to
+    /// UTC.
     TimestampTz(Vec<Option<DateTime<Utc>>>),
     /// Array of nullable UUIDs
     Uuid(Vec<Option<Uuid>>),
@@ -163,6 +172,7 @@ impl ArrayCell {
             ArrayCell::Numeric(vec) => vec.clear(),
             ArrayCell::Date(vec) => vec.clear(),
             ArrayCell::Time(vec) => vec.clear(),
+            ArrayCell::TimeTz(vec) => vec.clear(),
             ArrayCell::Timestamp(vec) => vec.clear(),
             ArrayCell::TimestampTz(vec) => vec.clear(),
             ArrayCell::Uuid(vec) => vec.clear(),
@@ -195,6 +205,7 @@ pub enum CellNonOptional {
     Numeric(PgNumeric),
     Date(NaiveDate),
     Time(NaiveTime),
+    TimeTz(PgTimeTz),
     Timestamp(NaiveDateTime),
     TimestampTz(DateTime<Utc>),
     Uuid(Uuid),
@@ -220,6 +231,7 @@ impl TryFrom<Cell> for CellNonOptional {
             Cell::Numeric(val) => Ok(CellNonOptional::Numeric(val)),
             Cell::Date(val) => Ok(CellNonOptional::Date(val)),
             Cell::Time(val) => Ok(CellNonOptional::Time(val)),
+            Cell::TimeTz(val) => Ok(CellNonOptional::TimeTz(val)),
             Cell::Timestamp(val) => Ok(CellNonOptional::Timestamp(val)),
             Cell::TimestampTz(val) => Ok(CellNonOptional::TimestampTz(val)),
             Cell::Uuid(val) => Ok(CellNonOptional::Uuid(val)),
@@ -248,6 +260,7 @@ impl CellNonOptional {
             CellNonOptional::Numeric(n) => *n = PgNumeric::default(),
             CellNonOptional::Date(t) => *t = NaiveDate::default(),
             CellNonOptional::Time(t) => *t = NaiveTime::default(),
+            CellNonOptional::TimeTz(t) => *t = PgTimeTz::default(),
             CellNonOptional::Timestamp(t) => *t = NaiveDateTime::default(),
             CellNonOptional::TimestampTz(t) => *t = DateTime::<Utc>::default(),
             CellNonOptional::Uuid(u) => *u = Uuid::default(),
@@ -285,6 +298,7 @@ pub enum ArrayCellNonOptional {
     Numeric(Vec<PgNumeric>),
     Date(Vec<NaiveDate>),
     Time(Vec<NaiveTime>),
+    TimeTz(Vec<PgTimeTz>),
     Timestamp(Vec<NaiveDateTime>),
     TimestampTz(Vec<DateTime<Utc>>),
     Uuid(Vec<Uuid>),
@@ -308,6 +322,7 @@ impl TryFrom<ArrayCell> for ArrayCellNonOptional {
             ArrayCell::Numeric(vec) => convert_array_variant!(Numeric, vec),
             ArrayCell::Date(vec) => convert_array_variant!(Date, vec),
             ArrayCell::Time(vec) => convert_array_variant!(Time, vec),
+            ArrayCell::TimeTz(vec) => convert_array_variant!(TimeTz, vec),
             ArrayCell::Timestamp(vec) => convert_array_variant!(Timestamp, vec),
             ArrayCell::TimestampTz(vec) => convert_array_variant!(TimestampTz, vec),
             ArrayCell::Uuid(vec) => convert_array_variant!(Uuid, vec),
@@ -332,6 +347,7 @@ impl ArrayCellNonOptional {
             ArrayCellNonOptional::Numeric(vec) => vec.clear(),
             ArrayCellNonOptional::Date(vec) => vec.clear(),
             ArrayCellNonOptional::Time(vec) => vec.clear(),
+            ArrayCellNonOptional::TimeTz(vec) => vec.clear(),
             ArrayCellNonOptional::Timestamp(vec) => vec.clear(),
             ArrayCellNonOptional::TimestampTz(vec) => vec.clear(),
             ArrayCellNonOptional::Uuid(vec) => vec.clear(),

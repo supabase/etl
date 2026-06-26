@@ -1,11 +1,9 @@
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
-#[cfg(test)]
-use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, atomic::AtomicBool},
-    time::Instant,
+    time::Duration,
 };
 
 use etl::{
@@ -16,17 +14,20 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_table_metadata::DestinationTableMetadata,
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
-        Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId,
-        TableName, TableRow, UpdatedTableRow,
+        ColumnModification, ColumnSchema, Event, EventSequenceKey, OldTableRow, PartialTableRow,
+        ReplicatedTableSchema, ReplicationMask, SchemaDiff, SnapshotId, TableId, TableName,
+        TableRow, TableSchema, UpdatedTableRow,
     },
 };
 use metrics::gauge;
 use parking_lot::Mutex;
-use pg_escape::quote_identifier as quote_postgres_identifier;
+use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
 use tokio::{
@@ -41,7 +42,7 @@ use url::Url;
 
 use crate::{
     ducklake::{
-        DuckLakeTableName, S3Config,
+        DuckLakeTableName, LAKE_CATALOG, S3Config,
         batches::{
             DuckLakeTableBatchKind, TableMutation, TrackedTableMutation, TrackedTruncateEvent,
             apply_table_batch_with_retry, apply_table_batches_with_retry,
@@ -56,9 +57,9 @@ use crate::{
             format_query_error_detail, run_duckdb_blocking,
         },
         config::{
-            MAINTENANCE_TARGET_FILE_SIZE, build_setup_plan, current_duckdb_extension_strategy,
-            maintenance_target_file_size_sql, resolve_expire_snapshots_older_than,
-            validate_expire_snapshots_older_than_sql,
+            MAINTENANCE_TARGET_FILE_SIZE, MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, build_setup_plan,
+            current_duckdb_extension_strategy, maintenance_target_file_size_sql,
+            resolve_expire_snapshots_older_than, validate_expire_snapshots_older_than_sql,
         },
         external_maintenance::ExternalMaintenanceOperations,
         inline_size::DuckLakePendingInlineSizeSampler,
@@ -67,7 +68,12 @@ use crate::{
             query_table_storage_metrics, register_metrics,
             resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
         },
-        schema::build_create_table_sql_ducklake,
+        schema::{
+            build_add_column_sql_ducklake, build_create_table_sql_ducklake,
+            build_drop_column_sql_ducklake, build_drop_default_sql_ducklake,
+            build_rename_column_sql_ducklake, build_set_default_sql_ducklake,
+            supports_column_default_ducklake,
+        },
         sql::qualified_lake_table_name,
     },
     table_name::try_stringify_table_name,
@@ -78,6 +84,10 @@ use crate::{
 /// One connection is enough because inline-size sampling and metrics sampling
 /// are both best-effort background reads and can safely serialize.
 const DUCKLAKE_METADATA_PG_POOL_SIZE: u32 = 1;
+
+/// Prefix for ETL-owned tombstone columns that keep same-name replacement DDL
+/// replay-safe.
+pub(super) const DUCKLAKE_DROPPED_COLUMN_PREFIX: &str = "__etl_ducklake_dropped_";
 
 /// Builds the shared Postgres metadata pool used by background samplers.
 fn build_ducklake_metadata_pg_pool(catalog_url: &Url) -> EtlResult<PgPool> {
@@ -203,16 +213,57 @@ fn table_write_slot(
     Arc::clone(slot)
 }
 
+/// Waits for process shutdown signals and interrupts active DuckDB calls.
+#[cfg(unix)]
+async fn interrupt_duckdb_connections_on_process_shutdown(manager: Arc<DuckLakeConnectionManager>) {
+    let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+        warn!("ducklake failed to register sigterm interrupt handler");
+        return;
+    };
+    let Ok(mut sigint) = signal(SignalKind::interrupt()) else {
+        warn!("ducklake failed to register sigint interrupt handler");
+        return;
+    };
+
+    let signal_name = tokio::select! {
+        _ = sigterm.recv() => "sigterm",
+        _ = sigint.recv() => "sigint",
+    };
+
+    let interrupted_connections = manager.interrupt_all_connections_for_process_shutdown();
+    info!(
+        interrupted_connections,
+        signal = signal_name,
+        "ducklake process shutdown signal received, interrupted active duckdb connections"
+    );
+}
+
+/// Waits for process shutdown signals and interrupts active DuckDB calls.
+#[cfg(not(unix))]
+async fn interrupt_duckdb_connections_on_process_shutdown(manager: Arc<DuckLakeConnectionManager>) {
+    if tokio::signal::ctrl_c().await.is_err() {
+        warn!("ducklake failed to register ctrl-c interrupt handler");
+        return;
+    }
+
+    let interrupted_connections = manager.interrupt_all_connections_for_process_shutdown();
+    info!(
+        interrupted_connections,
+        signal = "ctrl_c",
+        "ducklake process shutdown signal received, interrupted active duckdb connections"
+    );
+}
+
 impl<S> Destination for DuckLakeDestination<S>
 where
     S: DestinationStore,
 {
     fn name() -> &'static str {
-        "ducklake"
+        etl_config::shared::DestinationKind::Ducklake.as_str()
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
-        let interrupted_connections = self.manager.interrupt_all_connections();
+        let interrupted_connections = self.manager.interrupt_all_connections_for_shutdown();
         info!(
             interrupted_connections,
             "ducklake shutdown requested, interrupted active duckdb connections"
@@ -221,6 +272,10 @@ where
         self.shutdown_metrics_sampler().await?;
 
         Ok(())
+    }
+
+    async fn startup(&self) -> EtlResult<()> {
+        self.reconcile_existing_tables_after_restart().await
     }
 
     async fn drop_table_for_copy(
@@ -292,6 +347,481 @@ fn validate_ducklake_replica_identity(
     }
 
     Ok(())
+}
+
+/// Builds the query used to inspect a DuckLake table shape.
+fn ducklake_table_columns_sql(table_name: &str) -> String {
+    format!(
+        "select column_name from information_schema.columns where table_catalog = {} and \
+         table_schema = {} and table_name = {} order by ordinal_position",
+        quote_literal(LAKE_CATALOG),
+        quote_literal("main"),
+        quote_literal(table_name)
+    )
+}
+
+/// Reads DuckLake table column names using blocking DuckDB APIs.
+///
+/// Call only from a [`run_duckdb_blocking`] closure.
+fn read_ducklake_table_column_names_blocking(
+    conn: &duckdb::Connection,
+    table_name: &str,
+) -> EtlResult<Vec<String>> {
+    let sql = ducklake_table_columns_sql(table_name);
+    let mut statement = conn.prepare(&sql).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table schema lookup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })?;
+    let mut rows = statement.query([]).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table schema lookup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })?;
+    let mut column_names = Vec::new();
+    while let Some(row) = rows.next().map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table schema lookup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })? {
+        column_names.push(row.get(0).map_err(|source| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake table schema lookup failed",
+                format_query_error_detail(&sql),
+                source: source
+            )
+        })?);
+    }
+
+    Ok(column_names)
+}
+
+/// Finds a destination column by name.
+fn find_ducklake_column(column_names: &[String], column_name: &str) -> Option<usize> {
+    column_names.iter().position(|name| name == column_name)
+}
+
+/// One planned DuckLake DDL statement.
+#[derive(Debug, PartialEq, Eq)]
+struct DuckLakeSchemaDdlStatement {
+    /// SQL to execute.
+    sql: String,
+    /// Error description to attach if execution fails.
+    error_description: &'static str,
+}
+
+/// Planned DuckLake schema DDL and the expected resulting column names.
+#[derive(Debug, PartialEq, Eq)]
+struct DuckLakeSchemaDiffPlan {
+    /// Statements to execute in order.
+    statements: Vec<DuckLakeSchemaDdlStatement>,
+    /// Destination column names after applying the plan.
+    column_names: Vec<String>,
+}
+
+/// Ordered CDC mutations that all use the same replicated table schema.
+struct TableMutationSegment {
+    /// Replicated schema used to encode every mutation in this segment.
+    replicated_table_schema: ReplicatedTableSchema,
+    /// Ordered mutations for the schema.
+    mutations: Vec<TrackedTableMutation>,
+}
+
+/// Returns whether two replicated schemas have the same row shape and identity.
+fn replicated_table_schemas_match(
+    left: &ReplicatedTableSchema,
+    right: &ReplicatedTableSchema,
+) -> bool {
+    left.id() == right.id()
+        && left.inner().snapshot_id == right.inner().snapshot_id
+        && left.replication_mask() == right.replication_mask()
+        && left.identity_mask() == right.identity_mask()
+}
+
+/// Appends a mutation to the latest compatible schema segment.
+fn push_table_mutation_segment(
+    segments: &mut Vec<TableMutationSegment>,
+    replicated_table_schema: ReplicatedTableSchema,
+    mutation: TrackedTableMutation,
+) {
+    if let Some(segment) = segments.last_mut()
+        && replicated_table_schemas_match(
+            &segment.replicated_table_schema,
+            &replicated_table_schema,
+        )
+    {
+        segment.mutations.push(mutation);
+        return;
+    }
+
+    segments.push(TableMutationSegment { replicated_table_schema, mutations: vec![mutation] });
+}
+
+/// Returns a deterministic hash for generated DuckLake identifiers.
+fn stable_ducklake_identifier_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Builds the tombstone name used when a dropped column name is reused.
+fn dropped_column_tombstone_name_ducklake(column: &ColumnSchema) -> String {
+    format!(
+        "{DUCKLAKE_DROPPED_COLUMN_PREFIX}{}_{:016x}",
+        column.ordinal_position,
+        stable_ducklake_identifier_hash(&column.name)
+    )
+}
+
+/// Returns ETL tombstone columns that are not active replicated columns.
+fn tombstone_columns_to_cleanup_ducklake(
+    column_names: &[String],
+    target_schema: &ReplicatedTableSchema,
+) -> Vec<String> {
+    let active_column_names: HashSet<_> =
+        target_schema.column_schemas().map(|column| column.name.as_str()).collect();
+
+    column_names
+        .iter()
+        .filter(|column_name| {
+            column_name.starts_with(DUCKLAKE_DROPPED_COLUMN_PREFIX)
+                && !active_column_names.contains(column_name.as_str())
+        })
+        .cloned()
+        .collect()
+}
+
+/// Plans idempotent DuckLake schema DDL for the current destination columns.
+fn plan_schema_diff_sql_ducklake(
+    table_name: &str,
+    mut column_names: Vec<String>,
+    diff: &SchemaDiff,
+) -> EtlResult<DuckLakeSchemaDiffPlan> {
+    let added_column_names: HashSet<_> =
+        diff.columns_to_add.iter().map(|column| column.name.as_str()).collect();
+    let rename_target_names: HashSet<_> = diff
+        .columns_to_change
+        .iter()
+        .flat_map(|change| &change.modifications)
+        .filter_map(|modification| match modification {
+            ColumnModification::Rename { new_name, .. } => Some(new_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let reused_removed_column_names: HashSet<_> = diff
+        .columns_to_remove
+        .iter()
+        .filter(|column| {
+            added_column_names.contains(column.name.as_str())
+                || rename_target_names.contains(column.name.as_str())
+        })
+        .map(|column| column.name.as_str())
+        .collect();
+    let mut statements = Vec::new();
+
+    for column in &diff.columns_to_remove {
+        if reused_removed_column_names.contains(column.name.as_str()) {
+            let tombstone_name = dropped_column_tombstone_name_ducklake(column);
+            let old_index = find_ducklake_column(&column_names, &column.name);
+            let tombstone_index = find_ducklake_column(&column_names, &tombstone_name);
+
+            match (old_index, tombstone_index) {
+                (Some(index), None) => {
+                    statements.push(DuckLakeSchemaDdlStatement {
+                        sql: build_rename_column_sql_ducklake(
+                            table_name,
+                            &column.name,
+                            &tombstone_name,
+                        ),
+                        error_description: "DuckLake alter table rename dropped column failed",
+                    });
+                    column_names[index] = tombstone_name;
+                }
+                (Some(_), Some(_)) => {
+                    debug!(
+                        table = %table_name,
+                        column = %column.name,
+                        tombstone_column = %tombstone_name,
+                        "ducklake drop column skipped because reused column name was already \
+                         tombstoned"
+                    );
+                }
+                (None, Some(_)) => {
+                    debug!(
+                        table = %table_name,
+                        column = %column.name,
+                        tombstone_column = %tombstone_name,
+                        "ducklake drop column skipped because destination column is already \
+                         tombstoned"
+                    );
+                }
+                (None, None) => {
+                    debug!(
+                        table = %table_name,
+                        column = %column.name,
+                        "ducklake drop column skipped because destination column is already absent"
+                    );
+                }
+            }
+
+            continue;
+        }
+
+        let Some(index) = find_ducklake_column(&column_names, &column.name) else {
+            debug!(
+                table = %table_name,
+                column = %column.name,
+                "ducklake drop column skipped because destination column is already absent"
+            );
+            continue;
+        };
+
+        statements.push(DuckLakeSchemaDdlStatement {
+            sql: build_drop_column_sql_ducklake(table_name, &column.name),
+            error_description: "DuckLake alter table drop column failed",
+        });
+        column_names.remove(index);
+    }
+
+    for change in &diff.columns_to_change {
+        for modification in &change.modifications {
+            let ColumnModification::Rename { old_name, new_name } = modification else {
+                continue;
+            };
+
+            let old_index = find_ducklake_column(&column_names, old_name);
+            let new_index = find_ducklake_column(&column_names, new_name);
+
+            match (old_index, new_index) {
+                (Some(index), None) => {
+                    statements.push(DuckLakeSchemaDdlStatement {
+                        sql: build_rename_column_sql_ducklake(table_name, old_name, new_name),
+                        error_description: "DuckLake alter table rename column failed",
+                    });
+                    column_names[index] = new_name.clone();
+                }
+                (None, Some(_)) => {
+                    debug!(
+                        table = %table_name,
+                        old_column = %old_name,
+                        new_column = %new_name,
+                        "ducklake rename column skipped because destination column already has new \
+                         name"
+                    );
+                }
+                (None, None) => {
+                    return Err(etl_error!(
+                        ErrorKind::CorruptedTableSchema,
+                        "DuckLake destination column for rename is missing",
+                        format!(
+                            "Table '{table_name}' has neither old column '{old_name}' nor new \
+                             column '{new_name}'"
+                        )
+                    ));
+                }
+                (Some(_), Some(_))
+                    if added_column_names.contains(old_name.as_str())
+                        || rename_target_names.contains(old_name.as_str()) =>
+                {
+                    debug!(
+                        table = %table_name,
+                        old_column = %old_name,
+                        new_column = %new_name,
+                        "ducklake rename column skipped because destination has both names after \
+                         replay"
+                    );
+                }
+                (Some(index), Some(_)) => {
+                    debug!(
+                        table = %table_name,
+                        old_column = %old_name,
+                        new_column = %new_name,
+                        "ducklake dropping stale rename source column because destination already \
+                         has target name"
+                    );
+                    statements.push(DuckLakeSchemaDdlStatement {
+                        sql: build_drop_column_sql_ducklake(table_name, old_name),
+                        error_description: "DuckLake alter table drop stale rename source column \
+                                            failed",
+                    });
+                    column_names.remove(index);
+                }
+            }
+        }
+    }
+
+    for change in &diff.columns_to_change {
+        if find_ducklake_column(&column_names, &change.new_column.name).is_none() {
+            debug!(
+                table = %table_name,
+                column = %change.new_column.name,
+                "ducklake column update skipped because destination column is absent"
+            );
+            continue;
+        }
+
+        for modification in &change.modifications {
+            match modification {
+                ColumnModification::Rename { .. } => {}
+                ColumnModification::Nullability { old_nullable, new_nullable } => {
+                    warn!(
+                        table_name = %table_name,
+                        column_name = %change.new_column.name,
+                        old_nullable,
+                        new_nullable,
+                        "skipping source column nullability change for DuckLake"
+                    );
+                }
+                ColumnModification::Default { old_expression, new_expression } => {
+                    let old_default_was_supported =
+                        old_expression.as_deref().is_some_and(|default_expression| {
+                            supports_column_default_ducklake(
+                                default_expression,
+                                &change.old_column.typ,
+                            )
+                        });
+
+                    if let Some(new_default_expression) = new_expression.as_deref() {
+                        let Some(sql) = build_set_default_sql_ducklake(
+                            table_name,
+                            &change.new_column.name,
+                            &change.new_column.typ,
+                            new_default_expression,
+                        ) else {
+                            warn!(
+                                table_name = %table_name,
+                                column_name = %change.new_column.name,
+                                "skipping unsupported source column default for DuckLake"
+                            );
+                            if old_default_was_supported {
+                                statements.push(DuckLakeSchemaDdlStatement {
+                                    sql: build_drop_default_sql_ducklake(
+                                        table_name,
+                                        &change.new_column.name,
+                                    ),
+                                    error_description: "DuckLake alter table drop default failed",
+                                });
+                            }
+                            continue;
+                        };
+                        statements.push(DuckLakeSchemaDdlStatement {
+                            sql,
+                            error_description: "DuckLake alter table set default failed",
+                        });
+                    } else if old_default_was_supported {
+                        statements.push(DuckLakeSchemaDdlStatement {
+                            sql: build_drop_default_sql_ducklake(
+                                table_name,
+                                &change.new_column.name,
+                            ),
+                            error_description: "DuckLake alter table drop default failed",
+                        });
+                    } else if old_expression.is_some() {
+                        warn!(
+                            table_name = %table_name,
+                            column_name = %change.new_column.name,
+                            "skipping source column default removal for DuckLake because no \
+                             supported destination default was set"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    for column in &diff.columns_to_add {
+        if find_ducklake_column(&column_names, &column.name).is_some() {
+            debug!(
+                table = %table_name,
+                column = %column.name,
+                "ducklake add column skipped because destination column already exists"
+            );
+
+            if let Some(default_expression) = column.default_expression.as_deref() {
+                let Some(sql) = build_set_default_sql_ducklake(
+                    table_name,
+                    &column.name,
+                    &column.typ,
+                    default_expression,
+                ) else {
+                    warn!(
+                        table_name = %table_name,
+                        column_name = %column.name,
+                        "skipping unsupported source column default for DuckLake"
+                    );
+                    continue;
+                };
+                statements.push(DuckLakeSchemaDdlStatement {
+                    sql,
+                    error_description: "DuckLake alter table set default failed",
+                });
+            }
+
+            continue;
+        }
+
+        statements.push(DuckLakeSchemaDdlStatement {
+            sql: build_add_column_sql_ducklake(table_name, column),
+            error_description: "DuckLake alter table add column failed",
+        });
+        column_names.push(column.name.clone());
+    }
+
+    Ok(DuckLakeSchemaDiffPlan { statements, column_names })
+}
+
+/// Builds the best previous-schema replication mask available during recovery.
+///
+/// [`DestinationTableMetadata`] stores the target mask, not the previous mask.
+/// For a source-schema change we project target bits back by ordinal position.
+/// Columns that no longer exist in the target schema are treated as previously
+/// replicated so the idempotent DDL planner can drop them if they exist.
+fn previous_replication_mask_for_recovery(
+    previous_schema: &TableSchema,
+    target_schema: &TableSchema,
+    target_replication_mask: &ReplicationMask,
+) -> ReplicationMask {
+    let mask = previous_schema
+        .column_schemas
+        .iter()
+        .map(|previous_column| {
+            target_schema
+                .column_schemas
+                .iter()
+                .position(|target_column| {
+                    target_column.ordinal_position == previous_column.ordinal_position
+                })
+                .and_then(|index| target_replication_mask.as_slice().get(index).copied())
+                .unwrap_or(1)
+        })
+        .collect();
+
+    ReplicationMask::from_bytes(mask)
+}
+
+/// Returns target replicated columns that are missing from DuckLake.
+fn missing_replicated_columns_ducklake(
+    ducklake_columns: &[String],
+    target_schema: &ReplicatedTableSchema,
+) -> Vec<ColumnSchema> {
+    target_schema
+        .column_schemas()
+        .filter(|column| find_ducklake_column(ducklake_columns, &column.name).is_none())
+        .cloned()
+        .collect()
 }
 
 impl<S> DuckLakeDestination<S>
@@ -443,10 +973,8 @@ where
     /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata
     ///   tables (e.g. `"ducklake"`). Uses the catalog default schema when not
     ///   set.
-    /// - `duckdb_memory_cache_limit`: Optional DuckDB `memory_limit` value
-    ///   (e.g. `"150MB"`). Defaults to `150MB`.
     /// - `maintenance_target_file_size`: Optional DuckLake maintenance
-    ///   `target_file_size` value (e.g. `"10MB"`). Defaults to `10MB`.
+    ///   `target_file_size` value (e.g. `"500MB"`). Defaults to `500MB`.
     /// - `expire_snapshots_older_than`: Optional DuckLake snapshot-retention
     ///   interval (e.g. `"7 days"`). Defaults to `7 days`.
     /// - `duckdb_log`: Optional DuckDB log storage and shutdown dump paths.
@@ -466,7 +994,6 @@ where
         pool_size: u32,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
-        duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
         store: S,
@@ -477,7 +1004,6 @@ where
             pool_size,
             s3,
             metadata_schema,
-            duckdb_memory_cache_limit,
             maintenance_target_file_size,
             expire_snapshots_older_than,
             DuckLakeExternalMaintenanceConfig::default(),
@@ -495,7 +1021,6 @@ where
         pool_size: u32,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
-        duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
         external_maintenance: DuckLakeExternalMaintenanceConfig,
@@ -537,13 +1062,13 @@ where
             &data_path,
             s3.as_ref(),
             metadata_schema.as_deref(),
-            duckdb_memory_cache_limit.as_deref(),
         )?);
 
         let manager = Arc::new(DuckLakeConnectionManager {
             setup_plan: Arc::clone(&setup_plan),
             disable_extension_autoload,
             interrupt_registry: Arc::new(DuckLakeInterruptRegistry::default()),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         });
@@ -579,19 +1104,29 @@ where
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
             move |conn| -> EtlResult<()> {
-                conn.query_row(&expire_snapshots_validation_sql, [], |_row| Ok(())).map_err(
-                    |source| {
+                let retention_is_safe: bool = conn
+                    .query_row(&expire_snapshots_validation_sql, [], |row| row.get(0))
+                    .map_err(|source| {
                         etl_error!(
                             ErrorKind::ConfigError,
                             "DuckLake expire_snapshots_older_than configuration failed",
                             format!(
-                                "invalid expire_snapshots_older_than value `{}`",
+                                "Invalid expire_snapshots_older_than value `{}`",
                                 expire_snapshots_older_than_for_error
                             ),
                             source: source
                         )
-                    },
-                )?;
+                    })?;
+                if !retention_is_safe {
+                    return Err(etl_error!(
+                        ErrorKind::ConfigError,
+                        "DuckLake expire_snapshots_older_than configuration failed",
+                        format!(
+                            "Snapshot retention must be at least {}, got `{}`",
+                            MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, expire_snapshots_older_than_for_error
+                        )
+                    ));
+                }
                 Ok(())
             },
         )
@@ -629,6 +1164,13 @@ where
             streaming_progress_table_created: Arc::default(),
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
+        let shutdown_signal_manager = Arc::clone(&manager);
+        destination
+            .tasks
+            .spawn(async move {
+                interrupt_duckdb_connections_on_process_shutdown(shutdown_signal_manager).await;
+            })
+            .await;
         destination.ensure_applied_batches_table_exists().await?;
         destination.ensure_streaming_progress_table_exists().await?;
         destination.metrics_sampler = Arc::new(
@@ -875,6 +1417,340 @@ where
         Ok(())
     }
 
+    /// Handles a schema-change relation event by applying the destination DDL
+    /// diff and advancing destination table metadata.
+    async fn handle_relation_event(
+        &self,
+        new_replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_id = new_replicated_table_schema.id();
+        let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
+        let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
+
+        let metadata =
+            self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::CorruptedTableSchema,
+                    "Destination metadata missing for DuckLake schema change",
+                    format!(
+                        "Table {} received schema snapshot {}, but destination metadata from \
+                         initial synchronization was not found.",
+                        table_id, new_snapshot_id
+                    )
+                )
+            })?;
+        let table_name = metadata.destination_table_id.clone();
+        let metadata = if metadata.is_applying() {
+            self.recover_applying_metadata(
+                table_id,
+                &table_name,
+                metadata,
+                Some(new_replicated_table_schema),
+            )
+            .await?
+        } else {
+            metadata
+        };
+
+        let current_snapshot_id = metadata.snapshot_id;
+        let current_replication_mask = metadata.replication_mask.clone();
+        if current_snapshot_id == new_snapshot_id
+            && current_replication_mask == new_replication_mask
+        {
+            self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema)
+                .await?;
+            self.cleanup_tombstone_columns_after_applied(&table_name, new_replicated_table_schema)
+                .await;
+            info!(
+                table_id = %table_id,
+                snapshot_id = %new_snapshot_id,
+                replication_mask = %new_replication_mask,
+                "ducklake schema unchanged"
+            );
+            return Ok(());
+        }
+
+        info!(
+            table_id = %table_id,
+            current_snapshot_id = %current_snapshot_id,
+            new_snapshot_id = %new_snapshot_id,
+            current_replication_mask = %current_replication_mask,
+            new_replication_mask = %new_replication_mask,
+            "ducklake schema change detected"
+        );
+
+        let current_table_schema = self
+            .load_exact_table_schema(
+                table_id,
+                current_snapshot_id,
+                "Stored schema snapshot missing for DuckLake schema change",
+            )
+            .await?;
+        let current_schema = ReplicatedTableSchema::from_mask(
+            current_table_schema,
+            current_replication_mask.clone(),
+        );
+        self.cleanup_tombstone_columns_after_applied(&table_name, &current_schema).await;
+
+        let updated_metadata = DestinationTableMetadata::new_applied(
+            table_name.clone(),
+            current_snapshot_id,
+            current_replication_mask,
+        )
+        .with_schema_change(
+            new_snapshot_id,
+            new_replication_mask,
+            DestinationTableSchemaStatus::Applying,
+        );
+        self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
+
+        let diff = current_schema.diff(new_replicated_table_schema);
+        if let Err(error) = self.apply_schema_diff(&table_name, &diff).await {
+            warn!(
+                error = %error,
+                table_id = %table_id,
+                table = %table_name,
+                "ducklake schema change failed"
+            );
+            return Err(error);
+        }
+        self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema).await?;
+
+        let applied_metadata = updated_metadata.to_applied();
+        self.store.store_destination_table_metadata(table_id, applied_metadata).await?;
+        self.cleanup_tombstone_columns_after_applied(&table_name, new_replicated_table_schema)
+            .await;
+        self.created_tables.lock().insert(table_name.clone());
+
+        info!(
+            table_id = %table_id,
+            table = %table_name,
+            snapshot_id = %new_snapshot_id,
+            "ducklake schema change completed"
+        );
+
+        Ok(())
+    }
+
+    /// Applies a schema diff while serializing with table-local writes and
+    /// external maintenance.
+    async fn apply_schema_diff(&self, table_name: &str, diff: &SchemaDiff) -> EtlResult<()> {
+        if diff.is_empty() {
+            debug!(table = %table_name, "ducklake schema diff is empty");
+            return Ok(());
+        }
+
+        info!(
+            table = %table_name,
+            additions = diff.columns_to_add.len(),
+            removals = diff.columns_to_remove.len(),
+            changes = diff.columns_to_change.len(),
+            "ducklake applying schema diff"
+        );
+
+        let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let table_name = table_name.to_owned();
+        let diff = diff.clone();
+
+        run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), move |conn| {
+            let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
+                conn.execute_batch(sql).map_err(|source| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        description,
+                        format_query_error_detail(sql),
+                        source: source
+                    )
+                })
+            };
+
+            execute_ddl("begin transaction", "DuckLake DDL transaction failed")?;
+
+            let apply_result = (|| -> EtlResult<()> {
+                let column_names = read_ducklake_table_column_names_blocking(conn, &table_name)?;
+                let DuckLakeSchemaDiffPlan { statements, column_names: _column_names } =
+                    plan_schema_diff_sql_ducklake(&table_name, column_names, &diff)?;
+
+                for statement in statements {
+                    execute_ddl(&statement.sql, statement.error_description)?;
+                }
+
+                Ok(())
+            })();
+
+            if let Err(error) = apply_result {
+                if let Err(rollback_error) = conn.execute_batch("rollback") {
+                    warn!(
+                        error = %rollback_error,
+                        table = %table_name,
+                        "ducklake schema change rollback failed"
+                    );
+                }
+                return Err(error);
+            }
+
+            execute_ddl("commit", "DuckLake DDL transaction commit failed")
+        })
+        .await
+    }
+
+    /// Adds target replicated columns missing from the physical DuckLake table.
+    async fn reconcile_missing_replicated_columns(
+        &self,
+        table_name: &str,
+        target_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_name_for_read = table_name.to_owned();
+        let ducklake_columns = run_duckdb_blocking(
+            Arc::clone(&self.pool),
+            Arc::clone(&self.blocking_slots),
+            move |conn| read_ducklake_table_column_names_blocking(conn, &table_name_for_read),
+        )
+        .await?;
+        let missing_columns = missing_replicated_columns_ducklake(&ducklake_columns, target_schema);
+
+        if missing_columns.is_empty() {
+            return Ok(());
+        }
+
+        warn!(
+            table = %table_name,
+            missing_column_count = missing_columns.len(),
+            "ducklake destination table is missing replicated columns, reconciling"
+        );
+
+        let diff = SchemaDiff {
+            columns_to_add: missing_columns,
+            columns_to_remove: Vec::new(),
+            columns_to_change: Vec::new(),
+        };
+
+        self.apply_schema_diff(table_name, &diff).await
+    }
+
+    /// Drops ETL tombstone columns after schema metadata is durably `Applied`.
+    async fn cleanup_tombstone_columns(
+        &self,
+        table_name: &str,
+        target_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let table_name = table_name.to_owned();
+        let target_schema = target_schema.clone();
+
+        run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), move |conn| {
+            let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
+                conn.execute_batch(sql).map_err(|source| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        description,
+                        format_query_error_detail(sql),
+                        source: source
+                    )
+                })
+            };
+
+            let column_names = read_ducklake_table_column_names_blocking(conn, &table_name)?;
+            let columns_to_drop =
+                tombstone_columns_to_cleanup_ducklake(&column_names, &target_schema);
+            if columns_to_drop.is_empty() {
+                return Ok(());
+            }
+
+            info!(
+                table = %table_name,
+                tombstone_column_count = columns_to_drop.len(),
+                "ducklake cleaning up tombstone columns"
+            );
+
+            execute_ddl("begin transaction", "DuckLake tombstone cleanup transaction failed")?;
+
+            let cleanup_result = (|| -> EtlResult<()> {
+                for column_name in columns_to_drop {
+                    let sql = build_drop_column_sql_ducklake(&table_name, &column_name);
+                    execute_ddl(&sql, "DuckLake tombstone column drop failed")?;
+                }
+
+                Ok(())
+            })();
+
+            if let Err(error) = cleanup_result {
+                if let Err(rollback_error) = conn.execute_batch("rollback") {
+                    warn!(
+                        error = %rollback_error,
+                        table = %table_name,
+                        "ducklake tombstone cleanup rollback failed"
+                    );
+                }
+                return Err(error);
+            }
+
+            execute_ddl("commit", "DuckLake tombstone cleanup transaction commit failed")
+        })
+        .await
+    }
+
+    /// Best-effort wrapper for post-`Applied` tombstone cleanup.
+    async fn cleanup_tombstone_columns_after_applied(
+        &self,
+        table_name: &str,
+        target_schema: &ReplicatedTableSchema,
+    ) {
+        if let Err(error) = self.cleanup_tombstone_columns(table_name, target_schema).await {
+            warn!(
+                error = %error,
+                table = %table_name,
+                "ducklake tombstone column cleanup failed"
+            );
+        }
+    }
+
+    /// Reconciles persisted destination metadata with physical DuckLake tables.
+    async fn reconcile_existing_tables_after_restart(&self) -> EtlResult<()> {
+        let table_schemas = self.store.get_table_schemas().await?;
+        let table_ids: HashSet<_> = table_schemas.iter().map(|schema| schema.id).collect();
+
+        if table_ids.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            table_count = table_ids.len(),
+            "ducklake reconciling destination table schemas after restart"
+        );
+
+        for table_id in table_ids {
+            let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
+                continue;
+            };
+
+            let table_name = metadata.destination_table_id.clone();
+            if metadata.is_applying() {
+                self.recover_applying_metadata(table_id, &table_name, metadata, None).await?;
+                continue;
+            }
+
+            let target_table_schema = self
+                .load_exact_table_schema(
+                    table_id,
+                    metadata.snapshot_id,
+                    "DuckLake startup schema not found",
+                )
+                .await?;
+            let target_schema =
+                ReplicatedTableSchema::from_mask(target_table_schema, metadata.replication_mask);
+
+            self.issue_create_table_stmt(&table_name, &target_schema).await?;
+            self.reconcile_missing_replicated_columns(&table_name, &target_schema).await?;
+            self.cleanup_tombstone_columns_after_applied(&table_name, &target_schema).await;
+            self.created_tables.lock().insert(table_name);
+        }
+
+        Ok(())
+    }
+
     /// Writes streaming CDC events to the destination.
     ///
     /// Insert, Update, and Delete events are grouped by table and written in
@@ -888,15 +1764,12 @@ where
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
-            let mut table_id_to_mutations: HashMap<
-                TableId,
-                (ReplicatedTableSchema, Vec<TrackedTableMutation>),
-            > = HashMap::new();
+            let mut table_id_to_mutations: HashMap<TableId, Vec<TableMutationSegment>> =
+                HashMap::new();
 
-            // Accumulate non-truncate events, stopping at the first Truncate.
+            // Accumulate row events, stopping at the first DDL or truncate boundary.
             while let Some(event) = event_iter.peek() {
-                if matches!(event, Event::Truncate(_)) {
-                    // Handled later
+                if matches!(event, Event::Relation(_) | Event::Truncate(_)) {
                     break;
                 }
 
@@ -906,16 +1779,17 @@ where
                 match event {
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();
-                        let entry = table_id_to_mutations.entry(table_id).or_insert_with(|| {
-                            (insert.replicated_table_schema.clone(), Vec::new())
-                        });
-                        entry.0 = insert.replicated_table_schema;
-                        entry.1.push(TrackedTableMutation::new(
+                        let mutation = TrackedTableMutation::new(
                             insert.start_lsn,
                             insert.commit_lsn,
                             insert.tx_ordinal,
                             TableMutation::Insert(insert.table_row),
-                        ));
+                        );
+                        push_table_mutation_segment(
+                            table_id_to_mutations.entry(table_id).or_default(),
+                            insert.replicated_table_schema,
+                            mutation,
+                        );
                     }
                     Event::Update(update) => {
                         validate_ducklake_replica_identity(
@@ -923,20 +1797,22 @@ where
                             "update",
                         )?;
                         let table_id = update.replicated_table_schema.id();
-                        let entry = table_id_to_mutations.entry(table_id).or_insert_with(|| {
-                            (update.replicated_table_schema.clone(), Vec::new())
-                        });
-                        entry.0 = update.replicated_table_schema;
+                        let replicated_table_schema = update.replicated_table_schema;
                         let table_row = update.updated_table_row;
                         let old_table_row = update.old_table_row;
-                        let mutations = &mut entry.1;
+                        let segments = table_id_to_mutations.entry(table_id).or_default();
                         if let Some(old_row) = old_table_row {
-                            mutations.push(TrackedTableMutation::new(
+                            let mutation = TrackedTableMutation::new(
                                 update.start_lsn,
                                 update.commit_lsn,
                                 update.tx_ordinal,
                                 TableMutation::Update { delete_row: old_row, new_row: table_row },
-                            ));
+                            );
+                            push_table_mutation_segment(
+                                segments,
+                                replicated_table_schema,
+                                mutation,
+                            );
                         } else {
                             match table_row {
                                 UpdatedTableRow::Full(table_row) => {
@@ -944,23 +1820,28 @@ where
                                         "update event has no old row, deleting by replica \
                                          identity from new row"
                                     );
-                                    mutations.push(TrackedTableMutation::new(
+                                    let mutation = TrackedTableMutation::new(
                                         update.start_lsn,
                                         update.commit_lsn,
                                         update.tx_ordinal,
                                         TableMutation::Replace(table_row),
-                                    ));
+                                    );
+                                    push_table_mutation_segment(
+                                        segments,
+                                        replicated_table_schema,
+                                        mutation,
+                                    );
                                 }
                                 UpdatedTableRow::Partial(partial_row) => {
                                     let key_row = Self::key_row_from_updated_partial_row(
-                                        &entry.0,
+                                        &replicated_table_schema,
                                         &partial_row,
                                     )?;
                                     debug!(
                                         "update event has no old row, building key image from \
                                          partial new row"
                                     );
-                                    mutations.push(TrackedTableMutation::new(
+                                    let mutation = TrackedTableMutation::new(
                                         update.start_lsn,
                                         update.commit_lsn,
                                         update.tx_ordinal,
@@ -968,7 +1849,12 @@ where
                                             delete_row: OldTableRow::Key(key_row),
                                             new_row: UpdatedTableRow::Partial(partial_row),
                                         },
-                                    ));
+                                    );
+                                    push_table_mutation_segment(
+                                        segments,
+                                        replicated_table_schema,
+                                        mutation,
+                                    );
                                 }
                             }
                         }
@@ -980,7 +1866,7 @@ where
                         )?;
                         let Some(old_row) = delete.old_table_row else {
                             return Err(etl_error!(
-                                ErrorKind::InvalidState,
+                                ErrorKind::SourceReplicaIdentityError,
                                 "DuckLake delete requires an old row image",
                                 format!(
                                     "Table '{}' emitted a delete without an old row despite \
@@ -990,16 +1876,17 @@ where
                             ));
                         };
                         let table_id = delete.replicated_table_schema.id();
-                        let entry = table_id_to_mutations.entry(table_id).or_insert_with(|| {
-                            (delete.replicated_table_schema.clone(), Vec::new())
-                        });
-                        entry.0 = delete.replicated_table_schema;
-                        entry.1.push(TrackedTableMutation::new(
+                        let mutation = TrackedTableMutation::new(
                             delete.start_lsn,
                             delete.commit_lsn,
                             delete.tx_ordinal,
                             TableMutation::Delete(old_row),
-                        ));
+                        );
+                        push_table_mutation_segment(
+                            table_id_to_mutations.entry(table_id).or_default(),
+                            delete.replicated_table_schema,
+                            mutation,
+                        );
                     }
                     event => {
                         debug!(event_type = %event.event_type(), "skipping unsupported event type");
@@ -1012,73 +1899,74 @@ where
                 self.ensure_streaming_progress_table_exists().await?;
                 let mut join_set = JoinSet::new();
 
-                for (_, (replicated_table_schema, mutations)) in table_id_to_mutations {
-                    let table_name = self.ensure_table_exists(&replicated_table_schema).await?;
-                    let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
-                    let checkpoint_gate = Arc::clone(&self.checkpoint_gate);
-                    let pool = Arc::clone(&self.pool);
-                    let blocking_slots = Arc::clone(&self.blocking_slots);
-                    let destination_table_name = table_name.clone();
+                for (_, mutation_segments) in table_id_to_mutations {
+                    let destination = self.clone();
 
                     join_set.spawn(async move {
-                        let _table_write_permit = table_write_permit;
-                        let checkpoint_wait_started = tokio::time::Instant::now();
-                        info!(
-                            table = %destination_table_name,
-                            "ducklake waiting for checkpoint gate before streaming write: table={}",
-                            destination_table_name
-                        );
-                        let _checkpoint_guard = checkpoint_gate.read_owned().await;
-                        let checkpoint_wait = checkpoint_wait_started.elapsed();
-                        info!(
-                            table = %destination_table_name,
-                            checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
-                            "ducklake acquired checkpoint gate before streaming write: table={}, checkpoint_wait_ms={}",
-                            destination_table_name,
-                            checkpoint_wait.as_millis()
-                        );
-                        let last_sequence_key =
-                            read_table_streaming_progress_sequence_key_blocking(
-                                Arc::clone(&pool),
-                                Arc::clone(&blocking_slots),
+                        for segment in mutation_segments {
+                            let destination_table_name = destination
+                                .ensure_table_ready_for_streaming_schema(
+                                    &segment.replicated_table_schema,
+                                )
+                                .await?;
+                            let _table_write_permit = destination
+                                .acquire_table_write_slot(&destination_table_name)
+                                .await?;
+                            let checkpoint_wait_started = tokio::time::Instant::now();
+                            let _checkpoint_guard =
+                                Arc::clone(&destination.checkpoint_gate).read_owned().await;
+                            let checkpoint_wait = checkpoint_wait_started.elapsed();
+                            if checkpoint_wait > Duration::from_secs(1) {
+                                info!(
+                                    table = %destination_table_name,
+                                    checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
+                                    "ducklake waited for checkpoint gate before streaming write"
+                                );
+                            }
+                            let last_sequence_key =
+                                read_table_streaming_progress_sequence_key_blocking(
+                                    Arc::clone(&destination.pool),
+                                    Arc::clone(&destination.blocking_slots),
+                                    destination_table_name.clone(),
+                                )
+                                .await?;
+                            let pending_mutations = retain_mutations_after_sequence_key(
+                                segment.mutations,
+                                last_sequence_key,
+                            );
+                            if pending_mutations.is_empty() {
+                                debug!(
+                                    table = %destination_table_name,
+                                    "ducklake streaming mutation replay skipped, no pending events"
+                                );
+                                continue;
+                            }
+                            let is_first_streaming_batch = last_sequence_key.is_none();
+                            info!(
+                                table = %destination_table_name,
+                                pending_mutation_count = pending_mutations.len(),
+                                is_first_streaming_batch,
+                                "ducklake applying streaming mutations"
+                            );
+
+                            let prepared_batches = prepare_mutation_table_batches(
+                                &segment.replicated_table_schema,
                                 destination_table_name.clone(),
+                                pending_mutations,
+                            )?;
+                            apply_table_batches_with_retry(
+                                Arc::clone(&destination.pool),
+                                Arc::clone(&destination.blocking_slots),
+                                prepared_batches,
                             )
                             .await?;
-                        let pending_mutations =
-                            retain_mutations_after_sequence_key(mutations, last_sequence_key);
-                        if pending_mutations.is_empty() {
-                            debug!(
+                            info!(
                                 table = %destination_table_name,
-                                "ducklake streaming mutation replay skipped, no pending events: table={}",
-                                destination_table_name
+                                is_first_streaming_batch,
+                                "ducklake applied streaming mutations"
                             );
-                            return Ok::<(), etl::error::EtlError>(());
                         }
-                        let is_first_streaming_batch = last_sequence_key.is_none();
-                        info!(
-                            table = %destination_table_name,
-                            pending_mutation_count = pending_mutations.len(),
-                            is_first_streaming_batch,
-                            "ducklake applying streaming mutations: table={}, pending_mutation_count={}, is_first_streaming_batch={}",
-                            destination_table_name,
-                            pending_mutations.len(),
-                            is_first_streaming_batch
-                        );
 
-                        let prepared_batches = prepare_mutation_table_batches(
-                            &replicated_table_schema,
-                            destination_table_name.clone(),
-                            pending_mutations,
-                        )?;
-                        apply_table_batches_with_retry(pool, blocking_slots, prepared_batches)
-                            .await?;
-                        info!(
-                            table = %destination_table_name,
-                            is_first_streaming_batch,
-                            "ducklake applied streaming mutations: table={}, is_first_streaming_batch={}",
-                            destination_table_name,
-                            is_first_streaming_batch
-                        );
                         Ok::<(), etl::error::EtlError>(())
                     });
                 }
@@ -1087,6 +1975,14 @@ where
                     result.map_err(|_| {
                         etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake write task panicked")
                     })??;
+                }
+            }
+
+            // Apply schema changes sequentially before any later row events
+            // are encoded with the new replicated schema.
+            while let Some(Event::Relation(_)) = event_iter.peek() {
+                if let Some(Event::Relation(relation)) = event_iter.next() {
+                    self.handle_relation_event(&relation.replicated_table_schema).await?;
                 }
             }
 
@@ -1126,21 +2022,7 @@ where
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
-                        let checkpoint_wait_started = tokio::time::Instant::now();
-                        info!(
-                            table = %table_name,
-                            "ducklake waiting for checkpoint gate before streaming truncate: table={}",
-                            table_name
-                        );
                         let _checkpoint_guard = checkpoint_gate.read_owned().await;
-                        let checkpoint_wait = checkpoint_wait_started.elapsed();
-                        info!(
-                            table = %table_name,
-                            checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
-                            "ducklake acquired checkpoint gate before streaming truncate: table={}, checkpoint_wait_ms={}",
-                            table_name,
-                            checkpoint_wait.as_millis()
-                        );
                         let last_sequence_key =
                             read_table_streaming_progress_sequence_key_blocking(
                                 Arc::clone(&pool),
@@ -1153,19 +2035,11 @@ where
                         if pending_truncates.is_empty() {
                             debug!(
                                 table = %table_name,
-                                "ducklake streaming truncate replay skipped, no pending events: table={}",
-                                table_name
+                                "ducklake streaming truncate replay skipped, no pending events"
                             );
                             return Ok(());
                         }
 
-                        info!(
-                            table = %table_name,
-                            pending_truncate_count = pending_truncates.len(),
-                            "ducklake applying streaming truncates: table={}, pending_truncate_count={}",
-                            table_name,
-                            pending_truncates.len()
-                        );
                         let prepared_batch =
                             prepare_truncate_table_batch(table_name, pending_truncates);
                         apply_table_batch_with_retry(pool, blocking_slots, prepared_batch).await
@@ -1183,28 +2057,230 @@ where
         Ok(())
     }
 
+    /// Creates a DuckLake table and brackets the DDL with destination metadata
+    /// state transitions.
+    async fn create_table_with_metadata(
+        &self,
+        table_id: TableId,
+        table_name: &str,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let metadata = DestinationTableMetadata::new_applying(
+            table_name.to_owned(),
+            replicated_table_schema.inner().snapshot_id,
+            replicated_table_schema.replication_mask().clone(),
+        );
+        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+
+        self.issue_create_table_stmt(table_name, replicated_table_schema).await?;
+        self.reconcile_missing_replicated_columns(table_name, replicated_table_schema).await?;
+
+        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await
+    }
+
+    /// Issues DuckLake's idempotent `create table if not exists` statement.
+    async fn issue_create_table_stmt(
+        &self,
+        table_name: &str,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let column_schemas: Vec<_> = replicated_table_schema.column_schemas().cloned().collect();
+        let ddl = build_create_table_sql_ducklake(table_name, &column_schemas);
+        let created_tables = Arc::clone(&self.created_tables);
+        let table_name = table_name.to_owned();
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
+
+        run_duckdb_blocking(
+            Arc::clone(&self.pool),
+            Arc::clone(&self.blocking_slots),
+            move |conn| -> EtlResult<()> {
+                debug!(table = %table_name, "ducklake create table begin");
+                match conn.execute_batch(&ddl) {
+                    Ok(()) => {
+                        created_tables.lock().insert(table_name.clone());
+                    }
+                    Err(error) if is_create_table_conflict(&error, &table_name) => {
+                        created_tables.lock().insert(table_name.clone());
+                    }
+                    Err(error) => {
+                        return Err(etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake create table failed",
+                            format_query_error_detail(&ddl),
+                            source: error
+                        ));
+                    }
+                }
+                debug!(table = %table_name, "ducklake create table finished");
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Loads an exact table schema snapshot from the store.
+    async fn load_exact_table_schema(
+        &self,
+        table_id: TableId,
+        snapshot_id: SnapshotId,
+        missing_schema_description: &'static str,
+    ) -> EtlResult<Arc<TableSchema>> {
+        let table_schema =
+            self.store.get_table_schema(&table_id, snapshot_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    missing_schema_description,
+                    format!(
+                        "Table {} needs stored schema snapshot {}, but it was not found.",
+                        table_id, snapshot_id
+                    )
+                )
+            })?;
+
+        if table_schema.snapshot_id != snapshot_id {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                missing_schema_description,
+                format!(
+                    "Table {} needs exact schema snapshot {}, but only snapshot {} was found.",
+                    table_id, snapshot_id, table_schema.snapshot_id
+                )
+            ));
+        }
+
+        Ok(table_schema)
+    }
+
+    /// Loads the best available previous schema for interrupted DDL recovery.
+    async fn load_previous_recovery_table_schema(
+        &self,
+        table_id: TableId,
+        previous_snapshot_id: SnapshotId,
+    ) -> EtlResult<Arc<TableSchema>> {
+        let table_schema =
+            self.store.get_table_schema(&table_id, previous_snapshot_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "DuckLake schema recovery previous schema not found",
+                        format!(
+                            "Table {} needs stored schema snapshot {} to recover the destination \
+                             table, but it was not found.",
+                            table_id, previous_snapshot_id
+                        )
+                    )
+                },
+            )?;
+
+        if table_schema.snapshot_id != previous_snapshot_id {
+            warn!(
+                table_id = %table_id,
+                requested_snapshot_id = %previous_snapshot_id,
+                found_snapshot_id = %table_schema.snapshot_id,
+                "ducklake schema recovery exact previous schema not found, using nearest \
+                 available schema"
+            );
+        }
+
+        Ok(table_schema)
+    }
+
+    /// Resolves the target replicated schema for interrupted DDL recovery.
+    async fn target_schema_for_recovery(
+        &self,
+        table_id: TableId,
+        metadata: &DestinationTableMetadata,
+        provided_target_schema: Option<&ReplicatedTableSchema>,
+    ) -> EtlResult<ReplicatedTableSchema> {
+        if let Some(schema) = provided_target_schema
+            && schema.inner().snapshot_id == metadata.snapshot_id
+            && schema.replication_mask() == &metadata.replication_mask
+        {
+            return Ok(schema.clone());
+        }
+
+        let target_table_schema = self
+            .load_exact_table_schema(
+                table_id,
+                metadata.snapshot_id,
+                "DuckLake schema recovery target schema not found",
+            )
+            .await?;
+
+        Ok(ReplicatedTableSchema::from_mask(target_table_schema, metadata.replication_mask.clone()))
+    }
+
+    /// Replays interrupted DuckLake DDL and transitions metadata back to
+    /// `Applied`.
+    async fn recover_applying_metadata(
+        &self,
+        table_id: TableId,
+        table_name: &str,
+        metadata: DestinationTableMetadata,
+        target_schema: Option<&ReplicatedTableSchema>,
+    ) -> EtlResult<DestinationTableMetadata> {
+        warn!(
+            table_id = %table_id,
+            table = %table_name,
+            "ducklake table has Applying metadata, recovering interrupted operation"
+        );
+
+        let target_schema =
+            self.target_schema_for_recovery(table_id, &metadata, target_schema).await?;
+
+        match metadata.previous_snapshot_id {
+            Some(previous_snapshot_id) => {
+                let previous_table_schema = self
+                    .load_previous_recovery_table_schema(table_id, previous_snapshot_id)
+                    .await?;
+                let previous_replication_mask = previous_replication_mask_for_recovery(
+                    &previous_table_schema,
+                    target_schema.inner(),
+                    &metadata.replication_mask,
+                );
+                let old_schema = ReplicatedTableSchema::from_mask(
+                    previous_table_schema,
+                    previous_replication_mask,
+                );
+                let diff = old_schema.diff(&target_schema);
+                self.apply_schema_diff(table_name, &diff).await?;
+            }
+            None => {
+                self.issue_create_table_stmt(table_name, &target_schema).await?;
+            }
+        }
+        self.reconcile_missing_replicated_columns(table_name, &target_schema).await?;
+
+        let metadata = metadata.to_applied();
+        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+        self.cleanup_tombstone_columns_after_applied(table_name, &target_schema).await;
+        self.created_tables.lock().insert(table_name.to_owned());
+
+        Ok(metadata)
+    }
+
     /// Ensures the destination table exists, creating it (DDL) if necessary.
     async fn ensure_table_exists(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
         let table_id = replicated_table_schema.id();
-        let table_name = self.resolve_destination_table_name(replicated_table_schema).await?;
+        let metadata = self.store.get_destination_table_metadata(table_id).await?;
+        let table_name = metadata.as_ref().map_or_else(
+            || table_name_to_ducklake_table_name(replicated_table_schema.name()),
+            |metadata| Ok(metadata.destination_table_id.clone()),
+        )?;
 
-        // Fast path: already created.
+        if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_applying)
+            && self.created_tables.lock().contains(&table_name)
         {
-            let cache = self.created_tables.lock();
-            if cache.contains(&table_name) {
-                return Ok(table_name);
-            }
+            return Ok(table_name);
         }
 
         info!(
             table_id = %table_id,
             table = %table_name,
-            "ducklake destination table cache miss, ensuring table exists: table_id={}, table={}",
-            table_id,
-            table_name
+            "ducklake destination table cache miss, ensuring table exists"
         );
 
         let _table_creation_permit =
@@ -1212,64 +2288,59 @@ where
                 etl_error!(ErrorKind::InvalidState, "DuckLake table creation semaphore closed")
             })?;
 
+        let metadata = self.store.get_destination_table_metadata(table_id).await?;
+        let table_name = metadata.as_ref().map_or_else(
+            || table_name_to_ducklake_table_name(replicated_table_schema.name()),
+            |metadata| Ok(metadata.destination_table_id.clone()),
+        )?;
+
+        if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_applying)
+            && self.created_tables.lock().contains(&table_name)
         {
-            let cache = self.created_tables.lock();
-            if cache.contains(&table_name) {
-                return Ok(table_name);
+            return Ok(table_name);
+        }
+
+        match metadata {
+            None => {
+                self.create_table_with_metadata(table_id, &table_name, replicated_table_schema)
+                    .await?;
+            }
+            Some(metadata) if metadata.is_applying() => {
+                self.recover_applying_metadata(
+                    table_id,
+                    &table_name,
+                    metadata,
+                    Some(replicated_table_schema),
+                )
+                .await?;
+            }
+            Some(_) => {
+                self.issue_create_table_stmt(&table_name, replicated_table_schema).await?;
+                self.reconcile_missing_replicated_columns(&table_name, replicated_table_schema)
+                    .await?;
             }
         }
 
-        let metadata = DestinationTableMetadata::new_applying(
-            table_name.clone(),
-            replicated_table_schema.inner().snapshot_id,
-            replicated_table_schema.replication_mask().clone(),
-        );
-        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
-
-        let ddl = build_create_table_sql_ducklake(
-            &table_name,
-            &replicated_table_schema.inner().column_schemas,
-        );
-
-        let created_tables = Arc::clone(&self.created_tables);
-        let table_name_clone = table_name.clone();
-        let _checkpoint_guard = self.acquire_mutation_guard().await;
-
-        run_duckdb_blocking(
-            Arc::clone(&self.pool),
-            Arc::clone(&self.blocking_slots),
-            move |conn| -> EtlResult<()> {
-                debug!(
-                    table = %table_name_clone,
-                    "ducklake create table begin"
-                );
-                match conn.execute_batch(&ddl) {
-                    Ok(()) => {
-                        created_tables.lock().insert(table_name_clone.clone());
-                    }
-                    Err(e) if is_create_table_conflict(&e, &table_name_clone) => {
-                        created_tables.lock().insert(table_name_clone.clone());
-                    }
-                    Err(e) => {
-                        return Err(etl_error!(
-                            ErrorKind::DestinationQueryFailed,
-                            "DuckLake CREATE TABLE failed",
-                            format_query_error_detail(&ddl),
-                            source: e
-                        ));
-                    }
-                }
-                debug!(
-                    table = %table_name_clone,
-                    "ducklake create table finished"
-                );
-                Ok(())
-            },
-        )
-        .await?;
-        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
-
         Ok(table_name)
+    }
+
+    /// Ensures destination metadata and physical columns can accept a row
+    /// schema.
+    async fn ensure_table_ready_for_streaming_schema(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<DuckLakeTableName> {
+        let table_id = replicated_table_schema.id();
+        if let Some(metadata) = self.store.get_destination_table_metadata(table_id).await?
+            && metadata.is_applied()
+            && (metadata.snapshot_id < replicated_table_schema.inner().snapshot_id
+                || (metadata.snapshot_id == replicated_table_schema.inner().snapshot_id
+                    && &metadata.replication_mask != replicated_table_schema.replication_mask()))
+        {
+            self.handle_relation_event(replicated_table_schema).await?;
+        }
+
+        self.ensure_table_exists(replicated_table_schema).await
     }
 
     /// Ensures the ETL-managed replay marker table exists.
@@ -1318,19 +2389,14 @@ where
             Err(TryAcquireError::NoPermits) => {
                 info!(
                     table = %table_name,
-                    "ducklake waiting for table write slot: table={}",
-                    table_name
+                    "ducklake waiting for table write slot"
                 );
-                let started = Instant::now();
                 let permit = table_slot.acquire_owned().await.map_err(|_| {
                     etl_error!(ErrorKind::InvalidState, "DuckLake table write semaphore closed")
                 })?;
                 info!(
                     table = %table_name,
-                    wait_ms = started.elapsed().as_millis() as u64,
-                    "ducklake acquired table write slot after wait: table={}, wait_ms={}",
-                    table_name,
-                    started.elapsed().as_millis()
+                    "ducklake acquired table write slot after wait"
                 );
                 Ok(permit)
             }
@@ -1343,42 +2409,16 @@ where
     /// Acquires shared mutation access so exclusive background maintenance
     /// cannot start in the middle of a foreground write sequence.
     async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
-        let started = Instant::now();
-        info!(
-            metadata_schema = %self.metadata_schema,
-            "ducklake waiting for shared mutation guard: metadata_schema={}",
-            self.metadata_schema
-        );
-        let guard = Arc::clone(&self.checkpoint_gate).read_owned().await;
-        info!(
-            metadata_schema = %self.metadata_schema,
-            wait_ms = started.elapsed().as_millis() as u64,
-            "ducklake acquired shared mutation guard: metadata_schema={}, wait_ms={}",
-            self.metadata_schema,
-            started.elapsed().as_millis()
-        );
-        guard
+        Arc::clone(&self.checkpoint_gate).read_owned().await
     }
 
     /// Acquires exclusive DuckLake mutation access for an external maintenance
     /// run. While this guard is held, new foreground writes and in-process
     /// background maintenance operations wait before mutating the catalog.
     pub async fn acquire_external_maintenance_pause(&self) -> DuckLakeExternalMaintenancePause {
-        let started = Instant::now();
-        info!(
-            metadata_schema = %self.metadata_schema,
-            "ducklake waiting for exclusive external maintenance mutation guard: metadata_schema={}",
-            self.metadata_schema
-        );
-        let guard = Arc::clone(&self.checkpoint_gate).write_owned().await;
-        info!(
-            metadata_schema = %self.metadata_schema,
-            wait_ms = started.elapsed().as_millis() as u64,
-            "ducklake acquired exclusive external maintenance mutation guard: metadata_schema={}, wait_ms={}",
-            self.metadata_schema,
-            started.elapsed().as_millis()
-        );
-        DuckLakeExternalMaintenancePause { _guard: guard }
+        DuckLakeExternalMaintenancePause {
+            _guard: Arc::clone(&self.checkpoint_gate).write_owned().await,
+        }
     }
 
     /// Samples catalog state and returns which externally coordinated
@@ -1620,8 +2660,8 @@ mod tests {
         config::{PgConnectionConfig, TcpKeepaliveConfig},
         store::{both::memory::MemoryStore, schema::SchemaStore},
         types::{
-            Cell, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask, TableRow,
-            TableSchema, Type as PgType,
+            Cell, ColumnChange, ColumnModification, ColumnSchema, IdentityMask, PartialTableRow,
+            ReplicationMask, SchemaDiff, SnapshotId, TableRow, TableSchema, Type as PgType,
         },
     };
     use etl_maintenance::ducklake::flush_table_inlined_data;
@@ -1653,8 +2693,8 @@ mod tests {
             TableId::new(table_id),
             TableName::new(schema.to_owned(), table.to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ],
         )
     }
@@ -1664,9 +2704,9 @@ mod tests {
             TableId::new(2),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, None, false),
-                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 3, None, true),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, false),
+                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 3, true),
             ],
         ));
 
@@ -1685,6 +2725,54 @@ mod tests {
             ReplicationMask::all(&table_schema),
             IdentityMask::from_bytes(vec![0, 0]),
         )
+    }
+
+    fn rename_change(old_name: &str, new_name: &str, ordinal_position: i32) -> ColumnChange {
+        ColumnChange {
+            ordinal_position,
+            old_column: ColumnSchema::new(
+                old_name.to_owned(),
+                PgType::TEXT,
+                -1,
+                ordinal_position,
+                true,
+            ),
+            new_column: ColumnSchema::new(
+                new_name.to_owned(),
+                PgType::TEXT,
+                -1,
+                ordinal_position,
+                true,
+            ),
+            modifications: vec![ColumnModification::Rename {
+                old_name: old_name.to_owned(),
+                new_name: new_name.to_owned(),
+            }],
+        }
+    }
+
+    fn default_change(
+        name: &str,
+        ordinal_position: i32,
+        old_expression: Option<&str>,
+        new_expression: Option<&str>,
+    ) -> ColumnChange {
+        let old_column =
+            ColumnSchema::new(name.to_owned(), PgType::TEXT, -1, ordinal_position, true)
+                .with_default_expression_option(old_expression.map(ToOwned::to_owned));
+        let new_column =
+            ColumnSchema::new(name.to_owned(), PgType::TEXT, -1, ordinal_position, true)
+                .with_default_expression_option(new_expression.map(ToOwned::to_owned));
+
+        ColumnChange {
+            ordinal_position,
+            old_column,
+            new_column,
+            modifications: vec![ColumnModification::Default {
+                old_expression: old_expression.map(ToOwned::to_owned),
+                new_expression: new_expression.map(ToOwned::to_owned),
+            }],
+        }
     }
 
     #[test]
@@ -1722,6 +2810,331 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
         assert_eq!(error.description(), Some("DuckLake update requires a replica identity"));
+    }
+
+    #[test]
+    fn plan_schema_diff_renames_before_adding_reused_source_name() {
+        let diff = SchemaDiff {
+            columns_to_add: vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
+            columns_to_remove: Vec::new(),
+            columns_to_change: vec![rename_change("name", "full_name", 2)],
+        };
+
+        let plan =
+            plan_schema_diff_sql_ducklake("users", vec!["id".to_owned(), "name".to_owned()], &diff)
+                .expect("schema diff should plan");
+        let statement_sql: Vec<_> =
+            plan.statements.iter().map(|statement| statement.sql.clone()).collect();
+
+        assert_eq!(
+            statement_sql,
+            vec![
+                r#"alter table "lake"."users" rename column "name" to "full_name""#,
+                r#"alter table "lake"."users" add column "name" varchar"#,
+            ]
+        );
+        assert_eq!(plan.column_names, vec!["id", "full_name", "name"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_adds_column_with_supported_default() {
+        let diff = SchemaDiff {
+            columns_to_add: vec![
+                ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true)
+                    .with_default_expression("'pending'::text".to_owned()),
+            ],
+            columns_to_remove: Vec::new(),
+            columns_to_change: Vec::new(),
+        };
+
+        let plan =
+            plan_schema_diff_sql_ducklake("users", vec!["id".to_owned(), "name".to_owned()], &diff)
+                .expect("schema diff should plan");
+        let statement_sql: Vec<_> =
+            plan.statements.iter().map(|statement| statement.sql.clone()).collect();
+
+        assert_eq!(
+            statement_sql,
+            vec![r#"alter table "lake"."users" add column "status" varchar default 'pending'"#]
+        );
+        assert_eq!(plan.column_names, vec!["id", "name", "status"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_skips_unsupported_default_drop() {
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: Vec::new(),
+            columns_to_change: vec![default_change(
+                "status",
+                3,
+                Some("array['unsupported']::text[]"),
+                None,
+            )],
+        };
+
+        let plan = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
+            &diff,
+        )
+        .expect("schema diff should plan");
+
+        assert!(plan.statements.is_empty());
+        assert_eq!(plan.column_names, vec!["id", "name", "status"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_skips_replayed_rename_with_reused_source_name() {
+        let diff = SchemaDiff {
+            columns_to_add: vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
+            columns_to_remove: Vec::new(),
+            columns_to_change: vec![rename_change("name", "full_name", 2)],
+        };
+
+        let plan = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), "full_name".to_owned(), "name".to_owned()],
+            &diff,
+        )
+        .expect("schema diff replay should plan");
+
+        assert!(plan.statements.is_empty());
+        assert_eq!(plan.column_names, vec!["id", "full_name", "name"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_skips_replayed_rename_with_source_name_as_rename_target() {
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: Vec::new(),
+            columns_to_change: vec![
+                rename_change("name", "full_name", 2),
+                rename_change("email", "name", 3),
+            ],
+        };
+
+        let plan = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), "full_name".to_owned(), "name".to_owned()],
+            &diff,
+        )
+        .expect("schema diff replay should plan");
+
+        assert!(plan.statements.is_empty());
+        assert_eq!(plan.column_names, vec!["id", "full_name", "name"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_drops_stale_rename_source_when_target_exists() {
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: Vec::new(),
+            columns_to_change: vec![rename_change("ddl_col_4_1", "ddl_col_4_0", 4)],
+        };
+
+        let plan = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), "ddl_col_4_1".to_owned(), "ddl_col_4_0".to_owned()],
+            &diff,
+        )
+        .expect("schema diff with stale rename source should plan");
+        let statement_sql: Vec<_> =
+            plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
+
+        assert_eq!(statement_sql, vec![r#"alter table "lake"."users" drop column "ddl_col_4_1""#]);
+        assert_eq!(plan.column_names, vec!["id", "ddl_col_4_0"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_tombstones_removed_column_when_name_is_reused_by_rename() {
+        let removed_column = ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true);
+        let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: vec![removed_column],
+            columns_to_change: vec![rename_change("name", "status", 2)],
+        };
+
+        let plan = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
+            &diff,
+        )
+        .expect("schema diff should tombstone reused removed name");
+        let statement_sql: Vec<_> =
+            plan.statements.iter().map(|statement| statement.sql.clone()).collect();
+
+        assert_eq!(
+            statement_sql,
+            vec![
+                format!(
+                    r#"alter table "lake"."users" rename column "status" to "{tombstone_name}""#
+                ),
+                r#"alter table "lake"."users" rename column "name" to "status""#.to_owned(),
+            ]
+        );
+        assert_eq!(plan.column_names, vec!["id", "status", tombstone_name.as_str()]);
+    }
+
+    #[test]
+    fn plan_schema_diff_tombstones_removed_column_when_name_is_reused_by_add() {
+        let removed_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true);
+        let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
+        let diff = SchemaDiff {
+            columns_to_add: vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
+            columns_to_remove: vec![removed_column],
+            columns_to_change: Vec::new(),
+        };
+
+        let plan =
+            plan_schema_diff_sql_ducklake("users", vec!["id".to_owned(), "name".to_owned()], &diff)
+                .expect("schema diff should tombstone reused removed name");
+        let statement_sql: Vec<_> =
+            plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
+
+        assert_eq!(
+            statement_sql,
+            vec![
+                format!(r#"alter table "lake"."users" rename column "name" to "{tombstone_name}""#),
+                r#"alter table "lake"."users" add column "name" varchar"#.to_owned(),
+            ]
+        );
+        assert_eq!(plan.column_names, vec!["id", tombstone_name.as_str(), "name"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_skips_replayed_reused_removed_column_name() {
+        let removed_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true);
+        let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
+        let diff = SchemaDiff {
+            columns_to_add: vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
+            columns_to_remove: vec![removed_column],
+            columns_to_change: Vec::new(),
+        };
+
+        let plan = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), tombstone_name.clone(), "name".to_owned()],
+            &diff,
+        )
+        .expect("schema diff replay should plan");
+
+        assert!(plan.statements.is_empty());
+        assert_eq!(plan.column_names, vec!["id", tombstone_name.as_str(), "name"]);
+    }
+
+    #[test]
+    fn tombstone_columns_to_cleanup_keeps_active_prefixed_columns() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new(
+                    "__etl_ducklake_dropped_business".to_owned(),
+                    PgType::TEXT,
+                    -1,
+                    2,
+                    true,
+                ),
+            ],
+        ));
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_mask(table_schema, ReplicationMask::from_bytes(vec![1, 1]));
+        let column_names = vec![
+            "id".to_owned(),
+            "__etl_ducklake_dropped_business".to_owned(),
+            "__etl_ducklake_dropped_3_abcdef".to_owned(),
+        ];
+
+        let columns_to_cleanup =
+            tombstone_columns_to_cleanup_ducklake(&column_names, &replicated_table_schema);
+
+        assert_eq!(columns_to_cleanup, vec!["__etl_ducklake_dropped_3_abcdef"]);
+    }
+
+    #[test]
+    fn missing_replicated_columns_ducklake_returns_only_active_target_columns() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(4),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 3, true),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 4, true),
+            ],
+        ));
+        let target_schema = ReplicatedTableSchema::from_mask(
+            Arc::clone(&table_schema),
+            ReplicationMask::from_bytes(vec![1, 1, 0, 1]),
+        );
+
+        let missing_columns = missing_replicated_columns_ducklake(
+            &["id".to_owned(), "name".to_owned()],
+            &target_schema,
+        );
+        let missing_column_names: Vec<_> =
+            missing_columns.iter().map(|column| column.name.as_str()).collect();
+
+        assert_eq!(missing_column_names, vec!["email"]);
+    }
+
+    #[test]
+    fn previous_replication_mask_for_recovery_matches_previous_schema_width() {
+        let previous_schema = TableSchema::new(
+            TableId::new(4),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, true),
+            ],
+        );
+        let target_schema = TableSchema::with_snapshot_id(
+            previous_schema.id,
+            previous_schema.name.clone(),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, true),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
+            ],
+            SnapshotId::from(42_u64),
+        );
+        let target_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
+
+        let previous_mask =
+            previous_replication_mask_for_recovery(&previous_schema, &target_schema, &target_mask);
+
+        assert_eq!(previous_mask.to_bytes(), vec![1, 0]);
+    }
+
+    #[test]
+    fn previous_replication_mask_for_recovery_keeps_removed_columns_for_drop_diff() {
+        let previous_schema = TableSchema::new(
+            TableId::new(5),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+                ColumnSchema::new("old_col".to_owned(), PgType::TEXT, -1, 3, true),
+            ],
+        );
+        let target_schema = TableSchema::with_snapshot_id(
+            previous_schema.id,
+            previous_schema.name.clone(),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ],
+            SnapshotId::from(43_u64),
+        );
+        let target_mask = ReplicationMask::from_bytes(vec![1, 1]);
+
+        let previous_mask =
+            previous_replication_mask_for_recovery(&previous_schema, &target_schema, &target_mask);
+
+        assert_eq!(previous_mask.to_bytes(), vec![1, 1, 1]);
     }
 
     fn path_to_file_url(path: &Path) -> Url {
@@ -1785,7 +3198,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for root in candidate_roots {
-            let extension_dir = root.join("1.5.2").join(platform_dir);
+            let extension_dir = root.join("1.5.3").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
             let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
@@ -1865,8 +3278,7 @@ mod tests {
             [],
             |row| row.get::<_, i64>(0),
         )
-        .map(|count| count > 0)
-        .unwrap_or(false)
+        .is_ok_and(|count| count > 0)
     }
 
     async fn open_lake_conn_when_table_visible(
@@ -1950,7 +3362,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
                 store,
             )
             .await
@@ -2016,7 +3427,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
                 store,
             )
             .await
@@ -2075,7 +3485,6 @@ mod tests {
                 catalog.clone(),
                 data.clone(),
                 1,
-                None,
                 None,
                 None,
                 None,

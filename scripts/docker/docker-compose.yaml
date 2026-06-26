@@ -1,0 +1,230 @@
+x-lakekeeper-env: &lakekeeper-env
+  environment:
+    - LAKEKEEPER__PG_ENCRYPTION_KEY=insecure-encryption-key
+    - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres}:${LAKEKEEPER_POSTGRES_PASSWORD:-lakekeeper-postgres}@catalog-postgres:5432/${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}
+    - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres}:${LAKEKEEPER_POSTGRES_PASSWORD:-lakekeeper-postgres}@catalog-postgres:5432/${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}
+    - RUST_LOG=info
+
+name: etl-stack-pg-${POSTGRES_VERSION:-18}
+
+services:
+  # Start Postgres
+  source-postgres:
+    image: ${POSTGRES_IMAGE:-postgres:18}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5430}:5432"
+    shm_size: 1gb
+    volumes:
+      - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    # These parameters are configured for local testing only.
+    # In production, use PostgreSQL defaults or your own tuned values.
+    # `wal_sender_timeout/2` is the keepalive timeout for streaming replication, we set it to 10s to make tests
+    # run fast but also simulate a very low timeout and see how the system behaves.
+    command: >
+      postgres
+      -N 1000
+      -c listen_addresses=*
+      -c wal_level=logical
+      -c max_wal_senders=${POSTGRES_MAX_WAL_SENDERS:-100}
+      -c max_replication_slots=${POSTGRES_MAX_REPLICATION_SLOTS:-100}
+      -c wal_sender_timeout=${POSTGRES_WAL_SENDER_TIMEOUT:-10s}
+      -c hba_file=/etc/postgresql/pg_hba.conf
+      ${POSTGRES_SSL_ARGS:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  source-postgres-read-replica:
+    image: ${POSTGRES_IMAGE:-postgres:18}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      PGDATA: /var/lib/postgresql/data
+      POSTGRES_MAX_WAL_SENDERS: ${POSTGRES_MAX_WAL_SENDERS:-100}
+      POSTGRES_MAX_REPLICATION_SLOTS: ${POSTGRES_MAX_REPLICATION_SLOTS:-100}
+      POSTGRES_WAL_SENDER_TIMEOUT: ${POSTGRES_WAL_SENDER_TIMEOUT:-10s}
+      POSTGRES_REPLICA_WAL_RECEIVER_STATUS_INTERVAL: ${POSTGRES_REPLICA_WAL_RECEIVER_STATUS_INTERVAL:-1s}
+      POSTGRES_REPLICA_MAX_STANDBY_STREAMING_DELAY: ${POSTGRES_REPLICA_MAX_STANDBY_STREAMING_DELAY:--1}
+      POSTGRES_SSL_ARGS: ${POSTGRES_SSL_ARGS:-}
+    ports:
+      - "${POSTGRES_REPLICA_PORT:-6430}:5432"
+    shm_size: 1gb
+    volumes:
+      - ${POSTGRES_REPLICA_DATA_VOLUME:-postgres_replica_data}:/var/lib/postgresql
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./postgres/start-read-replica.sh:/usr/local/bin/start-read-replica.sh:ro
+    entrypoint: ["bash", "/usr/local/bin/start-read-replica.sh"]
+    restart: unless-stopped
+    depends_on:
+      source-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-etl}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-etl}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-9001}:9000"
+    volumes:
+      - ${CLICKHOUSE_DATA_VOLUME:-clickhouse_data}:/var/lib/clickhouse
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --query \"SELECT 1\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  catalog-postgres:
+      image: postgres:${LAKEKEEPER_POSTGRES_VERSION:-18}
+      environment:
+        POSTGRES_USER: ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres}
+        POSTGRES_PASSWORD: ${LAKEKEEPER_POSTGRES_PASSWORD:-lakekeeper-postgres}
+        POSTGRES_DB: ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}
+      volumes:
+        - ${LAKEKEEPER_POSTGRES_DATA_VOLUME:-lakekeeper_postgres_data}:/var/lib/postgresql
+      restart: unless-stopped
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres} -d ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}"]
+        interval: 5s
+        timeout: 5s
+        retries: 5
+
+  # Start MinIO for S3-compatible object storage
+  object-store-minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: minio-admin
+      MINIO_ROOT_PASSWORD: minio-admin-password
+    command: server /data --console-address ":9001"
+    ports:
+      - "9010:9000"
+      - "9011:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Create MinIO bucket
+  object-store-minio-init:
+    image: minio/mc:latest
+    depends_on:
+      object-store-minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set iceberg http://object-store-minio:9000 minio-admin minio-admin-password;
+      mc mb iceberg/dev-and-test;
+      exit 0;
+      "
+
+  # Migrate lakekeeper database
+  catalog-lakekeeper-migrate:
+    image: quay.io/lakekeeper/catalog:latest-main
+    <<: *lakekeeper-env
+    restart: "no"
+    command: ["migrate"]
+    depends_on:
+      catalog-postgres:
+        condition: service_healthy
+
+  # Start lakekeeper, an iceberg REST catalog
+  catalog-lakekeeper-api:
+    image: quay.io/lakekeeper/catalog:latest-main
+    depends_on:
+      catalog-lakekeeper-migrate:
+        condition: service_completed_successfully
+      object-store-minio-init:
+        condition: service_completed_successfully
+    <<: *lakekeeper-env
+    command: ["serve"]
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 1s
+      timeout: 10s
+      retries: 3
+      start_period: 3s
+    ports:
+      - "8182:8181"
+
+  # Bootstrap lakekeeper. After deployment, lakekeeper needs to be bootstrapped.
+  catalog-lakekeeper-bootstrap:
+    image: curlimages/curl
+    depends_on:
+      catalog-lakekeeper-api:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - -w
+      - "%{http_code}"
+      - "-X"
+      - "POST"
+      - "-v"
+      - "http://catalog-lakekeeper-api:8181/management/v1/bootstrap"
+      - "-H"
+      - "Content-Type: application/json"
+      - "--data"
+      - '{"accept-terms-of-use": true}'
+      - "-o"
+      - "/dev/null"
+      # - "--fail-with-body"
+
+  # Create a warehouse for development and testing
+  catalog-lakekeeper-warehouse-init:
+    image: curlimages/curl
+    depends_on:
+      catalog-lakekeeper-api:
+        condition: service_healthy
+      catalog-lakekeeper-bootstrap:
+        condition: service_completed_successfully
+      object-store-minio-init:
+        condition: service_completed_successfully
+    restart: "no"
+    command:
+      - -w
+      - "%{http_code}"
+      - "-X"
+      - "POST"
+      - "-v"
+      - "http://catalog-lakekeeper-api:8181/management/v1/warehouse"
+      - "-H"
+      - "Content-Type: application/json"
+      - "--data"
+      - "@warehouse.json"
+      - "-o"
+      - "/dev/null"
+      # - "--fail-with-body"
+    volumes:
+      - ./warehouse.json:/home/curl_user/warehouse.json
+
+volumes:
+  postgres_data:
+    driver: local
+  postgres_replica_data:
+    driver: local
+  clickhouse_data:
+    driver: local
+  lakekeeper_postgres_data:
+    driver: local
+  minio_data:
+    driver: local

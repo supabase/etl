@@ -15,8 +15,8 @@ use etl::{
     state::destination_table_metadata::DestinationTableMetadata,
     store::SharedStateStore,
     types::{
-        Cell, ColumnSchema, Event, IdentityType, OldTableRow, ReplicatedTableSchema, TableId,
-        TableName, TableRow, Type, generate_sequence_number,
+        Cell, ColumnSchema, Event, OldTableRow, ReplicatedTableSchema, TableId, TableName,
+        TableRow, Type, UpdatedTableRow, generate_sequence_number,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
@@ -338,23 +338,11 @@ where
                         entry.1.push(insert.table_row);
                     }
                     Event::Update(update) => {
-                        validate_iceberg_replica_identity(&update.replicated_table_schema)?;
                         let sequence_key = update.event_sequence_key().to_string();
-                        let mut table_row = match update.updated_table_row {
-                            etl::types::UpdatedTableRow::Full(row) => row,
-                            etl::types::UpdatedTableRow::Partial(_) => {
-                                return Err(etl_error!(
-                                    ErrorKind::InvalidState,
-                                    "Iceberg update requires a full new row image",
-                                    format!(
-                                        "Table '{}' emitted a partial update row. Configure \
-                                         replication so all updated values are available before \
-                                         writing to Iceberg.",
-                                        update.replicated_table_schema.name()
-                                    )
-                                ));
-                            }
-                        };
+                        let mut table_row = iceberg_update_row(
+                            &update.replicated_table_schema,
+                            update.updated_table_row,
+                        )?;
                         table_row.values_mut().push(IcebergOperationType::Update.into());
                         table_row.values_mut().push(Cell::String(sequence_key));
 
@@ -365,30 +353,11 @@ where
                         entry.1.push(table_row);
                     }
                     Event::Delete(delete) => {
-                        validate_iceberg_replica_identity(&delete.replicated_table_schema)?;
                         let sequence_key = delete.event_sequence_key().to_string();
-                        let Some(old_table_row) = delete.old_table_row else {
-                            return Err(etl_error!(
-                                ErrorKind::InvalidState,
-                                "Iceberg delete requires an old row image",
-                                format!(
-                                    "Table '{}' emitted a delete without an old row image even \
-                                     though Iceberg requires FULL replica identity.",
-                                    delete.replicated_table_schema.name()
-                                )
-                            ));
-                        };
-                        let OldTableRow::Full(mut old_table_row) = old_table_row else {
-                            return Err(etl_error!(
-                                ErrorKind::InvalidState,
-                                "Iceberg delete requires a full old row image",
-                                format!(
-                                    "Table '{}' emitted a key-only delete image. Configure \
-                                     REPLICA IDENTITY FULL for Iceberg delete support.",
-                                    delete.replicated_table_schema.name()
-                                )
-                            ));
-                        };
+                        let mut old_table_row = iceberg_delete_row(
+                            &delete.replicated_table_schema,
+                            delete.old_table_row,
+                        )?;
                         old_table_row.values_mut().push(IcebergOperationType::Delete.into());
                         old_table_row.values_mut().push(Cell::String(sequence_key));
 
@@ -399,8 +368,6 @@ where
                         entry.1.push(old_table_row);
                     }
                     Event::Relation(relation) => {
-                        validate_iceberg_replica_identity(&relation.replicated_table_schema)?;
-
                         // Check if schema has changed - if so, error since Iceberg doesn't
                         // support schema changes yet.
                         let table_id = relation.replicated_table_schema.id();
@@ -491,11 +458,9 @@ where
     /// Prepares a table for Iceberg writes with schema-aware table creation.
     ///
     /// Augments the provided schema with CDC columns and ensures the
-    /// corresponding Iceberg table exists in the namespace. Also validates
-    /// that the source table uses `REPLICA IDENTITY FULL`, which Iceberg needs
-    /// for delete replay. Uses caching to avoid redundant table creation
-    /// checks and holds a lock during the entire preparation to prevent race
-    /// conditions.
+    /// corresponding Iceberg table exists in the namespace. Uses caching to
+    /// avoid redundant table creation checks and holds a lock during the entire
+    /// preparation to prevent race conditions.
     ///
     /// Follows the applying -> applied pattern for crash recovery:
     /// 1. Store metadata with `Applying` status before creating the table
@@ -506,8 +471,6 @@ where
         inner: &mut Inner,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<(String, IcebergTableName)> {
-        validate_iceberg_replica_identity(replicated_table_schema)?;
-
         let table_id = replicated_table_schema.id();
         let table_name = replicated_table_schema.name();
         let snapshot_id = replicated_table_schema.inner().snapshot_id;
@@ -607,8 +570,8 @@ where
         let sequence_number_col =
             find_unique_column_name(&column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
 
-        column_schemas.push(ColumnSchema::new(cdc_operation_col, Type::TEXT, -1, 0, None, false));
-        column_schemas.push(ColumnSchema::new(sequence_number_col, Type::TEXT, -1, 0, None, false));
+        column_schemas.push(ColumnSchema::new(cdc_operation_col, Type::TEXT, -1, 0, false));
+        column_schemas.push(ColumnSchema::new(sequence_number_col, Type::TEXT, -1, 0, false));
 
         column_schemas
     }
@@ -620,7 +583,7 @@ where
 {
     /// Returns the identifier name for this destination type.
     fn name() -> &'static str {
-        "iceberg"
+        etl_config::shared::DestinationKind::Iceberg.as_str()
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
@@ -684,24 +647,48 @@ where
     }
 }
 
-/// Validates that a replicated table schema can be applied in Iceberg.
-///
-/// Iceberg changelog replay requires full old-row images so deletes can be
-/// represented correctly. That means source tables must use
-/// `REPLICA IDENTITY FULL`.
-fn validate_iceberg_replica_identity(
+/// Returns the full new row required for an Iceberg update changelog row.
+fn iceberg_update_row(
     replicated_table_schema: &ReplicatedTableSchema,
-) -> EtlResult<()> {
-    match replicated_table_schema.identity_type() {
-        IdentityType::Full => Ok(()),
-        identity_type => Err(etl_error!(
+    updated_table_row: UpdatedTableRow,
+) -> EtlResult<TableRow> {
+    match updated_table_row {
+        UpdatedTableRow::Full(row) => Ok(row),
+        UpdatedTableRow::Partial(_) => Err(etl_error!(
             ErrorKind::SourceReplicaIdentityError,
-            "Iceberg requires full replica identity",
+            "Iceberg update requires a full new row image",
             format!(
-                "Table '{}' uses replica identity {:?}, but Iceberg only supports source tables \
-                 with FULL replica identity.",
-                replicated_table_schema.name(),
-                identity_type
+                "Table '{}' emitted a partial update row. Configure the source so all updated \
+                 values are available before writing update events to Iceberg.",
+                replicated_table_schema.name()
+            )
+        )),
+    }
+}
+
+/// Returns the full old row required for an Iceberg delete changelog row.
+fn iceberg_delete_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    old_table_row: Option<OldTableRow>,
+) -> EtlResult<TableRow> {
+    match old_table_row {
+        Some(OldTableRow::Full(row)) => Ok(row),
+        Some(OldTableRow::Key(_)) => Err(etl_error!(
+            ErrorKind::SourceReplicaIdentityError,
+            "Iceberg delete requires a full old row image",
+            format!(
+                "Table '{}' emitted a key-only delete image. Configure the source so full old \
+                 rows are available before writing delete events to Iceberg.",
+                replicated_table_schema.name()
+            )
+        )),
+        None => Err(etl_error!(
+            ErrorKind::SourceReplicaIdentityError,
+            "Iceberg delete requires an old row image",
+            format!(
+                "Table '{}' emitted a delete without an old row image. Configure the source so \
+                 old rows are available before writing delete events to Iceberg.",
+                replicated_table_schema.name()
             )
         )),
     }
@@ -775,35 +762,15 @@ mod tests {
     use etl::{
         error::ErrorKind,
         types::{
-            ColumnSchema, IdentityMask, IdentityType, ReplicatedTableSchema, ReplicationMask,
-            TableId, TableName, TableSchema, Type,
+            Cell, ColumnSchema, IdentityMask, OldTableRow, PartialTableRow, ReplicatedTableSchema,
+            ReplicationMask, TableId, TableName, TableRow, TableSchema, Type, UpdatedTableRow,
         },
     };
 
     use crate::iceberg::core::{
-        CDC_OPERATION_COLUMN_NAME, find_unique_column_name, schema_to_namespace,
-        validate_iceberg_replica_identity,
+        CDC_OPERATION_COLUMN_NAME, find_unique_column_name, iceberg_delete_row, iceberg_update_row,
+        schema_to_namespace,
     };
-
-    fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
-        let table_schema = Arc::new(TableSchema::new(
-            TableId::new(1),
-            TableName::new("public".to_owned(), "users".to_owned()),
-            vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ],
-        ));
-        let replication_mask = ReplicationMask::all(&table_schema);
-        let identity_mask = match identity_type {
-            IdentityType::Full => IdentityMask::from_bytes(vec![1, 1]),
-            IdentityType::PrimaryKey => IdentityMask::from_bytes(vec![1, 0]),
-            IdentityType::AlternativeKey => IdentityMask::from_bytes(vec![0, 1]),
-            IdentityType::Missing => IdentityMask::from_bytes(vec![0, 0]),
-        };
-
-        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
-    }
 
     /// Creates a test column schema with common defaults.
     ///
@@ -817,7 +784,73 @@ mod tests {
         nullable: bool,
         primary_key_ordinal: Option<i32>,
     ) -> ColumnSchema {
-        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, primary_key_ordinal, nullable)
+        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, nullable)
+            .with_primary_key_ordinal_position(primary_key_ordinal)
+    }
+
+    /// Creates a replicated table schema for operation-level row-image tests.
+    fn replicated_schema() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1, 0]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    #[test]
+    fn iceberg_update_row_accepts_full_new_row() {
+        let schema = replicated_schema();
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+
+        let result = iceberg_update_row(&schema, UpdatedTableRow::Full(row.clone())).unwrap();
+
+        assert_eq!(result, row);
+    }
+
+    #[test]
+    fn iceberg_update_row_rejects_partial_new_row() {
+        let schema = replicated_schema();
+        let partial_row = PartialTableRow::new(2, TableRow::new(vec![Cell::I32(1)]), vec![1]);
+
+        let error = iceberg_update_row(&schema, UpdatedTableRow::Partial(partial_row)).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn iceberg_delete_row_accepts_full_old_row() {
+        let schema = replicated_schema();
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+
+        let result = iceberg_delete_row(&schema, Some(OldTableRow::Full(row.clone()))).unwrap();
+
+        assert_eq!(result, row);
+    }
+
+    #[test]
+    fn iceberg_delete_row_rejects_key_only_old_row() {
+        let schema = replicated_schema();
+        let old_row = OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]));
+
+        let error = iceberg_delete_row(&schema, Some(old_row)).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn iceberg_delete_row_rejects_missing_old_row() {
+        let schema = replicated_schema();
+
+        let error = iceberg_delete_row(&schema, None).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
@@ -990,36 +1023,5 @@ mod tests {
         assert_eq!(schema_to_namespace("storage"), "storage");
         assert_eq!(schema_to_namespace("pg_catalog"), "pg_catalog");
         assert_eq!(schema_to_namespace("information_schema"), "information_schema");
-    }
-
-    #[test]
-    fn validate_iceberg_replica_identity_accepts_full() {
-        let replicated_table_schema = replicated_schema(IdentityType::Full);
-
-        validate_iceberg_replica_identity(&replicated_table_schema).unwrap();
-    }
-
-    #[test]
-    fn validate_iceberg_replica_identity_rejects_primary_key() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
-
-        let error = validate_iceberg_replica_identity(&replicated_table_schema).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
-    }
-
-    #[test]
-    fn validate_iceberg_replica_identity_rejects_alternative_key() {
-        let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
-
-        let error = validate_iceberg_replica_identity(&replicated_table_schema).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
-    }
-
-    #[test]
-    fn validate_iceberg_replica_identity_rejects_missing() {
-        let replicated_table_schema = replicated_schema(IdentityType::Missing);
-
-        let error = validate_iceberg_replica_identity(&replicated_table_schema).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 }

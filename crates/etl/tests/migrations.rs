@@ -1,9 +1,9 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::LazyLock};
 
 use etl::{
     config::{
-        BatchConfig, ETL_MIGRATION_OPTIONS, IntoConnectOptions, InvalidatedSlotBehavior,
-        MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
+        BatchConfig, IntoConnectOptions, InvalidatedSlotBehavior, MemoryBackpressureConfig,
+        PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
     },
     migrations::run_source_migrations,
     pipeline::Pipeline,
@@ -21,6 +21,10 @@ const DEFAULT_DATABASE_PORT: &str = "5430";
 const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 const POSTGRES_STORE_BASE_VERSION: i64 = 20250827000000;
+const APP_NAME_TEST_MIGRATIONS: &str = "supabase_etl_test_migrations";
+
+static TEST_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_TEST_MIGRATIONS).build());
 
 fn local_pg_connection_config() -> PgConnectionConfig {
     PgConnectionConfig {
@@ -82,7 +86,7 @@ async fn applied_migration_versions(database: &PgDatabase<Client>) -> Vec<i64> {
 }
 
 async fn migration_connection(connection_config: &PgConnectionConfig) -> PgConnection {
-    let options: PgConnectOptions = connection_config.with_db(Some(&ETL_MIGRATION_OPTIONS));
+    let options: PgConnectOptions = connection_config.with_db(Some(&TEST_MIGRATION_OPTIONS));
     let mut conn = PgConnection::connect_with(&options).await.unwrap();
 
     conn.execute("set client_min_messages = warning;").await.unwrap();
@@ -157,6 +161,7 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
         id: 1,
         publication_name: "missing_publication".to_owned(),
         pg_connection,
+        store_pg_connection: None,
         batch: BatchConfig {
             max_fill_ms: 5000,
             memory_budget_ratio: 0.2,
@@ -167,6 +172,7 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
         max_table_sync_workers: 4,
         max_copy_connections_per_table: 2,
         memory_refresh_interval_ms: 100,
+        replication_lag_refresh_interval_ms: 10000,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
@@ -269,7 +275,7 @@ async fn postgres_store_schema_storage_migration_round_trips_old_state() {
     let database = spawn_unmigrated_database().await;
 
     let mut conn = migration_connection(&database.config).await;
-    postgres_store_migrator().run_direct(None, &mut conn).await.unwrap();
+    postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
     postgres_store_migrator().undo(&mut conn, POSTGRES_STORE_BASE_VERSION).await.unwrap();
     drop(conn);
 
@@ -352,7 +358,7 @@ async fn postgres_store_schema_storage_migration_round_trips_old_state() {
         .unwrap();
 
     let mut conn = migration_connection(&database.config).await;
-    postgres_store_migrator().run_direct(None, &mut conn).await.unwrap();
+    postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
     drop(conn);
 
     let migrated_columns: String = client

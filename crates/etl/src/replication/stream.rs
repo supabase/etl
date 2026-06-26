@@ -25,8 +25,10 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{
-        ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
-        ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, STATUS_UPDATE_TYPE_LABEL,
+        ACTION_LABEL, ETL_BYTES_PROCESSED_TOTAL, ETL_BYTES_RECEIVED_TOTAL,
+        ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL, ETL_ROW_SIZE_BYTES,
+        ETL_STATUS_UPDATES_SKIPPED_TOTAL, ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL,
+        STATUS_UPDATE_TYPE_LABEL, WORKER_TYPE_LABEL,
     },
     types::TableRow,
 };
@@ -58,6 +60,32 @@ impl<I> TableCopyStream<I> {
     pub(crate) fn wrap(stream: CopyOutStream, column_schemas: I) -> Self {
         Self { stream, column_schemas }
     }
+
+    /// Records source-side metrics for a COPY row received from Postgres.
+    fn record_row_received(row_size_bytes: u64) {
+        counter!(
+            ETL_EVENTS_RECEIVED_TOTAL,
+            WORKER_TYPE_LABEL => "table_sync",
+            ACTION_LABEL => "table_copy",
+        )
+        .increment(1);
+
+        counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => "copy").increment(row_size_bytes);
+    }
+
+    /// Records pipeline-side metrics for a COPY row read from the stream.
+    fn record_row_processed(row_size_bytes: u64) {
+        counter!(
+            ETL_EVENTS_PROCESSED_TOTAL,
+            WORKER_TYPE_LABEL => "table_sync",
+            ACTION_LABEL => "table_copy",
+        )
+        .increment(1);
+
+        counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "copy").increment(row_size_bytes);
+
+        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy").record(row_size_bytes as f64);
+    }
 }
 
 impl<'a, I> Stream for TableCopyStream<I>
@@ -80,11 +108,8 @@ where
             Some(Ok(row)) => {
                 let row_size_bytes = row.len() as u64;
 
-                counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "copy")
-                    .increment(row_size_bytes);
-
-                histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy")
-                    .record(row_size_bytes as f64);
+                Self::record_row_received(row_size_bytes);
+                Self::record_row_processed(row_size_bytes);
 
                 // Conversion step: transform raw bytes into structured TableRow.
                 // This is where most errors occur due to data format or type issues

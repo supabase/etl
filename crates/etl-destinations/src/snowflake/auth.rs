@@ -1,7 +1,7 @@
 //! Key-pair JWT authentication for the Snowflake SQL and Streaming APIs.
 //!
 //! Flow:
-//!   1. Load RSA private key from disk, derive a public-key fingerprint
+//!   1. Load RSA private key from config, derive a public-key fingerprint
 //!   2. Sign a short-lived JWT (1 h) identifying the account and user
 //!   3. Exchange the JWT at `POST {account_url}/oauth/token` for a bearer token
 //!      (~10 min TTL)
@@ -116,7 +116,7 @@ impl TokenExchanger for HttpExchanger {
 /// Signs a JWT locally, exchanges it for a short-lived scoped token via
 /// Snowflake's OAuth endpoint, and caches the result.
 pub struct AuthManager<E = HttpExchanger> {
-    account_url: String,
+    config: Config,
     account: String,
     user: String,
     encoding_key: EncodingKey,
@@ -126,18 +126,12 @@ pub struct AuthManager<E = HttpExchanger> {
 }
 
 impl AuthManager<HttpExchanger> {
-    /// Build an `AuthManager` from PEM-encoded RSA private key text.
+    /// Build an `AuthManager` from Snowflake configuration.
     ///
     /// Creates its own internal `reqwest::Client` via `HttpExchanger`.
-    pub fn new(
-        config: &Config,
-        private_key_pem: &str,
-        passphrase: Option<&secrecy::SecretString>,
-    ) -> Result<Self> {
+    pub fn new(config: Config) -> Result<Self> {
         Self::with_exchanger(
             config,
-            private_key_pem,
-            passphrase,
             HttpExchanger::new(
                 reqwest::Client::builder()
                     .connect_timeout(HTTP_CONNECT_TIMEOUT)
@@ -150,17 +144,16 @@ impl AuthManager<HttpExchanger> {
 }
 
 impl<E: TokenExchanger> AuthManager<E> {
-    /// Build an `AuthManager` from PEM-encoded RSA private key text.
+    /// Build an `AuthManager` from Snowflake configuration.
     ///
     /// The public-key fingerprint is derived and reused for every JWT.
     /// Accepts PKCS#8 (encrypted or plain) and PKCS#1 PEM formats.
-    pub fn with_exchanger(
-        config: &Config,
-        private_key_pem: &str,
-        passphrase: Option<&secrecy::SecretString>,
-        exchanger: E,
-    ) -> Result<Self> {
-        let (pkcs1_der, key_pair) = decode_and_load_rsa_key(private_key_pem, passphrase)?;
+    pub fn with_exchanger(mut config: Config, exchanger: E) -> Result<Self> {
+        let account = config.account_id.to_uppercase();
+        let user = config.username.to_uppercase();
+        let (private_key, passphrase) = config.take_credentials()?;
+        let (pkcs1_der, key_pair) =
+            decode_and_load_rsa_key(private_key.expose_secret(), passphrase.as_ref())?;
 
         // Snowflake identifies keys by SHA-256(DER-encoded public key).
         let pub_der = key_pair
@@ -176,14 +169,19 @@ impl<E: TokenExchanger> AuthManager<E> {
         let encoding_key = EncodingKey::from_rsa_der(&pkcs1_der);
 
         Ok(Self {
-            account_url: config.account_url().to_owned(),
-            account: config.account_id.to_uppercase(),
-            user: config.username.to_uppercase(),
+            config,
+            account,
+            user,
             encoding_key,
             key_fingerprint,
             cached_token: tokio::sync::Mutex::new(None),
             exchanger,
         })
+    }
+
+    /// Return sanitized Snowflake configuration.
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     /// Create a short-lived JWT (1 hour) used to request a scoped OAuth token.
@@ -223,7 +221,7 @@ impl<E: TokenExchanger> TokenProvider for AuthManager<E> {
         tracing::debug!("refreshing Snowflake scoped token");
 
         let jwt = self.generate_jwt()?;
-        let scoped = self.exchanger.exchange(&self.account_url, &jwt).await?;
+        let scoped = self.exchanger.exchange(self.config.account_url(), &jwt).await?;
         let access_token = scoped.access_token.clone();
         *cached = Some(scoped);
 
@@ -307,6 +305,36 @@ fn decode_token_expiry(token: &str) -> Result<Instant> {
 mod tests {
     use super::*;
 
+    // Non-secret RSA key generated only for hermetic auth unit tests.
+    const TEST_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDOiGnVXNdtwyJr
+jOJHno9nS+oVBl7PHU+64VvVL7EHZ5hzyL+ZM6bdM+CDjKmaJ0g8TiCPcHTHXnRY
+fMcuaZKk5VOsR1xi81biezJj/Q/TGb+Vja4TD7f4DnTmxG0xnQXsceya5fzQM8lB
+D9FzIOk0rR4UHw/zIvB4FhpAqaHWxFcgIMDKGv3puYmooXtTOhepgAlATZuKrfBQ
+AqdbaMWDtucGcfQru02GOXqn/JeggDKSQ5xlCguhocUPEVxI9ZwHh+yCVtxurAtc
+6z0gyQ2dlbZHG91KParLCaDU2Ff9Pf8ubE/HVv+8RtLoqYISWOPGE7W1V8pbprQ7
+scg6J9iVAgMBAAECggEAIorcMIw7l6cITbadbd8OGveuad/L4ZYEbLweUNSOJi/k
+ZpEPwn7KDLsNdNME1rx1L2jdtz/WuDWK/fW4loGfviaAzRKOWBpc0LpMHj8H84Wd
+7lRo5dU+LqW0VZhKrv6VLAuNyAZpNyVCJriPjlLVzjKaEkFzuHWChIMl1uTIJZQa
+F88mP4YpbJfpSU3b94eUFwPsYL8dCQCujLpriehMnBN+3qLK39JMbQk4xSzcQ8r6
++L6ZVTcmKaXMWWH6e4Tm08SvX6SgAfxZm/v5LlByEQRlxfergGlLA8+4lYM8JbXi
+eut7EOjMloA/eE+3edJubvPmWmu+30lL0x1Fkcz2QQKBgQDml5T2Xvj/khna6mqy
+HEG42RThWdapXg3OcxjXzcYfxQd9Uke34fwgo7LAsegONJgakmFdqVrvMUiU+sio
+s8Ds4iHw3yqOqDel06PYTkn10J8vWgyP4Z1KT6wuSMdAYqnze4EQr4+36lGFpEll
+QvvX/rjvydqKo2pxtVhOf7S4xQKBgQDlSi5eAn2MZXc7zi+QE/iK8TWdpKkeaDBR
+AhiV7XGKwq0yBWdGYv11cVSKNpjJ9gCNcAYSFOoNNz6532Y/2DQvhAvfvkP4m08D
+jU5HpPw5GEYUtXySbCJ1DkEPrX4lqkXA5Uw4DcMWmmA5YONgJ6BN0bd2zqSSoY2g
+wTn/53d9kQKBgQDWmbvIjhqtvwrQ8djaafHAVkdYcoOUnDO9LuCv9pGsf3G48BpO
+x8Idnjt9mhSdI9Vq5VA4GqTGdtdVzw9v8dpamxl7UjYJDgS8D3ssk6/BVabQKr4G
+KbJ4ti1H5fOJuEjykL5NCRZ301qLRZoI443+NtFmWDVLUUp/CIZmh/NpAQKBgB5g
+7LHB7LZsPxbqY3zYWIa4HJ1tUobX0Qb6mx1KH0/+KQpGkv9NYD1uLYA+aZHgiQQ0
+Qmmk4bmshyADTD3LPGbLPPOA9up6UUasMyHk5xH9eFOIFCAmOY5+u/oCx4LgA2vi
+NW37zMwy2ergPl/gACovTfpsuHtA8k3JLBEOrtMxAoGBAMXOs1j0+p1Y7gm7lppF
+FXYtPt7sn+eROS9ACov4lrhXqIjgiLxBiQbO34dSy8X3sb18W8vIckeRrHE7zcLE
+G/8wosvgIJ5zIqMZSeT3WFS82C9dk7ad2L1LEMbL/AHvXxgIr/sjNuReIBXFmp/t
+P23pIjtEtEPNpGkXj0aB1RDq
+-----END PRIVATE KEY-----"#;
+
     struct TestExchanger;
 
     impl TokenExchanger for TestExchanger {
@@ -329,20 +357,25 @@ mod tests {
         }
     }
 
-    const TEST_KEY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/test_key.pem");
+    fn make_test_config(account_id: &str, username: &str) -> Config {
+        Config::new(account_id, username, "TEST_DB", "PUBLIC")
+            .expect("valid config")
+            .with_private_key(TEST_PRIVATE_KEY, None)
+    }
 
     fn make_test_manager() -> AuthManager<TestExchanger> {
-        make_test_manager_with_account("ORG-ACCT", "USER")
+        AuthManager::with_exchanger(
+            make_test_config("TESTORG-TESTACCOUNT", "TESTUSER"),
+            TestExchanger,
+        )
+        .expect("AuthManager::with_exchanger")
     }
 
     fn make_test_manager_with_account(
         account_id: &str,
         username: &str,
     ) -> AuthManager<TestExchanger> {
-        let config = Config::new(account_id, username, "TEST_DB", "PUBLIC");
-        let pem = std::fs::read_to_string(TEST_KEY_PATH).expect("test key");
-
-        AuthManager::with_exchanger(&config, &pem, None, TestExchanger)
+        AuthManager::with_exchanger(make_test_config(account_id, username), TestExchanger)
             .expect("AuthManager::with_exchanger")
     }
 
@@ -387,6 +420,11 @@ mod tests {
     #[test]
     fn key_fingerprint_format() {
         let manager = make_test_manager();
+
+        // Auth sanitized config, by consuming PK and secret passphrase.
+        assert!(manager.config().private_key().is_none());
+        assert!(manager.config().private_key_passphrase().is_none());
+
         let fp = manager.fingerprint();
 
         // Fingerprint must use the SHA256: prefix per Snowflake convention.
@@ -400,7 +438,7 @@ mod tests {
 
     #[test]
     fn config_derives_account_url() {
-        let config = Config::new("ORG-ACCT", "USER", "TEST_DB", "PUBLIC");
+        let config = Config::new("ORG-ACCT", "USER", "TEST_DB", "PUBLIC").expect("valid config");
         assert_eq!(config.account_url(), "https://ORG-ACCT.snowflakecomputing.com");
     }
 

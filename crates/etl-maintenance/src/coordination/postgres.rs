@@ -7,7 +7,7 @@ use sqlx::{Executor, PgPool, Row, migrate::Migrator, types::Json};
 
 use super::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
-    ExternalMaintenanceOperationRequest, ExternalMaintenancePause,
+    ExternalMaintenanceOperationRequest, ExternalMaintenancePause, ExternalMaintenancePausePolicy,
     ExternalMaintenanceReplicatorStatus, ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun,
     ExternalMaintenanceState, ExternalMaintenanceStore,
 };
@@ -27,6 +27,48 @@ fn postgres_migrator() -> Migrator {
     let mut migrator = sqlx::migrate!("./migrations/postgres");
     migrator.set_ignore_missing(true);
     migrator
+}
+
+/// Persisted Postgres maintenance policy document.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PostgresExternalMaintenancePolicy {
+    /// Pause policy.
+    #[serde(default)]
+    pause: ExternalMaintenancePausePolicy,
+    /// Operation policy.
+    #[serde(default)]
+    operations: ExternalMaintenanceOperationPolicy,
+}
+
+impl PostgresExternalMaintenancePolicy {
+    /// Builds a policy document from backend-neutral policy sections.
+    fn new(
+        pause: ExternalMaintenancePausePolicy,
+        operations: ExternalMaintenanceOperationPolicy,
+    ) -> Self {
+        Self { pause, operations }
+    }
+}
+
+/// Decodes current nested policy documents and legacy flat operation policies.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StoredPostgresExternalMaintenancePolicy {
+    /// Current nested policy document.
+    Current(PostgresExternalMaintenancePolicy),
+    /// Legacy operation-only policy document.
+    Legacy(ExternalMaintenanceOperationPolicy),
+}
+
+impl StoredPostgresExternalMaintenancePolicy {
+    /// Returns backend-neutral policy sections.
+    fn into_parts(self) -> (ExternalMaintenancePausePolicy, ExternalMaintenanceOperationPolicy) {
+        match self {
+            Self::Current(policy) => (policy.pause, policy.operations),
+            Self::Legacy(operations) => (ExternalMaintenancePausePolicy::default(), operations),
+        }
+    }
 }
 
 /// Postgres-backed external maintenance coordination store.
@@ -54,7 +96,7 @@ impl PostgresExternalMaintenanceStore {
             sqlx_error(error, "Failed to configure external maintenance migration search path")
         })?;
 
-        postgres_migrator().run_direct(None, &mut *connection).await.map_err(|error| {
+        postgres_migrator().run_direct(None, &mut *connection, false).await.map_err(|error| {
             migration_error(error, "Failed to run external maintenance migrations")
         })?;
 
@@ -64,9 +106,10 @@ impl PostgresExternalMaintenanceStore {
     /// Ensures state exists for one pipeline.
     pub async fn ensure_pipeline_state(
         &self,
-        policy: ExternalMaintenanceOperationPolicy,
+        pause_policy: ExternalMaintenancePausePolicy,
+        operation_policy: ExternalMaintenanceOperationPolicy,
     ) -> EtlResult<()> {
-        let policy = Json(policy);
+        let policy = Json(PostgresExternalMaintenancePolicy::new(pause_policy, operation_policy));
         sqlx::query(
             r#"
             insert into etl.external_maintenance_state (pipeline_id, operation_policy)
@@ -85,12 +128,13 @@ impl PostgresExternalMaintenanceStore {
     }
 
     /// Ensures state exists for one pipeline without replacing an existing
-    /// operation policy.
+    /// maintenance policy.
     pub async fn ensure_pipeline_state_if_missing(
         &self,
-        policy: ExternalMaintenanceOperationPolicy,
+        pause_policy: ExternalMaintenancePausePolicy,
+        operation_policy: ExternalMaintenanceOperationPolicy,
     ) -> EtlResult<()> {
-        let policy = Json(policy);
+        let policy = Json(PostgresExternalMaintenancePolicy::new(pause_policy, operation_policy));
         sqlx::query(
             r#"
             insert into etl.external_maintenance_state (pipeline_id, operation_policy)
@@ -143,6 +187,11 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
         else {
             return Ok(ExternalMaintenanceState::default());
         };
+        let (pause_policy, operation_policy) = row
+            .try_get::<Json<StoredPostgresExternalMaintenancePolicy>, _>("operation_policy")
+            .map_err(|error| sqlx_error(error, "Failed to decode external maintenance policy"))?
+            .0
+            .into_parts();
 
         Ok(ExternalMaintenanceState {
             exists: true,
@@ -179,12 +228,8 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
             last_completed_at: row.try_get("last_completed_at").map_err(|error| {
                 sqlx_error(error, "Failed to decode external maintenance completed timestamp")
             })?,
-            operation_policy: row
-                .try_get::<Json<ExternalMaintenanceOperationPolicy>, _>("operation_policy")
-                .map_err(|error| {
-                    sqlx_error(error, "Failed to decode external maintenance operation policy")
-                })?
-                .0,
+            pause_policy,
+            operation_policy,
         })
     }
 
@@ -308,5 +353,71 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
         .map_err(|error| sqlx_error(error, "Failed to clear external maintenance status"))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn postgres_policy_decodes_current_pause_and_operation_policy() {
+        let policy = serde_json::json!({
+            "pause": {
+                "maxDurationSeconds": 900,
+            },
+            "operations": {
+                "inlineFlushEnabled": false,
+                "mergeAdjacentFilesEnabled": true,
+                "rewriteDataFilesEnabled": false,
+                "expireSnapshotsEnabled": true,
+                "cleanupOldFilesEnabled": false,
+            }
+        });
+
+        let (pause, operations) =
+            serde_json::from_value::<StoredPostgresExternalMaintenancePolicy>(policy)
+                .expect("current policy should decode")
+                .into_parts();
+
+        assert_eq!(pause.max_duration_seconds, 900);
+        assert_eq!(
+            operations,
+            ExternalMaintenanceOperationPolicy {
+                inline_flush_enabled: false,
+                merge_adjacent_files_enabled: true,
+                rewrite_data_files_enabled: false,
+                expire_snapshots_enabled: true,
+                cleanup_old_files_enabled: false,
+            }
+        );
+    }
+
+    #[test]
+    fn postgres_policy_decodes_legacy_operation_policy() {
+        let policy = serde_json::json!({
+            "inlineFlushEnabled": false,
+            "mergeAdjacentFilesEnabled": true,
+            "rewriteDataFilesEnabled": false,
+            "expireSnapshotsEnabled": true,
+            "cleanupOldFilesEnabled": false,
+        });
+
+        let (pause, operations) =
+            serde_json::from_value::<StoredPostgresExternalMaintenancePolicy>(policy)
+                .expect("legacy policy should decode")
+                .into_parts();
+
+        assert_eq!(pause, ExternalMaintenancePausePolicy::default());
+        assert_eq!(
+            operations,
+            ExternalMaintenanceOperationPolicy {
+                inline_flush_enabled: false,
+                merge_adjacent_files_enabled: true,
+                rewrite_data_files_enabled: false,
+                expire_snapshots_enabled: true,
+                cleanup_old_files_enabled: false,
+            }
+        );
     }
 }

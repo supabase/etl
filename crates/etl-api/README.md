@@ -12,16 +12,20 @@ This API service provides a RESTful interface for managing Postgres replication 
 ## Features
 
 - RESTful API endpoints for pipeline management
+- Axum HTTP runtime with tower middleware
 - Multi-tenant support with isolated configurations
+- Prometheus request metrics and Sentry capture for server-error responses
 - Kubernetes deployment support
 - Secure configuration management
 - Database schema versioning with migrations
+- OpenAPI descriptors generated from `utoipa` route macros
 - Integration with the core ETL system
 
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
 - [Development](#development)
+- [API Documentation](#api-documentation)
 - [Environment Variables](#environment-variables)
 - [Authentication](#authentication)
 
@@ -101,6 +105,14 @@ APP_ENVIRONMENT=prod \
 cargo x rotate-encryption-key
 ```
 
+To test one project/tenant first, pass its tenant id:
+
+```bash
+APP_CONFIG_DIR=/path/to/etl-api/configuration \
+APP_ENVIRONMENT=prod \
+cargo x rotate-encryption-key --dry-run --tenant-id <project-ref>
+```
+
 The command uses the keys and database connection from the API configuration.
 It decrypts rows using the stored key ids and writes updated configs with the
 highest configured key id.
@@ -121,6 +133,21 @@ After the dry run reports the expected rows, run the same command without
 API config remains the source of truth for the target database and keyring.
 
 ## Development
+
+### API Documentation
+
+The service exposes the generated OpenAPI document at
+`/api-docs/openapi.json` and Swagger UI at `/swagger-ui`. Route descriptors are
+generated from the `utoipa` macros attached to the handlers, so changes to
+routes, parameters, request bodies, or responses should be reflected in those
+attributes as part of the same code change.
+
+### Observability
+
+The service exposes Prometheus metrics at `/metrics`. HTTP request middleware
+records `http_requests_total` and `http_requests_duration_seconds` with
+`endpoint`, `method`, and `status` labels. Server-error HTTP responses are
+captured as Sentry events while preserving sensitive-route payload scrubbing.
 
 ### Database Migrations
 

@@ -7,10 +7,11 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "env"] }
-etl-api = { path = "../etl-api" }
+etl-api = { path = "../etl-api", default-features = false }
 etl-config = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 kube = { workspace = true, features = ["client", "derive", "rustls-tls", "ring"] }
+pg_escape = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 schemars = "0.8"
 serde = { workspace = true, features = ["derive"] }

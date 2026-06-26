@@ -29,9 +29,12 @@ impl Validator for BigQueryValidator {
         else {
             return Ok(vec![ValidationFailure::critical(
                 "BigQuery Authentication Failed",
-                "Unable to authenticate with BigQuery.\n\nPlease verify:\n(1) The service account \
-                 key is valid JSON\n(2) The key has not expired or been revoked\n(3) The project \
-                 ID is correct",
+                format!(
+                    "We couldn't authenticate with BigQuery using the service account \
+                     key.\n\nCheck that the key is valid JSON, has not been revoked, and belongs \
+                     to a service account with access to project `{}`.",
+                    self.project_id
+                ),
             )]);
         };
 
@@ -40,17 +43,16 @@ impl Validator for BigQueryValidator {
             Ok(false) => Ok(vec![ValidationFailure::critical(
                 "BigQuery Dataset Not Found",
                 format!(
-                    "Dataset '{}' does not exist in project '{}'.\n\nPlease verify:\n(1) The \
-                     dataset name is correct\n(2) The dataset exists in the specified \
-                     project\n(3) The service account has permission to access it",
+                    "BigQuery dataset `{}` was not found in project `{}`.\n\nCheck the dataset \
+                     name and make sure the service account can access it.",
                     self.dataset_id, self.project_id
                 ),
             )]),
             Err(_) => Ok(vec![ValidationFailure::critical(
                 "BigQuery Connection Failed",
-                "Unable to connect to BigQuery.\n\nPlease verify:\n(1) Network connectivity to \
-                 Google Cloud\n(2) The service account has the required permissions (BigQuery \
-                 Data Editor, BigQuery Job User)\n(3) BigQuery API is enabled for your project",
+                "We couldn't reach BigQuery or confirm that the dataset exists.\n\nCheck network \
+                 access to Google Cloud, that the BigQuery API is enabled, and that the service \
+                 account has `BigQuery Data Editor` and `BigQuery Job User` permissions.",
             )]),
         }
     }
