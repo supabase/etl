@@ -16,7 +16,9 @@ use etl::{
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
 };
-use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
+use etl_destinations::ducklake::{
+    DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
+};
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
@@ -111,16 +113,22 @@ fn checkpoint_lake(catalog: &Url, data: &Url) {
     conn.execute_batch("checkpoint").expect("failed to checkpoint DuckLake catalog");
 }
 
+fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
+    format!(
+        "{}.{}.{}",
+        quote_identifier("lake"),
+        quote_identifier(table_name.schema()),
+        quote_identifier(table_name.table())
+    )
+}
+
 /// Queries replicated user rows using blocking DuckDB APIs.
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
-fn query_user_rows(conn: &Connection, table_name: &str) -> Vec<(i64, String, i32)> {
-    let sql = format!(
-        "select id, name, age from {}.{} order by id",
-        quote_identifier("lake"),
-        quote_identifier(table_name)
-    );
+fn query_user_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<(i64, String, i32)> {
+    let sql =
+        format!("select id, name, age from {} order by id", qualified_lake_table_name(table_name));
     let mut statement = conn.prepare(&sql).expect("failed to prepare users query");
     let mut rows = statement.query([]).expect("failed to run users query");
     let mut result = Vec::new();
@@ -140,11 +148,10 @@ fn query_user_rows(conn: &Connection, table_name: &str) -> Vec<(i64, String, i32
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
-fn query_order_rows(conn: &Connection, table_name: &str) -> Vec<(i64, String)> {
+fn query_order_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<(i64, String)> {
     let sql = format!(
-        "select id, description from {}.{} order by id",
-        quote_identifier("lake"),
-        quote_identifier(table_name)
+        "select id, description from {} order by id",
+        qualified_lake_table_name(table_name)
     );
     let mut statement = conn.prepare(&sql).expect("failed to prepare orders query");
     let mut rows = statement.query([]).expect("failed to run orders query");
@@ -164,13 +171,13 @@ fn query_order_rows(conn: &Connection, table_name: &str) -> Vec<(i64, String)> {
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
-fn query_table_columns(conn: &Connection, table_name: &str) -> Vec<String> {
+fn query_table_columns(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<String> {
     let sql = format!(
         "select column_name from information_schema.columns where table_catalog = {} and \
          table_schema = {} and table_name = {} order by ordinal_position",
         quote_literal("lake"),
-        quote_literal("main"),
-        quote_literal(table_name)
+        quote_literal(table_name.schema()),
+        quote_literal(table_name.table())
     );
     let mut statement = conn.prepare(&sql).expect("failed to prepare columns query");
     let mut rows = statement.query([]).expect("failed to run columns query");
@@ -187,11 +194,10 @@ fn query_table_columns(conn: &Connection, table_name: &str) -> Vec<String> {
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
-fn query_schema_add_rows(conn: &Connection, table_name: &str) -> Vec<SchemaAddRow> {
+fn query_schema_add_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<SchemaAddRow> {
     let sql = format!(
-        "select id, name, age, email, score from {}.{} order by id",
-        quote_identifier("lake"),
-        quote_identifier(table_name)
+        "select id, name, age, email, score from {} order by id",
+        qualified_lake_table_name(table_name)
     );
     let mut statement = conn.prepare(&sql).expect("failed to prepare schema add query");
     let mut rows = statement.query([]).expect("failed to run schema add query");
@@ -215,11 +221,13 @@ fn query_schema_add_rows(conn: &Connection, table_name: &str) -> Vec<SchemaAddRo
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
-fn query_schema_multi_rows(conn: &Connection, table_name: &str) -> Vec<SchemaMultiRow> {
+fn query_schema_multi_rows(
+    conn: &Connection,
+    table_name: &DuckLakeTableName,
+) -> Vec<SchemaMultiRow> {
     let sql = format!(
-        "select id, full_name, status, email from {}.{} order by id",
-        quote_identifier("lake"),
-        quote_identifier(table_name)
+        "select id, full_name, status, email from {} order by id",
+        qualified_lake_table_name(table_name)
     );
     let mut statement = conn.prepare(&sql).expect("failed to prepare schema multi query");
     let mut rows = statement.query([]).expect("failed to run schema multi query");
@@ -242,11 +250,13 @@ fn query_schema_multi_rows(conn: &Connection, table_name: &str) -> Vec<SchemaMul
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
-fn query_schema_mutation_rows(conn: &Connection, table_name: &str) -> Vec<SchemaMutationRow> {
+fn query_schema_mutation_rows(
+    conn: &Connection,
+    table_name: &DuckLakeTableName,
+) -> Vec<SchemaMutationRow> {
     let sql = format!(
-        "select id, full_name, visits, email from {}.{} order by id",
-        quote_identifier("lake"),
-        quote_identifier(table_name)
+        "select id, full_name, visits, email from {} order by id",
+        qualified_lake_table_name(table_name)
     );
     let mut statement = conn.prepare(&sql).expect("failed to prepare schema mutation query");
     let mut rows = statement.query([]).expect("failed to run schema mutation query");
@@ -271,12 +281,11 @@ fn query_schema_mutation_rows(conn: &Connection, table_name: &str) -> Vec<Schema
 /// `run_duckdb_blocking`.
 fn query_simulator_ddl_rotation_rows(
     conn: &Connection,
-    table_name: &str,
+    table_name: &DuckLakeTableName,
 ) -> Vec<SimulatorDdlRotationRow> {
     let sql = format!(
-        "select id, text_col, ddl_col_0_0 from {}.{} order by id",
-        quote_identifier("lake"),
-        quote_identifier(table_name)
+        "select id, text_col, ddl_col_0_0 from {} order by id",
+        qualified_lake_table_name(table_name)
     );
     let mut statement = conn.prepare(&sql).expect("failed to prepare simulator DDL rotation query");
     let mut rows = statement.query([]).expect("failed to run simulator DDL rotation query");
@@ -298,12 +307,14 @@ fn query_simulator_ddl_rotation_rows(
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
-fn query_simulator_ddl_type_row(conn: &Connection, table_name: &str) -> SimulatorDdlTypeRow {
+fn query_simulator_ddl_type_row(
+    conn: &Connection,
+    table_name: &DuckLakeTableName,
+) -> SimulatorDdlTypeRow {
     let sql = format!(
         "select id, text_col, ddl_col_0_0, ddl_col_1_0, ddl_col_2_0, ddl_col_3_0 is not null, \
-         ddl_col_4_0 from {}.{} where id = 5",
-        quote_identifier("lake"),
-        quote_identifier(table_name)
+         ddl_col_4_0 from {} where id = 5",
+        qualified_lake_table_name(table_name)
     );
     let mut statement = conn.prepare(&sql).expect("failed to prepare simulator DDL type query");
     let row = statement.query_row([], |row| {

@@ -1,7 +1,10 @@
 use etl::schema::{ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression};
 use tracing::warn;
 
-use crate::ducklake::sql::{qualified_lake_table_name, quote_identifier};
+use crate::ducklake::{
+    DuckLakeTableName,
+    sql::{qualified_lake_schema_name, qualified_lake_table_name, quote_identifier},
+};
 
 /// Returns the DuckLake SQL type string for a given Postgres scalar type.
 fn postgres_scalar_type_to_ducklake_sql(typ: &Type) -> &'static str {
@@ -185,16 +188,20 @@ fn ducklake_default_expression(default_expression: &str, typ: &Type) -> Option<S
 /// The supplied columns are the destination-visible replicated columns in
 /// write order.
 pub(super) fn build_create_table_sql_ducklake(
-    table_name: &str,
+    table_name: &DuckLakeTableName,
     column_schemas: &[ColumnSchema],
 ) -> String {
+    let schema_name = qualified_lake_schema_name(table_name.schema());
     let table_name = qualified_lake_table_name(table_name);
     let col_defs: Vec<String> = column_schemas
         .iter()
         .map(|col| format!("  {}", ducklake_column_definition(col, true, true)))
         .collect();
 
-    format!("create table if not exists {table_name} ({})", col_defs.join(",\n"))
+    format!(
+        "create schema if not exists {schema_name};\ncreate table if not exists {table_name} ({})",
+        col_defs.join(",\n")
+    )
 }
 
 /// Builds a DuckLake `alter table add column` statement.
@@ -202,7 +209,7 @@ pub(super) fn build_create_table_sql_ducklake(
 /// DuckLake stores add-time defaults as metadata and does not rewrite data
 /// files during schema evolution.
 pub(super) fn build_add_column_sql_ducklake(
-    table_name: &str,
+    table_name: &DuckLakeTableName,
     column_schema: &ColumnSchema,
 ) -> String {
     let table_name = qualified_lake_table_name(table_name);
@@ -212,7 +219,10 @@ pub(super) fn build_add_column_sql_ducklake(
 }
 
 /// Builds a DuckLake `alter table drop column` statement.
-pub(super) fn build_drop_column_sql_ducklake(table_name: &str, column_name: &str) -> String {
+pub(super) fn build_drop_column_sql_ducklake(
+    table_name: &DuckLakeTableName,
+    column_name: &str,
+) -> String {
     let table_name = qualified_lake_table_name(table_name);
     let column_name = quote_identifier(column_name);
 
@@ -221,7 +231,7 @@ pub(super) fn build_drop_column_sql_ducklake(table_name: &str, column_name: &str
 
 /// Builds a DuckLake `alter table rename column` statement.
 pub(super) fn build_rename_column_sql_ducklake(
-    table_name: &str,
+    table_name: &DuckLakeTableName,
     old_name: &str,
     new_name: &str,
 ) -> String {
@@ -234,7 +244,7 @@ pub(super) fn build_rename_column_sql_ducklake(
 
 /// Builds a DuckLake `alter table alter column set default` statement.
 pub(super) fn build_set_default_sql_ducklake(
-    table_name: &str,
+    table_name: &DuckLakeTableName,
     column_name: &str,
     typ: &Type,
     default_expression: &str,
@@ -250,7 +260,10 @@ pub(super) fn build_set_default_sql_ducklake(
 }
 
 /// Builds a DuckLake `alter table alter column drop default` statement.
-pub(super) fn build_drop_default_sql_ducklake(table_name: &str, column_name: &str) -> String {
+pub(super) fn build_drop_default_sql_ducklake(
+    table_name: &DuckLakeTableName,
+    column_name: &str,
+) -> String {
     let table_name = qualified_lake_table_name(table_name);
     let column_name = quote_identifier(column_name);
 
@@ -260,6 +273,10 @@ pub(super) fn build_drop_default_sql_ducklake(table_name: &str, column_name: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn table_name(table: &str) -> DuckLakeTableName {
+        DuckLakeTableName::new("public", table)
+    }
 
     #[test]
     fn scalar_type_mapping() {
@@ -298,33 +315,36 @@ mod tests {
     #[test]
     fn build_create_table_sql_qualifies_lake_catalog() {
         let sql = build_create_table_sql_ducklake(
-            "odd\"table",
+            &table_name("odd\"table"),
             &[ColumnSchema::new("select".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
         );
 
-        assert!(sql.starts_with("create table if not exists \"lake\".\"odd\"\"table\""));
+        assert!(sql.starts_with(
+            "create schema if not exists \"lake\".\"public\";\ncreate table if not exists \
+             \"lake\".\"public\".\"odd\"\"table\""
+        ));
         assert!(sql.contains("  \"select\" integer not null"));
     }
 
     #[test]
     fn build_add_column_sql_keeps_added_columns_nullable() {
         let sql = build_add_column_sql_ducklake(
-            "test_table",
+            &table_name("test_table"),
             &ColumnSchema::new("score".to_owned(), Type::INT4, -1, 4, false),
         );
 
-        assert_eq!(sql, r#"alter table "lake"."test_table" add column "score" integer"#);
+        assert_eq!(sql, r#"alter table "lake"."public"."test_table" add column "score" integer"#);
     }
 
     #[test]
     fn build_add_column_sql_includes_supported_default() {
         let column = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 4, true)
             .with_default_expression("'pending'::text".to_owned());
-        let sql = build_add_column_sql_ducklake("test_table", &column);
+        let sql = build_add_column_sql_ducklake(&table_name("test_table"), &column);
 
         assert_eq!(
             sql,
-            r#"alter table "lake"."test_table" add column "status" varchar default 'pending'"#
+            r#"alter table "lake"."public"."test_table" add column "status" varchar default 'pending'"#
         );
     }
 
@@ -379,18 +399,22 @@ mod tests {
 
     #[test]
     fn build_drop_column_sql_quotes_identifiers() {
-        let sql = build_drop_column_sql_ducklake("table\"name", "old\"column");
+        let sql = build_drop_column_sql_ducklake(&table_name("table\"name"), "old\"column");
 
-        assert_eq!(sql, r#"alter table "lake"."table""name" drop column "old""column""#);
+        assert_eq!(sql, r#"alter table "lake"."public"."table""name" drop column "old""column""#);
     }
 
     #[test]
     fn build_rename_column_sql_quotes_identifiers() {
-        let sql = build_rename_column_sql_ducklake("table\"name", "old\"column", "new\"column");
+        let sql = build_rename_column_sql_ducklake(
+            &table_name("table\"name"),
+            "old\"column",
+            "new\"column",
+        );
 
         assert_eq!(
             sql,
-            r#"alter table "lake"."table""name" rename column "old""column" to "new""column""#
+            r#"alter table "lake"."public"."table""name" rename column "old""column" to "new""column""#
         );
     }
 
@@ -401,19 +425,19 @@ mod tests {
 
         assert_eq!(
             build_set_default_sql_ducklake(
-                "table\"name",
+                &table_name("table\"name"),
                 &column.name,
                 &column.typ,
                 column.default_expression.as_deref().expect("test default")
             ),
             Some(
-                r#"alter table "lake"."table""name" alter column "status""value" set default 'pending'"#
+                r#"alter table "lake"."public"."table""name" alter column "status""value" set default 'pending'"#
                     .to_owned()
             )
         );
         assert_eq!(
-            build_drop_default_sql_ducklake("table\"name", "status\"value"),
-            r#"alter table "lake"."table""name" alter column "status""value" drop default"#
+            build_drop_default_sql_ducklake(&table_name("table\"name"), "status\"value"),
+            r#"alter table "lake"."public"."table""name" alter column "status""value" drop default"#
         );
     }
 }
