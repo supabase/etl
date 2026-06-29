@@ -99,6 +99,12 @@ async fn non_existing_image_cannot_be_updated() {
     // Arrange
     let app = spawn_test_app().await;
 
+    let image = CreateImageRequest { name: "default-image".to_owned(), is_default: true };
+    let response = app.create_image(&image).await;
+    let response: CreateImageResponse =
+        response.json().await.expect("failed to deserialize response");
+    let image_id = response.id;
+
     // Act
     let name = "some/image".to_owned();
     let is_default = true;
@@ -107,6 +113,10 @@ async fn non_existing_image_cannot_be_updated() {
 
     // Assert
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = app.read_image(image_id).await;
+    let image: ReadImageResponse = response.json().await.expect("failed to deserialize response");
+    assert!(image.is_default);
 }
 
 #[tokio::test(flavor = "multi_thread")]
