@@ -14,7 +14,7 @@ use std::fmt;
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::TableName,
+    schema::TableName,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +34,6 @@ impl DuckLakeTableName {
         Self { schema: schema.into(), table: table.into() }
     }
 
-    /// Creates a DuckLake table reference for ETL internal helper tables.
     /// Creates a DuckLake table reference that mirrors a source Postgres table.
     pub fn from_source(table_name: &TableName) -> Self {
         Self::new(table_name.schema.clone(), table_name.name.clone())
