@@ -4,15 +4,15 @@
 //! CLEANUP` cleanup, PK-less source rejection, and composite PK ORDER BY.
 
 use etl::{
-    state::{TableState, TableStateType},
-    store::state::StateStore,
+    event::EventType,
+    pipeline::PipelineId,
+    store::{StateStore, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
     },
-    types::{EventType, PipelineId},
 };
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::test_utils::setup_clickhouse_database;

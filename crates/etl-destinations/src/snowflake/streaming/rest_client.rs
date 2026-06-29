@@ -499,7 +499,10 @@ struct BulkStatusChannel {
 
 #[cfg(test)]
 mod tests {
-    use etl::types::{Cell, ColumnSchema, TableRow, Type};
+    use etl::{
+        data::{Cell, TableRow},
+        schema::{ColumnSchema, Type},
+    };
 
     use super::*;
     use crate::snowflake::{

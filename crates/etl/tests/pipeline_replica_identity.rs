@@ -1,14 +1,14 @@
 use etl::{
-    state::TableStateType,
+    data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
+    event::{DeleteEvent, Event, EventType, UpdateEvent},
+    pipeline::PipelineId,
+    store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
-    },
-    types::{
-        Cell, Event, EventType, OldTableRow, PartialTableRow, PipelineId, TableRow, UpdatedTableRow,
     },
 };
 use etl_postgres::tokio::test_utils::TableModification;
@@ -99,7 +99,7 @@ fn data_events(events: Vec<Event>) -> Vec<Event> {
         .collect()
 }
 
-fn find_update_event(events: &[Event], update_index: usize) -> &etl::types::UpdateEvent {
+fn find_update_event(events: &[Event], update_index: usize) -> &UpdateEvent {
     events
         .iter()
         .filter_map(|event| match event {
@@ -110,7 +110,7 @@ fn find_update_event(events: &[Event], update_index: usize) -> &etl::types::Upda
         .expect("expected update event")
 }
 
-fn find_delete_event(events: &[Event]) -> &etl::types::DeleteEvent {
+fn find_delete_event(events: &[Event]) -> &DeleteEvent {
     events
         .iter()
         .find_map(|event| match event {

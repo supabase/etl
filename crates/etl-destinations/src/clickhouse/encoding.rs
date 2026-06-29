@@ -1,8 +1,8 @@
 use chrono::NaiveDate;
 use etl::{
+    data::{ArrayCell, Cell},
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::{ArrayCell, Cell},
 };
 
 // RowBinary bytes are written directly via `Client::insert_formatted_with`,
@@ -285,7 +285,7 @@ pub(crate) fn encode_to_row_binary(
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
-    use etl::types::Cell;
+    use etl::data::Cell;
     use uuid::Uuid;
 
     use super::*;

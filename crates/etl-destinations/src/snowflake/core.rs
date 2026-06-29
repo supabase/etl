@@ -2,16 +2,16 @@ use std::collections::HashMap;
 
 use etl::{
     bail,
-    concurrency::TaskSet,
-    destination::async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+    data::{OldTableRow, TableRow, UpdatedTableRow},
+    destination::{
+        DestinationTableMetadata, DestinationTableSchemaStatus, DropTableForCopyResult, TaskSet,
+        WriteEventsResult, WriteTableRowsResult,
+    },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    event::{DeleteEvent, Event, InsertEvent, UpdateEvent},
+    schema::{ColumnSchema, ReplicatedTableSchema, TableId},
     store::DestinationStore,
-    types::{
-        ColumnSchema, DeleteEvent, Event, InsertEvent, OldTableRow, ReplicatedTableSchema, TableId,
-        TableRow, UpdateEvent, UpdatedTableRow,
-    },
 };
 use tracing::{info, warn};
 
@@ -515,8 +515,9 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use etl::types::{
-        Cell, IdentityMask, PartialTableRow, ReplicationMask, TableName, TableSchema, Type,
+    use etl::{
+        data::{Cell, PartialTableRow},
+        schema::{IdentityMask, ReplicationMask, TableName, TableSchema, Type},
     };
 
     use super::*;

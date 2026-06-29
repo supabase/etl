@@ -49,6 +49,10 @@ pub fn parse_ducklake_url(value: &str) -> Result<Url, ParseDucklakeUrlError> {
     Url::from_file_path(&path).map_err(|_| ParseDucklakeUrlError::FilePath(path))
 }
 
+/// Returns a TCP host in the form expected by libpq connection strings.
+///
+/// IPv6 hosts are commonly wrapped in brackets in URLs. Libpq expects the bare
+/// address in the `host` parameter, so bracketed IPv6 values are unwrapped.
 pub fn libpq_tcp_host(host: &str) -> &str {
     match host.strip_prefix('[').and_then(|host| host.strip_suffix(']')) {
         Some(unbracketed) if unbracketed.contains(':') => unbracketed,

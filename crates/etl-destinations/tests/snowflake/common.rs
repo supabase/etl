@@ -31,18 +31,13 @@ pub async fn with_table_cleanup<F, Fut>(
 
 pub async fn poll_destination_offset<S, T, C>(
     destination: &Destination<S, T, C>,
-    table_id: etl::types::TableId,
+    table_id: etl::schema::TableId,
     expected: &OffsetToken,
     interval: std::time::Duration,
     max_attempts: usize,
 ) -> Option<OffsetToken>
 where
-    S: etl::store::state::StateStore
-        + etl::store::schema::SchemaStore
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    S: etl::store::StateStore + etl::store::SchemaStore + Clone + Send + Sync + 'static,
     T: etl_destinations::snowflake::TokenProvider + 'static,
     C: StreamClient,
 {

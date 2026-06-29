@@ -169,6 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_table_sync_workers: 4,
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
         memory_refresh_interval_ms: 100,
+        replication_lag_refresh_interval_ms: 10_000,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
@@ -197,8 +198,10 @@ one of the modules shipped in `etl-destinations`.
 | Feature | Destination | Status | Notes |
 | --- | --- | --- | --- |
 | `bigquery` | Google BigQuery | Stable | Full CRUD-capable replication for analytics workloads. |
+| `clickhouse` | ClickHouse | In progress | Columnar OLAP replication with current-state or append-only layouts. |
 | `ducklake` | DuckLake | In progress | Open data lake replication with local or S3-compatible storage. |
 | `iceberg` | Apache Iceberg | Deprecated for now | The module remains available, but new deployments should prefer BigQuery or DuckLake. |
+| `snowflake` | Snowflake | In progress | Cloud data warehouse replication example and destination module. |
 
 Enable one or more destination modules with crate features:
 

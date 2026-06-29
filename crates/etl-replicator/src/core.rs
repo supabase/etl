@@ -16,7 +16,7 @@ mod pipeline;
 ))]
 compile_error!("`any-destination` is internal; enable a concrete destination feature instead.");
 
-use etl::{store::both::postgres::PostgresStore, types::PipelineId};
+use etl::{pipeline::PipelineId, store::PostgresStore};
 use etl_config::shared::{PgConnectionConfig, ReplicatorConfig};
 use tracing::info;
 

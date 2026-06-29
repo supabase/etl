@@ -6,23 +6,32 @@
 //! synchronization status.
 //!
 //! Storage is divided into focused capability modules:
-//! - [`state`] - Replication progress and table synchronization states
-//! - [`schema`] - Database schema information, versioned schema storage, and
-//!   obsolete schema pruning
-//! - [`capabilities`] - Named facade traits for common store capability sets
-//! - [`lifecycle`] - Table lifecycle operations that span both stores
+//! - [`StateStore`] - Replication progress and table synchronization states
+//! - [`SchemaStore`] - Database schema information, versioned schema storage,
+//!   and obsolete schema pruning
+//! - [`SharedStateStore`], [`DestinationStore`], and [`PipelineStore`] - Named
+//!   facade traits for common store capability sets
+//! - [`TableStateLifecycleStore`] - Table lifecycle operations that span both
+//!   stores
 //!
-//! The [`both`] module provides combined implementations that handle both
-//! state and schema storage in unified systems.
+//! [`MemoryStore`] and [`PostgresStore`] provide combined implementations that
+//! handle both state and schema storage in unified systems.
 
-pub mod both;
-pub mod capabilities;
-pub mod lifecycle;
-pub mod schema;
-pub mod state;
+mod both;
+mod capabilities;
+mod lifecycle;
+mod schema;
+mod state;
 
 pub use both::{memory::MemoryStore, postgres::PostgresStore};
 pub use capabilities::{DestinationStore, PipelineStore, SharedStateStore};
 pub use lifecycle::{TableStateLifecycleStore, TableStateOperation};
-pub use schema::SchemaStore;
+pub(crate) use schema::TableSchemaSnapshots;
+pub use schema::{SchemaStore, TableSchemaRetention};
+pub(crate) use state::DestinationTablesMetadata;
 pub use state::{StateStore, TableStates};
+
+pub use crate::replication::{
+    WorkerType,
+    state::{TableRetryPolicy, TableState, TableStateType},
+};

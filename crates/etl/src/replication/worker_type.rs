@@ -1,6 +1,8 @@
 use std::fmt::{Display, Formatter};
 
-use etl_postgres::{replication::slots::EtlReplicationSlot, types::TableId};
+use etl_postgres::slots::EtlReplicationSlot;
+
+use crate::schema::TableId;
 
 /// Type of worker driving replication.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]

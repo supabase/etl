@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use etl::store::both::memory::MemoryStore;
+use etl::store::MemoryStore;
 use etl_config::{parse_ducklake_s3_data_path, parse_ducklake_url};
 use etl_destinations::ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config};
 use sqlx::{PgPool, postgres::PgPoolOptions};

@@ -1,13 +1,10 @@
 use std::{collections::BTreeMap, future::Future, sync::Arc};
 
 use crate::{
+    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     error::EtlResult,
-    replication::WorkerType,
-    state::{
-        TableState,
-        destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
-    },
-    types::{PgLsn, TableId},
+    schema::{PgLsn, TableId},
+    store::{TableState, WorkerType},
 };
 
 /// Arc-wrapped dictionary of table states.

@@ -1,5 +1,8 @@
 use etl::{
-    state::TableStateType,
+    data::{Cell, TableRow},
+    event::EventType,
+    pipeline::PipelineId,
+    store::TableStateType,
     test_utils::{
         database::spawn_source_database,
         notifying_store::NotifyingStore,
@@ -10,7 +13,6 @@ use etl::{
             insert_mock_data, setup_test_database_schema,
         },
     },
-    types::{Cell, EventType, PipelineId, TableRow},
 };
 use etl_destinations::iceberg::{
     DestinationNamespace, IcebergClient, IcebergDestination, IcebergOperationType,

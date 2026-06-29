@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
-use etl_postgres::types::{ReplicatedTableSchema, TableId};
-
-use crate::types::{Event, EventType, TableRow};
+use crate::{
+    data::TableRow,
+    event::{Event, EventType},
+    schema::{ReplicatedTableSchema, TableId},
+};
 
 /// Condition for waiting on events in tests.
 #[derive(Clone, Debug)]

@@ -20,9 +20,6 @@ use std::{
 };
 
 use etl_config::shared::PipelineConfig;
-use etl_postgres::types::{
-    IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
-};
 use futures::StreamExt;
 use metrics::{counter, gauge, histogram};
 use postgres_replication::{
@@ -44,29 +41,15 @@ use crate::failpoints::{
 };
 use crate::{
     bail,
-    concurrency::{
-        BackpressureStream, BatchBudgetController, CachedBatchBudget, MemoryMonitor,
-        ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
-        table_sync_worker_apply_stream_id,
-    },
-    conversions::{
-        DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
-        insert_message_payload_bytes, parse_event_from_begin_message,
-        parse_event_from_commit_message, parse_event_from_delete_message,
-        parse_event_from_insert_message, parse_event_from_truncate_message,
-        parse_event_from_update_message, parse_replica_identity_column_names,
-        parse_replicated_column_names, update_message_payload_bytes,
-    },
+    data::SizeHint,
     destination::{
-        PipelineDestination,
-        async_result::{
-            ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
-            PendingWriteEventsResult, WriteEventsResult,
-        },
+        ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
+        PendingWriteEventsResult, PipelineDestination, WriteEventsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    metrics::{
+    event::{Event, RelationEvent},
+    observability::{
         ACTION_LABEL, COMMAND_TAG_LABEL, ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
         ETL_APPLY_LOOP_END_TO_END_LAG_BYTES, ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
         ETL_APPLY_LOOP_RECEIVED_LAG_BYTES, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
@@ -77,19 +60,35 @@ use crate::{
         ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
         ETL_TRANSACTIONS_TOTAL, EVENT_TYPE_LABEL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
     },
-    replication::{
-        EventsStream, OutOfBandSourcePool, SharedTableCache, StatusUpdateResult, StatusUpdateType,
-        WorkerType,
+    pipeline::PipelineId,
+    postgres::{
+        EventsStream, OutOfBandSourcePool, StatusUpdateResult, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
+        codec::{
+            DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
+            insert_message_payload_bytes, parse_event_from_begin_message,
+            parse_event_from_commit_message, parse_event_from_delete_message,
+            parse_event_from_insert_message, parse_event_from_truncate_message,
+            parse_event_from_update_message, parse_replica_identity_column_names,
+            parse_replicated_column_names, update_message_payload_bytes,
+        },
     },
-    state::{TableState, TableStateType},
-    store::{
-        PipelineStore, SharedStateStore,
-        schema::{SchemaStore, TableSchemaRetention},
-        state::StateStore,
+    replication::{
+        SharedTableCache, WorkerType,
+        state::{TableState, TableStateType},
     },
-    types::{Event, PipelineId, RelationEvent, SizeHint},
-    workers::{TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState},
+    runtime::{
+        BatchBudgetController, CachedBatchBudget, MemoryMonitor, TableSyncWorker,
+        TableSyncWorkerPool, TableSyncWorkerState,
+        concurrency::{
+            BackpressureStream, ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
+            table_sync_worker_apply_stream_id,
+        },
+    },
+    schema::{
+        IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
+    },
+    store::{PipelineStore, SchemaStore, SharedStateStore, StateStore, TableSchemaRetention},
 };
 
 /// Default keep alive value if it can't be fetched from Postgres.

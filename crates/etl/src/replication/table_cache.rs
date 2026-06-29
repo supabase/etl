@@ -44,8 +44,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use etl_postgres::types::{ReplicatedTableSchema, SnapshotId, TableId};
 use tokio::sync::RwLock;
+
+use crate::schema::{ReplicatedTableSchema, SnapshotId, TableId};
 
 /// Shared per-table protocol state used to decode logical replication messages.
 #[derive(Debug, Clone)]
@@ -155,10 +156,10 @@ impl SharedTableCache {
 mod tests {
     use std::collections::HashSet;
 
-    use etl_postgres::types::{ColumnSchema, TableName, TableSchema};
     use tokio_postgres::types::Type;
 
     use super::*;
+    use crate::schema::{ColumnSchema, TableName, TableSchema};
 
     fn create_test_schema() -> ReplicatedTableSchema {
         let schema = TableSchema::with_snapshot_id(
@@ -174,9 +175,8 @@ mod tests {
 
         let replicated_columns: HashSet<String> =
             ["id".to_owned(), "age".to_owned()].into_iter().collect();
-        let replication_mask =
-            etl_postgres::types::ReplicationMask::build(&schema, &replicated_columns);
-        let identity_mask = etl_postgres::types::IdentityMask::from_bytes(vec![1, 0, 1]);
+        let replication_mask = crate::schema::ReplicationMask::build(&schema, &replicated_columns);
+        let identity_mask = crate::schema::IdentityMask::from_bytes(vec![1, 0, 1]);
         ReplicatedTableSchema::from_masks(Arc::new(schema), replication_mask, identity_mask)
     }
 

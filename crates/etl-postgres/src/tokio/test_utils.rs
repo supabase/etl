@@ -14,10 +14,10 @@ use tokio_postgres::{
 use tracing::info;
 
 use crate::{
-    replication::extract_server_version,
     requires_version,
+    schema::{ColumnSchema, TableId, TableName},
+    source::extract_server_version,
     tokio::tls::MakeRustlsConnect,
-    types::{ColumnSchema, TableId, TableName},
     version::POSTGRES_15,
 };
 

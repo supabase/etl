@@ -1,8 +1,11 @@
 use std::{fmt, io::Write};
 
-use etl::types::{
-    ArrayCell, Cell, ColumnSchema, DATE_FORMAT, PgNumeric, TIME_FORMAT, TIMESTAMP_FORMAT,
-    TIMESTAMPTZ_FORMAT_HH_MM, TableRow,
+use etl::{
+    data::{
+        ArrayCell, Cell, DATE_FORMAT, PgNumeric, TIME_FORMAT, TIMESTAMP_FORMAT,
+        TIMESTAMPTZ_FORMAT_HH_MM, TableRow,
+    },
+    schema::ColumnSchema,
 };
 use serde::{
     Serialize,
@@ -282,7 +285,7 @@ where
 #[cfg(test)]
 mod tests {
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-    use etl::types::Type;
+    use etl::schema::Type;
     use serde_json::{Value, json};
     use uuid::Uuid;
 

@@ -1,9 +1,11 @@
 use std::future::Future;
 
 use crate::{
-    destination::async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+    data::TableRow,
+    destination::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     error::EtlResult,
-    types::{Event, ReplicatedTableSchema, TableRow},
+    event::Event,
+    schema::ReplicatedTableSchema,
 };
 
 /// Trait for systems that can receive replicated data from ETL pipelines.
@@ -35,13 +37,15 @@ pub trait Destination {
         async { Ok(()) }
     }
 
-    /// Initializes destination state after the pipeline store cache is loaded.
+    /// Initializes destination state after pipeline startup state is prepared.
     ///
     /// ETL calls this hook during pipeline startup, after destination table
-    /// metadata and table schemas have been loaded from persistent state and
-    /// before workers begin submitting table-specific writes. Destinations can
-    /// use it to reconcile durable destination state with their physical
-    /// objects after a process restart. The default implementation is a no-op.
+    /// metadata, table schemas, and table states have been loaded and tables
+    /// removed from the publication have been purged from ETL-owned state. It
+    /// runs before workers begin submitting table-specific writes.
+    /// Destinations can use it to reconcile durable destination state with
+    /// their physical objects after a process restart. The default
+    /// implementation is a no-op.
     fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
     }
@@ -101,9 +105,9 @@ pub trait Destination {
     /// Writes streaming replication events to the destination.
     ///
     /// This method handles real-time changes from the Postgres replication
-    /// stream. Events include inserts, updates, deletes, and transaction
-    /// boundaries. ETL may call this method multiple times with different
-    /// streaming batches.
+    /// stream. Events include relation notifications, inserts, updates,
+    /// deletes, truncates, and transaction boundaries. ETL may call this
+    /// method multiple times with different streaming batches.
     ///
     /// Streaming batches are built from size and time limits, not schema
     /// change boundaries. A single call may contain zero, one, or many

@@ -1,7 +1,7 @@
 use etl_api::validation::{FailureType, ValidationContext, validate_pipeline, validate_source};
 use etl_config::Environment;
 use etl_postgres::{
-    below_version, replication::extract_server_version, sqlx::test_utils::drop_pg_database,
+    below_version, source::extract_server_version, sqlx::test_utils::drop_pg_database,
     version::POSTGRES_15,
 };
 use sqlx::Executor;

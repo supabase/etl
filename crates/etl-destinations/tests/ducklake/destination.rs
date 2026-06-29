@@ -27,15 +27,15 @@ use std::{f64::consts::PI, path::Path, sync::Arc, time::Duration};
 use chrono::NaiveDate;
 use duckdb::Connection;
 use etl::{
-    destination::Destination,
+    data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
+    destination::{Destination, DestinationTableMetadata, DestinationTableSchemaStatus},
     error::ErrorKind,
-    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::{both::memory::MemoryStore, schema::SchemaStore, state::StateStore},
-    types::{
-        Cell, ColumnSchema, DeleteEvent, Event, IdentityMask, OldTableRow, PartialTableRow, PgLsn,
-        ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableName, TableRow,
-        TableSchema, Type as PgType, UpdatedTableRow,
+    event::{DeleteEvent, Event},
+    schema::{
+        ColumnSchema, IdentityMask, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId,
+        TableId, TableName, TableSchema, Type as PgType,
     },
+    store::{MemoryStore, SchemaStore, StateStore},
 };
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
@@ -988,7 +988,10 @@ async fn truncate_clears_copy_markers_for_recopy() {
 /// state.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::{
+        event::{DeleteEvent, InsertEvent, UpdateEvent},
+        schema::PgLsn,
+    };
     let lake = create_test_lake("write_events").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
@@ -1074,7 +1077,7 @@ async fn write_events() {
 /// contains DML for multiple schema versions of the same table.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_splits_same_table_batch_by_replicated_schema() {
-    use etl::types::{InsertEvent, PgLsn};
+    use etl::{event::InsertEvent, schema::PgLsn};
 
     let lake = create_test_lake("write_events_splits_same_table_batch_by_replicated_schema").await;
     let catalog_url = lake.catalog_url.clone();
@@ -1154,7 +1157,7 @@ async fn write_events_splits_same_table_batch_by_replicated_schema() {
 /// `write_events` recovers interrupted DDL before handling a relation event.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_recovers_applying_metadata_before_relation_event() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake =
         create_test_lake("write_events_recovers_applying_metadata_before_relation_event").await;
@@ -1271,7 +1274,7 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_applies_defaulted_schema_change() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake = create_test_lake("write_events_applies_defaulted_schema_change").await;
     let catalog_url = lake.catalog_url.clone();
@@ -1391,7 +1394,7 @@ async fn write_events_applies_defaulted_schema_change() {
 /// marked applied for a schema that was not fully applied.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_reconciles_missing_columns_after_applied_metadata() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake =
         create_test_lake("write_events_reconciles_missing_columns_after_applied_metadata").await;
@@ -1505,7 +1508,7 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
 /// replacement while preserving replay safety.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_supports_drop_and_add_same_column_name() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake = create_test_lake("write_events_supports_drop_and_add_same_column_name").await;
     let catalog_url = lake.catalog_url.clone();
@@ -1601,7 +1604,7 @@ async fn write_events_supports_drop_and_add_same_column_name() {
 /// tombstones or block later replacements.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_supports_repeated_drop_and_add_same_column_name() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake =
         create_test_lake("write_events_supports_repeated_drop_and_add_same_column_name").await;
@@ -1717,7 +1720,7 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
 /// the same physical column name.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_drops_stale_tombstone_before_reusing_tombstone_name() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake = create_test_lake("write_events_drops_stale_tombstone_before_reuse").await;
     let catalog_url = lake.catalog_url.clone();
@@ -2206,7 +2209,7 @@ async fn startup_after_restart_recovers_initial_applying_metadata() {
 /// Small CDC batches should remain inlined after the caller returns.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_small_batch_stays_inlined_after_return() {
-    use etl::types::{InsertEvent, PgLsn};
+    use etl::{event::InsertEvent, schema::PgLsn};
     let lake = create_test_lake("write_events_small_batch_stays_inlined_after_return").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
@@ -2259,7 +2262,10 @@ async fn write_events_small_batch_stays_inlined_after_return() {
 /// `write_events` keeps update events with old rows on the current-state path.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_with_old_row_update() {
-    use etl::types::{InsertEvent, PgLsn, UpdateEvent};
+    use etl::{
+        event::{InsertEvent, UpdateEvent},
+        schema::PgLsn,
+    };
     let lake = create_test_lake("write_events_with_old_row_update").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
@@ -2331,7 +2337,7 @@ async fn write_events_with_old_row_update() {
 /// value when the same row is updated multiple times in order.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_with_partial_updates() {
-    use etl::types::UpdateEvent;
+    use etl::event::UpdateEvent;
 
     let lake = create_test_lake("write_events_with_partial_updates").await;
     let catalog_url = lake.catalog_url.clone();
@@ -2415,7 +2421,7 @@ async fn write_events_with_partial_updates() {
 /// skipping them.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_without_replica_identity_rejects_mutations() {
-    use etl::types::UpdateEvent;
+    use etl::event::UpdateEvent;
 
     let lake = create_test_lake("write_events_without_replica_identity_rejects_mutations").await;
     let catalog_url = lake.catalog_url.clone();
@@ -2501,7 +2507,10 @@ async fn write_events_without_replica_identity_rejects_mutations() {
 /// committed.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_replay_is_idempotent() {
-    use etl::types::{InsertEvent, PgLsn, UpdateEvent};
+    use etl::{
+        event::{InsertEvent, UpdateEvent},
+        schema::PgLsn,
+    };
 
     let lake = create_test_lake("write_events_replay_is_idempotent").await;
     let catalog_url = lake.catalog_url.clone();
@@ -2592,7 +2601,7 @@ async fn write_events_replay_is_idempotent() {
 /// Streaming progress must compare transaction ordinals when commit LSNs match.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
-    use etl::types::{InsertEvent, UpdateEvent};
+    use etl::event::{InsertEvent, UpdateEvent};
     let lake =
         create_test_lake("write_events_same_commit_lsn_higher_tx_ordinal_still_applies").await;
     let catalog_url = lake.catalog_url.clone();
@@ -2666,7 +2675,7 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
 /// overlaps.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
-    use etl::types::InsertEvent;
+    use etl::event::InsertEvent;
     let lake = create_test_lake("write_events_restart_overlap_rebatches_only_pending_suffix").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
@@ -2779,7 +2788,7 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_reuses_one_staging_table_per_atomic_batch() {
-    use etl::types::{InsertEvent, UpdateEvent};
+    use etl::event::{InsertEvent, UpdateEvent};
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
@@ -2911,7 +2920,10 @@ async fn applied_batches_table_uses_data_inlining() {
 /// flush.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_mixed_multi_table_batches() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::{
+        event::{DeleteEvent, InsertEvent, UpdateEvent},
+        schema::PgLsn,
+    };
     let lake = create_test_lake("write_events_mixed_multi_table_batches").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
@@ -3035,7 +3047,10 @@ async fn write_events_mixed_multi_table_batches() {
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
-    use etl::types::{InsertEvent, PgLsn, TruncateEvent};
+    use etl::{
+        event::{InsertEvent, TruncateEvent},
+        schema::PgLsn,
+    };
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
@@ -3127,7 +3142,10 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_retry_after_post_commit_failure_is_idempotent() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::{
+        event::{DeleteEvent, InsertEvent, UpdateEvent},
+        schema::PgLsn,
+    };
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();

@@ -5,7 +5,7 @@ use arrow::{
     array::{ArrayRef, RecordBatch},
     datatypes::TimeUnit,
 };
-use etl::types::{ArrayCell, Cell, TableRow};
+use etl::data::{ArrayCell, Cell, TableRow};
 use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
 use futures::StreamExt;
 

@@ -1,7 +1,7 @@
 use std::{io::ErrorKind, sync::LazyLock};
 
 use etl_config::shared::{PgConnectionConfig, PgConnectionOptions};
-use etl_postgres::replication::connect_to_source_database;
+use etl_postgres::source::connect_to_source_database;
 use sqlx::{PgPool, error::DatabaseError};
 
 /// Classification for source database errors exposed by API routes.

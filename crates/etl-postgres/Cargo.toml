@@ -16,7 +16,7 @@ test-utils = []
 tokio = []
 sqlx = []
 bigquery = []
-replication = ["sqlx"]
+store = ["sqlx"]
 
 [dependencies]
 
