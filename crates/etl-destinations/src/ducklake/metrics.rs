@@ -473,7 +473,7 @@ async fn record_catalog_maintenance_metrics(
 pub(super) async fn query_table_storage_metrics(
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
-    table_name: &str,
+    table_name: &DuckLakeTableName,
 ) -> EtlResult<DuckLakeTableStorageMetrics> {
     let sql = table_storage_metrics_query(metadata_schema);
     let (
@@ -485,7 +485,8 @@ pub(super) async fn query_table_storage_metrics(
         active_delete_bytes,
         deleted_rows,
     ): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(AssertSqlSafe(sql))
-        .bind(table_name)
+        .bind(table_name.schema())
+        .bind(table_name.table())
         .fetch_one(metadata_pg_pool)
         .await
         .map_err(|source| {
@@ -549,15 +550,20 @@ pub(super) async fn query_catalog_maintenance_metrics(
 /// Returns the SQL query used to sample table-level storage health.
 fn table_storage_metrics_query(metadata_schema: &str) -> String {
     let metadata_schema = quote_identifier(metadata_schema);
+    let ducklake_schema = quote_identifier("ducklake_schema");
     let ducklake_table = quote_identifier("ducklake_table");
     let ducklake_data_file = quote_identifier("ducklake_data_file");
     let ducklake_delete_file = quote_identifier("ducklake_delete_file");
 
     format!(
         r#"WITH target_table AS (
-             SELECT table_id
-             FROM {metadata_schema}.{ducklake_table}
-             WHERE end_snapshot IS NULL AND table_name = $1
+             SELECT t.table_id
+             FROM {metadata_schema}.{ducklake_table} AS t
+             JOIN {metadata_schema}.{ducklake_schema} AS s ON s.schema_id = t.schema_id
+             WHERE t.end_snapshot IS NULL
+               AND s.end_snapshot IS NULL
+               AND s.schema_name = $1
+               AND t.table_name = $2
              LIMIT 1
          ),
          data_stats AS (
@@ -676,7 +682,8 @@ mod tests {
         assert!(sql.contains("ducklake_data_file"));
         assert!(sql.contains("ducklake_delete_file"));
         assert!(sql.contains(r#""duck'lake""#));
-        assert!(sql.contains("table_name = $1"));
+        assert!(sql.contains("s.schema_name = $1"));
+        assert!(sql.contains("t.table_name = $2"));
     }
 
     #[test]

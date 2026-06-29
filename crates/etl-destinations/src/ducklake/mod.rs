@@ -9,11 +9,86 @@ mod metrics;
 mod schema;
 mod sql;
 
+use std::fmt;
+
+use etl::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    types::TableName,
+};
+use serde::{Deserialize, Serialize};
+
 /// The DuckDB catalog alias used in every `lake.<table>` qualified name.
 pub(super) const LAKE_CATALOG: &str = "lake";
 
-/// Alias for DuckLake table names.
-pub(super) type DuckLakeTableName = String;
+/// A table reference inside the DuckLake catalog.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+pub struct DuckLakeTableName {
+    schema: String,
+    table: String,
+}
+
+impl DuckLakeTableName {
+    /// Creates a DuckLake table reference from explicit schema and table names.
+    pub fn new(schema: impl Into<String>, table: impl Into<String>) -> Self {
+        Self { schema: schema.into(), table: table.into() }
+    }
+
+    /// Creates a DuckLake table reference for ETL internal helper tables.
+    /// Creates a DuckLake table reference that mirrors a source Postgres table.
+    pub fn from_source(table_name: &TableName) -> Self {
+        Self::new(table_name.schema.clone(), table_name.name.clone())
+    }
+
+    /// Returns the DuckLake schema name.
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// Returns the DuckLake table name.
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    /// Returns a stable ID for logs, metrics, and replay marker rows.
+    pub fn id(&self) -> String {
+        format!("{}.{}", self.schema, self.table)
+    }
+
+    /// Serializes this reference for durable destination metadata.
+    pub fn to_metadata_id(&self) -> EtlResult<String> {
+        serde_json::to_string(self).map_err(|source| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake destination table metadata serialization failed",
+                source: source
+            )
+        })
+    }
+
+    /// Parses a durable destination metadata table reference.
+    pub(super) fn from_metadata_id(value: &str) -> EtlResult<Self> {
+        serde_json::from_str(value).map_err(|source| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake destination table metadata is invalid",
+                format!("destination_table_id={value}"),
+                source: source
+            )
+        })
+    }
+
+    /// Returns whether this is an internal ETL helper table.
+    pub(super) fn is_internal_helper(&self) -> bool {
+        self.table.starts_with("__etl_")
+    }
+}
+
+impl fmt::Display for DuckLakeTableName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.id())
+    }
+}
 
 /// Attach-level DuckLake data inlining limit for ETL-managed connections.
 ///
