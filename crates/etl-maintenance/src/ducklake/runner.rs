@@ -1821,11 +1821,9 @@ async fn list_ducklake_tables(
     metadata_schema: &str,
 ) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
     let sql = format!(
-        "SELECT s.schema_name, t.table_name \
-         FROM {}.{} AS t \
-         JOIN {}.{} AS s ON s.schema_id = t.schema_id \
-         WHERE t.end_snapshot IS NULL AND s.end_snapshot IS NULL \
-         ORDER BY s.schema_name, t.table_name",
+        "SELECT s.schema_name, t.table_name FROM {}.{} AS t JOIN {}.{} AS s ON s.schema_id = \
+         t.schema_id WHERE t.end_snapshot IS NULL AND s.end_snapshot IS NULL ORDER BY \
+         s.schema_name, t.table_name",
         quote_identifier(metadata_schema),
         quote_identifier("ducklake_table"),
         quote_identifier(metadata_schema),
@@ -2247,8 +2245,8 @@ fn merge_adjacent_files(
     max_compacted_files: u32,
 ) -> EtlResult<u64> {
     let sql = format!(
-        "SELECT COALESCE(SUM(files_created), 0) FROM ducklake_merge_adjacent_files({}, {}, \
-         schema => {}, max_compacted_files => {});",
+        "SELECT COALESCE(SUM(files_created), 0) FROM ducklake_merge_adjacent_files({}, {}, schema \
+         => {}, max_compacted_files => {});",
         quote_literal(LAKE_CATALOG),
         quote_literal(&table_name.table_name),
         quote_literal(&table_name.schema_name),

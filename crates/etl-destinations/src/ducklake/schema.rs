@@ -320,7 +320,8 @@ mod tests {
         );
 
         assert!(sql.starts_with(
-            "create schema if not exists \"lake\".\"public\";\ncreate table if not exists \"lake\".\"public\".\"odd\"\"table\""
+            "create schema if not exists \"lake\".\"public\";\ncreate table if not exists \
+             \"lake\".\"public\".\"odd\"\"table\""
         ));
         assert!(sql.contains("  \"select\" integer not null"));
     }

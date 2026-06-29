@@ -11,7 +11,8 @@ pub(super) fn quote_identifier(identifier: &str) -> String {
     quote_double_identifier(identifier)
 }
 
-/// Quotes a DuckLake schema reference and qualifies it with the DuckLake catalog.
+/// Quotes a DuckLake schema reference and qualifies it with the DuckLake
+/// catalog.
 ///
 /// Each identifier part is quoted separately so names containing dots remain
 /// one identifier, not extra path components.
@@ -19,7 +20,8 @@ pub(super) fn qualified_lake_schema_name(schema_name: &str) -> String {
     format!("{}.{}", quote_identifier(LAKE_CATALOG), quote_identifier(schema_name))
 }
 
-/// Quotes a DuckLake table reference and qualifies it with the DuckLake catalog.
+/// Quotes a DuckLake table reference and qualifies it with the DuckLake
+/// catalog.
 ///
 /// Each identifier part is quoted separately so names containing dots are
 /// treated as one identifier, not as extra path components.

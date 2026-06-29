@@ -2515,11 +2515,9 @@ where
     /// Lists active DuckLake table names from the metadata catalog.
     async fn list_active_ducklake_tables(&self) -> EtlResult<Vec<DuckLakeTableName>> {
         let sql = format!(
-            "SELECT s.schema_name, t.table_name \
-             FROM {}.{} AS t \
-             JOIN {}.{} AS s ON s.schema_id = t.schema_id \
-             WHERE t.end_snapshot IS NULL AND s.end_snapshot IS NULL \
-             ORDER BY s.schema_name, t.table_name",
+            "SELECT s.schema_name, t.table_name FROM {}.{} AS t JOIN {}.{} AS s ON s.schema_id = \
+             t.schema_id WHERE t.end_snapshot IS NULL AND s.end_snapshot IS NULL ORDER BY \
+             s.schema_name, t.table_name",
             quote_postgres_identifier(self.metadata_schema.as_ref()),
             quote_postgres_identifier("ducklake_table"),
             quote_postgres_identifier(self.metadata_schema.as_ref()),
