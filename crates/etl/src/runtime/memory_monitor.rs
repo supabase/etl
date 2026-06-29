@@ -24,7 +24,7 @@ use crate::{
         DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
         ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
     },
-    runtime::concurrency::shutdown::ShutdownRx,
+    runtime::concurrency::ShutdownRx,
 };
 /// Represents a memory snapshot.
 #[derive(Debug, Clone, Copy)]

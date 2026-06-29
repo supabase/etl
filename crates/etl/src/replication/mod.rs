@@ -4,8 +4,8 @@
 //! streaming changes, and maintaining replication consistency.
 
 mod apply;
+pub(crate) mod state;
 mod table_cache;
-pub(crate) mod table_state;
 mod table_sync;
 mod worker_type;
 

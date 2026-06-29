@@ -29,9 +29,12 @@ use crate::{
             PostgresConnectionUpdate,
         },
     },
-    runtime::concurrency::{
-        BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx,
-        TryBatchBackpressureStream, table_sync_worker_copy_stream_id,
+    runtime::{
+        BatchBudgetController, MemoryMonitor,
+        concurrency::{
+            ShutdownResult, ShutdownRx, TryBatchBackpressureStream,
+            table_sync_worker_copy_stream_id,
+        },
     },
     schema::{ReplicatedTableSchema, TableId},
 };

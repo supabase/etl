@@ -27,12 +27,11 @@ use crate::{
     pipeline::PipelineId,
     postgres::client::PgReplicationClient,
     replication::{
+        state::{TableState, TableStateType},
         table_cache::SharedTableCache,
-        table_state::{TableState, TableStateType},
     },
     runtime::{
-        TableSyncWorkerState,
-        concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
+        BatchBudgetController, MemoryMonitor, TableSyncWorkerState, concurrency::ShutdownRx,
     },
     schema::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
     store::{PipelineStore, SchemaStore, StateStore},

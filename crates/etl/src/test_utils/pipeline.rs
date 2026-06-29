@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     destination::PipelineDestination,
     pipeline::{Pipeline, PipelineId},
-    replication::table_state::TableStateType,
+    replication::state::TableStateType,
     schema::{TableId, TableName},
     store::PipelineStore,
     test_utils::{

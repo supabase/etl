@@ -2,7 +2,7 @@
 //!
 //! This crate owns Postgres-specific helpers that need to be shared across
 //! crates: source database access, replication slot naming, ETL metadata-store
-//! queries, schema primitives, value wrappers, and codec support types.
+//! queries, schema primitives, value wrappers, and type conversion helpers.
 
 pub mod default_expression;
 pub mod lag;

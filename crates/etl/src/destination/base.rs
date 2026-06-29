@@ -103,9 +103,9 @@ pub trait Destination {
     /// Writes streaming replication events to the destination.
     ///
     /// This method handles real-time changes from the Postgres replication
-    /// stream. Events include inserts, updates, deletes, and transaction
-    /// boundaries. ETL may call this method multiple times with different
-    /// streaming batches.
+    /// stream. Events include relation notifications, inserts, updates,
+    /// deletes, truncates, and transaction boundaries. ETL may call this
+    /// method multiple times with different streaming batches.
     ///
     /// Streaming batches are built from size and time limits, not schema
     /// change boundaries. A single call may contain zero, one, or many

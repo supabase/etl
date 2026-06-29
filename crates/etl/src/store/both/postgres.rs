@@ -27,7 +27,7 @@ use crate::{
     postgres::migrations,
     replication::{
         WorkerType,
-        table_state::{TableState, TableStateType},
+        state::{TableState, TableStateType},
     },
     schema::{ReplicationMask, SnapshotId, TableId, TableSchema},
     store::{

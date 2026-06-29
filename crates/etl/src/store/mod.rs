@@ -33,5 +33,5 @@ pub use state::{StateStore, TableStates};
 
 pub use crate::replication::{
     WorkerType,
-    table_state::{TableRetryPolicy, TableState, TableStateType},
+    state::{TableRetryPolicy, TableState, TableStateType},
 };

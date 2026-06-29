@@ -75,13 +75,13 @@ use crate::{
     },
     replication::{
         SharedTableCache, WorkerType,
-        table_state::{TableState, TableStateType},
+        state::{TableState, TableStateType},
     },
     runtime::{
-        TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState,
+        BatchBudgetController, CachedBatchBudget, MemoryMonitor, TableSyncWorker,
+        TableSyncWorkerPool, TableSyncWorkerState,
         concurrency::{
-            BackpressureStream, BatchBudgetController, CachedBatchBudget, MemoryMonitor,
-            ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
+            BackpressureStream, ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
             table_sync_worker_apply_stream_id,
         },
     },

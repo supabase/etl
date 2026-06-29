@@ -19,10 +19,10 @@ use crate::{
     etl_error,
     observability::register_metrics,
     postgres::{OutOfBandSourcePool, client::PgReplicationClient, migrations},
-    replication::{SharedTableCache, table_state::TableState},
+    replication::{SharedTableCache, state::TableState},
     runtime::{
-        ApplyWorker, ApplyWorkerHandle, TableSyncWorkerPool,
-        concurrency::{MemoryMonitor, create_shutdown_channel},
+        ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool,
+        concurrency::create_shutdown_channel,
     },
     schema::TableId,
     store::PipelineStore,
@@ -58,9 +58,8 @@ enum PipelineState {
 /// Core ETL pipeline that orchestrates Postgres logical replication.
 ///
 /// A [`Pipeline`] represents a complete ETL workflow connecting a Postgres
-/// publication to a destination through configurable transformations. It
-/// manages the replication stream, coordinates worker processes, and handles
-/// failures gracefully.
+/// publication to a destination. It manages source preparation, initial table
+/// copies, streaming replication, worker coordination, and graceful shutdown.
 ///
 /// The pipeline operates in two main phases:
 /// 1. **Initial table synchronization** - Copies existing data from source

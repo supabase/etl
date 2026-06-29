@@ -10,8 +10,7 @@ use metrics::gauge;
 use tracing::debug;
 
 use crate::{
-    observability::ETL_IDEAL_BATCH_SIZE_BYTES, pipeline::PipelineId,
-    runtime::concurrency::memory_monitor::MemoryMonitor,
+    observability::ETL_IDEAL_BATCH_SIZE_BYTES, pipeline::PipelineId, runtime::MemoryMonitor,
 };
 
 /// Refresh interval for cached batch budget reads.
@@ -155,7 +154,7 @@ impl Drop for ActiveStreamsGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::concurrency::memory_monitor::MemoryMonitor;
+    use crate::runtime::MemoryMonitor;
 
     #[test]
     fn ideal_batch_size_divides_memory_budget_by_active_streams() {

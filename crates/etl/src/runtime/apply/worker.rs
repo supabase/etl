@@ -22,11 +22,11 @@ use crate::{
     },
     replication::{
         ApplyLoop, ApplyLoopResult, ApplyWorkerContext, SharedTableCache, WorkerContext,
-        WorkerType, table_state::TableStateType,
+        WorkerType, state::TableStateType,
     },
     runtime::{
-        TableSyncWorkerPool,
-        concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
+        BatchBudgetController, MemoryMonitor, TableSyncWorkerPool,
+        concurrency::ShutdownRx,
         error_policy::{RetryDirective, build_error_handling_policy},
     },
     store::{PipelineStore, StateStore, TableStateLifecycleStore},

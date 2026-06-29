@@ -24,11 +24,11 @@ use crate::{
     replication::{
         ApplyLoop, ApplyLoopResult, SharedTableCache, TableSyncResult, TableSyncWorkerContext,
         WorkerContext, WorkerType, start_table_sync,
-        table_state::{TableError, TableRetryPolicy, TableState, TableStateType},
+        state::{TableError, TableRetryPolicy, TableState, TableStateType},
     },
     runtime::{
-        TableSyncWorkerPool,
-        concurrency::{BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx},
+        BatchBudgetController, MemoryMonitor, TableSyncWorkerPool,
+        concurrency::{ShutdownResult, ShutdownRx},
         error_policy::{RetryDirective, build_error_handling_policy},
         table_sync::TableSyncWorkerId,
     },

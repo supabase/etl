@@ -8,7 +8,7 @@ use crate::{
     bail,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    replication::table_state::{TableError, TableRetryPolicy},
+    replication::state::{TableError, TableRetryPolicy},
 };
 
 /// Replication lifecycle state for a source table.
@@ -337,7 +337,7 @@ mod tests {
     use crate::{
         error::ErrorKind,
         etl_error,
-        replication::table_state::{TableRetryPolicy, TableState, TableStateType},
+        replication::state::{TableRetryPolicy, TableState, TableStateType},
     };
 
     #[test]

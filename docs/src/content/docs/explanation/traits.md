@@ -15,6 +15,7 @@ Receives replicated data. This is the **primary extension point** for sending da
 pub trait Destination {
     fn name() -> &'static str;
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
+    fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
     fn drop_table_for_copy(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: DropTableForCopyResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, table_rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
@@ -27,6 +28,7 @@ pub trait Destination {
 |--------|---------|
 | `name()` | Returns identifier for logging and diagnostics |
 | `shutdown()` | Called when the pipeline shuts down. Default is a no-op. Override for cleanup or bookkeeping |
+| `startup()` | Called after store caches are loaded and before workers start. Default is a no-op. Override to reconcile destination state after restarts |
 | `drop_table_for_copy()` | Drops the existing destination object and destination-private replay state before restarting a table copy. Receives the previously stored replicated schema for locating the old object |
 | `write_table_rows()` | Writes rows during initial table copy. Receives the current replicated schema and may get an empty vector for tables with no data |
 | `write_events()` | Processes streaming replication events (inserts, updates, deletes, truncates, relations, and transaction markers). Batches may span multiple tables |
@@ -40,6 +42,7 @@ pub trait Destination {
 - Preserve **per-table event order**. During initial copy and catch-up, transaction markers are not a reliable all-tables transaction boundary.
 - Treat `Event::Relation` as an ordered schema transition, not a `write_events()` batch boundary. ETL batches streaming events by size and time, so one call can contain multiple schema changes, including multiple relation events for the same table.
 - Always complete the supplied async result handle. Dropping it reports a destination error to ETL.
+- `startup()` runs after ETL has loaded destination metadata and table schemas from the store, so destinations can compare persisted ETL state with their physical objects before replication work starts.
 - All three write-like methods use async results, but ETL waits differently. `drop_table_for_copy()` waits immediately before copy-scoped store cleanup. `write_table_rows()` also waits immediately, requesting the next batch only after the current one finishes for that copy partition. `write_events()` is the method where ETL can keep processing other work while the destination finishes the current batch; ETL still waits for that batch's async result before handing the destination the next streaming batch.
 
 See [Event Types](/etl/explanation/events/) for details on the events received by `write_events()`.

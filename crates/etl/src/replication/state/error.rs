@@ -1,7 +1,7 @@
 use crate::{
     error::{ErrorKind, EtlError},
     etl_error,
-    replication::table_state::TableRetryPolicy,
+    replication::state::TableRetryPolicy,
     runtime::ErrorHandlingPolicy,
 };
 

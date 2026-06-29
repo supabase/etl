@@ -10,7 +10,7 @@ use crate::{
     destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     error::{ErrorKind, EtlResult},
     etl_error,
-    replication::{WorkerType, table_state::TableState},
+    replication::{WorkerType, state::TableState},
     schema::{SnapshotId, TableId, TableSchema},
     store::{
         DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,

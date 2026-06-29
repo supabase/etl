@@ -1,7 +1,7 @@
 //! Postgres source, protocol, and migration support.
 
-mod replication_stream;
 mod source_pool;
+mod stream;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod client;
@@ -11,7 +11,5 @@ pub(crate) mod client;
 pub(crate) mod codec;
 pub mod migrations;
 
-pub(crate) use replication_stream::{
-    EventsStream, StatusUpdateResult, StatusUpdateType, TableCopyStream,
-};
 pub(crate) use source_pool::OutOfBandSourcePool;
+pub(crate) use stream::{EventsStream, StatusUpdateResult, StatusUpdateType, TableCopyStream};

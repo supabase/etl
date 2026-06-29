@@ -11,9 +11,7 @@ use tracing::info;
 
 use crate::{
     data::SizeHint,
-    runtime::concurrency::{
-        batch_budget::CachedBatchBudget, memory_monitor::MemoryMonitorSubscription,
-    },
+    runtime::{CachedBatchBudget, MemoryMonitorSubscription},
     schema::TableId,
 };
 
@@ -332,9 +330,7 @@ mod tests {
     use super::*;
     use crate::{
         data::SizeHint,
-        runtime::concurrency::{
-            batch_budget::BatchBudgetController, memory_monitor::MemoryMonitor,
-        },
+        runtime::{BatchBudgetController, MemoryMonitor},
         schema::TableId,
     };
 

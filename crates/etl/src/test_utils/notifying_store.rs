@@ -13,7 +13,7 @@ use crate::{
     etl_error,
     replication::{
         WorkerType,
-        table_state::{TableState, TableStateType},
+        state::{TableState, TableStateType},
     },
     schema::{SnapshotId, TableId, TableSchema},
     store::{
