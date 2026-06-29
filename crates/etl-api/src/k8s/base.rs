@@ -58,6 +58,10 @@ pub struct DuckLakeMaintenanceResourceConfig {
 pub struct ReplicatorStatefulSetConfig {
     /// Existing Kubernetes resource prefix.
     pub prefix: String,
+    /// Tenant id that owns the replicator.
+    pub tenant_id: String,
+    /// Pipeline id that owns the replicator.
+    pub pipeline_id: i64,
     /// Image for the replicator container.
     pub replicator_image: String,
     /// Deployment environment.
