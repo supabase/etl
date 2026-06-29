@@ -289,7 +289,7 @@ fn count_internal_table_files(data: &Path, table_name: &str) -> usize {
 }
 
 fn count_files_in_dir(table_dir: &Path) -> usize {
-    match std::fs::read_dir(&table_dir) {
+    match std::fs::read_dir(table_dir) {
         Ok(entries) => {
             entries.filter_map(Result::ok).filter(|entry| entry.path().is_file()).count()
         }
