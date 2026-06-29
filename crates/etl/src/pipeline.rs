@@ -167,12 +167,14 @@ where
         // are loaded in the cache.
         self.store.load_destination_tables_metadata().await?;
         self.store.load_table_schemas().await?;
-        self.destination.startup().await?;
 
         // We load the table states by checking the table ids of a publication and
         // loading/creating the table states based on the current
         // state.
         self.initialize_table_states(&replication_client).await?;
+
+        // We then let destinations perform their startup sequence if any.
+        self.destination.startup().await?;
 
         // We create the table sync workers pool to manage all table sync workers in a
         // central place.
@@ -372,7 +374,7 @@ where
         self.store.load_table_states().await?;
         let table_states = self.store.get_table_states().await?;
 
-        // Initialize states for newly added tables in the publication
+        // Initialize states for newly added tables in the publication.
         for table_id in &publication_table_ids {
             if !table_states.contains_key(table_id) {
                 self.store.update_table_state(*table_id, TableState::Init).await?;

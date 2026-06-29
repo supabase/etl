@@ -93,7 +93,7 @@ pub trait Destination {
 |--------|-------------|---------|
 | `name()` | On initialization | Identify the destination |
 | `shutdown()` | After ETL stops submitting work | Clean up destination resources, drain writers, or stop background tasks |
-| `startup()` | After store caches are loaded and before workers start | Reconcile destination state after process restarts |
+| `startup()` | After store caches are loaded, removed-publication tables are purged, and before workers start | Reconcile destination state after process restarts |
 | `drop_table_for_copy()` | Before restarting a table copy when previous destination state exists | Drop the existing destination object and destination-private replay state using the previously stored replicated schema |
 | `write_table_rows()` | During initial copy | Receive bulk rows for the current replicated schema |
 | `write_events()` | During catch-up and continuous replication | Receive streaming changes |

@@ -47,8 +47,7 @@ const BIGQUERY_SEQUENCE_ORDINAL_SECOND: u64 = 1;
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
-/// Uses the shared underscore-escaped destination naming logic from
-/// [`crate::table_name`].
+/// Uses the shared underscore-escaped destination naming logic.
 pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> EtlResult<BigQueryTableId> {
     try_stringify_table_name(table_name)
 }

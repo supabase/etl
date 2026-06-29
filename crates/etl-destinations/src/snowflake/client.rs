@@ -311,7 +311,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     /// round-trip data would still be pushed, but we can avoid that extra
     /// trip).
     ///
-    /// Ref: https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-classic-recommendation
+    /// Ref: <https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-classic-recommendation>
     pub async fn refresh_table(&self, table_id: &TableId) -> Result<()> {
         self.get_channel(*table_id).await?.lock().await.open().await
     }

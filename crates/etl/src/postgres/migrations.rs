@@ -1,4 +1,4 @@
-//! Database postgres::migrations required by ETL.
+//! Database migrations required by ETL.
 
 use std::sync::LazyLock;
 
@@ -21,7 +21,7 @@ const APP_NAME_REPLICATOR_MIGRATIONS: &str = "supabase_etl_replicator_migrations
 static MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_REPLICATOR_MIGRATIONS).build());
 
-/// Creates a PostgreSQL connection prepared for ETL postgres::migrations.
+/// Creates a PostgreSQL connection prepared for ETL migrations.
 async fn create_migration_connection(
     connection_config: &PgConnectionConfig,
 ) -> Result<PgConnection, sqlx::Error> {
@@ -80,25 +80,25 @@ async fn run_migration_set(
 ) -> Result<(), sqlx::Error> {
     let mut conn = create_migration_connection(connection_config).await?;
 
-    debug!(migration_set = label, "applying ETL postgres::migrations");
+    debug!(migration_set = label, "applying ETL migrations");
     migrator.run_direct(None, &mut conn, false).await?;
-    debug!(migration_set = label, "ETL postgres::migrations successfully applied");
+    debug!(migration_set = label, "ETL migrations successfully applied");
 
     Ok(())
 }
 
-/// Runs source-side postgres::migrations required by every ETL pipeline.
+/// Runs source-side migrations required by every ETL pipeline.
 ///
-/// These postgres::migrations install the `etl` schema, schema snapshot helper
+/// These migrations install the `etl` schema, schema snapshot helper
 /// functions, and the DDL event trigger used by replication.
 /// When the configured source is a physical standby, this function skips
 /// migration execution because standby connections are read-only. In that
-/// setup, source-side postgres::migrations must be applied on the primary and
-/// then replayed to the standby before the pipeline starts.
+/// setup, source-side migrations must be applied on the primary and then
+/// replayed to the standby before the pipeline starts.
 ///
-/// [`crate::pipeline::Pipeline::start`] runs these postgres::migrations
-/// automatically. This function is public for applications that want to
-/// preflight or pre-apply the source-side setup.
+/// [`crate::pipeline::Pipeline::start`] runs these migrations automatically.
+/// This function is public for applications that want to preflight or
+/// pre-apply the source-side setup.
 pub async fn run_source_migrations(source_config: &PgConnectionConfig) -> EtlResult<()> {
     let in_recovery = source_database_in_recovery(source_config).await.map_err(|err| {
         etl_error!(
@@ -109,7 +109,7 @@ pub async fn run_source_migrations(source_config: &PgConnectionConfig) -> EtlRes
     })?;
 
     if in_recovery {
-        debug!("skipping etl source postgres::migrations on standby source database");
+        debug!("skipping etl source migrations on standby source database");
 
         return Ok(());
     }
@@ -117,11 +117,11 @@ pub async fn run_source_migrations(source_config: &PgConnectionConfig) -> EtlRes
     run_migration_set(source_config, source_migrator(), "source")
         .await
         .map_err(|err| {
-            etl_error!(ErrorKind::SourceError, "Failed to run ETL source postgres::migrations", source: err)
+            etl_error!(ErrorKind::SourceError, "Failed to run ETL source migrations", source: err)
         })
 }
 
-/// Runs postgres::migrations required only by [`crate::store::PostgresStore`].
+/// Runs migrations required only by [`crate::store::PostgresStore`].
 pub(crate) async fn run_postgres_store_migrations(
     source_config: &PgConnectionConfig,
 ) -> EtlResult<()> {
@@ -129,7 +129,7 @@ pub(crate) async fn run_postgres_store_migrations(
         |err| {
             etl_error!(
                 ErrorKind::SourceError,
-                "Failed to run Postgres store postgres::migrations",
+                "Failed to run Postgres store migrations",
                 source: err
             )
         },

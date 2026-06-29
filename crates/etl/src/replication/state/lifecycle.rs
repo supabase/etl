@@ -59,7 +59,6 @@ pub enum TableState {
         #[serde(with = "lsn_serde")]
         lsn: PgLsn,
     },
-
     /// Set by the table-sync worker when catch-up work is completed and the
     /// table-sync worker has caught up with the apply worker's LSN position.
     ///

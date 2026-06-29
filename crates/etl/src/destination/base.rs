@@ -37,13 +37,15 @@ pub trait Destination {
         async { Ok(()) }
     }
 
-    /// Initializes destination state after the pipeline store cache is loaded.
+    /// Initializes destination state after pipeline startup state is prepared.
     ///
     /// ETL calls this hook during pipeline startup, after destination table
-    /// metadata and table schemas have been loaded from persistent state and
-    /// before workers begin submitting table-specific writes. Destinations can
-    /// use it to reconcile durable destination state with their physical
-    /// objects after a process restart. The default implementation is a no-op.
+    /// metadata, table schemas, and table states have been loaded and tables
+    /// removed from the publication have been purged from ETL-owned state. It
+    /// runs before workers begin submitting table-specific writes.
+    /// Destinations can use it to reconcile durable destination state with
+    /// their physical objects after a process restart. The default
+    /// implementation is a no-op.
     fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
     }

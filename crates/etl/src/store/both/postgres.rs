@@ -181,7 +181,7 @@ pub struct PostgresStore {
 impl PostgresStore {
     /// Creates a new Postgres-backed store for the given pipeline.
     ///
-    /// Runs the Postgres store postgres::migrations, then creates a
+    /// Runs the Postgres store migrations, then creates a
     /// lazily-connected pool with automatic idle timeout. Connections are
     /// established on first use and automatically closed after
     /// `IDLE_TIMEOUT` of inactivity.

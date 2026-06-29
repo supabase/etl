@@ -325,7 +325,7 @@ Create `src/http_destination.rs`. A destination implements the `Destination` tra
 - `write_table_rows()` - Receive rows during initial copy together with the current replicated table schema
 - `write_events()` - Receive streaming changes (batches may span multiple tables)
 
-There are also optional `startup()` and `shutdown()` methods with default no-op implementations. Override `startup()` if your destination needs to reconcile durable ETL metadata with physical destination objects after a restart. Override `shutdown()` if your destination needs cleanup when the pipeline shuts down.
+There are also optional `startup()` and `shutdown()` methods with default no-op implementations. Override `startup()` if your destination needs to reconcile active durable ETL metadata with physical destination objects after a restart. Override `shutdown()` if your destination needs cleanup when the pipeline shuts down.
 
 ETL clears its own schema versions, destination metadata, and table-sync progress **only after `drop_table_for_copy()` succeeds**. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. If the object is already gone, return success.
 
