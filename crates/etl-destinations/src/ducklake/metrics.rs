@@ -682,7 +682,8 @@ mod tests {
         assert!(sql.contains("ducklake_data_file"));
         assert!(sql.contains("ducklake_delete_file"));
         assert!(sql.contains(r#""duck'lake""#));
-        assert!(sql.contains("table_name = $1"));
+        assert!(sql.contains("s.schema_name = $1"));
+        assert!(sql.contains("t.table_name = $2"));
     }
 
     #[test]
