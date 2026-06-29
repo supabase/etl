@@ -10,10 +10,15 @@
 
 use std::num::NonZeroI32;
 
+/// Postgres 14 server version number.
 pub const POSTGRES_14: i32 = 140000;
+/// Postgres 15 server version number.
 pub const POSTGRES_15: i32 = 150000;
+/// Postgres 16 server version number.
 pub const POSTGRES_16: i32 = 160000;
+/// Postgres 17 server version number.
 pub const POSTGRES_17: i32 = 170000;
+/// Postgres 18 server version number.
 pub const POSTGRES_18: i32 = 180000;
 
 /// Returns [`true`] if the server version meets or exceeds the required
@@ -29,7 +34,7 @@ pub fn meets_version(server_version: Option<NonZeroI32>, required_version: i32) 
 /// Checks if the server version meets or exceeds the required version.
 ///
 /// This macro provides ergonomic version checking by accepting various input
-/// types for the server version (Option<NonZeroI32>, NonZeroI32, i32) and
+/// types for the server version (`Option<NonZeroI32>`, `NonZeroI32`, `i32`) and
 /// comparing against version constants.
 #[macro_export]
 macro_rules! requires_version {

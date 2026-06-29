@@ -1,3 +1,5 @@
+//! Naming and cleanup helpers for ETL logical replication slots.
+
 use std::time::Duration;
 
 use sqlx::PgPool;
@@ -10,16 +12,19 @@ use crate::schema::TableId;
 /// Maximum length for a Postgres replication slot name in bytes.
 const MAX_SLOT_NAME_LENGTH: usize = 63;
 
-/// Prefixes for different types of replication slots
+/// Prefix used for apply-worker replication slots.
 pub const APPLY_WORKER_PREFIX: &str = "supabase_etl_apply";
+/// Prefix used for table-sync-worker replication slots.
 pub const TABLE_SYNC_WORKER_PREFIX: &str = "supabase_etl_table_sync";
 
 /// Error type for slot operations.
 #[derive(Debug, Error)]
 pub enum EtlReplicationSlotError {
+    /// The generated slot name exceeded Postgres's slot-name length limit.
     #[error("Invalid slot name length: {0}")]
     InvalidSlotNameLength(String),
 
+    /// The slot name did not match an ETL slot naming pattern.
     #[error("Invalid slot name: {0}")]
     InvalidSlotName(String),
 }
@@ -28,9 +33,17 @@ pub enum EtlReplicationSlotError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EtlReplicationSlot {
     /// Apply worker slot for a pipeline.
-    Apply { pipeline_id: u64 },
+    Apply {
+        /// Pipeline that owns the slot.
+        pipeline_id: u64,
+    },
     /// Table sync worker slot for a pipeline and table.
-    TableSync { pipeline_id: u64, table_id: TableId },
+    TableSync {
+        /// Pipeline that owns the slot.
+        pipeline_id: u64,
+        /// Source table copied by the table-sync worker.
+        table_id: TableId,
+    },
 }
 
 impl EtlReplicationSlot {

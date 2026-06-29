@@ -1,3 +1,5 @@
+//! Parsing and representation of portable Postgres default expressions.
+
 use tokio_postgres::types::Type;
 use tracing::warn;
 

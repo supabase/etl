@@ -1,3 +1,5 @@
+//! Replication lag queries for Postgres logical replication slots.
+
 use std::collections::BTreeMap;
 
 use sqlx::{FromRow, PgExecutor};

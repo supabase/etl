@@ -1,3 +1,5 @@
+//! Postgres temporal parsing and wire-format helpers.
+
 use std::{
     fmt,
     str::FromStr,

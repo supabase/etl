@@ -10,9 +10,11 @@ pub mod numeric;
 pub mod schema;
 pub mod slots;
 pub mod source;
+#[doc(hidden)]
 #[cfg(feature = "sqlx")]
 pub mod sqlx;
 pub mod store;
+#[doc(hidden)]
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 pub mod time;

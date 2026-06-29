@@ -1,3 +1,5 @@
+//! Shared Postgres schema identifiers and table schema metadata.
+
 use std::{
     fmt,
     hash::{Hash, Hasher},
@@ -125,6 +127,7 @@ pub struct TableName {
 }
 
 impl TableName {
+    /// Creates a fully qualified table name from schema and table components.
     pub fn new(schema: String, name: String) -> TableName {
         Self { schema, name }
     }
@@ -319,17 +322,17 @@ impl ColumnSchemaBuilder {
 /// Table OIDs are unique identifiers assigned to tables in Postgres.
 ///
 /// This newtype provides type safety by preventing accidental use of raw
-/// [`Oid`] values where a table identifier is expected.
+/// Postgres OID values where a table identifier is expected.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct TableId(pub Oid);
 
 impl TableId {
-    /// Creates a new [`TableId`] from an [`Oid`].
+    /// Creates a new [`TableId`] from a Postgres OID.
     pub fn new(oid: Oid) -> Self {
         Self(oid)
     }
 
-    /// Returns the underlying [`Oid`] value.
+    /// Returns the underlying Postgres OID value.
     pub fn into_inner(self) -> Oid {
         self.0
     }

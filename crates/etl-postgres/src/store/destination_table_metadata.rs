@@ -1,3 +1,5 @@
+//! SQL accessors for destination table metadata stored in Postgres.
+
 use std::collections::HashMap;
 
 use sqlx::{PgExecutor, PgPool, Row, Type, postgres::types::Oid as SqlxTableId};
@@ -36,12 +38,17 @@ fn parse_snapshot_ids(
 /// Database row representation of destination table metadata.
 #[derive(Debug, Clone)]
 pub struct StoredDestinationTableMetadataRow {
+    /// Source table identifier.
     pub table_id: TableId,
+    /// Destination-specific table identifier.
     pub destination_table_id: String,
+    /// Current schema snapshot applied at the destination.
     pub snapshot_id: SnapshotId,
     /// The schema version before the current change. None for initial schemas.
     pub previous_snapshot_id: Option<SnapshotId>,
+    /// Current destination schema application status.
     pub schema_status: StoredDestinationTableSchemaStatus,
+    /// Column replication mask stored as raw bytes.
     pub replication_mask: Vec<u8>,
 }
 

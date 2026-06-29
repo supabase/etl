@@ -1,3 +1,5 @@
+//! Utility helpers for working with Postgres type metadata.
+
 use tokio_postgres::types::{Kind, Type};
 
 /// Converts a Postgres type OID to a [`Type`] instance.

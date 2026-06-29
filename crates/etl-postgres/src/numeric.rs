@@ -1,3 +1,5 @@
+//! Postgres `NUMERIC` value support.
+
 use std::{
     io::Cursor,
     iter::Peekable,

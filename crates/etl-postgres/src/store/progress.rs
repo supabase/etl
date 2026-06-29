@@ -1,3 +1,5 @@
+//! SQL accessors for durable replication progress.
+
 use std::str::FromStr;
 
 use sqlx::{PgExecutor, postgres::types::Oid as SqlxTableId};

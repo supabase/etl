@@ -1,3 +1,5 @@
+//! SQL accessors for durable table replication state.
+
 use sqlx::{PgExecutor, Type, postgres::types::Oid as SqlxTableId, prelude::FromRow};
 
 use crate::schema::TableId;
@@ -6,23 +8,36 @@ use crate::schema::TableId;
 #[derive(Debug, Clone, Copy, Type, PartialEq)]
 #[sqlx(type_name = "etl.table_state", rename_all = "snake_case")]
 pub enum StoredTableStateType {
+    /// Table has been discovered but no copy work has started.
     Init,
+    /// Table is currently being copied by a table sync worker.
     DataSync,
+    /// Initial table copy completed.
     FinishedCopy,
+    /// Table sync worker caught up to the handoff LSN.
     SyncDone,
+    /// Table is ready for steady-state apply-worker replication.
     Ready,
+    /// Table replication is stopped on an error.
     Errored,
 }
 
 /// Database row representation of table state.
 #[derive(Debug, FromRow)]
 pub struct StoredTableStateRow {
+    /// Durable state row identifier.
     pub id: i64,
+    /// Pipeline that owns the table state.
     pub pipeline_id: i64,
+    /// Source table identifier.
     pub table_id: SqlxTableId,
+    /// Stored lifecycle state.
     pub state: StoredTableStateType,
+    /// Serialized state metadata for states that carry additional data.
     pub metadata: Option<serde_json::Value>,
+    /// Previous row in the table-state history chain.
     pub prev: Option<i64>,
+    /// Whether this row is the current state for its table.
     pub is_current: bool,
 }
 

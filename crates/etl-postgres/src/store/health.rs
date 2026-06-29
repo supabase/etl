@@ -1,3 +1,5 @@
+//! Health checks for ETL-owned Postgres metadata tables.
+
 use sqlx::PgExecutor;
 
 use crate::store::catalog::{ETL_CORE_STATE_TABLES, EtlTable};

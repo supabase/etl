@@ -7,8 +7,10 @@ Enable the destination modules you need with crate features:
 | Feature | Destination | Status |
 | --- | --- | --- |
 | `bigquery` | Google BigQuery | Stable |
+| `clickhouse` | ClickHouse | In progress |
 | `ducklake` | DuckLake | In progress |
 | `iceberg` | Apache Iceberg | Deprecated for now |
+| `snowflake` | Snowflake | In progress |
 
 DuckLake external maintenance is configured at runtime with
 `maintenance_mode`: `disabled`, `kubernetes`, or `postgres`. The default is

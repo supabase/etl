@@ -1,3 +1,5 @@
+//! SQL accessors for versioned source table schemas.
+
 use std::collections::HashMap;
 
 use sqlx::{

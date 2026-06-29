@@ -1,3 +1,5 @@
+//! Source database connection and catalog lookup helpers.
+
 use std::{collections::HashMap, num::NonZeroI32};
 
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions};
@@ -9,9 +11,11 @@ use crate::schema::{TableId, TableName};
 /// Errors that can occur during table lookups.
 #[derive(Debug, Error)]
 pub enum TableLookupError {
+    /// Querying the source database failed.
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    /// No table exists for the requested source table OID.
     #[error("Table with ID {0} not found")]
     TableNotFound(TableId),
 }

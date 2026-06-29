@@ -3,7 +3,9 @@
 //! Provides destination traits for sending replicated data to target systems.
 //! Destinations handle both initial table synchronization data and streaming
 //! replication events. [`PipelineDestination`] provides the facade bounds used
-//! by the pipeline runtime.
+//! by the pipeline runtime. [`TaskSet`] is available for destinations that
+//! complete accepted writes in background tasks while keeping shutdown and
+//! panic handling explicit.
 
 mod async_result;
 mod base;
