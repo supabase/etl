@@ -4,6 +4,7 @@ use etl_config::{
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use url::Url;
 use utoipa::ToSchema;
 
@@ -167,6 +168,348 @@ pub enum FullApiDestinationConfig {
         )]
         role: Option<String>,
     },
+}
+
+#[derive(Debug, Error)]
+pub enum DestinationConfigUpdateError {
+    #[error("Missing required secret field `{field}` for {destination} destination")]
+    MissingRequiredSecret { destination: &'static str, field: &'static str },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateApiDestinationConfig {
+    BigQuery {
+        #[schema(example = "my-gcp-project")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        project_id: String,
+        #[schema(example = "my_dataset")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        dataset_id: String,
+        #[schema(example = "{\"type\": \"service_account\", \"project_id\": \"my-project\"}")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service_account_key: Option<SerializableSecretString>,
+        #[schema(example = 15)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_staleness_mins: Option<u16>,
+        #[schema(example = 8)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        connection_pool_size: Option<usize>,
+    },
+    #[serde(rename = "clickhouse")]
+    ClickHouse {
+        #[schema(value_type = String, example = "http://test:8123")]
+        #[serde(deserialize_with = "crate::utils::trim_http_url")]
+        url: Url,
+        #[schema(example = "foo")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        user: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<SerializableSecretString>,
+        #[schema(example = "my_db")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        database: String,
+        #[schema(value_type = String, example = "replacing_merge_tree")]
+        #[serde(default)]
+        engine: ClickHouseEngine,
+    },
+    Iceberg {
+        #[serde(flatten)]
+        config: UpdateApiIcebergConfig,
+    },
+    Ducklake {
+        #[schema(value_type = String, example = "postgres://localhost:5432/ducklake_catalog")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_secret_string"
+        )]
+        catalog_url: Option<SerializableSecretString>,
+        #[schema(example = "s3://bucket/path")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        data_path: String,
+        #[schema(example = 4)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pool_size: Option<u32>,
+        #[schema(example = "my-access-key")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_secret_string"
+        )]
+        s3_access_key_id: Option<SerializableSecretString>,
+        #[schema(example = "my-secret-key")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_secret_string"
+        )]
+        s3_secret_access_key: Option<SerializableSecretString>,
+        #[schema(example = "us-east-1")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        s3_region: Option<String>,
+        #[schema(example = "127.0.0.1:5000/s3")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        s3_endpoint: Option<String>,
+        #[schema(example = "path")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        s3_url_style: Option<String>,
+        #[schema(example = false)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        s3_use_ssl: Option<bool>,
+        #[schema(example = "ducklake")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        metadata_schema: Option<String>,
+        #[schema(example = "500MB")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        maintenance_target_file_size: Option<String>,
+        #[schema(example = "7 days")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        expire_snapshots_older_than: Option<String>,
+        #[schema(example = "kubernetes")]
+        #[serde(default)]
+        maintenance_mode: DuckLakeMaintenanceMode,
+    },
+    Snowflake {
+        #[schema(example = "ORGNAME-ACCOUNTNAME")]
+        #[serde(deserialize_with = "crate::utils::trim_snowflake_account_id")]
+        account_id: String,
+        #[schema(example = "ETL_USER")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        user: String,
+        #[schema(example = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADA...")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        private_key: Option<SerializableSecretString>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        private_key_passphrase: Option<SerializableSecretString>,
+        #[schema(example = "ANALYTICS")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        database: String,
+        #[schema(example = "PUBLIC")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        schema: String,
+        #[schema(example = "ETL_ROLE")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        role: Option<String>,
+    },
+}
+
+impl UpdateApiDestinationConfig {
+    pub fn merge_into_stored(
+        self,
+        stored: StoredDestinationConfig,
+    ) -> Result<StoredDestinationConfig, DestinationConfigUpdateError> {
+        match (self, stored) {
+            (
+                Self::BigQuery {
+                    project_id,
+                    dataset_id,
+                    service_account_key,
+                    max_staleness_mins,
+                    connection_pool_size,
+                },
+                StoredDestinationConfig::BigQuery { service_account_key: stored_key, .. },
+            ) => Ok(StoredDestinationConfig::BigQuery {
+                project_id,
+                dataset_id,
+                service_account_key: service_account_key.unwrap_or(stored_key),
+                max_staleness_mins,
+                connection_pool_size: connection_pool_size
+                    .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
+            }),
+            (
+                Self::ClickHouse { url, user, password, database, engine },
+                StoredDestinationConfig::ClickHouse { password: stored_password, .. },
+            ) => Ok(StoredDestinationConfig::ClickHouse {
+                url,
+                user,
+                password: password.or(stored_password),
+                database,
+                engine,
+            }),
+            (
+                Self::Iceberg { config },
+                StoredDestinationConfig::Iceberg { config: stored_config },
+            ) => config
+                .merge_into_stored(stored_config)
+                .map(|config| StoredDestinationConfig::Iceberg { config }),
+            (
+                Self::Ducklake {
+                    catalog_url,
+                    data_path,
+                    pool_size,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_region,
+                    s3_endpoint,
+                    s3_url_style,
+                    s3_use_ssl,
+                    metadata_schema,
+                    maintenance_target_file_size,
+                    expire_snapshots_older_than,
+                    maintenance_mode,
+                },
+                StoredDestinationConfig::Ducklake {
+                    catalog_url: stored_catalog_url,
+                    s3_access_key_id: stored_s3_access_key_id,
+                    s3_secret_access_key: stored_s3_secret_access_key,
+                    ..
+                },
+            ) => Ok(StoredDestinationConfig::Ducklake {
+                catalog_url: catalog_url.unwrap_or(stored_catalog_url),
+                data_path,
+                pool_size: pool_size.unwrap_or(DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE),
+                s3_access_key_id: s3_access_key_id.or(stored_s3_access_key_id),
+                s3_secret_access_key: s3_secret_access_key.or(stored_s3_secret_access_key),
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+                maintenance_target_file_size,
+                expire_snapshots_older_than,
+                maintenance_mode,
+            }),
+            (
+                Self::Snowflake {
+                    account_id,
+                    user,
+                    private_key,
+                    private_key_passphrase,
+                    database,
+                    schema,
+                    role,
+                },
+                StoredDestinationConfig::Snowflake {
+                    private_key: stored_private_key,
+                    private_key_passphrase: stored_private_key_passphrase,
+                    ..
+                },
+            ) => Ok(StoredDestinationConfig::Snowflake {
+                account_id,
+                user,
+                private_key: private_key.unwrap_or(stored_private_key),
+                private_key_passphrase: private_key_passphrase.or(stored_private_key_passphrase),
+                database,
+                schema,
+                role,
+            }),
+            (config, _) => config.into_stored_requiring_secrets(),
+        }
+    }
+
+    pub fn into_stored_requiring_secrets(
+        self,
+    ) -> Result<StoredDestinationConfig, DestinationConfigUpdateError> {
+        match self {
+            Self::BigQuery {
+                project_id,
+                dataset_id,
+                service_account_key,
+                max_staleness_mins,
+                connection_pool_size,
+            } => Ok(StoredDestinationConfig::BigQuery {
+                project_id,
+                dataset_id,
+                service_account_key: require_secret(
+                    service_account_key,
+                    "BigQuery",
+                    "service_account_key",
+                )?,
+                max_staleness_mins,
+                connection_pool_size: connection_pool_size
+                    .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
+            }),
+            Self::ClickHouse { url, user, password, database, engine } => {
+                Ok(StoredDestinationConfig::ClickHouse { url, user, password, database, engine })
+            }
+            Self::Iceberg { config } => config
+                .into_stored_requiring_secrets()
+                .map(|config| StoredDestinationConfig::Iceberg { config }),
+            Self::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+                maintenance_target_file_size,
+                expire_snapshots_older_than,
+                maintenance_mode,
+            } => Ok(StoredDestinationConfig::Ducklake {
+                catalog_url: require_secret(catalog_url, "DuckLake", "catalog_url")?,
+                data_path,
+                pool_size: pool_size.unwrap_or(DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE),
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+                maintenance_target_file_size,
+                expire_snapshots_older_than,
+                maintenance_mode,
+            }),
+            Self::Snowflake {
+                account_id,
+                user,
+                private_key,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            } => Ok(StoredDestinationConfig::Snowflake {
+                account_id,
+                user,
+                private_key: require_secret(private_key, "Snowflake", "private_key")?,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            }),
+        }
+    }
+}
+
+fn require_secret<T>(
+    value: Option<T>,
+    destination: &'static str,
+    field: &'static str,
+) -> Result<T, DestinationConfigUpdateError> {
+    value.ok_or(DestinationConfigUpdateError::MissingRequiredSecret { destination, field })
 }
 
 impl From<StoredDestinationConfig> for FullApiDestinationConfig {
@@ -537,6 +880,115 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 database,
                 schema,
                 role,
+            },
+        }
+    }
+}
+
+impl From<FullApiDestinationConfig> for UpdateApiDestinationConfig {
+    fn from(value: FullApiDestinationConfig) -> Self {
+        match value {
+            FullApiDestinationConfig::BigQuery {
+                project_id,
+                dataset_id,
+                service_account_key,
+                max_staleness_mins,
+                connection_pool_size,
+            } => Self::BigQuery {
+                project_id,
+                dataset_id,
+                service_account_key: Some(service_account_key),
+                max_staleness_mins,
+                connection_pool_size,
+            },
+            FullApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
+                Self::ClickHouse { url, user, password, database, engine }
+            }
+            FullApiDestinationConfig::Iceberg { config } => Self::Iceberg { config: config.into() },
+            FullApiDestinationConfig::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+                maintenance_target_file_size,
+                expire_snapshots_older_than,
+                maintenance_mode,
+            } => Self::Ducklake {
+                catalog_url: Some(catalog_url),
+                data_path,
+                pool_size,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+                maintenance_target_file_size,
+                expire_snapshots_older_than,
+                maintenance_mode,
+            },
+            FullApiDestinationConfig::Snowflake {
+                account_id,
+                user,
+                private_key,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            } => Self::Snowflake {
+                account_id,
+                user,
+                private_key: Some(private_key),
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            },
+        }
+    }
+}
+
+impl From<FullApiIcebergConfig> for UpdateApiIcebergConfig {
+    fn from(value: FullApiIcebergConfig) -> Self {
+        match value {
+            FullApiIcebergConfig::Supabase {
+                project_ref,
+                warehouse_name,
+                namespace,
+                catalog_token,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+            } => Self::Supabase {
+                project_ref,
+                warehouse_name,
+                namespace,
+                catalog_token: Some(catalog_token),
+                s3_access_key_id: Some(s3_access_key_id),
+                s3_secret_access_key: Some(s3_secret_access_key),
+                s3_region,
+            },
+            FullApiIcebergConfig::Rest {
+                catalog_uri,
+                warehouse_name,
+                namespace,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_endpoint,
+            } => Self::Rest {
+                catalog_uri,
+                warehouse_name,
+                namespace,
+                s3_access_key_id: Some(s3_access_key_id),
+                s3_secret_access_key: Some(s3_secret_access_key),
+                s3_endpoint,
             },
         }
     }
@@ -1051,6 +1503,165 @@ pub enum FullApiIcebergConfig {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateApiIcebergConfig {
+    Supabase {
+        #[schema(example = "abcdefghijklmnopqrst")]
+        #[serde(deserialize_with = "crate::utils::trim_supabase_project_ref")]
+        project_ref: String,
+        #[schema(example = "my-warehouse")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        warehouse_name: String,
+        #[schema(example = "my-namespace")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        namespace: Option<String>,
+        #[schema(
+            example = "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ"
+        )]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        catalog_token: Option<SerializableSecretString>,
+        #[schema(example = "9156667efc2c70d89af6588da86d2924")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        s3_access_key_id: Option<SerializableSecretString>,
+        #[schema(example = "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        s3_secret_access_key: Option<SerializableSecretString>,
+        #[schema(example = "ap-southeast-1")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        s3_region: String,
+    },
+    Rest {
+        #[schema(example = "https://abcdefghijklmnopqrst.storage.supabase.com/storage/v1/iceberg")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        catalog_uri: String,
+        #[schema(example = "my-warehouse")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        warehouse_name: String,
+        #[schema(example = "my-namespace")]
+        #[serde(default, deserialize_with = "crate::utils::trim_option_string")]
+        namespace: Option<String>,
+        #[schema(example = "9156667efc2c70d89af6588da86d2924")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        s3_access_key_id: Option<SerializableSecretString>,
+        #[schema(example = "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        s3_secret_access_key: Option<SerializableSecretString>,
+        #[schema(example = "https://s3.endpoint")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        s3_endpoint: String,
+    },
+}
+
+impl UpdateApiIcebergConfig {
+    fn merge_into_stored(
+        self,
+        stored: StoredIcebergConfig,
+    ) -> Result<StoredIcebergConfig, DestinationConfigUpdateError> {
+        match (self, stored) {
+            (
+                Self::Supabase {
+                    project_ref,
+                    warehouse_name,
+                    namespace,
+                    catalog_token,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_region,
+                },
+                StoredIcebergConfig::Supabase {
+                    catalog_token: stored_catalog_token,
+                    s3_access_key_id: stored_s3_access_key_id,
+                    s3_secret_access_key: stored_s3_secret_access_key,
+                    ..
+                },
+            ) => Ok(StoredIcebergConfig::Supabase {
+                project_ref,
+                warehouse_name,
+                namespace,
+                catalog_token: catalog_token.unwrap_or(stored_catalog_token),
+                s3_access_key_id: s3_access_key_id.unwrap_or(stored_s3_access_key_id),
+                s3_secret_access_key: s3_secret_access_key.unwrap_or(stored_s3_secret_access_key),
+                s3_region,
+            }),
+            (
+                Self::Rest {
+                    catalog_uri,
+                    warehouse_name,
+                    namespace,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_endpoint,
+                },
+                StoredIcebergConfig::Rest {
+                    s3_access_key_id: stored_s3_access_key_id,
+                    s3_secret_access_key: stored_s3_secret_access_key,
+                    ..
+                },
+            ) => Ok(StoredIcebergConfig::Rest {
+                catalog_uri,
+                warehouse_name,
+                namespace,
+                s3_access_key_id: s3_access_key_id.unwrap_or(stored_s3_access_key_id),
+                s3_secret_access_key: s3_secret_access_key.unwrap_or(stored_s3_secret_access_key),
+                s3_endpoint,
+            }),
+            (config, _) => config.into_stored_requiring_secrets(),
+        }
+    }
+
+    fn into_stored_requiring_secrets(
+        self,
+    ) -> Result<StoredIcebergConfig, DestinationConfigUpdateError> {
+        match self {
+            Self::Supabase {
+                project_ref,
+                warehouse_name,
+                namespace,
+                catalog_token,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+            } => Ok(StoredIcebergConfig::Supabase {
+                project_ref,
+                warehouse_name,
+                namespace,
+                catalog_token: require_secret(catalog_token, "Iceberg", "catalog_token")?,
+                s3_access_key_id: require_secret(s3_access_key_id, "Iceberg", "s3_access_key_id")?,
+                s3_secret_access_key: require_secret(
+                    s3_secret_access_key,
+                    "Iceberg",
+                    "s3_secret_access_key",
+                )?,
+                s3_region,
+            }),
+            Self::Rest {
+                catalog_uri,
+                warehouse_name,
+                namespace,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_endpoint,
+            } => Ok(StoredIcebergConfig::Rest {
+                catalog_uri,
+                warehouse_name,
+                namespace,
+                s3_access_key_id: require_secret(s3_access_key_id, "Iceberg", "s3_access_key_id")?,
+                s3_secret_access_key: require_secret(
+                    s3_secret_access_key,
+                    "Iceberg",
+                    "s3_secret_access_key",
+                )?,
+                s3_endpoint,
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptedStoredIcebergConfig {
@@ -1511,6 +2122,98 @@ mod tests {
             }
             _ => panic!("Config types don't match"),
         }
+    }
+
+    #[test]
+    fn update_api_destination_config_preserves_omitted_bigquery_secret() {
+        let stored_config = StoredDestinationConfig::BigQuery {
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("existing-key".to_owned()),
+            max_staleness_mins: Some(15),
+            connection_pool_size: 8,
+        };
+        let update_config = UpdateApiDestinationConfig::BigQuery {
+            project_id: "updated-project".to_owned(),
+            dataset_id: "updated_dataset".to_owned(),
+            service_account_key: None,
+            max_staleness_mins: None,
+            connection_pool_size: None,
+        };
+
+        let updated_config = update_config.merge_into_stored(stored_config).unwrap();
+
+        match updated_config {
+            StoredDestinationConfig::BigQuery {
+                project_id,
+                dataset_id,
+                service_account_key,
+                max_staleness_mins,
+                connection_pool_size,
+            } => {
+                assert_eq!(project_id, "updated-project");
+                assert_eq!(dataset_id, "updated_dataset");
+                assert_eq!(service_account_key.expose_secret(), "existing-key");
+                assert_eq!(max_staleness_mins, None);
+                assert_eq!(connection_pool_size, DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE);
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn update_api_destination_config_replaces_provided_bigquery_secret() {
+        let stored_config = StoredDestinationConfig::BigQuery {
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("existing-key".to_owned()),
+            max_staleness_mins: Some(15),
+            connection_pool_size: 8,
+        };
+        let update_config = UpdateApiDestinationConfig::BigQuery {
+            project_id: "updated-project".to_owned(),
+            dataset_id: "updated_dataset".to_owned(),
+            service_account_key: Some(SerializableSecretString::from("new-key".to_owned())),
+            max_staleness_mins: None,
+            connection_pool_size: None,
+        };
+
+        let updated_config = update_config.merge_into_stored(stored_config).unwrap();
+
+        match updated_config {
+            StoredDestinationConfig::BigQuery { service_account_key, .. } => {
+                assert_eq!(service_account_key.expose_secret(), "new-key");
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn update_api_destination_config_requires_secrets_when_changing_destination_type() {
+        let stored_config = StoredDestinationConfig::ClickHouse {
+            url: Url::parse("https://example.com:8443").unwrap(),
+            user: "etl".to_owned(),
+            password: Some(SerializableSecretString::from("secret".to_owned())),
+            database: "analytics".to_owned(),
+            engine: ClickHouseEngine::MergeTree,
+        };
+        let update_config = UpdateApiDestinationConfig::BigQuery {
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            service_account_key: None,
+            max_staleness_mins: None,
+            connection_pool_size: None,
+        };
+
+        let error = update_config.merge_into_stored(stored_config).unwrap_err();
+
+        assert!(matches!(
+            error,
+            DestinationConfigUpdateError::MissingRequiredSecret {
+                destination: "BigQuery",
+                field: "service_account_key"
+            }
+        ));
     }
 
     #[test]

@@ -300,7 +300,7 @@ async fn an_existing_bigquery_destination_and_pipeline_can_be_updated() {
     // Act
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
-        destination_config: updated_destination_config(),
+        destination_config: updated_destination_config().into(),
         source_id: new_source_id,
         pipeline_config: updated_pipeline_config(),
     };
@@ -352,7 +352,7 @@ async fn an_existing_iceberg_supabase_destination_and_pipeline_can_be_updated() 
     // Act
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: "Iceberg Supabase Destination (Updated)".to_owned(),
-        destination_config: updated_iceberg_supabase_destination_config(),
+        destination_config: updated_iceberg_supabase_destination_config().into(),
         source_id: new_source_id,
         pipeline_config: updated_pipeline_config(),
     };
@@ -416,7 +416,7 @@ async fn destination_and_pipeline_with_another_tenants_source_cannot_be_updated(
     let source2_id = create_source(&app, tenant2_id).await;
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
-        destination_config: updated_destination_config(),
+        destination_config: updated_destination_config().into(),
         source_id: source2_id,
         pipeline_config: updated_pipeline_config(),
     };
@@ -467,7 +467,7 @@ async fn updating_destination_pipeline_to_duplicate_source_destination_returns_c
     // Act
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
-        destination_config: updated_destination_config(),
+        destination_config: updated_destination_config().into(),
         source_id: source2_id,
         pipeline_config: updated_pipeline_config(),
     };
@@ -514,7 +514,7 @@ async fn destination_and_pipeline_with_another_tenants_destination_cannot_be_upd
     let destination2_id = create_destination(&app, tenant2_id).await;
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
-        destination_config: updated_destination_config(),
+        destination_config: updated_destination_config().into(),
         source_id: source1_id,
         pipeline_config: updated_pipeline_config(),
     };
@@ -577,7 +577,7 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cannot_be_update
     // Act
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
-        destination_config: updated_destination_config(),
+        destination_config: updated_destination_config().into(),
         source_id: source1_id,
         pipeline_config: updated_pipeline_config(),
     };

@@ -1,11 +1,12 @@
 use std::fmt::Debug;
 
-use sqlx::PgExecutor;
+use sqlx::{PgConnection, PgExecutor};
 use thiserror::Error;
 
 use crate::configs::{
     destination::{
-        EncryptedStoredDestinationConfig, FullApiDestinationConfig, StoredDestinationConfig,
+        DestinationConfigUpdateError, EncryptedStoredDestinationConfig, FullApiDestinationConfig,
+        StoredDestinationConfig, UpdateApiDestinationConfig,
     },
     encryption::EncryptionKeyring,
     serde::{
@@ -24,6 +25,9 @@ pub enum DestinationsDbError {
 
     #[error("Error while deserializing destination config: {0}")]
     DbDeserialization(#[from] DbDeserializationError),
+
+    #[error(transparent)]
+    DestinationConfigUpdate(#[from] DestinationConfigUpdateError),
 }
 
 #[derive(Debug)]
@@ -105,18 +109,36 @@ where
     Ok(destination)
 }
 
-pub async fn update_destination<'c, E>(
-    executor: E,
+pub async fn update_destination(
+    executor: &mut PgConnection,
     tenant_id: &str,
     name: &str,
     destination_id: i64,
-    config: FullApiDestinationConfig,
+    config: UpdateApiDestinationConfig,
     encryption_key: &EncryptionKeyring,
-) -> Result<Option<i64>, DestinationsDbError>
-where
-    E: PgExecutor<'c>,
-{
-    let config = encrypt_and_serialize(StoredDestinationConfig::from(config), encryption_key)?;
+) -> Result<Option<i64>, DestinationsDbError> {
+    let stored_config_value = sqlx::query_scalar::<_, serde_json::Value>(
+        r#"
+        select config
+        from app.destinations
+        where tenant_id = $1 and id = $2
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(destination_id)
+    .fetch_optional(&mut *executor)
+    .await?;
+
+    let Some(stored_config_value) = stored_config_value else {
+        return Ok(None);
+    };
+
+    let stored_config = decrypt_and_deserialize_from_value::<
+        EncryptedStoredDestinationConfig,
+        StoredDestinationConfig,
+    >(stored_config_value, encryption_key)?;
+    let config = config.merge_into_stored(stored_config)?;
+    let config = encrypt_and_serialize(config, encryption_key)?;
 
     let record = sqlx::query!(
         r#"

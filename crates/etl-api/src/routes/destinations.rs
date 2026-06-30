@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::DerefMut, sync::Arc};
 
 use axum::{
     Extension, Json,
@@ -15,7 +15,8 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::{
-        destination::FullApiDestinationConfig, encryption::EncryptionKeyring,
+        destination::{FullApiDestinationConfig, UpdateApiDestinationConfig},
+        encryption::EncryptionKeyring,
         pipeline::FullApiPipelineConfig,
     },
     data,
@@ -96,6 +97,9 @@ impl DestinationError {
 impl IntoResponse for DestinationError {
     fn into_response(self) -> Response {
         let status_code = match &self {
+            DestinationError::DestinationsDb(DestinationsDbError::DestinationConfigUpdate(_)) => {
+                StatusCode::BAD_REQUEST
+            }
             DestinationError::DestinationsDb(_)
             | DestinationError::PipelinesDb(_)
             | DestinationError::SourcesDb(_)
@@ -138,7 +142,7 @@ pub struct UpdateDestinationRequest {
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
     #[schema(required = true)]
-    pub config: FullApiDestinationConfig,
+    pub config: UpdateApiDestinationConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -300,8 +304,9 @@ pub(crate) async fn update_destination(
     let destination_id = destination_id.into_inner();
     let destination = destination.into_inner();
 
+    let mut conn = pool.acquire().await.map_err(DestinationsDbError::from)?;
     data::destinations::update_destination(
-        &pool,
+        conn.deref_mut(),
         tenant_id,
         &destination.name,
         destination_id,
