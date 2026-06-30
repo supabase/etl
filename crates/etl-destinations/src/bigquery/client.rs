@@ -1255,6 +1255,7 @@ impl BigQueryClient {
                         retryable_requests.push(RetryableAppendRequest { request, detail });
                     } else {
                         has_non_retryable_request = true;
+                        break;
                     }
                 }
 
