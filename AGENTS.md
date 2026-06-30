@@ -165,6 +165,18 @@
 - Every `unsafe` block should have a preceding `// SAFETY:` comment explaining why it is sound.
 - Prefer explicit ownership and borrowing over unnecessary cloning or interior mutability.
 - In async code, keep long-running background work behind named tasks or helpers.
+- Be intentional about Tokio task shutdown semantics. Dropping a
+  `JoinHandle` detaches the task; call `abort()` for best-effort background
+  tasks such as metrics reporters when they should stop immediately.
+- Dropping a Tokio `JoinSet` aborts all tasks in the set. Do not call
+  `abort_all()` before returning from a scope that owns the `JoinSet`; use
+  `abort_all()` only when the set is retained and tasks must be stopped while
+  the set remains alive.
+- Prefer graceful shutdown signaling and joining only when tasks own state that
+  must be completed or unwound deliberately, such as database transactions,
+  destination flushes, or retry-sensitive replication work.
+- Avoid elaborate shutdown channels for timer, polling, or telemetry tasks
+  whose state can be safely discarded.
 
 ## Documentation
 - Document all items, public and private, using concise stdlib-style prose.

@@ -34,8 +34,8 @@ use crate::{
     postgres::{
         OutOfBandSourcePool, TableCopyStream,
         client::{
-            CtidPartition, PgChildReplicationTransaction, PgReplicationTransaction,
-            PostgresConnectionUpdate,
+            ChildPgReplicationClient, CtidPartition, PgChildReplicationTransaction,
+            PgReplicationTransaction, PostgresConnectionUpdate,
         },
     },
     runtime::{
@@ -82,13 +82,6 @@ struct PlannedCopyPartitions {
     copy_partitions: Vec<CopyPartition>,
     /// Target partition count used before empty physical tables were skipped.
     target_partitions: u16,
-}
-
-/// Handle for the table-copy replication lag reporter task.
-#[derive(Debug)]
-struct TableCopyLagReporter {
-    /// Join handle for the lag reporter task.
-    handle: JoinHandle<()>,
 }
 
 /// Rows and timings copied by a completed worker.
@@ -160,7 +153,8 @@ fn target_ctid_partition_count(
     max_copy_connections: u16,
     total_estimated_rows: Option<i64>,
 ) -> u16 {
-    // If we have just one copy connection, we just load everything as one partition.
+    // If we have just one copy connection, we just load everything as one
+    // partition.
     if max_copy_connections == 1 {
         return 1;
     }
@@ -168,8 +162,8 @@ fn target_ctid_partition_count(
     // We try to estimate the number of partitions given the worker count.
     let worker_target = max_copy_connections.saturating_mul(CTID_PARTITIONS_PER_COPY_WORKER).max(1);
 
-    // We try to estimate the number of partitions also using the total number of estimated rows
-    // for the table(s).
+    // We try to estimate the number of partitions also using the total number of
+    // estimated rows for the table(s).
     let row_target = total_estimated_rows.filter(|estimated_rows| *estimated_rows > 0).map_or(
         1,
         |estimated_rows| {
@@ -179,7 +173,8 @@ fn target_ctid_partition_count(
         },
     );
 
-    // We take the biggest number of partitions between the two, while remaining within sane limits.
+    // We take the biggest number of partitions between the two, while remaining
+    // within sane limits.
     worker_target.max(row_target).clamp(1, MAX_CTID_COPY_PARTITIONS)
 }
 
@@ -224,8 +219,8 @@ fn spawn_table_copy_lag_reporter(
     out_of_band_source_pool: OutOfBandSourcePool,
     replication_lag_refresh_interval: Duration,
     mut shutdown_rx: ShutdownRx,
-) -> TableCopyLagReporter {
-    let handle = tokio::spawn(async move {
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
         let mut replication_lag_interval = tokio::time::interval(replication_lag_refresh_interval);
         replication_lag_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -246,9 +241,7 @@ fn spawn_table_copy_lag_reporter(
                 }
             }
         }
-    });
-
-    TableCopyLagReporter { handle }
+    })
 }
 
 /// Emits end-to-end lag metrics for a table sync while initial copy runs.
@@ -276,9 +269,8 @@ async fn emit_table_copy_replication_lag_metrics(
 }
 
 /// Stops the periodic replication lag reporter task.
-async fn stop_table_copy_lag_reporter(lag_reporter: &mut Option<TableCopyLagReporter>) {
-    if let Some(lag_reporter) = lag_reporter.take() {
-        let mut handle = lag_reporter.handle;
+async fn stop_table_copy_lag_reporter(lag_reporter: &mut Option<JoinHandle<()>>) {
+    if let Some(mut handle) = lag_reporter.take() {
         handle.abort();
 
         if let Err(error) = (&mut handle).await
@@ -368,9 +360,9 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
         "starting table copy"
     );
 
-    let snapshot_id = Arc::<str>::from(replication_transaction.export_snapshot().await?);
+    let snapshot_id = replication_transaction.export_snapshot().await?;
     let work_queue = Arc::new(Mutex::new(VecDeque::from(copy_partitions)));
-    let publication_name = publication_name.map(Arc::<str>::from);
+    let publication_name = publication_name.map(str::to_owned);
     let mut join_set = JoinSet::new();
     let mut lag_reporter = Some(spawn_table_copy_lag_reporter(
         table_id,
@@ -390,7 +382,7 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
             }
         };
 
-        let snapshot_id = Arc::clone(&snapshot_id);
+        let snapshot_id = snapshot_id.clone();
         let work_queue = Arc::clone(&work_queue);
         let replicated_table_schema = replicated_table_schema.clone();
         let publication_name = publication_name.clone();
@@ -543,12 +535,12 @@ async fn plan_copy_partitions(
 #[expect(clippy::too_many_arguments)]
 async fn copy_worker<D>(
     worker_index: usize,
-    mut child_replication_client: crate::postgres::client::ChildPgReplicationClient,
-    snapshot_id: Arc<str>,
+    mut child_replication_client: ChildPgReplicationClient,
+    snapshot_id: String,
     work_queue: Arc<Mutex<VecDeque<CopyPartition>>>,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
-    publication_name: Option<Arc<str>>,
+    publication_name: Option<String>,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
     destination: D,
@@ -604,7 +596,7 @@ async fn copy_partition_rows<D>(
     child_replication_transaction: &PgChildReplicationTransaction<'_>,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
-    publication_name: Option<Arc<str>>,
+    publication_name: Option<String>,
     partition: CopyPartition,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
