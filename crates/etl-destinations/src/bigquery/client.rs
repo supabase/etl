@@ -61,9 +61,10 @@ const MAX_SAFE_INFLIGHT_REQUESTS: usize = 100_000;
 /// Maximum time to retry locally retryable BigQuery Storage Write append
 /// errors.
 ///
-/// The current retryable cases are metadata-convergence errors after DDL.
-/// Google documents schema update detection as happening on the order of
-/// minutes.
+/// The current retryable cases are Storage Write schema propagation and
+/// `NOT_FOUND` responses when the BigQuery table API confirms that the target
+/// table exists. Google documents schema update detection as happening on the
+/// order of minutes.
 const STORAGE_WRITE_RETRY_TIMEOUT: Duration = Duration::from_secs(300);
 /// Initial backoff when retrying locally retryable Storage Write errors.
 const STORAGE_WRITE_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -324,7 +325,8 @@ fn storage_write_retry_timeout_error(detail: &str) -> EtlError {
         ErrorKind::DestinationAtomicBatchRetryable,
         "BigQuery storage write retry timed out",
         format!(
-            "BigQuery did not accept the storage write request within {} seconds after DDL: {}",
+            "BigQuery did not accept the storage write request within {} seconds after the \
+             destination table changed: {}",
             STORAGE_WRITE_RETRY_TIMEOUT.as_secs(),
             detail
         )
@@ -552,11 +554,11 @@ fn decode_storage_error_codes(status: &tonic::Status) -> Vec<&'static str> {
 }
 
 /// Returns true when the request-level BigQuery error matches the documented
-/// Storage Write metadata-lag cases.
+/// Storage Write schema-propagation cases.
 ///
 /// BigQuery documents `StorageErrorCode::SCHEMA_MISMATCH_EXTRA_FIELDS` as the
 /// structured signal for schema mismatch during appends. We fall back to the
-/// observed rename-path message only when BigQuery does not provide a
+/// observed schema-mismatch message forms only when BigQuery does not provide a
 /// structured storage error code in the gRPC details.
 fn is_retryable_schema_propagation_error(error: &BQError) -> bool {
     let BQError::TonicStatusError(status) = error else {
@@ -626,8 +628,8 @@ async fn retryable_storage_write_error_detail(
     request: &BigQueryAppendRequest,
     error: &BQError,
 ) -> EtlResult<Option<String>> {
-    // Storage Write schema updates can be visible to tables.get before the
-    // append stream accepts the new schema.
+    // BigQuery table metadata can reflect a schema update before Storage Write
+    // append streams accept rows encoded with that updated schema.
     if let Some(detail) = retryable_storage_write_schema_update_detail(error) {
         return Ok(Some(detail));
     }
@@ -1141,8 +1143,8 @@ impl BigQueryClient {
     ///
     /// Retries for transient request and transport failures are handled inside
     /// the underlying Storage Write API library. This method also retries
-    /// the narrow class of locally retryable Storage Write failures that can
-    /// happen after DDL, then converts final failures into ETL errors.
+    /// locally retryable Storage Write failures that can happen after BigQuery
+    /// table metadata changes, then converts final failures into ETL errors.
     pub(super) async fn append_table_batches(
         &self,
         append_requests: Vec<BigQueryAppendRequest>,
@@ -1558,7 +1560,7 @@ mod tests {
 
     #[test]
     fn storage_write_retry_timeout_error_is_worker_retryable() {
-        let error = storage_write_retry_timeout_error("storage write metadata lag");
+        let error = storage_write_retry_timeout_error("retryable storage write error");
 
         assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
         assert_eq!(error.description(), Some("BigQuery storage write retry timed out"));
