@@ -61,6 +61,18 @@ fn build_ctid_copy_query(
     }
 }
 
+/// Returns the half-open heap block range assigned to one ctid partition.
+fn ctid_partition_block_range(
+    partition_index: i64,
+    table_blocks: i64,
+    effective_partitions: i64,
+) -> (i64, i64) {
+    let start_block = partition_index * table_blocks / effective_partitions;
+    let end_block_exclusive = (partition_index + 1) * table_blocks / effective_partitions;
+
+    (start_block, end_block_exclusive)
+}
+
 /// Planning statistics used to split table copy work.
 #[derive(Debug)]
 pub(crate) struct TableCopyPlanningEstimate {
@@ -299,16 +311,14 @@ impl<'a> PgReplicationTransactionCore<'a> {
 
         let requested_partitions = i64::from(num_partitions);
         let effective_partitions = requested_partitions.min(table_blocks);
-        // We perform ceil-division with the classic formula to avoid having undersized
-        // partitions.
-        let blocks_per_partition = (table_blocks + effective_partitions - 1) / effective_partitions;
 
         let mut partitions = Vec::with_capacity(effective_partitions as usize);
         for i in 0..effective_partitions {
-            let start_block = i * blocks_per_partition;
-            // We use the next block as exclusive delimiter for the query to avoid possible
-            // issues in the way we determine boundaries.
-            let end_block_exclusive = ((i + 1) * blocks_per_partition).min(table_blocks);
+            // Proportional block boundaries cover [0, table_blocks) exactly and avoid
+            // producing empty trailing ranges when table_blocks is not divisible by the
+            // number of partitions.
+            let (start_block, end_block_exclusive) =
+                ctid_partition_block_range(i, table_blocks, effective_partitions);
 
             let partition = if effective_partitions == 1 {
                 CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() }
@@ -865,7 +875,7 @@ impl<'a> PgChildReplicationTransaction<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CtidPartition, build_ctid_copy_query};
+    use super::{CtidPartition, build_ctid_copy_query, ctid_partition_block_range};
     use crate::schema::TableName;
 
     #[test]
@@ -893,5 +903,40 @@ mod tests {
         assert!(query.contains("from public.\"CommentReadStatus\""));
         assert!(query.contains("and (\"tenantId\" is not null)"));
         assert!(!query.contains("from public.CommentReadStatus"));
+    }
+
+    #[test]
+    fn ctid_partition_block_ranges_cover_all_blocks_once() {
+        let table_blocks = 10;
+        let effective_partitions = 6;
+
+        let ranges = (0..effective_partitions)
+            .map(|index| ctid_partition_block_range(index, table_blocks, effective_partitions))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ranges, vec![(0, 1), (1, 3), (3, 5), (5, 6), (6, 8), (8, 10)]);
+        assert_eq!(ranges.first(), Some(&(0, 1)));
+        assert_eq!(ranges.last(), Some(&(8, table_blocks)));
+
+        let mut expected_start_block = 0;
+        for (start_block, end_block_exclusive) in ranges {
+            assert_eq!(start_block, expected_start_block);
+            assert!(end_block_exclusive > start_block);
+            expected_start_block = end_block_exclusive;
+        }
+
+        assert_eq!(expected_start_block, table_blocks);
+    }
+
+    #[test]
+    fn ctid_partition_block_ranges_are_single_block_when_partition_count_matches_blocks() {
+        let table_blocks = 4;
+        let effective_partitions = 4;
+
+        let ranges = (0..effective_partitions)
+            .map(|index| ctid_partition_block_range(index, table_blocks, effective_partitions))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ranges, vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
     }
 }
