@@ -247,7 +247,7 @@ fn process_single_batch_append_result(
                 }
             }
             Err(status) => {
-                return batch_process_result_from_request_error(BQError::from(status));
+                return BatchProcessResult::RequestError { error: BQError::from(status) };
             }
         }
     }
