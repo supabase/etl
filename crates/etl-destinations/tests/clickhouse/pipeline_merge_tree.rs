@@ -19,7 +19,7 @@ use etl_destinations::clickhouse::test_utils::setup_clickhouse_database;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
-use crate::support::clickhouse::install_crypto_provider;
+use crate::support::crypto::install_crypto_provider;
 
 /// MergeTree event-log row: includes CDC metadata. All three operations in this
 /// test target the same source row, so `id` is asserted on alongside the

@@ -582,20 +582,9 @@ fn is_retryable_schema_propagation_error(error: &BQError) -> bool {
         || message.contains("schema_mismatch_extra_fields")
 }
 
-/// Returns true for BigQuery's transient default-stream error after a table is
-/// dropped and recreated with the same name.
-fn is_retryable_table_recreation_error(error: &BQError) -> bool {
-    let BQError::TonicStatusError(status) = error else {
-        return false;
-    };
-
-    status.code() == Code::NotFound
-        && status.message().to_ascii_lowercase().contains("is re-created")
-}
-
-/// Returns true for generic Storage Write `NOT_FOUND` responses that need table
+/// Returns true for Storage Write `NOT_FOUND` responses that need table
 /// existence confirmation before retrying.
-fn is_ambiguous_storage_write_not_found(error: &BQError) -> bool {
+fn is_storage_write_not_found(error: &BQError) -> bool {
     let BQError::TonicStatusError(status) = error else {
         return false;
     };
@@ -603,17 +592,31 @@ fn is_ambiguous_storage_write_not_found(error: &BQError) -> bool {
     status.code() == Code::NotFound
 }
 
-/// Returns retry detail for explicit Storage Write metadata-lag signals.
-fn explicit_storage_write_metadata_lag_detail(error: &BQError) -> Option<String> {
+/// Returns retry detail for Storage Write schema update propagation errors.
+fn retryable_storage_write_schema_update_detail(error: &BQError) -> Option<String> {
     if is_retryable_schema_propagation_error(error) {
         return Some(error.to_string());
     }
 
-    if is_retryable_table_recreation_error(error) {
-        return Some(error.to_string());
+    None
+}
+
+/// Returns retry detail for Storage Write `NOT_FOUND` errors when the table
+/// exists according to the BigQuery table API.
+async fn retryable_storage_write_not_found_detail(
+    client: &BigQueryClient,
+    request: &BigQueryAppendRequest,
+    error: &BQError,
+) -> EtlResult<Option<String>> {
+    if !is_storage_write_not_found(error) {
+        return Ok(None);
     }
 
-    None
+    if client.table_exists(&request.dataset_id, &request.table_id).await? {
+        return Ok(Some(error.to_string()));
+    }
+
+    Ok(None)
 }
 
 /// Returns retry detail when a Storage Write append failed with a locally
@@ -623,17 +626,18 @@ async fn retryable_storage_write_error_detail(
     request: &BigQueryAppendRequest,
     error: &BQError,
 ) -> EtlResult<Option<String>> {
-    // Explicit Storage Write metadata-lag signals are transient.
-    if let Some(detail) = explicit_storage_write_metadata_lag_detail(error) {
+    // Storage Write schema updates can be visible to tables.get before the
+    // append stream accepts the new schema.
+    if let Some(detail) = retryable_storage_write_schema_update_detail(error) {
         return Ok(Some(detail));
     }
 
-    // Generic `NOT_FOUND` can be stale Storage Write routing when the table
-    // exists after a delete/recreate.
-    if is_ambiguous_storage_write_not_found(error)
-        && client.table_exists(&request.dataset_id, &request.table_id).await?
-    {
-        return Ok(Some(error.to_string()));
+    // Storage Write `NOT_FOUND` can be stale default-stream routing when the
+    // table still exists after a delete/recreate. This intentionally covers
+    // both BigQuery's explicit "is re-created" message and generic
+    // "Requested entity was not found" responses.
+    if let Some(detail) = retryable_storage_write_not_found_detail(client, request, error).await? {
+        return Ok(Some(detail));
     }
 
     Ok(None)
@@ -1478,20 +1482,20 @@ mod tests {
     }
 
     #[test]
-    fn explicit_metadata_lag_classifies_pure_schema_propagation_errors() {
+    fn schema_update_detail_classifies_pure_schema_propagation_errors() {
         let error = BQError::from(tonic::Status::invalid_argument("schema_mismatch_extra_fields"));
 
-        assert!(explicit_storage_write_metadata_lag_detail(&error).is_some());
+        assert!(retryable_storage_write_schema_update_detail(&error).is_some());
     }
 
     #[test]
-    fn explicit_metadata_lag_classifies_extra_proto_fields_schema_lag() {
+    fn schema_update_detail_classifies_extra_proto_fields_schema_lag() {
         let error = BQError::from(tonic::Status::invalid_argument(
             "Found incompatible fields: 'id' and/or mismatch fields, extra proto fields: \
              'ddl_col_1_0' extra bq fields: ''",
         ));
 
-        assert!(explicit_storage_write_metadata_lag_detail(&error).is_some());
+        assert!(retryable_storage_write_schema_update_detail(&error).is_some());
     }
 
     #[test]
@@ -1509,20 +1513,22 @@ mod tests {
     }
 
     #[test]
-    fn explicit_metadata_lag_classifies_table_recreation_propagation() {
+    fn storage_write_not_found_includes_table_recreation_message() {
         let error = BQError::from(tonic::Status::not_found(
             "Table 123:dataset.test_users_0 is re-created. Entity: \
              projects/project/datasets/dataset/tables/test_users_0/streams/_default",
         ));
 
-        assert!(explicit_storage_write_metadata_lag_detail(&error).is_some());
+        assert!(is_storage_write_not_found(&error));
+        assert!(retryable_storage_write_schema_update_detail(&error).is_none());
     }
 
     #[test]
-    fn generic_not_found_is_ambiguous_until_table_exists() {
+    fn generic_not_found_requires_table_exists_probe() {
         let error = BQError::from(tonic::Status::not_found("Requested entity was not found"));
 
-        assert!(is_ambiguous_storage_write_not_found(&error));
+        assert!(is_storage_write_not_found(&error));
+        assert!(retryable_storage_write_schema_update_detail(&error).is_none());
     }
 
     #[test]
