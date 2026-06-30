@@ -64,9 +64,9 @@ const MAX_SAFE_INFLIGHT_REQUESTS: usize = 100_000;
 /// Google documents schema update detection as happening on the order of
 /// minutes.
 const STORAGE_WRITE_METADATA_LAG_RETRY_TIMEOUT: Duration = Duration::from_secs(180);
-/// Initial backoff when retrying writes during storage write metadata lag.
+/// Initial backoff when retrying locally retryable Storage Write errors.
 const STORAGE_WRITE_METADATA_LAG_RETRY_DELAY: Duration = Duration::from_secs(1);
-/// Maximum backoff when retrying writes during storage write metadata lag.
+/// Maximum backoff when retrying locally retryable Storage Write errors.
 const STORAGE_WRITE_METADATA_LAG_MAX_RETRY_DELAY: Duration = Duration::from_secs(15);
 /// Retry policy for transient BigQuery query job failures.
 const QUERY_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -122,8 +122,6 @@ impl fmt::Display for BigQueryOperationType {
 enum BatchProcessResult {
     /// Batch succeeded with byte metrics.
     Success { bytes_sent: usize, bytes_received: usize },
-    /// Batch hit storage write metadata lag after DDL and should be retried.
-    RetryableStorageWriteMetadataLag { detail: String },
     /// Batch had row-level errors.
     RowErrors { errors: Vec<RowError> },
     /// Batch had a request-level error.
@@ -149,17 +147,25 @@ enum AppendProcessingResult {
 /// lag clears.
 #[derive(Debug)]
 struct RetryableAppendRequest {
-    request: BatchAppendRequest<BigQueryTableRow>,
+    request: BigQueryAppendRequest,
     detail: String,
 }
 
-/// Builds a concise description for a set of Storage Write metadata lag
-/// retries.
-fn format_retryable_storage_write_metadata_lag_requests(
-    requests: &[RetryableAppendRequest],
-) -> String {
+/// A BigQuery append request with local retry context.
+#[derive(Debug, Clone)]
+pub(super) struct BigQueryAppendRequest {
+    /// Request sent to the Storage Write API client.
+    request: BatchAppendRequest<BigQueryTableRow>,
+    /// BigQuery dataset id targeted by the request.
+    dataset_id: BigQueryDatasetId,
+    /// BigQuery table id targeted by the request.
+    table_id: BigQueryTableId,
+}
+
+/// Builds a concise description for a set of retryable Storage Write requests.
+fn format_retryable_storage_write_requests(requests: &[RetryableAppendRequest]) -> String {
     match requests.split_first() {
-        None => "storage write metadata lag error".to_owned(),
+        None => "retryable storage write error".to_owned(),
         Some((first, [])) => first.detail.clone(),
         Some((first, rest)) => {
             let distinct_other_details =
@@ -258,25 +264,6 @@ fn error_code_label(error: &BQError) -> &'static str {
     }
 }
 
-/// Converts request-level append errors to retryable or terminal outcomes.
-fn append_processing_result_from_request_error(
-    error: BQError,
-    append_requests: Vec<BatchAppendRequest<BigQueryTableRow>>,
-) -> AppendProcessingResult {
-    if let Some(detail) = retryable_storage_write_metadata_lag_detail(&error) {
-        AppendProcessingResult::Retry {
-            pending_requests: append_requests
-                .into_iter()
-                .map(|request| RetryableAppendRequest { request, detail: detail.clone() })
-                .collect(),
-            bytes_sent: 0,
-            bytes_received: 0,
-        }
-    } else {
-        AppendProcessingResult::Error(bq_error_to_etl_error(error))
-    }
-}
-
 /// Returns whether a BigQuery query error is transient.
 fn is_transient_query_error(error: &BQError) -> RetryDecision {
     match error {
@@ -306,18 +293,17 @@ fn log_query_retry(attempt: crate::retry::RetryAttempt<'_, BQError>) {
     );
 }
 
-/// Builds the error returned when local Storage Write metadata lag retries are
-/// exhausted.
+/// Builds the error returned when local Storage Write retries are exhausted.
 ///
 /// The destination absorbs the common short lag window locally. If
 /// BigQuery still has not accepted the storage write metadata once that bounded
 /// window expires, the worker-level timed retry policy should take over.
-fn storage_write_metadata_lag_timeout_error(detail: &str) -> EtlError {
+fn storage_write_retry_timeout_error(detail: &str) -> EtlError {
     etl_error!(
         ErrorKind::DestinationAtomicBatchRetryable,
-        "BigQuery storage write metadata lag timed out",
+        "BigQuery storage write retry timed out",
         format!(
-            "BigQuery did not accept the storage write metadata within {} seconds after DDL: {}",
+            "BigQuery did not accept the storage write request within {} seconds after DDL: {}",
             STORAGE_WRITE_METADATA_LAG_RETRY_TIMEOUT.as_secs(),
             detail
         )
@@ -342,11 +328,7 @@ fn row_error_to_etl_error(err: RowError) -> EtlError {
 
 /// Converts a request-level append error into a [`BatchProcessResult`].
 fn batch_process_result_from_request_error(error: BQError) -> BatchProcessResult {
-    if retryable_storage_write_metadata_lag_detail(&error).is_some() {
-        BatchProcessResult::RetryableStorageWriteMetadataLag { detail: error.to_string() }
-    } else {
-        BatchProcessResult::RequestError { error }
-    }
+    BatchProcessResult::RequestError { error }
 }
 
 /// Converts BigQuery errors to ETL errors with appropriate classification.
@@ -549,7 +531,7 @@ fn decode_storage_error_codes(status: &tonic::Status) -> Vec<&'static str> {
 }
 
 /// Returns true when the request-level BigQuery error matches the documented
-/// storage write metadata lag case.
+/// Storage Write metadata-lag cases.
 ///
 /// BigQuery documents `StorageErrorCode::SCHEMA_MISMATCH_EXTRA_FIELDS` as the
 /// structured signal for schema mismatch during appends. We fall back to the
@@ -590,9 +572,18 @@ fn is_retryable_table_recreation_error(error: &BQError) -> bool {
         && status.message().to_ascii_lowercase().contains("is re-created")
 }
 
-/// Returns retry detail when a Storage Write append failed due to BigQuery
-/// metadata propagation after DDL.
-fn retryable_storage_write_metadata_lag_detail(error: &BQError) -> Option<String> {
+/// Returns true for generic Storage Write `NOT_FOUND` responses that need table
+/// existence confirmation before retrying.
+fn is_ambiguous_storage_write_not_found(error: &BQError) -> bool {
+    let BQError::TonicStatusError(status) = error else {
+        return false;
+    };
+
+    status.code() == Code::NotFound
+}
+
+/// Returns retry detail for explicit Storage Write metadata-lag signals.
+fn explicit_storage_write_metadata_lag_detail(error: &BQError) -> Option<String> {
     if is_retryable_schema_propagation_error(error) {
         return Some(error.to_string());
     }
@@ -602,6 +593,27 @@ fn retryable_storage_write_metadata_lag_detail(error: &BQError) -> Option<String
     }
 
     None
+}
+
+/// Returns retry detail when a Storage Write append failed with a locally
+/// retryable error.
+async fn retryable_storage_write_error_detail(
+    client: &BigQueryClient,
+    request: &BigQueryAppendRequest,
+    error: &BQError,
+) -> EtlResult<Option<String>> {
+    // We check if there is an explicit storage write metadata lag error, which is transient.
+    if let Some(detail) = explicit_storage_write_metadata_lag_detail(error) {
+        return Ok(Some(detail));
+    }
+
+    // We check if there is an ambiguous not found error while still the table exists, which could
+    // happen after a table was deleted and recreated.
+    if is_ambiguous_storage_write_not_found(error) && client.table_exists(&request.dataset_id, &request.table_id).await? {
+        return Ok(Some(error.to_string()));
+    }
+
+    Ok(None)
 }
 
 /// Client for interacting with Google BigQuery.
@@ -1073,12 +1085,11 @@ impl BigQueryClient {
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
     ) -> EtlResult<bool> {
-        let table = self.client.table().get(&self.project_id, dataset_id, table_id, None).await;
-
-        let exists =
-            !matches!(table, Err(BQError::ResponseError { error }) if error.error.code == 404);
-
-        Ok(exists)
+        match self.client.table().get(&self.project_id, dataset_id, table_id, None).await {
+            Ok(_) => Ok(true),
+            Err(BQError::ResponseError { error }) if error.error.code == 404 => Ok(false),
+            Err(error) => Err(bq_error_to_etl_error(error)),
+        }
     }
 
     /// Checks whether a dataset exists and is accessible.
@@ -1103,11 +1114,11 @@ impl BigQueryClient {
     ///
     /// Retries for transient request and transport failures are handled inside
     /// the underlying Storage Write API library. This method also retries
-    /// the narrow class of storage write metadata lag failures that can happen
-    /// after DDL, then converts final failures into ETL errors.
+    /// the narrow class of locally retryable Storage Write failures that can
+    /// happen after DDL, then converts final failures into ETL errors.
     pub(super) async fn append_table_batches(
         &self,
-        append_requests: Vec<BatchAppendRequest<BigQueryTableRow>>,
+        append_requests: Vec<BigQueryAppendRequest>,
     ) -> EtlResult<(usize, usize)> {
         if append_requests.is_empty() {
             return Ok((0, 0));
@@ -1137,9 +1148,8 @@ impl BigQueryClient {
                     total_bytes_sent += bytes_sent;
                     total_bytes_received += bytes_received;
 
-                    let retry_summary = format_retryable_storage_write_metadata_lag_requests(
-                        &next_pending_requests,
-                    );
+                    let retry_summary =
+                        format_retryable_storage_write_requests(&next_pending_requests);
                     pending_requests =
                         next_pending_requests.into_iter().map(|request| request.request).collect();
 
@@ -1153,21 +1163,23 @@ impl BigQueryClient {
                         STORAGE_WRITE_METADATA_LAG_RETRY_TIMEOUT.saturating_sub(elapsed);
 
                     if remaining_timeout.is_zero() {
-                        return Err(storage_write_metadata_lag_timeout_error(&retry_summary));
+                        return Err(storage_write_retry_timeout_error(&retry_summary));
                     }
 
                     let sleep_delay = retry_delay.min(remaining_timeout);
 
                     if sleep_delay.is_zero() {
-                        return Err(storage_write_metadata_lag_timeout_error(&retry_summary));
+                        return Err(storage_write_retry_timeout_error(&retry_summary));
                     }
+
+                    self.invalidate_all_connections().await;
 
                     warn!(
                         attempt,
                         pending_batch_count,
                         retry_delay_ms = sleep_delay.as_millis() as u64,
                         error_detail = %retry_summary,
-                        "bigquery storage write metadata still lagging, retrying append"
+                        "retrying retryable bigquery storage write append error"
                     );
 
                     sleep(sleep_delay).await;
@@ -1183,7 +1195,7 @@ impl BigQueryClient {
     /// Executes a single append attempt and classifies the result.
     async fn append_table_batches_once(
         &self,
-        append_requests: Vec<BatchAppendRequest<BigQueryTableRow>>,
+        append_requests: Vec<BigQueryAppendRequest>,
     ) -> EtlResult<AppendProcessingResult> {
         if append_requests.is_empty() {
             return Ok(AppendProcessingResult::Success { bytes_sent: 0, bytes_received: 0 });
@@ -1191,8 +1203,10 @@ impl BigQueryClient {
 
         debug!(batch_count = append_requests.len(), "streaming table batches concurrently");
 
+        let raw_append_requests =
+            append_requests.iter().map(|request| request.request.clone()).collect::<Vec<_>>();
         let batch_append_results =
-            self.client.storage().append_table_batches(append_requests.clone()).await.inspect_err(
+            self.client.storage().append_table_batches(raw_append_requests).await.inspect_err(
                 |err| {
                     let error_code = error_code_label(err);
 
@@ -1207,7 +1221,27 @@ impl BigQueryClient {
         let batch_append_results = match batch_append_results {
             Ok(results) => results,
             Err(error) => {
-                return Ok(append_processing_result_from_request_error(error, append_requests));
+                let mut retryable_requests = Vec::new();
+                let mut has_terminal_request = false;
+                for request in append_requests {
+                    if let Some(detail) =
+                        retryable_storage_write_error_detail(self, &request, &error).await?
+                    {
+                        retryable_requests.push(RetryableAppendRequest { request, detail });
+                    } else {
+                        has_terminal_request = true;
+                    }
+                }
+
+                if !has_terminal_request && !retryable_requests.is_empty() {
+                    return Ok(AppendProcessingResult::Retry {
+                        pending_requests: retryable_requests,
+                        bytes_sent: 0,
+                        bytes_received: 0,
+                    });
+                }
+
+                return Ok(AppendProcessingResult::Error(bq_error_to_etl_error(error)));
             }
         };
 
@@ -1226,9 +1260,6 @@ impl BigQueryClient {
                     total_bytes_sent += bytes_sent;
                     total_bytes_received += bytes_received;
                 }
-                BatchProcessResult::RetryableStorageWriteMetadataLag { detail } => {
-                    retryable_batch_details[batch_index] = Some(detail);
-                }
                 BatchProcessResult::RowErrors { errors: row_errors } => {
                     let error_count = row_errors.len();
                     if error_count > 0 {
@@ -1246,6 +1277,17 @@ impl BigQueryClient {
                     }
                 }
                 BatchProcessResult::RequestError { error: request_error } => {
+                    if let Some(detail) = retryable_storage_write_error_detail(
+                        self,
+                        &append_requests[batch_index],
+                        &request_error,
+                    )
+                    .await?
+                    {
+                        retryable_batch_details[batch_index] = Some(detail);
+                        continue;
+                    }
+
                     let error_code = error_code_label(&request_error);
                     warn!(
                         batch_index,
@@ -1298,7 +1340,7 @@ impl BigQueryClient {
     /// Creates a batch append request for a specific table with validated rows.
     ///
     /// Converts TableRow instances to BigQueryTableRow and creates a properly
-    /// configured [`BatchAppendRequest`] for efficient append retries.
+    /// configured [`BigQueryAppendRequest`] for efficient append retries.
     pub(super) fn create_batch_append_request(
         &self,
         pipeline_id: PipelineId,
@@ -1307,7 +1349,7 @@ impl BigQueryClient {
         table_id: &BigQueryTableId,
         table_descriptor: TableDescriptor,
         validated_rows: Vec<BigQueryTableRow>,
-    ) -> EtlResult<BatchAppendRequest<BigQueryTableRow>> {
+    ) -> EtlResult<BigQueryAppendRequest> {
         let stream_name =
             StreamName::new_default(self.project_id.clone(), dataset_id.clone(), table_id.clone());
 
@@ -1315,7 +1357,11 @@ impl BigQueryClient {
         let trace_id =
             create_append_trace_id(pipeline_id, table_batch.stream_name().table(), batch_index);
 
-        Ok(BatchAppendRequest::new(table_batch, trace_id))
+        Ok(BigQueryAppendRequest {
+            request: BatchAppendRequest::new(table_batch, trace_id),
+            dataset_id: dataset_id.clone(),
+            table_id: table_id.clone(),
+        })
     }
 
     /// Executes a BigQuery SQL query and returns the result set.
@@ -1409,32 +1455,24 @@ mod tests {
     }
 
     #[test]
-    fn process_single_batch_append_result_retries_pure_schema_propagation_errors() {
-        let result = process_single_batch_append_result(BatchAppendResult {
-            batch_index: 0,
-            responses: vec![Err(tonic::Status::invalid_argument("schema_mismatch_extra_fields"))],
-            bytes_sent: 128,
-        });
+    fn explicit_metadata_lag_classifies_pure_schema_propagation_errors() {
+        let error = BQError::from(tonic::Status::invalid_argument("schema_mismatch_extra_fields"));
 
-        assert!(matches!(result, BatchProcessResult::RetryableStorageWriteMetadataLag { .. }));
+        assert!(explicit_storage_write_metadata_lag_detail(&error).is_some());
     }
 
     #[test]
-    fn process_single_batch_append_result_retries_extra_proto_fields_schema_lag() {
-        let result = process_single_batch_append_result(BatchAppendResult {
-            batch_index: 0,
-            responses: vec![Err(tonic::Status::invalid_argument(
-                "Found incompatible fields: 'id' and/or mismatch fields, extra proto fields: \
-                 'ddl_col_1_0' extra bq fields: ''",
-            ))],
-            bytes_sent: 128,
-        });
+    fn explicit_metadata_lag_classifies_extra_proto_fields_schema_lag() {
+        let error = BQError::from(tonic::Status::invalid_argument(
+            "Found incompatible fields: 'id' and/or mismatch fields, extra proto fields: \
+             'ddl_col_1_0' extra bq fields: ''",
+        ));
 
-        assert!(matches!(result, BatchProcessResult::RetryableStorageWriteMetadataLag { .. }));
+        assert!(explicit_storage_write_metadata_lag_detail(&error).is_some());
     }
 
     #[test]
-    fn process_single_batch_append_result_retries_partial_success_schema_propagation() {
+    fn process_single_batch_append_result_reports_schema_propagation_error() {
         let result = process_single_batch_append_result(BatchAppendResult {
             batch_index: 0,
             responses: vec![
@@ -1444,21 +1482,24 @@ mod tests {
             bytes_sent: 128,
         });
 
-        assert!(matches!(result, BatchProcessResult::RetryableStorageWriteMetadataLag { .. }));
+        assert!(matches!(result, BatchProcessResult::RequestError { .. }));
     }
 
     #[test]
-    fn process_single_batch_append_result_retries_table_recreation_propagation() {
-        let result = process_single_batch_append_result(BatchAppendResult {
-            batch_index: 0,
-            responses: vec![Err(tonic::Status::not_found(
-                "Table 123:dataset.test_users_0 is re-created. Entity: \
-                 projects/project/datasets/dataset/tables/test_users_0/streams/_default",
-            ))],
-            bytes_sent: 128,
-        });
+    fn explicit_metadata_lag_classifies_table_recreation_propagation() {
+        let error = BQError::from(tonic::Status::not_found(
+            "Table 123:dataset.test_users_0 is re-created. Entity: \
+             projects/project/datasets/dataset/tables/test_users_0/streams/_default",
+        ));
 
-        assert!(matches!(result, BatchProcessResult::RetryableStorageWriteMetadataLag { .. }));
+        assert!(explicit_storage_write_metadata_lag_detail(&error).is_some());
+    }
+
+    #[test]
+    fn generic_not_found_is_ambiguous_until_table_exists() {
+        let error = BQError::from(tonic::Status::not_found("Requested entity was not found"));
+
+        assert!(is_ambiguous_storage_write_not_found(&error));
     }
 
     #[test]
@@ -1475,10 +1516,10 @@ mod tests {
     }
 
     #[test]
-    fn storage_write_metadata_lag_timeout_error_is_worker_retryable() {
-        let error = storage_write_metadata_lag_timeout_error("storage write metadata lag");
+    fn storage_write_retry_timeout_error_is_worker_retryable() {
+        let error = storage_write_retry_timeout_error("storage write metadata lag");
 
         assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
-        assert_eq!(error.description(), Some("BigQuery storage write metadata lag timed out"));
+        assert_eq!(error.description(), Some("BigQuery storage write retry timed out"));
     }
 }
