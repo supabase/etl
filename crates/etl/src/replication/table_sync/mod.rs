@@ -23,7 +23,7 @@ use crate::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    observability::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL},
+    observability::{ETL_TABLE_COPY_DURATION_SECONDS, TABLE_ID_LABEL},
     pipeline::PipelineId,
     postgres::client::PgReplicationClient,
     replication::{
@@ -350,10 +350,9 @@ where
             }
 
             // Record the table copy duration.
-            let with_partitioning = config.max_copy_connections_per_table > 1;
             histogram!(
                 ETL_TABLE_COPY_DURATION_SECONDS,
-                PARTITIONING_LABEL => with_partitioning.to_string(),
+                TABLE_ID_LABEL => table_id.to_string(),
             )
             .record(total_table_copy_duration_secs);
 

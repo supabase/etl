@@ -61,6 +61,15 @@ fn build_ctid_copy_query(
     }
 }
 
+/// Planning statistics used to split table copy work.
+#[derive(Debug)]
+pub(crate) struct TableCopyPlanningEstimate {
+    /// Current physical relation size in Postgres blocks.
+    pub(crate) table_blocks: i64,
+    /// Estimated row count from Postgres statistics.
+    pub(crate) estimated_rows: i64,
+}
+
 /// Common state for an open replication transaction.
 ///
 /// This stays private so parent and child transaction wrappers can expose
@@ -282,29 +291,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
             ));
         }
 
-        // We query how many blocks the table has at this point in time. Note that this
-        // query doesn't use MVCC, so it's a real-time snapshot.
-        let size_query = format!(
-            "select pg_relation_size({table_id}::regclass)::bigint / \
-             current_setting('block_size')::bigint as table_blocks"
-        );
-        let size_results = self.transaction.simple_query(&size_query).await?;
-        let table_blocks: i64 = size_results
-            .iter()
-            .find_map(|msg| {
-                if let SimpleQueryMessage::Row(row) = msg {
-                    row.try_get("table_blocks").ok()??.parse().ok()
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::SourceSchemaError,
-                    "Could not retrieve table block count for partition planning",
-                    format!("table_id: {table_id}")
-                )
-            })?;
+        let table_blocks = self.get_table_copy_planning_estimate(table_id).await?.table_blocks;
 
         if table_blocks == 0 {
             return Ok(vec![]);
@@ -342,6 +329,46 @@ impl<'a> PgReplicationTransactionCore<'a> {
         Ok(partitions)
     }
 
+    /// Returns quick planner statistics for table copy.
+    async fn get_table_copy_planning_estimate(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<TableCopyPlanningEstimate> {
+        // This query does not use MVCC, so it reflects the relation size at the
+        // time partition planning runs. The row count is an estimate from
+        // pg_class so planning stays cheap for huge tables.
+        let estimate_query = format!(
+            "select pg_relation_size({table_id}::regclass)::bigint / \
+             current_setting('block_size')::bigint as table_blocks,
+             greatest(c.reltuples, 0)::bigint as estimated_rows
+             from pg_class c
+             where c.oid = {table_id};"
+        );
+
+        for message in self.transaction.simple_query(&estimate_query).await? {
+            if let SimpleQueryMessage::Row(row) = message {
+                let Some(table_blocks) = row.try_get::<&str>("table_blocks")? else {
+                    continue;
+                };
+                let Some(estimated_rows) = row.try_get::<&str>("estimated_rows")? else {
+                    continue;
+                };
+
+                if let (Ok(table_blocks), Ok(estimated_rows)) =
+                    (table_blocks.parse(), estimated_rows.parse())
+                {
+                    return Ok(TableCopyPlanningEstimate { table_blocks, estimated_rows });
+                }
+            }
+        }
+
+        Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "Could not retrieve table copy planning estimate",
+            format!("table_id: {table_id}")
+        ))
+    }
+
     /// Checks whether the given table is a partitioned parent (`relkind =
     /// 'p'`).
     async fn is_partitioned_table(&self, table_id: TableId) -> EtlResult<bool> {
@@ -374,8 +401,28 @@ impl<'a> PgReplicationTransactionCore<'a> {
         publication_name: Option<&str>,
         partition: &CtidPartition,
     ) -> EtlResult<CopyOutStream> {
+        self.get_table_copy_stream_with_ctid_partition_and_filter_table(
+            table_id,
+            table_id,
+            column_schemas,
+            publication_name,
+            partition,
+        )
+        .await
+    }
+
+    /// Creates a COPY stream for a ctid range from `table_id`, using
+    /// `filter_table_id` to resolve publication row filters.
+    async fn get_table_copy_stream_with_ctid_partition_and_filter_table(
+        &self,
+        table_id: TableId,
+        filter_table_id: TableId,
+        column_schemas: &[ColumnSchema],
+        publication_name: Option<&str>,
+        partition: &CtidPartition,
+    ) -> EtlResult<CopyOutStream> {
         let table_name = self.get_table_name(table_id).await?;
-        let row_filter = self.get_row_filter(table_id, publication_name).await?;
+        let row_filter = self.get_row_filter(filter_table_id, publication_name).await?;
 
         let column_list = column_schemas
             .iter()
@@ -698,6 +745,14 @@ impl<'a> PgReplicationTransaction<'a> {
         self.core.plan_ctid_partitions(table_id, num_partitions).await
     }
 
+    /// Returns quick planner statistics for table copy.
+    pub(crate) async fn get_table_copy_planning_estimate(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<TableCopyPlanningEstimate> {
+        self.core.get_table_copy_planning_estimate(table_id).await
+    }
+
     /// Checks whether the given table is a partitioned parent (`relkind =
     /// 'p'`).
     pub(crate) async fn is_partitioned_table(&self, table_id: TableId) -> EtlResult<bool> {
@@ -710,11 +765,6 @@ impl<'a> PgReplicationTransaction<'a> {
     /// 'r'`). For a non-partitioned table this returns an empty vec.
     pub(crate) async fn get_leaf_partitions(&self, table_id: TableId) -> EtlResult<Vec<TableId>> {
         self.core.get_leaf_partitions(table_id).await
-    }
-
-    /// Returns a receiver for background connection task updates.
-    pub(crate) fn connection_updates_rx(&self) -> watch::Receiver<PostgresConnectionUpdate> {
-        self.core.connection_updates_rx()
     }
 
     /// Creates a new child connection that can import this transaction's
@@ -760,29 +810,6 @@ impl<'a> PgChildReplicationTransaction<'a> {
         Self { core }
     }
 
-    /// Creates a COPY stream for reading data from `table_id`, using
-    /// `filter_table_id` to resolve publication row filters.
-    ///
-    /// This is used when parallel partition copy reads a leaf partition while
-    /// applying the row filter attached to the tracked published root or
-    /// subtree.
-    pub(crate) async fn get_table_copy_stream_with_filter_table(
-        &self,
-        table_id: TableId,
-        filter_table_id: TableId,
-        column_schemas: &[ColumnSchema],
-        publication_name: Option<&str>,
-    ) -> EtlResult<CopyOutStream> {
-        self.core
-            .get_table_copy_stream_with_filter_table(
-                table_id,
-                filter_table_id,
-                column_schemas,
-                publication_name,
-            )
-            .await
-    }
-
     /// Creates a COPY stream for a ctid partition range of the specified table.
     ///
     /// Resolves the table name and row filter internally, then streams rows
@@ -797,6 +824,27 @@ impl<'a> PgChildReplicationTransaction<'a> {
         self.core
             .get_table_copy_stream_with_ctid_partition(
                 table_id,
+                column_schemas,
+                publication_name,
+                partition,
+            )
+            .await
+    }
+
+    /// Creates a COPY stream for a ctid partition of `table_id`, using
+    /// `filter_table_id` to resolve publication row filters.
+    pub(crate) async fn get_table_copy_stream_with_ctid_partition_and_filter_table(
+        &self,
+        table_id: TableId,
+        filter_table_id: TableId,
+        column_schemas: &[ColumnSchema],
+        publication_name: Option<&str>,
+        partition: &CtidPartition,
+    ) -> EtlResult<CopyOutStream> {
+        self.core
+            .get_table_copy_stream_with_ctid_partition_and_filter_table(
+                table_id,
+                filter_table_id,
                 column_schemas,
                 publication_name,
                 partition,

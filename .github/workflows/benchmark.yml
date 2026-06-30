@@ -35,7 +35,7 @@ on:
       max_copy_connections_per_table:
         description: Maximum copy connections per table.
         required: true
-        default: "4"
+        default: "8"
       batch_max_fill_ms:
         description: Maximum stream batch fill time in milliseconds.
         required: true

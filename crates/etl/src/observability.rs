@@ -11,11 +11,20 @@ pub(crate) const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_durat
 pub(crate) const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
 pub(crate) const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub(crate) const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
-pub(crate) const ETL_TABLE_COPY_ROWS: &str = "etl_table_copy_rows";
-pub(crate) const ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE: &str =
-    "etl_parallel_table_copy_time_imbalance";
-pub(crate) const ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE: &str =
-    "etl_parallel_table_copy_rows_imbalance";
+pub(crate) const ETL_TABLE_COPY_ROWS_TOTAL: &str = "etl_table_copy_rows_total";
+pub(crate) const ETL_TABLE_COPY_ROWS_CURRENT: &str = "etl_table_copy_rows_current";
+pub(crate) const ETL_TABLE_COPY_PARTITION_ROWS: &str = "etl_table_copy_partition_rows";
+pub(crate) const ETL_TABLE_COPY_PARTITION_DURATION_SECONDS: &str =
+    "etl_table_copy_partition_duration_seconds";
+pub(crate) const ETL_TABLE_COPY_PARTITIONS_TOTAL: &str = "etl_table_copy_partitions_total";
+pub(crate) const ETL_TABLE_COPY_PARTITIONS_PLANNED: &str = "etl_table_copy_partitions_planned";
+pub(crate) const ETL_TABLE_COPY_PARTITIONS_COMPLETED_CURRENT: &str =
+    "etl_table_copy_partitions_completed_current";
+pub(crate) const ETL_TABLE_COPY_ACTIVE_WORKERS: &str = "etl_table_copy_active_workers";
+pub(crate) const ETL_TABLE_COPY_PARTITION_TIME_IMBALANCE: &str =
+    "etl_table_copy_partition_time_imbalance";
+pub(crate) const ETL_TABLE_COPY_PARTITION_ROWS_IMBALANCE: &str =
+    "etl_table_copy_partition_rows_imbalance";
 pub(crate) const ETL_BYTES_RECEIVED_TOTAL: &str = "etl_bytes_received_total";
 pub(crate) const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
 pub(crate) const ETL_EVENTS_RECEIVED_TOTAL: &str = "etl_events_received_total";
@@ -52,8 +61,8 @@ pub(crate) const WORKER_TYPE_LABEL: &str = "worker_type";
 /// Label key for the action performed by the worker ("table_copy" or
 /// "table_streaming").
 pub(crate) const ACTION_LABEL: &str = "action";
-/// Label to tag the table copy metric if it was using partitioning.
-pub(crate) const PARTITIONING_LABEL: &str = "partitioning";
+/// Label key for the table being copied.
+pub(crate) const TABLE_ID_LABEL: &str = "table_id";
 /// Label key for event type (copy, insert, update, delete).
 pub(crate) const EVENT_TYPE_LABEL: &str = "event_type";
 /// Label key for whether the status update was forced.
@@ -101,26 +110,67 @@ pub(crate) fn register_metrics() {
             ETL_TABLE_COPY_DURATION_SECONDS,
             Unit::Seconds,
             "Duration in seconds to complete initial table copy from DataSync to FinishedCopy \
-             state transition"
+             state transition, labeled by table_id."
         );
 
-        describe_histogram!(
-            ETL_TABLE_COPY_ROWS,
+        describe_counter!(
+            ETL_TABLE_COPY_ROWS_TOTAL,
             Unit::Count,
-            "Number of rows copied per table copy partition, labeled by partitioning."
+            "Total rows flushed during table copy, labeled by table_id."
+        );
+
+        describe_gauge!(
+            ETL_TABLE_COPY_ROWS_CURRENT,
+            Unit::Count,
+            "Current cumulative rows flushed during table copy, labeled by table_id."
         );
 
         describe_histogram!(
-            ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
-            "Load imbalance factor for parallel table copy duration (max_time / avg_time). Value \
-             of 1.0 indicates perfect balance, higher values indicate more imbalance."
+            ETL_TABLE_COPY_PARTITION_ROWS,
+            Unit::Count,
+            "Rows flushed by one table copy partition, labeled by table_id."
         );
 
         describe_histogram!(
-            ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
-            "Load imbalance factor for parallel table copy row distribution (max_rows / \
-             avg_rows). Value of 1.0 indicates perfect balance, higher values indicate more \
-             imbalance."
+            ETL_TABLE_COPY_PARTITION_DURATION_SECONDS,
+            Unit::Seconds,
+            "Duration in seconds to copy one table copy partition, labeled by table_id."
+        );
+
+        describe_counter!(
+            ETL_TABLE_COPY_PARTITIONS_TOTAL,
+            Unit::Count,
+            "Total table copy partitions by outcome, labeled by table_id and outcome."
+        );
+
+        describe_gauge!(
+            ETL_TABLE_COPY_PARTITIONS_PLANNED,
+            Unit::Count,
+            "Planned table copy partitions for the current table copy, labeled by table_id."
+        );
+
+        describe_gauge!(
+            ETL_TABLE_COPY_PARTITIONS_COMPLETED_CURRENT,
+            Unit::Count,
+            "Current completed table copy partitions, labeled by table_id."
+        );
+
+        describe_gauge!(
+            ETL_TABLE_COPY_ACTIVE_WORKERS,
+            Unit::Count,
+            "Active table copy worker connections, labeled by table_id."
+        );
+
+        describe_histogram!(
+            ETL_TABLE_COPY_PARTITION_TIME_IMBALANCE,
+            "Load imbalance factor for table copy partition duration (max_time / avg_time), \
+             labeled by table_id. A value of 1.0 indicates perfect balance."
+        );
+
+        describe_histogram!(
+            ETL_TABLE_COPY_PARTITION_ROWS_IMBALANCE,
+            "Load imbalance factor for table copy partition row distribution (max_rows / \
+             avg_rows), labeled by table_id. A value of 1.0 indicates perfect balance."
         );
 
         describe_counter!(

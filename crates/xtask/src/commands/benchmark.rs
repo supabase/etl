@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
+use etl_config::shared::PipelineConfig;
 use pg_escape::{quote_identifier, quote_literal};
 use serde_json::{Map, Number, Value};
 
@@ -106,8 +107,8 @@ pub(crate) struct BenchmarkArgs {
     /// Maximum table sync workers.
     #[arg(long, default_value_t = 4)]
     max_table_sync_workers: u16,
-    /// Maximum parallel copy connections per table.
-    #[arg(long, default_value_t = 2)]
+    /// Maximum worker connections per table during initial copy.
+    #[arg(long, default_value_t = PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE)]
     max_copy_connections_per_table: u16,
     /// Enable ETL memory backpressure. Benchmark orchestration disables it by
     /// default.
