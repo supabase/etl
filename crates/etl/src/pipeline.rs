@@ -4,27 +4,37 @@
 //! replication with destination systems. Manages worker lifecycles, shutdown
 //! coordination, and error handling.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
-use etl_postgres::replication::slots::EtlReplicationSlot;
+use etl_postgres::slots::EtlReplicationSlot;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
+pub use crate::runtime::concurrency::ShutdownTx;
 use crate::{
     bail,
-    concurrency::{MemoryMonitor, ShutdownTx, create_shutdown_channel},
     config::PipelineConfig,
     destination::PipelineDestination,
     error::{ErrorKind, EtlResult},
     etl_error,
-    metrics::register_metrics,
-    migrations,
-    replication::{SharedTableCache, client::PgReplicationClient},
-    state::TableState,
+    observability::register_metrics,
+    postgres::{OutOfBandSourcePool, client::PgReplicationClient, migrations},
+    replication::{SharedTableCache, state::TableState},
+    runtime::{
+        ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool,
+        concurrency::create_shutdown_channel,
+    },
+    schema::TableId,
     store::PipelineStore,
-    types::{PipelineId, TableId},
-    workers::{ApplyWorker, ApplyWorkerHandle, TableSyncWorkerPool},
 };
+
+/// Unique identifier for an ETL pipeline instance.
+///
+/// [`PipelineId`] provides a simple numeric identifier to distinguish between
+/// multiple pipeline instances running concurrently. This ID is used for
+/// logging, monitoring, and coordinating shutdown operations across pipeline
+/// components.
+pub type PipelineId = u64;
 
 /// Internal state tracking for pipeline lifecycle.
 ///
@@ -48,9 +58,8 @@ enum PipelineState {
 /// Core ETL pipeline that orchestrates Postgres logical replication.
 ///
 /// A [`Pipeline`] represents a complete ETL workflow connecting a Postgres
-/// publication to a destination through configurable transformations. It
-/// manages the replication stream, coordinates worker processes, and handles
-/// failures gracefully.
+/// publication to a destination. It manages source preparation, initial table
+/// copies, streaming replication, worker coordination, and graceful shutdown.
 ///
 /// The pipeline operates in two main phases:
 /// 1. **Initial table synchronization** - Copies existing data from source
@@ -59,7 +68,7 @@ enum PipelineState {
 ///    log
 ///
 /// Multiple table sync workers run in parallel during the initial stage, while
-/// a single apply worker processes the replication stream of table that were
+/// a single apply worker processes replication streams for tables that were
 /// already copied.
 #[derive(Debug)]
 pub struct Pipeline<S, D> {
@@ -158,12 +167,14 @@ where
         // are loaded in the cache.
         self.store.load_destination_tables_metadata().await?;
         self.store.load_table_schemas().await?;
-        self.destination.startup().await?;
 
         // We load the table states by checking the table ids of a publication and
         // loading/creating the table states based on the current
         // state.
         self.initialize_table_states(&replication_client).await?;
+
+        // We then let destinations perform their startup sequence if any.
+        self.destination.startup().await?;
 
         // We create the table sync workers pool to manage all table sync workers in a
         // central place.
@@ -179,6 +190,13 @@ where
         // replication mask for each table.
         let shared_table_cache = SharedTableCache::new();
 
+        // We create a shared lazy pool for low-frequency, out-of-band source
+        // database queries that should not use the replication connection.
+        let out_of_band_source_pool = OutOfBandSourcePool::new(
+            &self.config.pg_connection,
+            Duration::from_millis(self.config.replication_lag_refresh_interval_ms),
+        );
+
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
             self.config.id,
@@ -187,6 +205,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             shared_table_cache,
+            out_of_band_source_pool,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
             memory_monitor.clone(),
@@ -355,7 +374,7 @@ where
         self.store.load_table_states().await?;
         let table_states = self.store.get_table_states().await?;
 
-        // Initialize states for newly added tables in the publication
+        // Initialize states for newly added tables in the publication.
         for table_id in &publication_table_ids {
             if !table_states.contains_key(table_id) {
                 self.store.update_table_state(*table_id, TableState::Init).await?;

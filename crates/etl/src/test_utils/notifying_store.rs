@@ -4,24 +4,23 @@ use std::{
     sync::Arc,
 };
 
-use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use tokio::sync::{Notify, RwLock};
+use tokio_postgres::types::PgLsn;
 
 use crate::{
+    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     error::{ErrorKind, EtlResult},
     etl_error,
-    replication::WorkerType,
-    state::{
-        TableState, TableStateType,
-        destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    replication::{
+        WorkerType,
+        state::{TableState, TableStateType},
     },
+    schema::{SnapshotId, TableId, TableSchema},
     store::{
-        lifecycle::{TableStateLifecycleStore, TableStateOperation},
-        schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
-        state::{DestinationTablesMetadata, StateStore, TableStates},
+        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
+        TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,
     },
     test_utils::notify::TimedNotify,
-    types::PgLsn,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

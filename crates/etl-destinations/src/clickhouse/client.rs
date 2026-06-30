@@ -8,7 +8,7 @@ use clickhouse::Client;
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    types::Type,
+    schema::Type,
 };
 use url::Url;
 
@@ -130,7 +130,7 @@ fn add_column_placement_clause(after_column: Option<&str>) -> String {
 /// Builds the SQL used to add a column to a ClickHouse table.
 fn build_add_column_sql(
     table_name: &str,
-    column: &etl::types::ColumnSchema,
+    column: &etl::schema::ColumnSchema,
     after_column: Option<&str>,
 ) -> String {
     let col_type = clickhouse_column_type(column, true);
@@ -459,7 +459,7 @@ impl ClickHouseClient {
     pub(crate) async fn add_column(
         &self,
         table_name: &str,
-        column: &etl::types::ColumnSchema,
+        column: &etl::schema::ColumnSchema,
         after_column: Option<&str>,
     ) -> EtlResult<()> {
         let sql = build_add_column_sql(table_name, column, after_column);
@@ -642,7 +642,7 @@ impl ClickHouseClient {
 
 #[cfg(test)]
 mod tests {
-    use etl::types::{ColumnSchema, Type};
+    use etl::schema::{ColumnSchema, Type};
 
     use super::*;
 

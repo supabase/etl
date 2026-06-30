@@ -1,21 +1,22 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use etl::{
+    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
+        DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::{schema::SchemaStore, state::StateStore},
-    types::{
-        Cell, ColumnModification, Event, EventSequenceKey, IdentityType, OldTableRow, PgLsn,
-        ReplicatedTableSchema, SchemaDiff, TableId, TableRow, Type, UpdatedTableRow, is_array_type,
+    event::{Event, EventSequenceKey},
+    schema::{
+        ColumnModification, IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId, Type,
+        is_array_type,
     },
+    store::{SchemaStore, StateStore},
 };
 use etl_config::shared::ClickHouseEngine;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use url::Url;
@@ -367,6 +368,19 @@ pub struct ClickHouseDestination<S> {
     /// section is a brief in-memory map op with no `.await` inside, so the
     /// async `tokio::sync::RwLock` would be needless overhead.
     table_cache: Arc<RwLock<HashMap<String, Arc<[bool]>>>>,
+    /// Per-`table_id` locks serialising first-time table creation.
+    ///
+    /// The two ctid copy workers spawned when `max_copy_connections > 1` share
+    /// this destination (it is `Clone` over `Arc` state), so without a guard
+    /// both fall through the cache miss in [`Self::ensure_table_exists`] and
+    /// issue racing `CREATE TABLE` / `CREATE VIEW` statements. On ClickHouse
+    /// Cloud the replicated `... IF NOT EXISTS` is not atomic across replicas,
+    /// so the loser fails with "DDL failed". A `tokio::sync::Mutex` (held
+    /// across the DDL `.await`) per table makes the second worker wait,
+    /// then fall through the post-lock cache re-check. The outer map is
+    /// guarded by a brief, await-free `parking_lot::Mutex` and grows at
+    /// most one entry per replicated table.
+    create_locks: Arc<Mutex<HashMap<TableId, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl<S> ClickHouseDestination<S>
@@ -392,6 +406,7 @@ where
             inserter_config,
             store: Arc::new(store),
             table_cache: Arc::new(RwLock::new(HashMap::new())),
+            create_locks: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -422,8 +437,8 @@ where
         table_id: TableId,
         clickhouse_table_name: &str,
         schema: &ReplicatedTableSchema,
-        snapshot_id: etl::types::SnapshotId,
-        replication_mask: etl::types::ReplicationMask,
+        snapshot_id: etl::schema::SnapshotId,
+        replication_mask: etl::schema::ReplicationMask,
     ) -> EtlResult<()> {
         let metadata = DestinationTableMetadata::new_applying(
             clickhouse_table_name.to_owned(),
@@ -439,6 +454,11 @@ where
         Ok(())
     }
 
+    // ClickHouse Cloud transparently substitutes the MergeTree family with its
+    // shared-storage variants (`ReplacingMergeTree` -> `SharedReplacingMergeTree`).
+    // These are drop-in equivalents, so `system.tables.engine` reads back the
+    // `Shared`-prefixed name even though the pipeline configured the plain one.
+
     /// Rejects writing to a pre-existing ClickHouse table whose engine does
     /// not match the configured one. No-op if the table doesn't exist yet.
     async fn ensure_engine_matches(&self, clickhouse_table_name: &str) -> EtlResult<()> {
@@ -446,7 +466,7 @@ where
             return Ok(());
         };
         let configured = self.inserter_config.engine.as_clickhouse_str();
-        if existing == configured {
+        if clickhouse_engine_matches(&existing, configured) {
             return Ok(());
         }
 
@@ -517,13 +537,33 @@ where
             return Ok((clickhouse_table_name, flags));
         }
 
+        let table_id = schema.id();
+
+        // Serialise the first-time create/recover path per `table_id`. When
+        // `max_copy_connections > 1` the two ctid copy workers share this
+        // destination and would otherwise both fall through the cache miss
+        // above and issue racing CREATE TABLE / CREATE VIEW statements; on
+        // ClickHouse Cloud the replicated `... IF NOT EXISTS` is not atomic
+        // across replicas, so the loser fails with "DDL failed". See the
+        // `create_locks` field doc.
+        let table_lock = {
+            let mut guard = self.create_locks.lock();
+            Arc::clone(guard.entry(table_id).or_default())
+        };
+        let _create_guard = table_lock.lock().await;
+
+        // Re-check the cache under the lock: a worker that went ahead of us may
+        // have completed creation and populated it while we were blocked.
+        if let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned() {
+            return Ok((clickhouse_table_name, flags));
+        }
+
         // Engine-mismatch detection runs before any DDL or metadata mutation:
         // a pre-existing table created under a different engine must hard-fail
         // here, not silently get an idempotent CREATE TABLE IF NOT EXISTS that
         // would then mis-align RowBinary on insert.
         self.ensure_engine_matches(&clickhouse_table_name).await?;
 
-        let table_id = schema.id();
         match self.store.get_destination_table_metadata(table_id).await? {
             None => {
                 self.create_table_with_metadata(
@@ -1361,7 +1401,7 @@ fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> EtlResul
 /// Date, Timestamp, and UUID use typed zero values because their ClickHouse
 /// wire format is not String.
 fn default_cell(typ: &Type) -> Cell {
-    use etl::types::ArrayCell;
+    use etl::data::ArrayCell;
 
     match *typ {
         Type::BOOL => Cell::Bool(false),
@@ -1444,11 +1484,24 @@ where
     }
 }
 
+/// Strips ClickHouse Cloud's `Shared` storage-variant prefix so the shared and
+/// non-shared MergeTree-family engines compare equal (see
+/// `ensure_engine_matches`).
+fn normalize_clickhouse_engine(engine: &str) -> &str {
+    engine.strip_prefix("Shared").unwrap_or(engine)
+}
+
+/// Whether a table's existing engine satisfies the configured one, treating the
+/// `Shared` Cloud variants as equivalent to their plain forms.
+fn clickhouse_engine_matches(existing: &str, configured: &str) -> bool {
+    normalize_clickhouse_engine(existing) == normalize_clickhouse_engine(configured)
+}
+
 #[cfg(test)]
 mod tests {
-    use etl::types::{
-        ArrayCell, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask, TableName,
-        TableSchema,
+    use etl::{
+        data::{ArrayCell, PartialTableRow},
+        schema::{ColumnSchema, IdentityMask, ReplicationMask, TableName, TableSchema},
     };
 
     use super::*;
@@ -1456,6 +1509,18 @@ mod tests {
 
     fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
         ClickHouseTableColumn { name: name.to_owned(), type_name: type_name.to_owned() }
+    }
+
+    #[test]
+    fn clickhouse_engine_matches_accepts_cloud_shared_variants() {
+        // Cloud `Shared` variants are equivalent to their plain configured forms.
+        assert!(clickhouse_engine_matches("SharedReplacingMergeTree", "ReplacingMergeTree"));
+        assert!(clickhouse_engine_matches("SharedMergeTree", "MergeTree"));
+        assert!(clickhouse_engine_matches("ReplacingMergeTree", "ReplacingMergeTree"));
+
+        // Genuine engine mismatches still fail.
+        assert!(!clickhouse_engine_matches("SharedReplacingMergeTree", "MergeTree"));
+        assert!(!clickhouse_engine_matches("MergeTree", "ReplacingMergeTree"));
     }
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
@@ -1664,8 +1729,8 @@ mod tests {
         old_name: &str,
         new_name: &str,
         ordinal_position: i32,
-    ) -> etl::types::ColumnChange {
-        etl::types::ColumnChange {
+    ) -> etl::schema::ColumnChange {
+        etl::schema::ColumnChange {
             ordinal_position,
             old_column: ColumnSchema::new(
                 old_name.to_owned(),
@@ -1681,7 +1746,7 @@ mod tests {
                 ordinal_position,
                 true,
             ),
-            modifications: vec![etl::types::ColumnModification::Rename {
+            modifications: vec![etl::schema::ColumnModification::Rename {
                 old_name: old_name.to_owned(),
                 new_name: new_name.to_owned(),
             }],

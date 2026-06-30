@@ -2,18 +2,16 @@ use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
     PipelineConfig, TableSyncCopyConfig,
 };
-use etl_postgres::{
-    tokio::test_utils::PgDatabase,
-    types::{TableId, TableName},
-};
+use etl_postgres::tokio::test_utils::PgDatabase;
 use rand::random;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
 use crate::{
     destination::PipelineDestination,
-    pipeline::Pipeline,
-    state::TableStateType,
+    pipeline::{Pipeline, PipelineId},
+    replication::state::TableStateType,
+    schema::{TableId, TableName},
     store::PipelineStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -21,7 +19,6 @@ use crate::{
         notifying_store::NotifyingStore,
         test_destination_wrapper::TestDestinationWrapper,
     },
-    types::PipelineId,
 };
 
 /// Generates a test-specific replication slot name with a random component.
@@ -198,6 +195,8 @@ where
             invalidated_slot_behavior: self.invalidated_slot_behavior,
             max_copy_connections_per_table: self.max_copy_connections_per_table,
             memory_refresh_interval_ms: self.memory_refresh_interval_ms,
+            replication_lag_refresh_interval_ms:
+                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
             memory_backpressure: Some(self.memory_backpressure),
         };
 

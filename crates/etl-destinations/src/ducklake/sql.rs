@@ -1,4 +1,7 @@
-use crate::{ducklake::LAKE_CATALOG, sql::quote_double_identifier};
+use crate::{
+    ducklake::{DuckLakeTableName, LAKE_CATALOG},
+    sql::quote_double_identifier,
+};
 
 /// Quotes a DuckDB SQL identifier for DuckLake SQL.
 ///
@@ -8,12 +11,26 @@ pub(super) fn quote_identifier(identifier: &str) -> String {
     quote_double_identifier(identifier)
 }
 
-/// Quotes a DuckLake table name and qualifies it with the DuckLake catalog.
+/// Quotes a DuckLake schema reference and qualifies it with the DuckLake
+/// catalog.
 ///
-/// Each identifier part is quoted separately so table names containing dots are
-/// treated as a single table identifier, not as extra path components.
-pub(super) fn qualified_lake_table_name(table_name: &str) -> String {
-    format!("{}.{}", quote_identifier(LAKE_CATALOG), quote_identifier(table_name))
+/// Each identifier part is quoted separately so names containing dots remain
+/// one identifier, not extra path components.
+pub(super) fn qualified_lake_schema_name(schema_name: &str) -> String {
+    format!("{}.{}", quote_identifier(LAKE_CATALOG), quote_identifier(schema_name))
+}
+
+/// Quotes a DuckLake table reference and qualifies it with the DuckLake
+/// catalog.
+///
+/// Each identifier part is quoted separately so names containing dots are
+/// treated as one identifier, not as extra path components.
+pub(super) fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
+    format!(
+        "{}.{}",
+        qualified_lake_schema_name(table_name.schema()),
+        quote_identifier(table_name.table())
+    )
 }
 
 #[cfg(test)]
@@ -31,9 +48,10 @@ mod tests {
 
     #[test]
     fn qualified_lake_table_name_quotes_each_identifier_part() {
+        let table_name = DuckLakeTableName::new("schema.name", r#"users"; DROP TABLE other; --"#);
         assert_eq!(
-            qualified_lake_table_name(r#"users"; DROP TABLE other; --"#),
-            r#""lake"."users""; DROP TABLE other; --""#
+            qualified_lake_table_name(&table_name),
+            r#""lake"."schema.name"."users""; DROP TABLE other; --""#
         );
     }
 }

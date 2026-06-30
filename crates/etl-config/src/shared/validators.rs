@@ -12,7 +12,7 @@ const SUPABASE_PROJECT_REF_LEN: usize = 20;
 /// - Legacy single-part locator: `xy12345` (ASCII alphanumeric, starts with a
 ///   letter).
 ///
-/// See https://docs.snowflake.com/en/user-guide/admin-account-identifier for details.
+/// See <https://docs.snowflake.com/en/user-guide/admin-account-identifier> for details.
 pub fn validate_snowflake_account_id(account_id: &str) -> Result<(), ValidationError> {
     let invalid = || ValidationError::InvalidFieldValue {
         field: "account_id".to_owned(),

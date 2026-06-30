@@ -95,7 +95,7 @@ pub async fn mark_sensitive_sentry_scope(request: Request, next: Next) -> Respon
     next.run(request).await
 }
 
-/// Captures Sentry events for HTTP 5xx responses.
+/// Captures Sentry events for internal HTTP 500 responses.
 ///
 /// Axum route errors are converted into JSON responses before they reach Tower,
 /// so this middleware restores the Actix behavior of reporting server-error
@@ -107,7 +107,7 @@ pub(crate) async fn capture_server_errors(request: Request, next: Next) -> Respo
     let response = next.run(request).await;
     let status = response.status();
 
-    if status.is_server_error() {
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
         capture_server_error(
             &method,
             &route,
@@ -175,7 +175,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capture_server_errors_records_sentry_event_for_5xx_response() {
+    fn capture_server_errors_records_sentry_event_for_internal_server_error() {
         let events = sentry::test::with_captured_events(|| {
             run_request(
                 Router::new()
@@ -252,13 +252,27 @@ mod tests {
     }
 
     #[test]
-    fn capture_server_errors_ignores_non_5xx_response() {
+    fn capture_server_errors_ignores_non_internal_server_error_response() {
         let events = sentry::test::with_captured_events(|| {
             run_request(
                 Router::new()
                     .route("/missing", get(|| async { StatusCode::NOT_FOUND }))
                     .layer(middleware::from_fn(capture_server_errors)),
                 "/missing",
+            );
+        });
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn capture_server_errors_ignores_upstream_failure_response() {
+        let events = sentry::test::with_captured_events(|| {
+            run_request(
+                Router::new()
+                    .route("/upstream", get(|| async { StatusCode::BAD_GATEWAY }))
+                    .layer(middleware::from_fn(capture_server_errors)),
+                "/upstream",
             );
         });
 

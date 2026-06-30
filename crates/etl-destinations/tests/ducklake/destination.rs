@@ -16,7 +16,7 @@
 //!   LOAD '/absolute/path/to/ducklake.duckdb_extension';
 //!   ATTACH 'ducklake:postgres:host=... dbname=... user=...' AS lake
 //!     (DATA_PATH 'file:///path/printed/data');
-//!   SELECT * FROM lake.public_users;
+//!   SELECT * FROM lake.public.users;
 //! "
 //! ```
 
@@ -27,17 +27,19 @@ use std::{f64::consts::PI, path::Path, sync::Arc, time::Duration};
 use chrono::NaiveDate;
 use duckdb::Connection;
 use etl::{
-    destination::Destination,
+    data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
+    destination::{Destination, DestinationTableMetadata, DestinationTableSchemaStatus},
     error::ErrorKind,
-    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::{both::memory::MemoryStore, schema::SchemaStore, state::StateStore},
-    types::{
-        Cell, ColumnSchema, DeleteEvent, Event, IdentityMask, OldTableRow, PartialTableRow, PgLsn,
-        ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableName, TableRow,
-        TableSchema, Type as PgType, UpdatedTableRow,
+    event::{DeleteEvent, Event},
+    schema::{
+        ColumnSchema, IdentityMask, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId,
+        TableId, TableName, TableSchema, Type as PgType,
     },
+    store::{MemoryStore, SchemaStore, StateStore},
 };
-use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
+use etl_destinations::ducklake::{
+    DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
+};
 #[cfg(feature = "test-utils")]
 use etl_destinations::ducklake::{
     arm_fail_after_atomic_batch_commit_once_for_tests,
@@ -134,14 +136,14 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     try_open_lake_conn(catalog, data).expect("failed to attach DuckLake catalog")
 }
 
-fn lake_table_exists(conn: &Connection, table_name: &str) -> bool {
+fn lake_table_exists(conn: &Connection, table_name: &DuckLakeTableName) -> bool {
     conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_catalog = {} AND \
              table_schema = {} AND table_name = {}",
             quote_literal("lake"),
-            quote_literal("main"),
-            quote_literal(table_name)
+            quote_literal(table_name.schema()),
+            quote_literal(table_name.table())
         ),
         [],
         |row| row.get::<_, i64>(0),
@@ -152,7 +154,7 @@ fn lake_table_exists(conn: &Connection, table_name: &str) -> bool {
 async fn open_lake_conn_when_tables_visible(
     catalog: &Url,
     data: &Url,
-    table_names: &[&str],
+    table_names: &[&DuckLakeTableName],
 ) -> Connection {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -193,26 +195,31 @@ async fn new_test_destination(
     .expect("failed to create DuckLake destination")
 }
 
-fn count_rows(conn: &Connection, table_name: &str) -> i64 {
+fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
+    format!(
+        "{}.{}.{}",
+        quote_identifier("lake"),
+        quote_identifier(table_name.schema()),
+        quote_identifier(table_name.table())
+    )
+}
+
+fn count_rows(conn: &Connection, table_name: &DuckLakeTableName) -> i64 {
     conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM {}.{}",
-            quote_identifier("lake"),
-            quote_identifier(table_name)
-        ),
+        &format!("SELECT COUNT(*) FROM {}", qualified_lake_table_name(table_name)),
         [],
         |r| r.get(0),
     )
     .expect("count query failed")
 }
 
-fn table_column_names(conn: &Connection, table_name: &str) -> Vec<String> {
+fn table_column_names(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<String> {
     conn.prepare(&format!(
         "select column_name from information_schema.columns where table_catalog = {} and \
          table_schema = {} and table_name = {} order by ordinal_position",
         quote_literal("lake"),
-        quote_literal("main"),
-        quote_literal(table_name),
+        quote_literal(table_name.schema()),
+        quote_literal(table_name.table()),
     ))
     .expect("failed to prepare column query")
     .query_map([], |row| row.get::<_, String>(0))
@@ -221,13 +228,17 @@ fn table_column_names(conn: &Connection, table_name: &str) -> Vec<String> {
     .expect("failed to read table columns")
 }
 
-fn count_applied_batches(conn: &Connection, table_name: &str, batch_kind: &str) -> i64 {
+fn count_applied_batches(
+    conn: &Connection,
+    table_name: &DuckLakeTableName,
+    batch_kind: &str,
+) -> i64 {
     conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM {}.{} WHERE table_name = {} AND batch_kind = {}",
             quote_identifier("lake"),
             quote_identifier("__etl_applied_table_batches"),
-            quote_literal(table_name),
+            quote_literal(&table_name.id()),
             quote_literal(batch_kind)
         ),
         [],
@@ -236,13 +247,13 @@ fn count_applied_batches(conn: &Connection, table_name: &str, batch_kind: &str) 
     .expect("batch marker count query failed")
 }
 
-fn count_streaming_progress_rows(conn: &Connection, table_name: &str) -> i64 {
+fn count_streaming_progress_rows(conn: &Connection, table_name: &DuckLakeTableName) -> i64 {
     conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM {}.{} WHERE table_name = {}",
             quote_identifier("lake"),
             quote_identifier("__etl_streaming_progress"),
-            quote_literal(table_name),
+            quote_literal(&table_name.id()),
         ),
         [],
         |r| r.get(0),
@@ -250,13 +261,16 @@ fn count_streaming_progress_rows(conn: &Connection, table_name: &str) -> i64 {
     .expect("streaming progress count query failed")
 }
 
-fn read_streaming_progress(conn: &Connection, table_name: &str) -> Option<(u64, u64)> {
+fn read_streaming_progress(
+    conn: &Connection,
+    table_name: &DuckLakeTableName,
+) -> Option<(u64, u64)> {
     conn.query_row(
         &format!(
             "SELECT last_commit_lsn, last_tx_ordinal FROM {}.{} WHERE table_name = {}",
             quote_identifier("lake"),
             quote_identifier("__etl_streaming_progress"),
-            quote_literal(table_name),
+            quote_literal(&table_name.id()),
         ),
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -264,9 +278,18 @@ fn read_streaming_progress(conn: &Connection, table_name: &str) -> Option<(u64, 
     .ok()
 }
 
-fn count_table_files(data: &Path, table_name: &str) -> usize {
+fn count_table_files(data: &Path, table_name: &DuckLakeTableName) -> usize {
+    let table_dir = data.join(table_name.schema()).join(table_name.table());
+    count_files_in_dir(&table_dir)
+}
+
+fn count_internal_table_files(data: &Path, table_name: &str) -> usize {
     let table_dir = data.join("main").join(table_name);
-    match std::fs::read_dir(&table_dir) {
+    count_files_in_dir(&table_dir)
+}
+
+fn count_files_in_dir(table_dir: &Path) -> usize {
+    match std::fs::read_dir(table_dir) {
         Ok(entries) => {
             entries.filter_map(Result::ok).filter(|entry| entry.path().is_file()).count()
         }
@@ -275,13 +298,14 @@ fn count_table_files(data: &Path, table_name: &str) -> usize {
     }
 }
 
-fn flush_inlined_rows(conn: &Connection, table_name: &str) -> i64 {
+fn flush_inlined_rows(conn: &Connection, table_name: &DuckLakeTableName) -> i64 {
     conn.query_row(
         &format!(
             "SELECT COALESCE(SUM(rows_flushed), 0) FROM ducklake_flush_inlined_data({}, \
-             table_name => {})",
+             schema_name => {}, table_name => {})",
             quote_literal("lake"),
-            quote_literal(table_name),
+            quote_literal(table_name.schema()),
+            quote_literal(table_name.table()),
         ),
         [],
         |r| r.get(0),
@@ -351,9 +375,8 @@ async fn write_table_rows_basic() {
     let (id, name): (i32, Option<String>) = conn
         .query_row(
             &format!(
-                "SELECT id, name FROM {}.{} WHERE id = 1",
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
+                "SELECT id, name FROM {} WHERE id = 1",
+                qualified_lake_table_name(&table_name)
             ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -619,7 +642,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
 
     assert_eq!(destination.connection_open_count_for_tests(), 1);
 
-    arm_fail_after_copy_batch_commit_once_for_tests(&table_name);
+    arm_fail_after_copy_batch_commit_once_for_tests(&table_name.id());
     destination
         .write_table_rows(
             &replicated_table_schema,
@@ -676,7 +699,7 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     .await
     .unwrap();
 
-    arm_fail_after_copy_batch_commit_once_for_tests(&table_name);
+    arm_fail_after_copy_batch_commit_once_for_tests(&table_name.id());
     destination
         .write_table_rows(
             &replicated_table_schema,
@@ -793,7 +816,7 @@ async fn concurrent_same_table_copy_batches_complete() {
              AND batch_kind = {}",
             quote_identifier("lake"),
             quote_identifier("__etl_applied_table_batches"),
-            quote_literal(&table_name),
+            quote_literal(&table_name.id()),
             quote_literal("copy"),
         );
         let mut stmt = conn.prepare(&sql).expect("marker detail prepare failed");
@@ -909,8 +932,8 @@ async fn truncate_clears_rows() {
                 "SELECT COUNT(*) FROM information_schema.columns WHERE table_catalog = {} AND \
                  table_schema = {} AND table_name = {}",
                 quote_literal("lake"),
-                quote_literal("main"),
-                quote_literal(&table_name),
+                quote_literal(table_name.schema()),
+                quote_literal(table_name.table()),
             ),
             [],
             |r| r.get(0),
@@ -965,7 +988,10 @@ async fn truncate_clears_copy_markers_for_recopy() {
 /// state.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::{
+        event::{DeleteEvent, InsertEvent, UpdateEvent},
+        schema::PgLsn,
+    };
     let lake = create_test_lake("write_events").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
@@ -1038,11 +1064,7 @@ async fn write_events() {
 
     let (id, name): (i32, String) = conn
         .query_row(
-            &format!(
-                "SELECT id, name FROM {}.{}",
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
-            ),
+            &format!("SELECT id, name FROM {}", qualified_lake_table_name(&table_name)),
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -1055,7 +1077,7 @@ async fn write_events() {
 /// contains DML for multiple schema versions of the same table.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_splits_same_table_batch_by_replicated_schema() {
-    use etl::types::{InsertEvent, PgLsn};
+    use etl::{event::InsertEvent, schema::PgLsn};
 
     let lake = create_test_lake("write_events_splits_same_table_batch_by_replicated_schema").await;
     let catalog_url = lake.catalog_url.clone();
@@ -1111,9 +1133,8 @@ async fn write_events_splits_same_table_batch_by_replicated_schema() {
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut statement = conn
         .prepare(&format!(
-            "select id, name, email from {}.{} order by id",
-            quote_identifier("lake"),
-            quote_identifier(&table_name)
+            "select id, name, email from {} order by id",
+            qualified_lake_table_name(&table_name)
         ))
         .expect("failed to prepare segmented schema query");
     let rows = statement
@@ -1136,7 +1157,7 @@ async fn write_events_splits_same_table_batch_by_replicated_schema() {
 /// `write_events` recovers interrupted DDL before handling a relation event.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_recovers_applying_metadata_before_relation_event() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake =
         create_test_lake("write_events_recovers_applying_metadata_before_relation_event").await;
@@ -1184,7 +1205,7 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
         .unwrap();
 
     let applying_metadata = DestinationTableMetadata::new_applied(
-        table_name.clone(),
+        table_name.to_metadata_id().unwrap(),
         old_schema.snapshot_id,
         old_replicated_table_schema.replication_mask().clone(),
     )
@@ -1230,9 +1251,8 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut statement = conn
         .prepare(&format!(
-            "select id, name, email from {}.{} order by id",
-            quote_identifier("lake"),
-            quote_identifier(&table_name)
+            "select id, name, email from {} order by id",
+            qualified_lake_table_name(&table_name)
         ))
         .expect("failed to prepare state query");
     let rows = statement
@@ -1254,7 +1274,7 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_applies_defaulted_schema_change() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake = create_test_lake("write_events_applies_defaulted_schema_change").await;
     let catalog_url = lake.catalog_url.clone();
@@ -1306,7 +1326,7 @@ async fn write_events_applies_defaulted_schema_change() {
         .unwrap();
 
     let initial_metadata = DestinationTableMetadata::new_applied(
-        table_name.clone(),
+        table_name.to_metadata_id().unwrap(),
         old_schema.snapshot_id,
         old_replicated_table_schema.replication_mask().clone(),
     );
@@ -1341,9 +1361,8 @@ async fn write_events_applies_defaulted_schema_change() {
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut rows_statement = conn
         .prepare(&format!(
-            "select id, name, status, score, active from {}.{} order by id",
-            quote_identifier("lake"),
-            quote_identifier(&table_name)
+            "select id, name, status, score, active from {} order by id",
+            qualified_lake_table_name(&table_name)
         ))
         .expect("failed to prepare defaulted row query");
     let rows = rows_statement
@@ -1375,7 +1394,7 @@ async fn write_events_applies_defaulted_schema_change() {
 /// marked applied for a schema that was not fully applied.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_reconciles_missing_columns_after_applied_metadata() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake =
         create_test_lake("write_events_reconciles_missing_columns_after_applied_metadata").await;
@@ -1423,7 +1442,7 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
         .unwrap();
 
     let applied_metadata = DestinationTableMetadata::new_applied(
-        table_name.clone(),
+        table_name.to_metadata_id().unwrap(),
         new_schema.snapshot_id,
         new_replicated_table_schema.replication_mask().clone(),
     );
@@ -1464,9 +1483,8 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut statement = conn
         .prepare(&format!(
-            "select id, name, email from {}.{} order by id",
-            quote_identifier("lake"),
-            quote_identifier(&table_name)
+            "select id, name, email from {} order by id",
+            qualified_lake_table_name(&table_name)
         ))
         .expect("failed to prepare state query");
     let rows = statement
@@ -1490,7 +1508,7 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
 /// replacement while preserving replay safety.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_supports_drop_and_add_same_column_name() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake = create_test_lake("write_events_supports_drop_and_add_same_column_name").await;
     let catalog_url = lake.catalog_url.clone();
@@ -1567,9 +1585,8 @@ async fn write_events_supports_drop_and_add_same_column_name() {
 
     let mut statement = conn
         .prepare(&format!(
-            "select id, name, status from {}.{} order by id",
-            quote_identifier("lake"),
-            quote_identifier(&table_name)
+            "select id, name, status from {} order by id",
+            qualified_lake_table_name(&table_name)
         ))
         .expect("failed to prepare state query");
     let rows = statement
@@ -1587,7 +1604,7 @@ async fn write_events_supports_drop_and_add_same_column_name() {
 /// tombstones or block later replacements.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_supports_repeated_drop_and_add_same_column_name() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake =
         create_test_lake("write_events_supports_repeated_drop_and_add_same_column_name").await;
@@ -1686,9 +1703,8 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
 
     let mut statement = conn
         .prepare(&format!(
-            "select id, status from {}.{} order by id",
-            quote_identifier("lake"),
-            quote_identifier(&table_name)
+            "select id, status from {} order by id",
+            qualified_lake_table_name(&table_name)
         ))
         .expect("failed to prepare state query");
     let rows = statement
@@ -1704,7 +1720,7 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
 /// the same physical column name.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_drops_stale_tombstone_before_reusing_tombstone_name() {
-    use etl::types::{InsertEvent, RelationEvent};
+    use etl::event::{InsertEvent, RelationEvent};
 
     let lake = create_test_lake("write_events_drops_stale_tombstone_before_reuse").await;
     let catalog_url = lake.catalog_url.clone();
@@ -1741,13 +1757,11 @@ async fn write_events_drops_stale_tombstone_before_reusing_tombstone_name() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     conn.execute_batch(&format!(
-        "alter table {}.{} add column {} varchar;
-         update {}.{} set {} = {};",
-        quote_identifier("lake"),
-        quote_identifier(&table_name),
+        "alter table {} add column {} varchar;
+         update {} set {} = {};",
+        qualified_lake_table_name(&table_name),
         quote_identifier(stale_tombstone_column),
-        quote_identifier("lake"),
-        quote_identifier(&table_name),
+        qualified_lake_table_name(&table_name),
         quote_identifier(stale_tombstone_column),
         quote_literal("stale"),
     ))
@@ -1783,10 +1797,9 @@ async fn write_events_drops_stale_tombstone_before_reusing_tombstone_name() {
 
     let mut statement = conn
         .prepare(&format!(
-            "select id, name, {} from {}.{} order by id",
+            "select id, name, {} from {} order by id",
             quote_identifier(stale_tombstone_column),
-            quote_identifier("lake"),
-            quote_identifier(&table_name)
+            qualified_lake_table_name(&table_name)
         ))
         .expect("failed to prepare reused tombstone query");
     let rows = statement
@@ -1842,10 +1855,9 @@ async fn write_table_rows_preserves_active_column_with_tombstone_prefix() {
     let value: String = conn
         .query_row(
             &format!(
-                "select {} from {}.{} where id = 1",
+                "select {} from {} where id = 1",
                 quote_identifier("__etl_ducklake_dropped_business"),
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
+                qualified_lake_table_name(&table_name)
             ),
             [],
             |row| row.get(0),
@@ -1884,7 +1896,7 @@ async fn startup_after_restart_reconciles_applied_metadata_missing_columns() {
         .unwrap();
 
     let applied_metadata = DestinationTableMetadata::new_applied(
-        table_name.clone(),
+        table_name.to_metadata_id().unwrap(),
         new_schema.snapshot_id,
         new_replicated_table_schema.replication_mask().clone(),
     );
@@ -1912,9 +1924,8 @@ async fn startup_after_restart_reconciles_applied_metadata_missing_columns() {
 
     let mut statement = conn
         .prepare(&format!(
-            "select id, name, email from {}.{} order by id",
-            quote_identifier("lake"),
-            quote_identifier(&table_name)
+            "select id, name, email from {} order by id",
+            qualified_lake_table_name(&table_name)
         ))
         .expect("failed to prepare state query");
     let rows = statement
@@ -1961,7 +1972,7 @@ async fn startup_after_restart_recovers_applying_schema_change() {
         .unwrap();
 
     let applying_metadata = DestinationTableMetadata::new_applied(
-        table_name.clone(),
+        table_name.to_metadata_id().unwrap(),
         old_schema.snapshot_id,
         old_replicated_table_schema.replication_mask().clone(),
     )
@@ -2036,13 +2047,11 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     conn.execute_batch(&format!(
-        "alter table {}.{} add column {} varchar;
-         update {}.{} set {} = {};",
-        quote_identifier("lake"),
-        quote_identifier(&table_name),
+        "alter table {} add column {} varchar;
+         update {} set {} = {};",
+        qualified_lake_table_name(&table_name),
         quote_identifier("ddl_col_4_0"),
-        quote_identifier("lake"),
-        quote_identifier(&table_name),
+        qualified_lake_table_name(&table_name),
         quote_identifier("ddl_col_4_0"),
         quote_identifier("ddl_col_4_1"),
     ))
@@ -2050,7 +2059,7 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
     drop(conn);
 
     let applying_metadata = DestinationTableMetadata::new_applied(
-        table_name.clone(),
+        table_name.to_metadata_id().unwrap(),
         old_schema.snapshot_id,
         old_replicated_table_schema.replication_mask().clone(),
     )
@@ -2087,9 +2096,8 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
 
     let mut statement = conn
         .prepare(&format!(
-            "select id, ddl_col_4_0 from {}.{} order by id",
-            quote_identifier("lake"),
-            quote_identifier(&table_name)
+            "select id, ddl_col_4_0 from {} order by id",
+            qualified_lake_table_name(&table_name)
         ))
         .expect("failed to prepare state query");
     let rows = statement
@@ -2133,7 +2141,7 @@ async fn startup_after_restart_recovers_applying_schema_change_with_pruned_previ
         .unwrap();
 
     let applying_metadata = DestinationTableMetadata::new_applied(
-        table_name.clone(),
+        table_name.to_metadata_id().unwrap(),
         missing_previous_snapshot_id,
         old_replicated_table_schema.replication_mask().clone(),
     )
@@ -2177,7 +2185,7 @@ async fn startup_after_restart_recovers_initial_applying_metadata() {
     let store = MemoryStore::new();
     store.store_table_schema(schema.clone()).await.unwrap();
     let applying_metadata = DestinationTableMetadata::new_applying(
-        table_name.clone(),
+        table_name.to_metadata_id().unwrap(),
         schema.snapshot_id,
         replicated_table_schema.replication_mask().clone(),
     );
@@ -2201,7 +2209,7 @@ async fn startup_after_restart_recovers_initial_applying_metadata() {
 /// Small CDC batches should remain inlined after the caller returns.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_small_batch_stays_inlined_after_return() {
-    use etl::types::{InsertEvent, PgLsn};
+    use etl::{event::InsertEvent, schema::PgLsn};
     let lake = create_test_lake("write_events_small_batch_stays_inlined_after_return").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
@@ -2254,7 +2262,10 @@ async fn write_events_small_batch_stays_inlined_after_return() {
 /// `write_events` keeps update events with old rows on the current-state path.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_with_old_row_update() {
-    use etl::types::{InsertEvent, PgLsn, UpdateEvent};
+    use etl::{
+        event::{InsertEvent, UpdateEvent},
+        schema::PgLsn,
+    };
     let lake = create_test_lake("write_events_with_old_row_update").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
@@ -2313,11 +2324,7 @@ async fn write_events_with_old_row_update() {
 
     let (id, name): (i32, String) = conn
         .query_row(
-            &format!(
-                "SELECT id, name FROM {}.{}",
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
-            ),
+            &format!("SELECT id, name FROM {}", qualified_lake_table_name(&table_name)),
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -2330,7 +2337,7 @@ async fn write_events_with_old_row_update() {
 /// value when the same row is updated multiple times in order.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_with_partial_updates() {
-    use etl::types::UpdateEvent;
+    use etl::event::UpdateEvent;
 
     let lake = create_test_lake("write_events_with_partial_updates").await;
     let catalog_url = lake.catalog_url.clone();
@@ -2402,11 +2409,7 @@ async fn write_events_with_partial_updates() {
 
     let name: String = conn
         .query_row(
-            &format!(
-                "SELECT name FROM {}.{} WHERE id = 1",
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
-            ),
+            &format!("SELECT name FROM {} WHERE id = 1", qualified_lake_table_name(&table_name)),
             [],
             |r| r.get(0),
         )
@@ -2418,7 +2421,7 @@ async fn write_events_with_partial_updates() {
 /// skipping them.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_without_replica_identity_rejects_mutations() {
-    use etl::types::UpdateEvent;
+    use etl::event::UpdateEvent;
 
     let lake = create_test_lake("write_events_without_replica_identity_rejects_mutations").await;
     let catalog_url = lake.catalog_url.clone();
@@ -2492,11 +2495,7 @@ async fn write_events_without_replica_identity_rejects_mutations() {
     assert_eq!(count_rows(&conn, &table_name), 1);
     let name: String = conn
         .query_row(
-            &format!(
-                "SELECT name FROM {}.{} WHERE id = 1",
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
-            ),
+            &format!("SELECT name FROM {} WHERE id = 1", qualified_lake_table_name(&table_name)),
             [],
             |r| r.get(0),
         )
@@ -2508,7 +2507,10 @@ async fn write_events_without_replica_identity_rejects_mutations() {
 /// committed.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_replay_is_idempotent() {
-    use etl::types::{InsertEvent, PgLsn, UpdateEvent};
+    use etl::{
+        event::{InsertEvent, UpdateEvent},
+        schema::PgLsn,
+    };
 
     let lake = create_test_lake("write_events_replay_is_idempotent").await;
     let catalog_url = lake.catalog_url.clone();
@@ -2587,11 +2589,7 @@ async fn write_events_replay_is_idempotent() {
 
     let (id, name): (i32, String) = conn
         .query_row(
-            &format!(
-                "SELECT id, name FROM {}.{}",
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
-            ),
+            &format!("SELECT id, name FROM {}", qualified_lake_table_name(&table_name)),
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -2603,7 +2601,7 @@ async fn write_events_replay_is_idempotent() {
 /// Streaming progress must compare transaction ordinals when commit LSNs match.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
-    use etl::types::{InsertEvent, UpdateEvent};
+    use etl::event::{InsertEvent, UpdateEvent};
     let lake =
         create_test_lake("write_events_same_commit_lsn_higher_tx_ordinal_still_applies").await;
     let catalog_url = lake.catalog_url.clone();
@@ -2665,11 +2663,7 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
 
     let name: String = conn
         .query_row(
-            &format!(
-                "SELECT name FROM {}.{} WHERE id = 1",
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
-            ),
+            &format!("SELECT name FROM {} WHERE id = 1", qualified_lake_table_name(&table_name)),
             [],
             |r| r.get(0),
         )
@@ -2681,7 +2675,7 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
 /// overlaps.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
-    use etl::types::InsertEvent;
+    use etl::event::InsertEvent;
     let lake = create_test_lake("write_events_restart_overlap_rebatches_only_pending_suffix").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
@@ -2776,9 +2770,8 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
 
     let names: Vec<String> = conn
         .prepare(&format!(
-            "SELECT name FROM {}.{} ORDER BY id",
-            quote_identifier("lake"),
-            quote_identifier(&table_name)
+            "SELECT name FROM {} ORDER BY id",
+            qualified_lake_table_name(&table_name)
         ))
         .unwrap()
         .query_map([], |row| row.get(0))
@@ -2795,7 +2788,7 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_reuses_one_staging_table_per_atomic_batch() {
-    use etl::types::{InsertEvent, UpdateEvent};
+    use etl::event::{InsertEvent, UpdateEvent};
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
@@ -2859,16 +2852,15 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
         .await
         .unwrap();
 
-    assert_eq!(ducklake_staging_table_creations_for_tests(&table_name), 1);
+    assert_eq!(ducklake_staging_table_creations_for_tests(&table_name.id()), 1);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
 
     let rows = conn
         .prepare(&format!(
-            "SELECT id, name FROM {}.{} ORDER BY id",
-            quote_identifier("lake"),
-            quote_identifier(&table_name)
+            "SELECT id, name FROM {} ORDER BY id",
+            qualified_lake_table_name(&table_name)
         ))
         .unwrap()
         .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
@@ -2921,14 +2913,17 @@ async fn applied_batches_table_uses_data_inlining() {
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
-    assert_eq!(count_table_files(&data, "__etl_applied_table_batches"), 0);
+    assert_eq!(count_internal_table_files(&data, "__etl_applied_table_batches"), 0);
 }
 
 /// Mixed table batches remain correct when multiple tables are written in one
 /// flush.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_mixed_multi_table_batches() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::{
+        event::{DeleteEvent, InsertEvent, UpdateEvent},
+        schema::PgLsn,
+    };
     let lake = create_test_lake("write_events_mixed_multi_table_batches").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
@@ -3030,22 +3025,14 @@ async fn write_events_mixed_multi_table_batches() {
 
     let name_a: String = conn
         .query_row(
-            &format!(
-                "SELECT name FROM {}.{} WHERE id = 1",
-                quote_identifier("lake"),
-                quote_identifier(&table_name_a)
-            ),
+            &format!("SELECT name FROM {} WHERE id = 1", qualified_lake_table_name(&table_name_a)),
             [],
             |r| r.get(0),
         )
         .unwrap();
     let name_b: String = conn
         .query_row(
-            &format!(
-                "SELECT name FROM {}.{} WHERE id = 2",
-                quote_identifier("lake"),
-                quote_identifier(&table_name_b)
-            ),
+            &format!("SELECT name FROM {} WHERE id = 2", qualified_lake_table_name(&table_name_b)),
             [],
             |r| r.get(0),
         )
@@ -3060,7 +3047,10 @@ async fn write_events_mixed_multi_table_batches() {
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
-    use etl::types::{InsertEvent, PgLsn, TruncateEvent};
+    use etl::{
+        event::{InsertEvent, TruncateEvent},
+        schema::PgLsn,
+    };
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
@@ -3102,7 +3092,7 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
         .await
         .unwrap();
 
-    arm_fail_after_atomic_batch_commit_once_for_tests(&table_name);
+    arm_fail_after_atomic_batch_commit_once_for_tests(&table_name.id());
 
     let lsn = PgLsn::from(800u64);
     destination
@@ -3137,11 +3127,7 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
 
     let name: String = conn
         .query_row(
-            &format!(
-                "SELECT name FROM {}.{} WHERE id = 3",
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
-            ),
+            &format!("SELECT name FROM {} WHERE id = 3", qualified_lake_table_name(&table_name)),
             [],
             |r| r.get(0),
         )
@@ -3156,7 +3142,10 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_retry_after_post_commit_failure_is_idempotent() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::{
+        event::{DeleteEvent, InsertEvent, UpdateEvent},
+        schema::PgLsn,
+    };
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
@@ -3185,7 +3174,7 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
     .await
     .unwrap();
 
-    arm_fail_after_atomic_batch_commit_once_for_tests(&table_name);
+    arm_fail_after_atomic_batch_commit_once_for_tests(&table_name.id());
 
     let lsn = PgLsn::from(500u64);
     destination
@@ -3240,11 +3229,7 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
 
     let name: String = conn
         .query_row(
-            &format!(
-                "SELECT name FROM {}.{} WHERE id = 1",
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
-            ),
+            &format!("SELECT name FROM {} WHERE id = 1", qualified_lake_table_name(&table_name)),
             [],
             |r| r.get(0),
         )
@@ -3369,9 +3354,8 @@ async fn type_mapping_round_trip() {
     let row: (i32, String, f64, bool, String) = conn
         .query_row(
             &format!(
-                "SELECT id, label, score, active, CAST(birthday AS VARCHAR) FROM {}.{}",
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
+                "SELECT id, label, score, active, CAST(birthday AS VARCHAR) FROM {}",
+                qualified_lake_table_name(&table_name)
             ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),

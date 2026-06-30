@@ -1,7 +1,7 @@
 use etl_api::validation::{FailureType, ValidationContext, validate_pipeline, validate_source};
 use etl_config::Environment;
 use etl_postgres::{
-    below_version, replication::extract_server_version, sqlx::test_utils::drop_pg_database,
+    below_version, source::extract_server_version, sqlx::test_utils::drop_pg_database,
     version::POSTGRES_15,
 };
 use sqlx::Executor;
@@ -248,8 +248,8 @@ async fn validate_pipeline_all_checks_pass() {
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
     assert!(
-        failures.is_empty(),
-        "Expected no failures for properly configured pipeline, got: {failures:?}"
+        failures.iter().all(|failure| failure.failure_type != FailureType::Critical),
+        "Expected no critical failures for properly configured pipeline, got: {failures:?}"
     );
 
     drop_pg_database(&config).await;

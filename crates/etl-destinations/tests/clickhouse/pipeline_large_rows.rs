@@ -9,14 +9,16 @@
 //! tiny no matter how large the row is.
 
 use etl::{
-    state::TableStateType,
+    event::EventType,
+    pipeline::PipelineId,
+    schema::TableName,
+    store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
     },
-    types::{EventType, PipelineId, TableName},
 };
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::test_utils::setup_clickhouse_database;

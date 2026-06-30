@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use etl::types::PipelineId;
+use etl::pipeline::PipelineId;
 use metrics::{counter, histogram};
 use reqwest::StatusCode;
 use tracing::warn;

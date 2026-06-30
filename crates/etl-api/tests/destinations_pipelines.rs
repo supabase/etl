@@ -242,7 +242,7 @@ async fn tenant_cannot_create_more_than_max_destinations_pipelines() {
     let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -274,7 +274,7 @@ async fn destination_and_pipeline_with_another_tenants_source_cannot_be_created(
     let response = app.create_destination_pipeline(tenant1_id, &destination_pipeline).await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -425,7 +425,7 @@ async fn destination_and_pipeline_with_another_tenants_source_cannot_be_updated(
         .await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -528,7 +528,7 @@ async fn destination_and_pipeline_with_another_tenants_destination_cannot_be_upd
         .await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -591,7 +591,7 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cannot_be_update
         .await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 // TODO: Re-enable these tests once MAX_PIPELINES_PER_TENANT is lifted from 1.

@@ -23,16 +23,16 @@ use crate::{
     },
     data,
     data::{
-        connect_to_source_database_from_api,
         destinations::{DestinationsDbError, destination_exists},
         destinations_pipelines::DestinationPipelinesDbError,
         images::ImagesDbError,
         pipelines::{
             MAX_PIPELINES_PER_TENANT, PipelinesDbError, count_pipelines_for_tenant,
-            delete_pipeline_api_and_source_state, delete_pipeline_api_state,
-            delete_pipeline_replication_slots, read_pipeline, read_pipeline_for_deletion,
+            delete_pipeline_api_state, delete_pipeline_replication_slots,
+            delete_pipeline_source_state, read_pipeline, read_pipeline_for_deletion,
             read_pipelines_for_destination_for_deletion,
         },
+        source_database,
         sources::SourcesDbError,
     },
     feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant},
@@ -87,6 +87,12 @@ pub(crate) enum DestinationPipelineError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    #[error("Source database error: {0}")]
+    SourceDatabase(sqlx::Error),
+
+    #[error("Source pipeline state operation failed: {0}")]
+    SourcePipelineState(PipelinesDbError),
+
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
 
@@ -130,7 +136,12 @@ impl DestinationPipelineError {
             | DestinationPipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | DestinationPipelineError::Database(_)
             | DestinationPipelineError::NoDefaultImageFound
+            | DestinationPipelineError::TrustedRootCerts(_)
             | DestinationPipelineError::K8sCore(_) => "Internal server error".to_owned(),
+            DestinationPipelineError::SourceDatabase(_)
+            | DestinationPipelineError::SourcePipelineState(_) => {
+                utils::source_database_query_error_message().to_owned()
+            }
             DestinationPipelineError::Validation(error) => {
                 utils::validation_error_message(error).to_owned()
             }
@@ -152,20 +163,27 @@ impl IntoResponse for DestinationPipelineError {
             | DestinationPipelineError::Database(_)
             | DestinationPipelineError::K8sCore(_)
             | DestinationPipelineError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            DestinationPipelineError::SourceDatabase(error) => {
+                utils::source_database_error_status_code(error)
+            }
+            DestinationPipelineError::SourcePipelineState(error) => match error {
+                PipelinesDbError::Database(error) => {
+                    utils::source_database_error_status_code(error)
+                }
+                _ => StatusCode::BAD_GATEWAY,
+            },
             DestinationPipelineError::Validation(error) => {
                 utils::validation_error_status_code(error)
             }
-            DestinationPipelineError::TenantId(_)
-            | DestinationPipelineError::SourceNotFound(_)
+            DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
             | DestinationPipelineError::PipelineNotFound(_)
-            | DestinationPipelineError::PipelineDestinationMismatch(_, _)
+            | DestinationPipelineError::PipelineDestinationMismatch(_, _) => StatusCode::NOT_FOUND,
+            DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::InvalidPipelineRequest(_) => StatusCode::BAD_REQUEST,
             DestinationPipelineError::DuplicatePipeline
-            | DestinationPipelineError::ActivePipeline(_) => StatusCode::CONFLICT,
-            DestinationPipelineError::PipelineLimitReached { .. } => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
+            | DestinationPipelineError::ActivePipeline(_)
+            | DestinationPipelineError::PipelineLimitReached { .. } => StatusCode::CONFLICT,
         };
 
         error_response_with_internal_error(status_code, self.to_message(), &self)
@@ -233,8 +251,9 @@ fn validate_pipeline_request(
     ),
     responses(
         (status = 200, description = "Destination and pipeline created successfully", body = CreateDestinationPipelineResponse),
-        (status = 409, description = "Conflict – a pipeline already exists for this source and destination", body = ErrorMessage),
+        (status = 409, description = "Conflict: a pipeline already exists for this source and destination or tenant pipeline limit reached", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Destinations and Pipelines"
@@ -310,8 +329,9 @@ pub(crate) async fn create_destination_and_pipeline(
     ),
     responses(
         (status = 200, description = "Destination and pipeline updated successfully"),
-        (status = 404, description = "Pipeline or destination not found", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source, pipeline, destination, or destination-pipeline link not found", body = ErrorMessage),
+        (status = 409, description = "Conflict: a pipeline already exists for this source and destination", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Destinations and Pipelines"
@@ -393,8 +413,11 @@ pub(crate) async fn update_destination_and_pipeline(
     responses(
         (status = 200, description = "Pipeline deleted successfully, with destination deletion status included in the response body", body = DeleteDestinationPipelineResponse),
         (status = 409, description = "Pipeline is active", body = ErrorMessage),
-        (status = 404, description = "Pipeline or destination not found", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source, pipeline, destination, or destination-pipeline link not found", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Destinations and Pipelines"
@@ -435,7 +458,7 @@ pub(crate) async fn delete_destination_and_pipeline(
     )
     .await?
     .ok_or(DestinationPipelineError::SourceNotFound(pipeline.source_id))?;
-    let source_pool = match connect_to_source_database_from_api(
+    let source_pool = match source_database::connect(
         &source.config.into_connection_config(tls_config),
     )
     .await
@@ -456,18 +479,15 @@ pub(crate) async fn delete_destination_and_pipeline(
     };
     let mut api_txn = pool.begin().await?;
     let mut source_txn = if let Some(source_pool) = source_pool.as_ref() {
-        Some(source_pool.begin().await?)
+        Some(source_pool.begin().await.map_err(DestinationPipelineError::SourceDatabase)?)
     } else {
         None
     };
     if let Some(source_txn) = source_txn.as_mut() {
-        delete_pipeline_api_and_source_state(
-            api_txn.deref_mut(),
-            source_txn.deref_mut(),
-            tenant_id,
-            &pipeline,
-        )
-        .await?;
+        delete_pipeline_api_state(api_txn.deref_mut(), tenant_id, &pipeline).await?;
+        delete_pipeline_source_state(source_txn.deref_mut(), pipeline.id)
+            .await
+            .map_err(DestinationPipelineError::SourcePipelineState)?;
     } else {
         delete_pipeline_api_state(api_txn.deref_mut(), tenant_id, &pipeline).await?;
     }
@@ -488,10 +508,12 @@ pub(crate) async fn delete_destination_and_pipeline(
     // reference pipeline state that no longer exists in the source database.
     api_txn.commit().await?;
     if let Some(source_txn) = source_txn {
-        source_txn.commit().await?;
+        source_txn.commit().await.map_err(DestinationPipelineError::SourceDatabase)?;
     }
     if let Some(source_pool) = source_pool.as_ref() {
-        delete_pipeline_replication_slots(source_pool, pipeline.id).await?;
+        delete_pipeline_replication_slots(source_pool, pipeline.id)
+            .await
+            .map_err(DestinationPipelineError::SourcePipelineState)?;
     }
 
     Ok(Json(DeleteDestinationPipelineResponse {

@@ -1,10 +1,10 @@
 use etl::{
-    error::EtlError,
-    etl_error,
-    types::{
+    data::{
         ArrayCellNonOptional, Cell, CellNonOptional, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT,
         TableRow,
     },
+    error::EtlError,
+    etl_error,
 };
 use prost::bytes;
 
@@ -420,8 +420,8 @@ mod tests {
 
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
     use etl::{
+        data::{Cell, PgNumeric},
         error::ErrorKind,
-        types::{Cell, PgNumeric},
     };
     use prost::Message;
 
@@ -489,7 +489,7 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_array_with_nulls() {
-        let array_with_nulls = etl::types::ArrayCell::I32(vec![Some(1), None, Some(3)]);
+        let array_with_nulls = etl::data::ArrayCell::I32(vec![Some(1), None, Some(3)]);
         let table_row = TableRow::new(vec![Cell::Array(array_with_nulls)]);
 
         let result = BigQueryTableRow::try_from(table_row);
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_array_with_numeric_rounding_risk() {
-        let array_with_rounding_risk = etl::types::ArrayCell::Numeric(vec![
+        let array_with_rounding_risk = etl::data::ArrayCell::Numeric(vec![
             Some(PgNumeric::from_str("123.456").unwrap()),
             Some(PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap()),
             Some(PgNumeric::from_str("789.012").unwrap()),
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_valid_array() {
-        let valid_array = etl::types::ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
+        let valid_array = etl::data::ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
         let table_row = TableRow::new(vec![
             Cell::String("prefix".to_owned()),
             Cell::Array(valid_array),
@@ -536,7 +536,7 @@ mod tests {
             Cell::Numeric(
                 PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
             ),
-            Cell::Array(etl::types::ArrayCell::Numeric(vec![Some(
+            Cell::Array(etl::data::ArrayCell::Numeric(vec![Some(
                 PgNumeric::from_str("0.000000000000000000000000000000000000002").unwrap(),
             )])),
         ]);

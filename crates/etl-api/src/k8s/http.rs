@@ -813,6 +813,8 @@ impl K8sClient for HttpK8sClient {
 
         let stateful_set_json = create_replicator_stateful_set_json(
             prefix,
+            &request.tenant_id,
+            request.pipeline_id,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -1699,6 +1701,8 @@ fn create_snowflake_passphrase_env_var_json(snowflake_secret_name: &str) -> serd
 #[expect(clippy::too_many_arguments)]
 fn create_replicator_stateful_set_json(
     prefix: &str,
+    tenant_id: &str,
+    pipeline_id: i64,
     stateful_set_name: &str,
     replicator_image: &str,
     container_environment: Vec<serde_json::Value>,
@@ -1720,7 +1724,9 @@ fn create_replicator_stateful_set_json(
         "namespace": DATA_PLANE_NAMESPACE,
         "labels": {
           "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
+          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
+          "etl.supabase.com/pipeline-id": pipeline_id.to_string(),
+          "etl.supabase.com/tenant-id": tenant_id
         },
       },
       "spec": {
@@ -1811,6 +1817,7 @@ mod tests {
     use crate::configs::pipeline::ReplicatorResourcesConfig;
 
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
+    const PIPELINE_ID: i64 = 24;
     const MAX_TENANT_ID: &str = "abcdefghijklmnopqrst";
     const MAX_BIGINT_ID: i64 = 9_223_372_036_854_775_807;
     const MAX_K8S_LABEL_VALUE_LEN: usize = 63;
@@ -1835,6 +1842,51 @@ mod tests {
 
             assert_snapshot!(serde_json::to_string_pretty(&stateful_set_json).unwrap());
         }};
+    }
+
+    fn assert_stateful_set_has_identity_metadata_labels(
+        stateful_set_json: &serde_json::Value,
+        tenant_id: &str,
+        pipeline_id: i64,
+    ) {
+        let labels = stateful_set_json
+            .pointer("/metadata/labels")
+            .and_then(serde_json::Value::as_object)
+            .expect("stateful set should have metadata labels");
+        let pipeline_id = pipeline_id.to_string();
+
+        assert_eq!(
+            labels.get("etl.supabase.com/tenant-id").and_then(serde_json::Value::as_str),
+            Some(tenant_id)
+        );
+        assert_eq!(
+            labels.get("etl.supabase.com/pipeline-id").and_then(serde_json::Value::as_str),
+            Some(pipeline_id.as_str())
+        );
+        assert!(
+            stateful_set_json
+                .pointer("/spec/selector/matchLabels/etl.supabase.com~1tenant-id")
+                .is_none(),
+            "tenant-id should not be part of the immutable selector"
+        );
+        assert!(
+            stateful_set_json
+                .pointer("/spec/selector/matchLabels/etl.supabase.com~1pipeline-id")
+                .is_none(),
+            "pipeline-id should not be part of the immutable selector"
+        );
+        assert!(
+            stateful_set_json
+                .pointer("/spec/template/metadata/labels/etl.supabase.com~1tenant-id")
+                .is_none(),
+            "tenant-id should not be part of the pod template labels"
+        );
+        assert!(
+            stateful_set_json
+                .pointer("/spec/template/metadata/labels/etl.supabase.com~1pipeline-id")
+                .is_none(),
+            "pipeline-id should not be part of the pod template labels"
+        );
     }
 
     fn container_environment_has_var(
@@ -2081,6 +2133,8 @@ mod tests {
                 "replicator stateful set",
                 create_replicator_stateful_set_json(
                     &prefix,
+                    MAX_TENANT_ID,
+                    MAX_BIGINT_ID,
                     &stateful_set_name,
                     replicator_image,
                     container_environment,
@@ -2242,6 +2296,7 @@ mod tests {
                 table_error_retry_max_attempts: 3,
                 max_table_sync_workers: 4,
                 memory_refresh_interval_ms: 100,
+                replication_lag_refresh_interval_ms: 10000,
                 memory_backpressure: Some(MemoryBackpressureConfig {
                     activate_threshold: 1.0,
                     resume_threshold: 0.99,
@@ -2720,6 +2775,8 @@ mod tests {
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
+            TENANT_ID,
+            PIPELINE_ID,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -2731,6 +2788,11 @@ mod tests {
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
+        assert_stateful_set_has_identity_metadata_labels(
+            &stateful_set_json,
+            TENANT_ID,
+            PIPELINE_ID,
+        );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Staging env
@@ -2753,6 +2815,8 @@ mod tests {
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
+            TENANT_ID,
+            PIPELINE_ID,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -2764,6 +2828,11 @@ mod tests {
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
+        assert_stateful_set_has_identity_metadata_labels(
+            &stateful_set_json,
+            TENANT_ID,
+            PIPELINE_ID,
+        );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Prod env
@@ -2786,6 +2855,8 @@ mod tests {
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
+            TENANT_ID,
+            PIPELINE_ID,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -2797,6 +2868,11 @@ mod tests {
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
+        assert_stateful_set_has_identity_metadata_labels(
+            &stateful_set_json,
+            TENANT_ID,
+            PIPELINE_ID,
+        );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
 
@@ -2826,6 +2902,8 @@ mod tests {
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
+            TENANT_ID,
+            PIPELINE_ID,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -2837,6 +2915,11 @@ mod tests {
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
+        assert_stateful_set_has_identity_metadata_labels(
+            &stateful_set_json,
+            TENANT_ID,
+            PIPELINE_ID,
+        );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Staging env
@@ -2859,6 +2942,8 @@ mod tests {
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
+            TENANT_ID,
+            PIPELINE_ID,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -2870,6 +2955,11 @@ mod tests {
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
+        assert_stateful_set_has_identity_metadata_labels(
+            &stateful_set_json,
+            TENANT_ID,
+            PIPELINE_ID,
+        );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Prod env
@@ -2892,6 +2982,8 @@ mod tests {
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
+            TENANT_ID,
+            PIPELINE_ID,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -2903,6 +2995,11 @@ mod tests {
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
+        assert_stateful_set_has_identity_metadata_labels(
+            &stateful_set_json,
+            TENANT_ID,
+            PIPELINE_ID,
+        );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
 
@@ -2932,6 +3029,8 @@ mod tests {
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
+            TENANT_ID,
+            PIPELINE_ID,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -2943,6 +3042,11 @@ mod tests {
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
+        assert_stateful_set_has_identity_metadata_labels(
+            &stateful_set_json,
+            TENANT_ID,
+            PIPELINE_ID,
+        );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Staging env
@@ -2965,6 +3069,8 @@ mod tests {
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
+            TENANT_ID,
+            PIPELINE_ID,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -2976,6 +3082,11 @@ mod tests {
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
+        assert_stateful_set_has_identity_metadata_labels(
+            &stateful_set_json,
+            TENANT_ID,
+            PIPELINE_ID,
+        );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Prod env
@@ -2998,6 +3109,8 @@ mod tests {
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
+            TENANT_ID,
+            PIPELINE_ID,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -3009,6 +3122,11 @@ mod tests {
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
+        assert_stateful_set_has_identity_metadata_labels(
+            &stateful_set_json,
+            TENANT_ID,
+            PIPELINE_ID,
+        );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
 }

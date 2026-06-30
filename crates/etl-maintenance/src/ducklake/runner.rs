@@ -17,6 +17,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
+use etl_config::libpq_tcp_host;
 use metrics::{gauge, histogram};
 use pg_escape::{quote_identifier, quote_literal};
 use regex::Regex;
@@ -69,6 +70,32 @@ const ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES: &str =
 const RESULT_LABEL: &str = "result";
 const TABLE_LABEL: &str = "table";
 const SMALL_FILE_SIZE_BYTES: i64 = 5 * 1024 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DuckLakeMaintenanceTableName {
+    schema_name: String,
+    table_name: String,
+}
+
+impl DuckLakeMaintenanceTableName {
+    fn new(schema_name: String, table_name: String) -> Self {
+        Self { schema_name, table_name }
+    }
+
+    fn id(&self) -> String {
+        format!("{}.{}", self.schema_name, self.table_name)
+    }
+
+    fn is_etl_internal_table(&self) -> bool {
+        self.table_name.starts_with("__etl_")
+    }
+}
+
+impl fmt::Display for DuckLakeMaintenanceTableName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.id())
+    }
+}
 
 static POSTGRES_PASSWORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"password=(?:'([^'\\]|\\.)*'|[^\s,);]+)")
@@ -532,7 +559,7 @@ fn serialize_hosts(hosts: &[Host]) -> EtlResult<String> {
     let mut values = Vec::with_capacity(hosts.len());
     for host in hosts {
         match host {
-            Host::Tcp(host) => values.push(host.clone()),
+            Host::Tcp(host) => values.push(libpq_tcp_host(host).to_owned()),
             #[cfg(unix)]
             Host::Unix(path) => {
                 let path = path.to_str().ok_or_else(|| {
@@ -1792,13 +1819,17 @@ async fn resolve_metadata_schema(duckdb: &DuckDbMaintenanceExecutor) -> EtlResul
 async fn list_ducklake_tables(
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
-) -> EtlResult<Vec<String>> {
+) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
     let sql = format!(
-        "SELECT table_name FROM {}.{} WHERE end_snapshot IS NULL ORDER BY table_name",
+        "SELECT s.schema_name, t.table_name FROM {}.{} AS t JOIN {}.{} AS s ON s.schema_id = \
+         t.schema_id WHERE t.end_snapshot IS NULL AND s.end_snapshot IS NULL ORDER BY \
+         s.schema_name, t.table_name",
         quote_identifier(metadata_schema),
-        quote_identifier("ducklake_table")
+        quote_identifier("ducklake_table"),
+        quote_identifier(metadata_schema),
+        quote_identifier("ducklake_schema")
     );
-    let rows: Vec<(String,)> =
+    let rows: Vec<(String, String)> =
         sqlx::query_as(AssertSqlSafe(sql)).fetch_all(metadata_pg_pool).await.map_err(|source| {
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
@@ -1807,7 +1838,10 @@ async fn list_ducklake_tables(
                 source: source
             )
         })?;
-    Ok(rows.into_iter().map(|(table_name,)| table_name).collect())
+    Ok(rows
+        .into_iter()
+        .map(|(schema_name, table_name)| DuckLakeMaintenanceTableName::new(schema_name, table_name))
+        .collect())
 }
 
 /// Runs inline flush for tables that crossed the pending-inline threshold.
@@ -1815,7 +1849,7 @@ async fn run_inline_flush(
     duckdb: &DuckDbMaintenanceExecutor,
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
-    table_names: &[String],
+    table_names: &[DuckLakeMaintenanceTableName],
     config: InlineFlushMaintenanceConfig,
     outcome: &mut DuckLakeMaintenanceOutcome,
 ) -> EtlResult<()> {
@@ -1844,8 +1878,15 @@ async fn run_inline_flush(
             "ducklake inline flush executing"
         );
         let table_name_for_query = table_name.clone();
-        let rows =
-            duckdb.run(move |conn| flush_table_inlined_data(conn, &table_name_for_query)).await?;
+        let rows = duckdb
+            .run(move |conn| {
+                flush_table_inlined_data(
+                    conn,
+                    &table_name_for_query.schema_name,
+                    &table_name_for_query.table_name,
+                )
+            })
+            .await?;
         outcome.inline_flush_tables = outcome.inline_flush_tables.saturating_add(1);
         outcome.inline_flush_rows = outcome.inline_flush_rows.saturating_add(rows);
         info!(
@@ -1867,7 +1908,7 @@ async fn run_merge_adjacent_files(
     duckdb: &DuckDbMaintenanceExecutor,
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
-    table_names: &[String],
+    table_names: &[DuckLakeMaintenanceTableName],
     config: &MergeAdjacentFilesMaintenanceConfig,
     outcome: &mut DuckLakeMaintenanceOutcome,
 ) -> EtlResult<()> {
@@ -1951,7 +1992,7 @@ async fn run_rewrite_data_files(
     duckdb: &DuckDbMaintenanceExecutor,
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
-    table_names: &[String],
+    table_names: &[DuckLakeMaintenanceTableName],
     config: RewriteDataFilesMaintenanceConfig,
     outcome: &mut DuckLakeMaintenanceOutcome,
 ) -> EtlResult<()> {
@@ -2034,13 +2075,13 @@ async fn run_cleanup_old_files(
 async fn select_merge_tables(
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
-    table_names: &[String],
+    table_names: &[DuckLakeMaintenanceTableName],
     target_file_size_bytes: Option<i64>,
     max_tables_per_run: u32,
-) -> EtlResult<Vec<String>> {
+) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
     let mut selected = Vec::new();
     for table_name in table_names {
-        if is_etl_internal_table(table_name) {
+        if table_name.is_etl_internal_table() {
             info!(
                 table = %table_name,
                 "ducklake rewrite-data-files table skipped because it is internal ETL metadata"
@@ -2098,13 +2139,13 @@ fn should_merge(
 async fn select_rewrite_tables(
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
-    table_names: &[String],
+    table_names: &[DuckLakeMaintenanceTableName],
     min_active_data_files: i64,
     max_tables_per_run: u32,
-) -> EtlResult<Vec<String>> {
+) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
     let mut selected = Vec::new();
     for table_name in table_names {
-        if is_etl_internal_table(table_name) {
+        if table_name.is_etl_internal_table() {
             info!(
                 table = %table_name,
                 "ducklake rewrite-data-files table skipped because it is internal ETL metadata"
@@ -2141,10 +2182,6 @@ async fn select_rewrite_tables(
     Ok(selected)
 }
 
-fn is_etl_internal_table(table_name: &str) -> bool {
-    table_name.starts_with("__etl_")
-}
-
 /// Returns whether a table should be rewritten.
 fn should_rewrite(metrics: &DuckLakeTableStorageMetrics, min_active_data_files: i64) -> bool {
     metrics.active_data_files > min_active_data_files
@@ -2152,12 +2189,17 @@ fn should_rewrite(metrics: &DuckLakeTableStorageMetrics, min_active_data_files: 
 
 /// Flushes inlined user data for one table.
 #[doc(hidden)]
-pub fn flush_table_inlined_data(conn: &duckdb::Connection, table_name: &str) -> EtlResult<u64> {
+pub fn flush_table_inlined_data(
+    conn: &duckdb::Connection,
+    schema_name: &str,
+    table_name: &str,
+) -> EtlResult<u64> {
     let flush_started = std::time::Instant::now();
     let sql = format!(
         r#"SELECT COALESCE(SUM(rows_flushed), 0)
-         FROM ducklake_flush_inlined_data({}, table_name => {});"#,
+         FROM ducklake_flush_inlined_data({}, schema_name => {}, table_name => {});"#,
         quote_literal(LAKE_CATALOG),
+        quote_literal(schema_name),
         quote_literal(table_name),
     );
     let rows_flushed: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|source| {
@@ -2183,13 +2225,13 @@ pub fn flush_table_inlined_data(conn: &duckdb::Connection, table_name: &str) -> 
 
     if rows_flushed > 0 {
         debug!(
-            table = %table_name,
+            table = %format!("{schema_name}.{table_name}"),
             rows_flushed,
             "ducklake inlined data flushed"
         );
     } else {
         debug!(
-            table = %table_name,
+            table = %format!("{schema_name}.{table_name}"),
             "ducklake inlined data already flushed"
         );
     }
@@ -2199,25 +2241,30 @@ pub fn flush_table_inlined_data(conn: &duckdb::Connection, table_name: &str) -> 
 /// Calls DuckLake merge-adjacent-files for one table.
 fn merge_adjacent_files(
     conn: &duckdb::Connection,
-    table_name: &str,
+    table_name: &DuckLakeMaintenanceTableName,
     max_compacted_files: u32,
 ) -> EtlResult<u64> {
     let sql = format!(
-        "SELECT COALESCE(SUM(files_created), 0) FROM ducklake_merge_adjacent_files({}, {}, \
-         max_compacted_files => {});",
+        "SELECT COALESCE(SUM(files_created), 0) FROM ducklake_merge_adjacent_files({}, {}, schema \
+         => {}, max_compacted_files => {});",
         quote_literal(LAKE_CATALOG),
-        quote_literal(table_name),
+        quote_literal(&table_name.table_name),
+        quote_literal(&table_name.schema_name),
         max_compacted_files
     );
     count_maintenance_files(conn, &sql, "DuckLake merge adjacent files failed")
 }
 
 /// Calls DuckLake rewrite-data-files for one table.
-fn rewrite_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlResult<u64> {
+fn rewrite_data_files(
+    conn: &duckdb::Connection,
+    table_name: &DuckLakeMaintenanceTableName,
+) -> EtlResult<u64> {
     let sql = format!(
-        "CALL ducklake_rewrite_data_files({}, {});",
+        "CALL ducklake_rewrite_data_files({}, {}, schema => {});",
         quote_literal(LAKE_CATALOG),
-        quote_literal(table_name)
+        quote_literal(&table_name.table_name),
+        quote_literal(&table_name.schema_name)
     );
     conn.execute_batch(&sql).map_err(|source| {
         etl_error!(
@@ -2328,10 +2375,14 @@ impl DuckLakePendingInlineSizeSampler {
         Self { metadata_schema, pool }
     }
 
-    async fn sample_table(&self, table_name: &str) -> EtlResult<DuckLakePendingInlineDataSizes> {
+    async fn sample_table(
+        &self,
+        table_name: &DuckLakeMaintenanceTableName,
+    ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
         let inlined_bytes: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
-            .bind(table_name)
+            .bind(&table_name.schema_name)
+            .bind(&table_name.table_name)
             .fetch_one(&self.pool)
             .await
             .map_err(|source| {
@@ -2341,7 +2392,7 @@ impl DuckLakePendingInlineSizeSampler {
                     source: source
                 )
             })?;
-        Ok(record_pending_inline_data_sizes(inlined_bytes, table_name))
+        Ok(record_pending_inline_data_sizes(inlined_bytes, &table_name.id()))
     }
 }
 
@@ -2358,14 +2409,19 @@ fn record_pending_inline_data_sizes(
 fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
     let metadata_schema_literal = quote_literal(metadata_schema);
     let metadata_schema = quote_identifier(metadata_schema);
+    let ducklake_schema = quote_identifier("ducklake_schema");
     let ducklake_table = quote_identifier("ducklake_table");
     let ducklake_inlined_data_tables = quote_identifier("ducklake_inlined_data_tables");
 
     format!(
         r"WITH target_table AS (
-             SELECT table_id
-             FROM {metadata_schema}.{ducklake_table}
-             WHERE end_snapshot IS NULL AND table_name = $1
+             SELECT t.table_id
+             FROM {metadata_schema}.{ducklake_table} AS t
+             JOIN {metadata_schema}.{ducklake_schema} AS s ON s.schema_id = t.schema_id
+             WHERE t.end_snapshot IS NULL
+               AND s.end_snapshot IS NULL
+               AND s.schema_name = $1
+               AND t.table_name = $2
              LIMIT 1
          ),
          target_inline_tables AS (
@@ -2445,7 +2501,7 @@ impl DuckLakeTableStorageMetrics {
 async fn query_table_storage_metrics(
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
-    table_name: &str,
+    table_name: &DuckLakeMaintenanceTableName,
 ) -> EtlResult<DuckLakeTableStorageMetrics> {
     let sql = table_storage_metrics_query(metadata_schema);
     let (
@@ -2457,7 +2513,8 @@ async fn query_table_storage_metrics(
         _active_delete_bytes,
         deleted_rows,
     ): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(AssertSqlSafe(sql))
-        .bind(table_name)
+        .bind(&table_name.schema_name)
+        .bind(&table_name.table_name)
         .fetch_one(metadata_pg_pool)
         .await
         .map_err(|source| {
@@ -2488,15 +2545,20 @@ fn parse_size_bytes(value: &str) -> Option<i64> {
 
 fn table_storage_metrics_query(metadata_schema: &str) -> String {
     let metadata_schema = quote_identifier(metadata_schema);
+    let ducklake_schema = quote_identifier("ducklake_schema");
     let ducklake_table = quote_identifier("ducklake_table");
     let ducklake_data_file = quote_identifier("ducklake_data_file");
     let ducklake_delete_file = quote_identifier("ducklake_delete_file");
 
     format!(
         r#"WITH target_table AS (
-             SELECT table_id
-             FROM {metadata_schema}.{ducklake_table}
-             WHERE end_snapshot IS NULL AND table_name = $1
+             SELECT t.table_id
+             FROM {metadata_schema}.{ducklake_table} AS t
+             JOIN {metadata_schema}.{ducklake_schema} AS s ON s.schema_id = t.schema_id
+             WHERE t.end_snapshot IS NULL
+               AND s.end_snapshot IS NULL
+               AND s.schema_name = $1
+               AND t.table_name = $2
              LIMIT 1
          ),
          data_stats AS (
@@ -2732,6 +2794,25 @@ mod tests {
 
         assert_eq!(options.get_host(), "2a05:dddd:c3c:b703:e52f:e170:4155:c8dd");
         assert!(matches!(options.get_ssl_mode(), PgSslMode::Prefer));
+    }
+
+    #[test]
+    fn catalog_conninfo_from_postgres_ipv6_url_uses_libpq_host_syntax() {
+        let catalog_url = Url::parse(
+            "postgres://postgres@[2406:da18:1d63:9b01:df66:7be6:5158:2151]:5432/postgres?\
+             sslmode=prefer",
+        )
+        .unwrap();
+        let conninfo = catalog_conninfo_from_url(&catalog_url).unwrap();
+        let parsed = PgConfig::from_str(conninfo.strip_prefix("postgres:").unwrap()).unwrap();
+
+        assert!(!conninfo.contains("[2406:da18"));
+        assert_eq!(
+            serialize_hosts(parsed.get_hosts()).unwrap(),
+            "2406:da18:1d63:9b01:df66:7be6:5158:2151"
+        );
+        assert_eq!(parsed.get_ports(), &[5432]);
+        assert_eq!(parsed.get_ssl_mode(), SslMode::Prefer);
     }
 
     #[tokio::test]

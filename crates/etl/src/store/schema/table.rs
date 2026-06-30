@@ -3,7 +3,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::types::{PgLsn, SnapshotId, TableId, TableSchema};
+use tokio_postgres::types::PgLsn;
+
+use crate::schema::{SnapshotId, TableId, TableSchema};
 
 /// Per-table schema cleanup retention boundary.
 ///
@@ -166,7 +168,7 @@ mod tests {
     use tokio_postgres::types::Type;
 
     use super::*;
-    use crate::types::{ColumnSchema, TableName};
+    use crate::schema::{ColumnSchema, TableName};
 
     /// Builds a schema with a snapshot-specific non-key column.
     fn test_schema(table_id: TableId, snapshot_id: u64) -> TableSchema {

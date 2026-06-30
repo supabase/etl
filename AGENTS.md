@@ -65,6 +65,27 @@
 - Prefer absolute crate imports for shared module items, for example `use crate::metrics::{PIPELINE_ID_LABEL, APP_TYPE_LABEL};`, instead of `use super::{...};`.
 - Write SQL queries with lowercase SQL keywords and identifiers, unless quoting or an external API requires specific casing.
 - When multiple files share constants, helpers, or a single entrypoint, prefer a module directory with `mod.rs`.
+- Use crate boundaries for reuse across crates, not for organizing code inside
+  one domain. Keep code in its owning crate unless another crate has a real
+  dependency on that API.
+- Use module boundaries for domain concepts. Prefer names such as `schema`,
+  `data`, `event`, `store`, `source`, or `slots` over generic buckets like
+  `types`, `utils`, or `common`.
+- Keep replication behavior and replication-specific domain types in `etl`.
+  Keep reusable Postgres primitives, source database helpers, slot helpers, and
+  SQL access to ETL-owned Postgres metadata tables in `etl-postgres`.
+- Prefer flat module files such as `schema.rs` or `event.rs` when the module
+  has no child modules. Use a directory with `mod.rs` only when the module owns
+  multiple child modules or needs a clear grouped entrypoint.
+- Avoid compatibility facades and wildcard re-exports during structural
+  refactors unless the facade is an intentional public API. Public re-exports
+  should live in domain modules and represent the API callers should actually
+  use.
+- For external crate ergonomics, expose the smallest useful setup surface from
+  `etl`: pipeline configuration/building, destination and store traits, ETL
+  schema/data/event types, and dependency types that callers must use to
+  implement those traits. Keep worker orchestration, Postgres codec internals,
+  runtime plumbing, and store implementation details private or crate-private.
 - Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
 - Prefer clear, boring code over clever abstractions.
 - Prefer existing workspace patterns over introducing new local conventions.
@@ -73,6 +94,9 @@
   `impl`, then trait impls. Within inherent impls, put constructors first,
   externally visible methods next, and private helpers last.
 - Do not add `#[must_use]` attributes unless the user explicitly asks for one.
+- Put rustdoc comments above all attributes on the item they document,
+  including `#[derive(...)]`, `#[serde(...)]`, `#[cfg_attr(...)]`, and macro
+  attributes such as `#[macro_export]`.
 - Default to private visibility and only widen when a real caller requires it.
 - Prefer the narrowest working visibility in this order: private, `pub(super)`, `pub(crate)`, then `pub`.
 - Use `pub` only for intentional crate APIs consumed by other crates, integration tests, examples, or documented user-facing entrypoints.
@@ -80,7 +104,10 @@
 - When a module is internal, tighten the module itself before leaving deep items `pub`.
 - In `mod.rs` and other module roots, prefer private child modules plus selective `pub use` lists over `pub mod` or `pub use child::*` when building a facade API.
 - Treat `pub use` as part of the public API contract: re-export only items you intentionally want callers to depend on, and avoid wildcard re-exports from internal modules.
-- When a crate re-exports dependency types through its own facade, prefer referring to them via the crate facade (for example `crate::types::SchemaError`) inside that crate unless you are working at an explicit integration boundary or the item is not re-exported.
+- When a crate re-exports dependency types through an intentional domain module,
+  prefer referring to them via that domain module (for example
+  `crate::schema::SchemaError`) inside that crate unless you are working at an
+  explicit integration boundary or the item is not re-exported.
 - After visibility changes, verify with `cargo rustc -p <crate> --all-features -- -W unreachable_pub` for the relevant target and then rerun the smallest relevant checks/tests.
 - Keep log message prose lowercase; SQL fragments, identifiers, and external product names may keep their required casing.
 

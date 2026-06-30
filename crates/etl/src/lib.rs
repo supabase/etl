@@ -2,13 +2,10 @@
 //!   <img src="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/supabase-logo-wordmark--light.svg" alt="Supabase" width="480">
 //! </p>
 //!
-//! ⚠️ **Warning:** These docs are a work in progress, for this reason they may
-//! be incomplete.
-//!
 //! This crate provides a high-performance, streaming ETL (Extract, Transform,
 //! Load) system built on Postgres logical replication. It enables real-time
-//! data synchronization from Postgres databases to various destinations with
-//! configurable transformations and robust error handling.
+//! data synchronization from Postgres databases to destination systems with a
+//! typed Rust API and robust error handling.
 //!
 //! # Key Features
 //!
@@ -28,7 +25,8 @@
 //! ## Pipeline
 //! A [`pipeline::Pipeline`] represents a complete ETL workflow that connects a
 //! Postgres publication to a destination. It manages the replication stream,
-//! applies transformations, and handles failures gracefully.
+//! coordinates initial copy and streaming workers, and handles failures
+//! gracefully.
 //!
 //! ## Destinations
 //! [`destination::Destination`] trait implementations define where replicated
@@ -42,11 +40,11 @@
 //! operations. These stores are critical to a pipeline's operation, as they
 //! allow it to be safely paused and resumed.
 //!
-//! The [`store::state::StateStore`] trait handles table states,
+//! The [`store::StateStore`] trait handles table states,
 //! durable replication progress, and destination table metadata, providing a
 //! single interface for all state-related storage operations.
 //!
-//! The [`store::schema::SchemaStore`] trait handles versioned table schemas,
+//! The [`store::SchemaStore`] trait handles versioned table schemas,
 //! and [`store::TableStateLifecycleStore`] handles table-scoped preparation,
 //! reset, and deletion operations that must update state, schema, and metadata
 //! consistently.
@@ -72,13 +70,15 @@
 //!         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
 //!         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
 //!     },
+//!     data::TableRow,
 //!     destination::{
 //!         Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
 //!     },
 //!     error::EtlResult,
+//!     event::Event,
 //!     pipeline::Pipeline,
+//!     schema::ReplicatedTableSchema,
 //!     store::MemoryStore,
-//!     types::{Event, ReplicatedTableSchema, TableRow},
 //! };
 //!
 //! #[derive(Clone)]
@@ -144,14 +144,15 @@
 //!             memory_budget_ratio: 0.2,
 //!             max_bytes: 8 * 1024 * 1024,
 //!         },
-//!         table_error_retry_delay_ms: 10000,
+//!         table_error_retry_delay_ms: 10_000,
 //!         table_error_retry_max_attempts: 5,
 //!         max_table_sync_workers: 4,
-//!         max_copy_connections_per_table: 1,
+//!         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
 //!         memory_refresh_interval_ms: 100,
+//!         replication_lag_refresh_interval_ms: 10_000,
 //!         memory_backpressure: Some(MemoryBackpressureConfig::default()),
-//!         table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
-//!         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
+//!         table_sync_copy: TableSyncCopyConfig::default(),
+//!         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
 //!     };
 //!
 //!     // Create and start the pipeline
@@ -167,27 +168,35 @@
 //!
 //! # Feature Flags
 //!
+//! - `egress`: Enable structured egress logging helpers
 //! - `test-utils`: Enable testing utilities and mock implementations
 //! - `failpoints`: Enable fault injection for testing error scenarios
 
-pub mod concurrency;
 pub mod config;
-mod conversions;
+pub mod data;
 pub mod destination;
 #[cfg(feature = "egress")]
-pub mod egress;
+mod egress;
 pub mod error;
+pub mod event;
+#[doc(hidden)]
 #[cfg(feature = "failpoints")]
 pub mod failpoints;
+#[doc(hidden)]
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 mod macros;
-pub mod metrics;
-pub mod migrations;
+mod observability;
 pub mod pipeline;
-pub mod replication;
-pub mod state;
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod postgres;
+#[cfg(not(any(test, feature = "test-utils")))]
+mod postgres;
+mod replication;
+mod runtime;
+pub mod schema;
 pub mod store;
+#[doc(hidden)]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
-pub mod types;
-mod utils;
-mod workers;

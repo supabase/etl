@@ -6,7 +6,10 @@ use metrics::gauge;
 use pg_escape::{quote_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool};
 
-use crate::ducklake::metrics::{ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES, TABLE_LABEL};
+use crate::ducklake::{
+    DuckLakeTableName,
+    metrics::{ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES, TABLE_LABEL},
+};
 
 /// Pending inlined bytes sampled from the Postgres DuckLake catalog.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -30,11 +33,12 @@ impl DuckLakePendingInlineSizeSampler {
     /// Samples pending inlined bytes for one DuckLake table.
     pub(super) async fn sample_table(
         &self,
-        table_name: &str,
+        table_name: &DuckLakeTableName,
     ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
         let inlined_bytes: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
-            .bind(table_name)
+            .bind(table_name.schema())
+            .bind(table_name.table())
             .fetch_one(&self.pool)
             .await
             .map_err(|source| {
@@ -44,7 +48,7 @@ impl DuckLakePendingInlineSizeSampler {
                     source: source
                 )
             })?;
-        Ok(record_pending_inline_data_sizes(inlined_bytes, table_name))
+        Ok(record_pending_inline_data_sizes(inlined_bytes, &table_name.id()))
     }
 }
 
@@ -63,6 +67,7 @@ fn record_pending_inline_data_sizes(
 fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
     let metadata_schema_literal = quote_literal(metadata_schema);
     let metadata_schema = quote_identifier(metadata_schema);
+    let ducklake_schema = quote_identifier("ducklake_schema");
     let ducklake_table = quote_identifier("ducklake_table");
     let ducklake_inlined_data_tables = quote_identifier("ducklake_inlined_data_tables");
 
@@ -72,9 +77,13 @@ fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
     // deterministic delete-table relation size.
     format!(
         r"WITH target_table AS (
-             SELECT table_id
-             FROM {metadata_schema}.{ducklake_table}
-             WHERE end_snapshot IS NULL AND table_name = $1
+             SELECT t.table_id
+             FROM {metadata_schema}.{ducklake_table} AS t
+             JOIN {metadata_schema}.{ducklake_schema} AS s ON s.schema_id = t.schema_id
+             WHERE t.end_snapshot IS NULL
+               AND s.end_snapshot IS NULL
+               AND s.schema_name = $1
+               AND t.table_name = $2
              LIMIT 1
          ),
          target_inline_tables AS (

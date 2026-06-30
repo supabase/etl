@@ -2130,6 +2130,7 @@ dependencies = [
  "chrono",
  "duckdb",
  "etl",
+ "etl-config",
  "k8s-openapi",
  "kube",
  "metrics",

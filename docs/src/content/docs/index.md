@@ -69,7 +69,7 @@ limitations.
 ```toml
 [dependencies]
 etl = { git = "https://github.com/supabase/etl" }
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
 ```
 
 **Create a pipeline** with a source config, store, and destination:
@@ -80,11 +80,13 @@ use etl::{
         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
+    data::TableRow,
     destination::{Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     error::EtlResult,
+    event::Event,
     pipeline::Pipeline,
+    schema::ReplicatedTableSchema,
     store::MemoryStore,
-    types::{Event, ReplicatedTableSchema, TableRow},
 };
 
 #[derive(Clone)]
@@ -152,6 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_table_sync_workers: 4,
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
         memory_refresh_interval_ms: 100,
+        replication_lag_refresh_interval_ms: 10_000,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

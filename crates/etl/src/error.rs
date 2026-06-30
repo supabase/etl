@@ -13,7 +13,9 @@ use std::{
     sync::Arc,
 };
 
-use etl_postgres::types::{ParseNumericError, ParseTimeError};
+use etl_postgres::{numeric::ParseNumericError, time::ParseTimeError};
+
+use crate::schema::SchemaError;
 
 const MAX_SCHEMA_ERROR_COLUMN_NAMES: usize = 12;
 
@@ -82,84 +84,137 @@ enum ErrorRepr {
 #[non_exhaustive]
 pub enum ErrorKind {
     // Connection Errors
+    /// The source database connection could not be established or maintained.
     SourceConnectionFailed,
+    /// The destination connection could not be established or maintained.
     DestinationConnectionFailed,
 
     // Query & Execution Errors
+    /// A query against the source database failed.
     SourceQueryFailed,
+    /// A query or write against the destination failed.
     DestinationQueryFailed,
+    /// A destination atomic batch failed with a retryable error.
     DestinationAtomicBatchRetryable,
+    /// A source query failed because a lock could not be acquired in time.
     SourceLockTimeout,
+    /// A destination operation exceeded its timeout.
     DestinationTimeout,
+    /// A source operation was canceled by Postgres.
     SourceOperationCanceled,
 
     // Schema Errors
+    /// The source schema could not be read or interpreted.
     SourceSchemaError,
+    /// A required table schema was missing from state.
     MissingTableSchema,
+    /// A stored table schema was invalid or inconsistent.
     CorruptedTableSchema,
+    /// A destination table name was invalid.
     DestinationTableNameInvalid,
+    /// The destination namespace already exists.
     DestinationNamespaceAlreadyExists,
+    /// The destination table already exists.
     DestinationTableAlreadyExists,
+    /// The destination namespace does not exist.
     DestinationNamespaceMissing,
+    /// The destination table does not exist.
     DestinationTableMissing,
 
     // Data & Transformation Errors
+    /// A value could not be converted between source and destination formats.
     ConversionError,
+    /// Source or destination data was invalid.
     InvalidData,
+    /// Configuration or data validation failed.
     ValidationError,
+    /// A destination does not support null values inside arrays.
     NullValuesNotSupportedInArrayInDestination,
+    /// A destination does not support a source value.
     UnsupportedValueInDestination,
 
     // Configuration & Limit Errors
+    /// Pipeline or destination configuration was invalid.
     ConfigError,
+    /// The source database exceeded a configured or supported limit.
     SourceConfigurationLimitExceeded,
 
     // IO & Serialization Errors
+    /// A generic I/O operation failed.
     IoError,
+    /// A source-side I/O operation failed.
     SourceIoError,
+    /// A destination-side I/O operation failed.
     DestinationIoError,
+    /// A value could not be serialized.
     SerializationError,
+    /// A value could not be deserialized.
     DeserializationError,
 
     // Security & Authentication Errors
+    /// Encryption or decryption failed.
     EncryptionError,
+    /// Source authentication failed.
     SourceAuthenticationError,
+    /// Destination authentication failed.
     DestinationAuthenticationError,
+    /// The caller does not have permission for the requested operation.
     PermissionDenied,
 
     // State & Workflow Errors
+    /// Pipeline state violated an expected invariant.
     InvalidState,
+    /// The apply worker task panicked.
     ApplyWorkerPanic,
+    /// The apply worker task was canceled.
     ApplyWorkerCancelled,
+    /// A table sync worker task panicked.
     TableSyncWorkerPanic,
+    /// A table sync worker task was canceled.
     TableSyncWorkerCancelled,
+    /// Table state rollback failed.
     StateRollbackError,
 
     // Replication Errors
+    /// A required replication slot was not found.
     ReplicationSlotNotFound,
+    /// A replication slot already exists.
     ReplicationSlotAlreadyExists,
+    /// A replication slot could not be created.
     ReplicationSlotNotCreated,
+    /// A replication slot was invalidated by Postgres.
     ReplicationSlotInvalidated,
+    /// Replication slot deletion did not complete before timeout.
     ReplicationSlotDeletionTimeout,
+    /// A source table replica identity cannot support requested replication.
     SourceReplicaIdentityError,
+    /// The requested source snapshot is too old.
     SourceSnapshotTooOld,
+    /// The source database is in recovery and cannot serve the operation.
     SourceDatabaseInRecovery,
+    /// The source database is shutting down.
     SourceDatabaseShutdown,
 
     // General Errors
+    /// A generic source-side error occurred.
     SourceError,
+    /// A generic destination-side error occurred.
     DestinationError,
 
     // Unknown / Uncategorized
+    /// The error could not be classified more specifically.
     Unknown,
 
     // Special error kinds used for tests that trigger specific retry behaviors via fault
     // injection.
     #[cfg(feature = "failpoints")]
+    /// Fault-injection error that should not be retried.
     WithNoRetry,
     #[cfg(feature = "failpoints")]
+    /// Fault-injection error that requires manual retry.
     WithManualRetry,
     #[cfg(feature = "failpoints")]
+    /// Fault-injection error that should be retried after a delay.
     WithTimedRetry,
 }
 
@@ -894,7 +949,7 @@ impl From<rustls::Error> for EtlError {
     }
 }
 
-/// Converts [`rustls::pki_types::pem::Error`] to [`EtlError`] with
+/// Converts `rustls::pki_types::pem::Error` to [`EtlError`] with
 /// [`ErrorKind::ConfigError`].
 impl From<rustls::pki_types::pem::Error> for EtlError {
     fn from(err: rustls::pki_types::pem::Error) -> EtlError {
@@ -989,48 +1044,46 @@ impl From<sqlx::Error> for EtlError {
     }
 }
 
-/// Converts [`etl_postgres::replication::slots::EtlReplicationSlotError`] to
+/// Converts [`etl_postgres::slots::EtlReplicationSlotError`] to
 /// [`EtlError`] with appropriate error kind.
-impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlError {
-    fn from(err: etl_postgres::replication::slots::EtlReplicationSlotError) -> EtlError {
+impl From<etl_postgres::slots::EtlReplicationSlotError> for EtlError {
+    fn from(err: etl_postgres::slots::EtlReplicationSlotError) -> EtlError {
         match err {
-            etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotNameLength(
-                slot_name,
-            ) => EtlError::from_components(
-                ErrorKind::ValidationError,
-                Cow::Borrowed("Replication slot name exceeds maximum length"),
-                Some(Cow::Owned(slot_name)),
-                None,
-            ),
-            etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotName(
-                slot_name,
-            ) => EtlError::from_components(
-                ErrorKind::ValidationError,
-                Cow::Borrowed("Replication slot name is invalid"),
-                Some(Cow::Owned(slot_name)),
-                None,
-            ),
+            etl_postgres::slots::EtlReplicationSlotError::InvalidSlotNameLength(slot_name) => {
+                EtlError::from_components(
+                    ErrorKind::ValidationError,
+                    Cow::Borrowed("Replication slot name exceeds maximum length"),
+                    Some(Cow::Owned(slot_name)),
+                    None,
+                )
+            }
+            etl_postgres::slots::EtlReplicationSlotError::InvalidSlotName(slot_name) => {
+                EtlError::from_components(
+                    ErrorKind::ValidationError,
+                    Cow::Borrowed("Replication slot name is invalid"),
+                    Some(Cow::Owned(slot_name)),
+                    None,
+                )
+            }
         }
     }
 }
 
-/// Converts [`crate::types::SchemaError`] to [`EtlError`] with
+/// Converts [`SchemaError`] to [`EtlError`] with
 /// [`ErrorKind::CorruptedTableSchema`].
-impl From<crate::types::SchemaError> for EtlError {
+impl From<SchemaError> for EtlError {
     #[track_caller]
-    fn from(err: crate::types::SchemaError) -> EtlError {
+    fn from(err: SchemaError) -> EtlError {
         match err {
-            crate::types::SchemaError::UnknownReplicatedColumns(columns) => {
-                EtlError::from_components(
-                    ErrorKind::CorruptedTableSchema,
-                    Cow::Borrowed(
-                        "Replication stream contains columns missing from the stored table schema",
-                    ),
-                    Some(Cow::Owned(unknown_replicated_columns_detail(&columns))),
-                    None,
-                )
-            }
-            crate::types::SchemaError::InvalidSnapshotId(lsn_str) => EtlError::from_components(
+            SchemaError::UnknownReplicatedColumns(columns) => EtlError::from_components(
+                ErrorKind::CorruptedTableSchema,
+                Cow::Borrowed(
+                    "Replication stream contains columns missing from the stored table schema",
+                ),
+                Some(Cow::Owned(unknown_replicated_columns_detail(&columns))),
+                None,
+            ),
+            SchemaError::InvalidSnapshotId(lsn_str) => EtlError::from_components(
                 ErrorKind::CorruptedTableSchema,
                 Cow::Borrowed("Invalid snapshot id"),
                 Some(Cow::Owned(format!("Failed to parse snapshot '{lsn_str}' as PgLsn."))),
@@ -1104,7 +1157,7 @@ mod tests {
 
     #[test]
     fn unknown_replicated_columns_error_is_readable() {
-        let err = EtlError::from(crate::types::SchemaError::UnknownReplicatedColumns(vec![
+        let err = EtlError::from(SchemaError::UnknownReplicatedColumns(vec![
             "extra_id".to_owned(),
             "extra_name".to_owned(),
         ]));
@@ -1127,7 +1180,7 @@ mod tests {
     fn unknown_replicated_columns_error_caps_long_column_lists() {
         let columns = (1..=13).map(|index| format!("column_{index}")).collect();
 
-        let err = EtlError::from(crate::types::SchemaError::UnknownReplicatedColumns(columns));
+        let err = EtlError::from(SchemaError::UnknownReplicatedColumns(columns));
 
         assert_eq!(
             err.detail(),

@@ -13,13 +13,15 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use etl::{
+    data::{SizeHint, TableRow},
     destination::{
-        Destination, PipelineDestination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        Destination, DropTableForCopyResult, PipelineDestination, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::EtlResult,
+    event::Event,
+    schema::ReplicatedTableSchema,
     test_utils::notifying_store::NotifyingStore,
-    types::{Event, ReplicatedTableSchema, SizeHint, TableRow},
 };
 use etl_config::{
     Environment,
@@ -757,10 +759,16 @@ fn pg_connect_options(args: &PgConnectionArgs) -> PgConnectOptions {
     options
 }
 
+/// Minimum number of connections for benchmark helper Postgres pools.
+const MIN_POSTGRES_POOL_CONNECTIONS: u32 = 0;
+/// Maximum number of connections for benchmark helper Postgres pools.
+const MAX_POSTGRES_POOL_CONNECTIONS: u32 = 16;
+
 /// Opens a Postgres pool for benchmark helpers.
 pub async fn pg_pool(args: &PgConnectionArgs) -> Result<PgPool> {
     PgPoolOptions::new()
-        .max_connections(16)
+        .min_connections(MIN_POSTGRES_POOL_CONNECTIONS)
+        .max_connections(MAX_POSTGRES_POOL_CONNECTIONS)
         .connect_with(pg_connect_options(args))
         .await
         .context("failed to connect to Postgres")
@@ -826,6 +834,8 @@ pub fn pipeline_config(
         table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
         max_table_sync_workers: tuning.max_table_sync_workers,
         memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
+        replication_lag_refresh_interval_ms:
+            PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
         memory_backpressure: if tuning.disable_memory_backpressure {
             None
         } else {

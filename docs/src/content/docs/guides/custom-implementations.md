@@ -48,8 +48,8 @@ path = "src/main.rs"
 
 [dependencies]
 etl = { git = "https://github.com/supabase/etl" }
-tokio = { version = "1.0", features = ["full"] }
-reqwest = { version = "0.11", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
@@ -75,14 +75,15 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use etl::error::EtlResult;
-use etl::replication::WorkerType;
-use etl::state::{AppliedDestinationTableMetadata, DestinationTableMetadata, TableState};
-use etl::store::{
-    SchemaStore, StateStore, TableStateLifecycleStore, TableStateOperation, TableStates,
+use etl::{
+    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    error::EtlResult,
+    schema::{PgLsn, SnapshotId, TableId, TableSchema},
+    store::{
+        SchemaStore, StateStore, TableSchemaRetention, TableState, TableStateLifecycleStore,
+        TableStateOperation, TableStates, WorkerType,
+    },
 };
-use etl::store::schema::TableSchemaRetention;
-use etl::types::{PgLsn, SnapshotId, TableId, TableSchema};
 
 #[derive(Debug, Clone, Default)]
 struct TableEntry {
@@ -183,17 +184,12 @@ impl SchemaStore for CustomStore {
 }
 
 impl StateStore for CustomStore {
-    async fn get_table_state(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<TableState>> {
+    async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
         let tables = self.tables.lock().await;
         Ok(tables.get(&table_id).and_then(|e| e.state.clone()))
     }
 
-    async fn get_table_states(
-        &self,
-    ) -> EtlResult<TableStates> {
+    async fn get_table_states(&self) -> EtlResult<TableStates> {
         let tables = self.tables.lock().await;
         Ok(Arc::new(
             tables
@@ -207,10 +203,7 @@ impl StateStore for CustomStore {
         Ok(0)
     }
 
-    async fn update_table_states(
-        &self,
-        updates: Vec<(TableId, TableState)>,
-    ) -> EtlResult<()> {
+    async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
         let mut tables = self.tables.lock().await;
         for (table_id, state) in updates {
             info!("table {} -> {:?}", table_id.0, state);
@@ -219,10 +212,7 @@ impl StateStore for CustomStore {
         Ok(())
     }
 
-    async fn rollback_table_state(
-        &self,
-        _table_id: TableId,
-    ) -> EtlResult<TableState> {
+    async fn rollback_table_state(&self, _table_id: TableId) -> EtlResult<TableState> {
         todo!("Implement rollback if needed")
     }
 
@@ -335,7 +325,7 @@ Create `src/http_destination.rs`. A destination implements the `Destination` tra
 - `write_table_rows()` - Receive rows during initial copy together with the current replicated table schema
 - `write_events()` - Receive streaming changes (batches may span multiple tables)
 
-There's also an optional `shutdown()` method with a default no-op implementation. Override it if your destination needs cleanup when the pipeline shuts down.
+There are also optional `startup()` and `shutdown()` methods with default no-op implementations. Override `startup()` if your destination needs to reconcile active durable ETL metadata with physical destination objects after a restart. Override `shutdown()` if your destination needs cleanup when the pipeline shuts down.
 
 ETL clears its own schema versions, destination metadata, and table-sync progress **only after `drop_table_for_copy()` succeeds**. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. If the object is already gone, return success.
 
@@ -351,7 +341,7 @@ use etl::destination::{
     Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
 };
 use etl::error::{ErrorKind, EtlResult};
-use etl::types::{Event, ReplicatedTableSchema, TableRow};
+use etl::{data::TableRow, event::Event, schema::ReplicatedTableSchema};
 use etl::{bail, etl_error};
 
 #[derive(Debug, Clone)]
@@ -520,11 +510,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             memory_budget_ratio: 0.2,
             max_bytes: 8 * 1024 * 1024,
         },
-        table_error_retry_delay_ms: 10000,
+        table_error_retry_delay_ms: 10_000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: 4,
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
         memory_refresh_interval_ms: 100,
+        replication_lag_refresh_interval_ms: 10_000,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

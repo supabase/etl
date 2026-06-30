@@ -1,6 +1,8 @@
-# `etl` - Core
+# `etl` - Core Library
 
-This is the main crate of the ETL system, providing the core functionality for Postgres logical replication. It abstracts the complexities of Postgres's logical streaming replication protocol and provides a unified interface for data replication and transformation.
+This is the main crate of the ETL system. It provides the public pipeline,
+configuration, destination, store, schema, event, and row-data APIs used to
+build Postgres logical replication applications.
 
 ## Features
 
@@ -16,37 +18,37 @@ The ETL core implements a pipeline architecture that replicates data from Postgr
 ### Key Components
 
 - **Pipeline**: Main orchestrator that manages the replication process
-- **Replication Client**: Connects to Postgres's logical replication protocol
-- **Apply Worker**: Main worker that handles the creation of table sync workers and processes CDC events
+- **Postgres Client**: Connects to Postgres's logical replication protocol
+- **Apply Worker**: Main runtime worker that starts table sync workers and processes CDC events
 - **Table Sync Worker**: Handles initial copying of existing table data and processes CDC events until it has caught up
   to the apply worker
 - **State Store**: Stores the state of the pipeline
 - **Schema Store**: Stores versioned table schemas and prunes obsolete schema versions after acknowledged progress
-- **Cleanup Store**: Provides atomic cleanup primitives that delete stored state, schema, and destination table metadata for tables removed from a publication (does not touch destination data)
+- **TableStateLifecycleStore**: Provides lifecycle primitives that prepare fresh copies, reset resync state, and delete ETL-owned state for tables removed from a publication
 
 ### Information Flow
 
 ```mermaid
 graph TB
     subgraph "ETL Pipeline"
-        Pipeline["🎭 Pipeline"]
+        Pipeline["Pipeline"]
 
-        ApplyWorker["⚙️ Apply Worker"]
+        ApplyWorker["Apply Worker"]
 
         subgraph "Worker Pool"
-            TSWorker1["🔄 Table Sync Worker 1"]
-            TSWorkerN["🔄 Table Sync Worker N"]
+            TSWorker1["Table Sync Worker 1"]
+            TSWorkerN["Table Sync Worker N"]
         end
 
         subgraph "Store"
-            StateStore["💾 State Store"]
-            SchemaStore["📋 Schema Store"]
+            StateStore["State Store"]
+            SchemaStore["Schema Store"]
         end
     end
 
-    PG[("🐘 Postgres<br/>Source Database")]
+    PG[("Postgres<br/>Source Database")]
 
-    Destination[("🎯 Destination<br/>BigQuery, etc.")]
+    Destination[("Destination<br/>BigQuery, etc.")]
 
     Pipeline --> ApplyWorker
 
@@ -66,6 +68,6 @@ graph TB
     TSWorker1 <--> StateStore
     TSWorker1 <--> SchemaStore
 
-    TSWorker2 <--> StateStore
-    TSWorker2 <--> SchemaStore
+    TSWorkerN <--> StateStore
+    TSWorkerN <--> SchemaStore
 ```

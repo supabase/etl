@@ -1,4 +1,4 @@
-use std::{net::IpAddr, sync::LazyLock, time::Duration};
+use std::{net::IpAddr, time::Duration};
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -24,96 +24,12 @@ const COMMON_INTERVALSTYLE: &str = "postgres";
 const COMMON_EXTRA_FLOAT_DIGITS: i32 = 3;
 const COMMON_CLIENT_ENCODING: &str = "UTF8";
 const COMMON_TIMEZONE: &str = "UTC";
-
-/// Application name for ETL API connections.
-const APP_NAME_API: &str = "supabase_etl_api";
-
-/// Application name for ETL replicator migration connections.
-const APP_NAME_REPLICATOR_MIGRATIONS: &str = "supabase_etl_replicator_migrations";
-
-/// Application name for ETL state management connections.
-const APP_NAME_REPLICATOR_STATE: &str = "supabase_etl_replicator_state";
-
-/// Application name for ETL logical replication streaming connections.
-const APP_NAME_REPLICATOR_STREAMING: &str = "supabase_etl_replicator_streaming";
-
-/// Connection options for the API's metadata database.
-///
-/// Uses strict timeouts (30s statement, 5s lock, 60s idle) to maintain
-/// responsiveness and fail fast when contention occurs, preventing API request
-/// timeouts.
-pub static ETL_API_OPTIONS: LazyLock<PgConnectionOptions> = LazyLock::new(|| PgConnectionOptions {
-    datestyle: COMMON_DATESTYLE.to_owned(),
-    intervalstyle: COMMON_INTERVALSTYLE.to_owned(),
-    extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
-    client_encoding: COMMON_CLIENT_ENCODING.to_owned(),
-    timezone: COMMON_TIMEZONE.to_owned(),
-    statement_timeout: 30_000,
-    lock_timeout: 5_000,
-    idle_in_transaction_session_timeout: 60_000,
-    application_name: APP_NAME_API.to_owned(),
-});
-
-/// Connection options for database migrations.
-///
-/// Uses extended statement timeout (5 minutes) to accommodate long-running DDL
-/// operations while maintaining moderate lock and idle timeouts (10s lock, 60s
-/// idle).
-pub static ETL_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
-    LazyLock::new(|| PgConnectionOptions {
-        datestyle: COMMON_DATESTYLE.to_owned(),
-        intervalstyle: COMMON_INTERVALSTYLE.to_owned(),
-        extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
-        client_encoding: COMMON_CLIENT_ENCODING.to_owned(),
-        timezone: COMMON_TIMEZONE.to_owned(),
-        statement_timeout: 300_000,
-        lock_timeout: 10_000,
-        idle_in_transaction_session_timeout: 60_000,
-        application_name: APP_NAME_REPLICATOR_MIGRATIONS.to_owned(),
-    });
-
-/// Connection options for logical replication streams.
-///
-/// Disables statement, lock, and idle timeouts to allow large COPY operations
-/// and long-running transactions during initial table synchronization and WAL
-/// streaming.
-///
-/// Keep the session timezone at UTC so Postgres renders `timestamptz` text
-/// output with a deterministic UTC offset for replication parsing.
-///
-/// Lock timeout is disabled because `CREATE_REPLICATION_SLOT` must wait for all
-/// in-progress write transactions to reach a consistent snapshot point. On
-/// heavily-loaded databases this can take minutes, and a timeout would only
-/// cause retries that will also fail.
-pub static ETL_REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> =
-    LazyLock::new(|| PgConnectionOptions {
-        datestyle: COMMON_DATESTYLE.to_owned(),
-        intervalstyle: COMMON_INTERVALSTYLE.to_owned(),
-        extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
-        client_encoding: COMMON_CLIENT_ENCODING.to_owned(),
-        timezone: COMMON_TIMEZONE.to_owned(),
-        statement_timeout: 0,
-        lock_timeout: 0,
-        idle_in_transaction_session_timeout: 0,
-        application_name: APP_NAME_REPLICATOR_STREAMING.to_owned(),
-    });
-
-/// Connection options for accessing ETL state metadata in the source database.
-///
-/// Applies moderate timeouts (30s statement, 10s lock, 60s idle) since metadata
-/// queries execute quickly and should not block other operations.
-pub static ETL_STATE_MANAGEMENT_OPTIONS: LazyLock<PgConnectionOptions> =
-    LazyLock::new(|| PgConnectionOptions {
-        datestyle: COMMON_DATESTYLE.to_owned(),
-        intervalstyle: COMMON_INTERVALSTYLE.to_owned(),
-        extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
-        client_encoding: COMMON_CLIENT_ENCODING.to_owned(),
-        timezone: COMMON_TIMEZONE.to_owned(),
-        statement_timeout: 30_000,
-        lock_timeout: 10_000,
-        idle_in_transaction_session_timeout: 60_000,
-        application_name: APP_NAME_REPLICATOR_STATE.to_owned(),
-    });
+/// Default statement timeout in milliseconds for bounded ETL queries.
+const DEFAULT_STATEMENT_TIMEOUT: u32 = 30_000;
+/// Default lock timeout in milliseconds for bounded ETL queries.
+const DEFAULT_LOCK_TIMEOUT: u32 = 10_000;
+/// Default idle-in-transaction timeout in milliseconds for bounded ETL queries.
+const DEFAULT_IDLE_IN_TRANSACTION_SESSION_TIMEOUT: u32 = 60_000;
 
 /// Postgres server options for ETL workloads.
 ///
@@ -146,6 +62,26 @@ pub struct PgConnectionOptions {
 }
 
 impl PgConnectionOptions {
+    /// Starts building connection options with common ETL Postgres defaults.
+    ///
+    /// The `application_name` must be provided by each workload so database
+    /// sessions can be identified in Postgres logs and activity views.
+    pub fn builder(application_name: impl Into<String>) -> PgConnectionOptionsBuilder {
+        PgConnectionOptionsBuilder {
+            options: PgConnectionOptions {
+                datestyle: COMMON_DATESTYLE.to_owned(),
+                intervalstyle: COMMON_INTERVALSTYLE.to_owned(),
+                extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
+                client_encoding: COMMON_CLIENT_ENCODING.to_owned(),
+                timezone: COMMON_TIMEZONE.to_owned(),
+                statement_timeout: DEFAULT_STATEMENT_TIMEOUT,
+                lock_timeout: DEFAULT_LOCK_TIMEOUT,
+                idle_in_transaction_session_timeout: DEFAULT_IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
+                application_name: application_name.into(),
+            },
+        }
+    }
+
     /// Formats options as a string for tokio-postgres connection.
     ///
     /// Returns space-separated `-c key=value` pairs suitable for the options
@@ -185,6 +121,45 @@ impl PgConnectionOptions {
             ),
             ("application_name".to_owned(), self.application_name.clone()),
         ]
+    }
+}
+
+/// Builder for [`PgConnectionOptions`] with common ETL defaults.
+///
+/// Workload-specific options should prefer this builder over constructing
+/// [`PgConnectionOptions`] directly so shared Postgres session invariants
+/// remain consistent across connection types.
+#[derive(Debug, Clone)]
+pub struct PgConnectionOptionsBuilder {
+    /// Options being configured.
+    options: PgConnectionOptions,
+}
+
+impl PgConnectionOptionsBuilder {
+    /// Overrides the statement timeout in milliseconds.
+    pub fn statement_timeout(mut self, statement_timeout: u32) -> Self {
+        self.options.statement_timeout = statement_timeout;
+        self
+    }
+
+    /// Overrides the lock timeout in milliseconds.
+    pub fn lock_timeout(mut self, lock_timeout: u32) -> Self {
+        self.options.lock_timeout = lock_timeout;
+        self
+    }
+
+    /// Overrides the idle-in-transaction session timeout in milliseconds.
+    pub fn idle_in_transaction_session_timeout(
+        mut self,
+        idle_in_transaction_session_timeout: u32,
+    ) -> Self {
+        self.options.idle_in_transaction_session_timeout = idle_in_transaction_session_timeout;
+        self
+    }
+
+    /// Builds the finalized connection options.
+    pub fn build(self) -> PgConnectionOptions {
+        self.options
     }
 }
 
@@ -442,7 +417,12 @@ mod tests {
 
     #[test]
     fn replication_options_string_format() {
-        let options_string = ETL_REPLICATION_OPTIONS.to_options_string();
+        let options = PgConnectionOptions::builder("supabase_etl_replicator_streaming")
+            .statement_timeout(0)
+            .lock_timeout(0)
+            .idle_in_transaction_session_timeout(0)
+            .build();
+        let options_string = options.to_options_string();
 
         assert_eq!(
             options_string,
@@ -454,8 +434,9 @@ mod tests {
     }
 
     #[test]
-    fn state_management_options_key_value_pairs() {
-        let pairs = ETL_STATE_MANAGEMENT_OPTIONS.to_key_value_pairs();
+    fn out_of_band_options_key_value_pairs() {
+        let options = PgConnectionOptions::builder("supabase_etl_replicator_out_of_band").build();
+        let pairs = options.to_key_value_pairs();
 
         assert_eq!(pairs.len(), 9);
         assert!(pairs.contains(&("datestyle".to_owned(), "ISO".to_owned())));
@@ -470,13 +451,26 @@ mod tests {
         );
         assert!(pairs.contains(&(
             "application_name".to_owned(),
-            "supabase_etl_replicator_state".to_owned()
+            "supabase_etl_replicator_out_of_band".to_owned()
         )));
     }
 
     #[test]
-    fn api_options_application_name() {
-        assert_eq!(ETL_API_OPTIONS.application_name, "supabase_etl_api");
+    fn builder_applies_common_defaults_and_overrides() {
+        let options = PgConnectionOptions::builder("custom_workload")
+            .statement_timeout(45_000)
+            .lock_timeout(6_000)
+            .build();
+
+        assert_eq!(options.datestyle, "ISO");
+        assert_eq!(options.intervalstyle, "postgres");
+        assert_eq!(options.extra_float_digits, 3);
+        assert_eq!(options.client_encoding, "UTF8");
+        assert_eq!(options.timezone, "UTC");
+        assert_eq!(options.statement_timeout, 45_000);
+        assert_eq!(options.lock_timeout, 6_000);
+        assert_eq!(options.idle_in_transaction_session_timeout, 60_000);
+        assert_eq!(options.application_name, "custom_workload");
     }
 
     #[test]

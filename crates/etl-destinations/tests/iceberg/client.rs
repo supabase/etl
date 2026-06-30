@@ -1,7 +1,8 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
+    data::{ArrayCell, Cell, TableRow},
+    schema::{ColumnSchema, Type},
     test_utils::test_schema::assert_table_rows_equal_ignoring_size,
-    types::{ArrayCell, Cell, ColumnSchema, TableRow, Type},
 };
 use etl_destinations::iceberg::{
     IcebergClient,

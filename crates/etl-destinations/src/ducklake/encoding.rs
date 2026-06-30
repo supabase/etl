@@ -1,6 +1,6 @@
 use chrono::{NaiveDate, NaiveTime};
 use duckdb::types::{TimeUnit, Value};
-use etl::types::{ArrayCell, Cell, TableRow};
+use etl::data::{ArrayCell, Cell, TableRow};
 use pg_escape::quote_literal;
 
 /// Prepared row payload reused across retry attempts.

@@ -5,7 +5,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
     get,
     path = "/metrics",
     summary = "Get prometheus metrics",
-    description = "Returns prometheus metrics collected since the last call to this endpoint.",
+    description = "Returns the current prometheus metrics snapshot.",
     responses(
         (status = 200, description = "Metrics returned successfully", body = String),
     ),

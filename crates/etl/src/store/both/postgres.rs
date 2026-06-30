@@ -1,36 +1,39 @@
 use std::{
     collections::{BTreeMap, HashMap},
     ops::DerefMut,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
-use etl_postgres::replication::{
+use etl_postgres::store::{
     destination_table_metadata as pg_destination_table_metadata, progress, schema,
     table_state as pg_table_state,
 };
 use metrics::gauge;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::Mutex;
+use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
 use crate::{
-    config::{ETL_STATE_MANAGEMENT_OPTIONS, IntoConnectOptions, PgConnectionConfig},
+    config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
+    destination::{
+        AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
+    },
     error::{ErrorKind, EtlResult},
     etl_error,
-    metrics::{ETL_TABLES_TOTAL, STATE_LABEL},
-    migrations,
-    replication::WorkerType,
-    state::{
-        AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
-        TableState, TableStateType,
+    observability::{ETL_TABLES_TOTAL, STATE_LABEL},
+    pipeline::PipelineId,
+    postgres::migrations,
+    replication::{
+        WorkerType,
+        state::{TableState, TableStateType},
     },
+    schema::{ReplicationMask, SnapshotId, TableId, TableSchema},
     store::{
-        lifecycle::{TableStateLifecycleStore, TableStateOperation},
-        schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
-        state::{DestinationTablesMetadata, StateStore, TableStates},
+        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
+        TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,
     },
-    types::{PgLsn, PipelineId, ReplicationMask, SnapshotId, TableId, TableSchema},
 };
 
 /// Maximum number of connections in the pool.
@@ -38,6 +41,16 @@ const MAX_POOL_CONNECTIONS: u32 = 2;
 
 /// Duration after which idle connections are closed.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Application name for Postgres state store connections.
+const APP_NAME_REPLICATOR_STORE: &str = "supabase_etl_replicator_store";
+
+/// Connection options for Postgres state store queries.
+///
+/// These settings intentionally mirror out-of-band query timeouts while using a
+/// store-specific application name for clearer database observability.
+static POSTGRES_STORE_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_REPLICATOR_STORE).build());
 
 /// Maximum number of schema snapshots to keep cached per table.
 ///
@@ -56,7 +69,7 @@ const MAX_CACHED_SCHEMAS_PER_TABLE: usize = 2;
 /// be open for a while and then closed when it's unnecessary since after the
 /// first table copy state, we don't update the state so often.
 fn create_database_pool(connection_config: &PgConnectionConfig) -> PgPool {
-    let options = connection_config.with_db(Some(&ETL_STATE_MANAGEMENT_OPTIONS));
+    let options = connection_config.with_db(Some(&POSTGRES_STORE_OPTIONS));
 
     PgPoolOptions::new()
         .min_connections(0)
@@ -168,9 +181,10 @@ pub struct PostgresStore {
 impl PostgresStore {
     /// Creates a new Postgres-backed store for the given pipeline.
     ///
-    /// Runs the Postgres store migrations, then creates a lazily-connected pool
-    /// with automatic idle timeout. Connections are established on first use
-    /// and automatically closed after `IDLE_TIMEOUT` of inactivity.
+    /// Runs the Postgres store migrations, then creates a
+    /// lazily-connected pool with automatic idle timeout. Connections are
+    /// established on first use and automatically closed after
+    /// `IDLE_TIMEOUT` of inactivity.
     pub async fn new(
         pipeline_id: PipelineId,
         connection_config: PgConnectionConfig,
@@ -784,15 +798,15 @@ impl TableStateLifecycleStore for PostgresStore {
     }
 }
 
-impl From<pg_destination_table_metadata::DestinationTableSchemaStatus>
+impl From<pg_destination_table_metadata::StoredDestinationTableSchemaStatus>
     for DestinationTableSchemaStatus
 {
-    fn from(value: pg_destination_table_metadata::DestinationTableSchemaStatus) -> Self {
+    fn from(value: pg_destination_table_metadata::StoredDestinationTableSchemaStatus) -> Self {
         match value {
-            pg_destination_table_metadata::DestinationTableSchemaStatus::Applying => {
+            pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applying => {
                 DestinationTableSchemaStatus::Applying
             }
-            pg_destination_table_metadata::DestinationTableSchemaStatus::Applied => {
+            pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applied => {
                 DestinationTableSchemaStatus::Applied
             }
         }
@@ -800,15 +814,15 @@ impl From<pg_destination_table_metadata::DestinationTableSchemaStatus>
 }
 
 impl From<DestinationTableSchemaStatus>
-    for pg_destination_table_metadata::DestinationTableSchemaStatus
+    for pg_destination_table_metadata::StoredDestinationTableSchemaStatus
 {
     fn from(value: DestinationTableSchemaStatus) -> Self {
         match value {
             DestinationTableSchemaStatus::Applying => {
-                pg_destination_table_metadata::DestinationTableSchemaStatus::Applying
+                pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applying
             }
             DestinationTableSchemaStatus::Applied => {
-                pg_destination_table_metadata::DestinationTableSchemaStatus::Applied
+                pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applied
             }
         }
     }

@@ -1,6 +1,9 @@
 use std::ops::DerefMut;
 
-use etl_postgres::replication::{destination_table_metadata, health, schema, slots, table_state};
+use etl_postgres::{
+    slots,
+    store::{destination_table_metadata, health, schema, table_state},
+};
 use sqlx::{FromRow, PgConnection, PgExecutor, PgPool, PgTransaction};
 use thiserror::Error;
 

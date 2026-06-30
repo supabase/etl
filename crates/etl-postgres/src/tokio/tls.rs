@@ -1,6 +1,8 @@
-// This code is copied from the tokio-postgres-rustls library (https://github.com/jbg/tokio-postgres-rustls),
-// available under the MIT License, which provides Rustls-based TLS support for
-// secure asynchronous Postgres connections using the tokio-postgres client.
+//! Rustls TLS integration for `tokio-postgres`.
+//!
+//! This code is adapted from the `tokio-postgres-rustls` library
+//! (<https://github.com/jbg/tokio-postgres-rustls>), available under the MIT
+//! License.
 
 use std::{
     io,
@@ -63,6 +65,7 @@ where
     }
 }
 
+/// Future returned while establishing a rustls-backed Postgres TLS stream.
 pub struct TlsConnectFuture<S> {
     inner: tokio_rustls::Connect<S>,
 }
@@ -78,9 +81,10 @@ where
     }
 }
 
+/// Connector returned by [`MakeRustlsConnect`] for a single host name.
 pub struct RustlsConnect(RustlsConnectData);
 
-pub struct RustlsConnectData {
+struct RustlsConnectData {
     hostname: ServerName<'static>,
     connector: TlsConnector,
 }
@@ -98,6 +102,7 @@ where
     }
 }
 
+/// Rustls stream wrapper implementing `tokio-postgres` TLS traits.
 pub struct RustlsStream<S>(TlsStream<S>);
 
 impl<S> RustlsStream<S>

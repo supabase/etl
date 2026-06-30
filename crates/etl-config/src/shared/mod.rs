@@ -9,9 +9,8 @@ mod validators;
 
 pub use base::ValidationError;
 pub use connection::{
-    ETL_API_OPTIONS, ETL_MIGRATION_OPTIONS, ETL_REPLICATION_OPTIONS, ETL_STATE_MANAGEMENT_OPTIONS,
     IntoConnectOptions, PgConnectionConfig, PgConnectionConfigWithoutSecrets, PgConnectionOptions,
-    TcpKeepaliveConfig, TlsConfig,
+    PgConnectionOptionsBuilder, TcpKeepaliveConfig, TlsConfig,
 };
 pub use destination::{
     ClickHouseEngine, DestinationConfig, DestinationConfigWithoutSecrets, DestinationKind,

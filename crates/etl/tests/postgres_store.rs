@@ -3,22 +3,17 @@
 use std::collections::HashMap;
 
 use etl::{
+    destination::DestinationTableMetadata,
     error::ErrorKind,
     etl_error,
-    replication::WorkerType,
-    state::{TableRetryPolicy, TableState, destination_table_metadata::DestinationTableMetadata},
+    schema::{ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema},
     store::{
-        TableStateLifecycleStore,
-        both::postgres::PostgresStore,
-        schema::{SchemaStore, TableSchemaRetention},
-        state::StateStore,
+        PostgresStore, SchemaStore, StateStore, TableRetryPolicy, TableSchemaRetention, TableState,
+        TableStateLifecycleStore, WorkerType,
     },
     test_utils::database::spawn_source_database,
 };
-use etl_postgres::{
-    replication::connect_to_source_database,
-    types::{ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema},
-};
+use etl_postgres::source::connect_to_source_database;
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::postgres::types::Oid as SqlxTableId;
 use tokio_postgres::types::{PgLsn, Type as PgType};
@@ -134,7 +129,7 @@ async fn state_store_rollback() {
     store.update_table_state(table_id, data_sync_state.clone()).await.unwrap();
 
     // Verify two rows exist before rollback (init + data_sync)
-    let pool = connect_to_source_database(&database.config, 1, 1, None)
+    let pool = connect_to_source_database(&database.config, 0, 1, None)
         .await
         .expect("Failed to connect to source database with sqlx");
     let count_before: i64 = sqlx::query_scalar(
@@ -562,7 +557,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
         store.store_table_schema(table_schema).await.unwrap();
     }
 
-    let pool = connect_to_source_database(&database.config, 1, 1, None).await.unwrap();
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
     let obsolete_schema_ids: Vec<i64> = sqlx::query_scalar(
         r#"
         select id
@@ -1139,7 +1134,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     let table_id = TableId::new(12345);
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
-    let pool = connect_to_source_database(&database.config, 1, 1, None)
+    let pool = connect_to_source_database(&database.config, 0, 1, None)
         .await
         .expect("Failed to connect to source database with sqlx");
 
@@ -1188,7 +1183,7 @@ async fn replication_mask_various_patterns() {
     let pipeline_id = 1;
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
-    let pool = connect_to_source_database(&database.config, 1, 1, None)
+    let pool = connect_to_source_database(&database.config, 0, 1, None)
         .await
         .expect("Failed to connect to source database with sqlx");
 

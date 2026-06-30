@@ -196,14 +196,15 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
             memory_budget_ratio: 0.2,
             max_bytes: 8 * 1024 * 1024,
         },
-        table_error_retry_delay_ms: 10000,
+        table_error_retry_delay_ms: 10_000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
+        replication_lag_refresh_interval_ms: 10_000,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
-        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        max_copy_connections_per_table: 2,
     };
 
     // Initialize BigQuery destination with service account authentication

@@ -7,20 +7,19 @@ use std::{
 };
 
 use etl::{
-    concurrency::TaskSet,
+    data::{OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
+        DropTableForCopyResult, TaskSet, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::DestinationStore,
-    types::{
-        ColumnModification, ColumnSchema, Event, EventSequenceKey, OldTableRow, PartialTableRow,
-        ReplicatedTableSchema, ReplicationMask, SchemaDiff, SnapshotId, TableId, TableName,
-        TableRow, TableSchema, UpdatedTableRow,
+    event::{Event, EventSequenceKey},
+    schema::{
+        ColumnModification, ColumnSchema, ReplicatedTableSchema, ReplicationMask, SchemaDiff,
+        SnapshotId, TableId, TableName, TableSchema,
     },
+    store::DestinationStore,
 };
 use metrics::gauge;
 use parking_lot::Mutex;
@@ -40,43 +39,40 @@ use tokio::{
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::{
-    ducklake::{
-        DuckLakeTableName, LAKE_CATALOG, S3Config,
-        batches::{
-            DuckLakeTableBatchKind, TableMutation, TrackedTableMutation, TrackedTruncateEvent,
-            apply_table_batch_with_retry, apply_table_batches_with_retry,
-            clear_applied_batch_markers_for_kind, clear_table_streaming_progress,
-            ensure_applied_batches_table_exists, ensure_streaming_progress_table_exists,
-            prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
-            read_table_streaming_progress_sequence_key, retain_mutations_after_sequence_key,
-            retain_truncates_after_sequence_key,
-        },
-        client::{
-            DuckLakeConnectionManager, DuckLakeInterruptRegistry, build_warm_ducklake_pool,
-            format_query_error_detail, run_duckdb_blocking,
-        },
-        config::{
-            MAINTENANCE_TARGET_FILE_SIZE, MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, build_setup_plan,
-            current_duckdb_extension_strategy, maintenance_target_file_size_sql,
-            resolve_expire_snapshots_older_than, validate_expire_snapshots_older_than_sql,
-        },
-        external_maintenance::ExternalMaintenanceOperations,
-        inline_size::DuckLakePendingInlineSizeSampler,
-        metrics::{
-            DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
-            query_table_storage_metrics, register_metrics,
-            resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
-        },
-        schema::{
-            build_add_column_sql_ducklake, build_create_table_sql_ducklake,
-            build_drop_column_sql_ducklake, build_drop_default_sql_ducklake,
-            build_rename_column_sql_ducklake, build_set_default_sql_ducklake,
-            supports_column_default_ducklake,
-        },
-        sql::qualified_lake_table_name,
+use crate::ducklake::{
+    DuckLakeTableName, LAKE_CATALOG, S3Config,
+    batches::{
+        DuckLakeTableBatchKind, TableMutation, TrackedTableMutation, TrackedTruncateEvent,
+        apply_table_batch_with_retry, apply_table_batches_with_retry,
+        clear_applied_batch_markers_for_kind, clear_table_streaming_progress,
+        ensure_applied_batches_table_exists, ensure_streaming_progress_table_exists,
+        prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
+        read_table_streaming_progress_sequence_key, retain_mutations_after_sequence_key,
+        retain_truncates_after_sequence_key,
     },
-    table_name::try_stringify_table_name,
+    client::{
+        DuckLakeConnectionManager, DuckLakeInterruptRegistry, build_warm_ducklake_pool,
+        format_query_error_detail, run_duckdb_blocking,
+    },
+    config::{
+        MAINTENANCE_TARGET_FILE_SIZE, MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, build_setup_plan,
+        current_duckdb_extension_strategy, maintenance_target_file_size_sql,
+        resolve_expire_snapshots_older_than, validate_expire_snapshots_older_than_sql,
+    },
+    external_maintenance::ExternalMaintenanceOperations,
+    inline_size::DuckLakePendingInlineSizeSampler,
+    metrics::{
+        DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
+        query_table_storage_metrics, register_metrics, resolve_ducklake_metadata_schema_blocking,
+        spawn_ducklake_metrics_sampler,
+    },
+    schema::{
+        build_add_column_sql_ducklake, build_create_table_sql_ducklake,
+        build_drop_column_sql_ducklake, build_drop_default_sql_ducklake,
+        build_rename_column_sql_ducklake, build_set_default_sql_ducklake,
+        supports_column_default_ducklake,
+    },
+    sql::qualified_lake_table_name,
 };
 
 /// Shared Postgres metadata pool size for DuckLake background samplers.
@@ -111,7 +107,7 @@ fn build_ducklake_metadata_pg_pool(catalog_url: &Url) -> EtlResult<PgPool> {
 pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) -> bool {
     let message = error.to_string();
     message.contains("has been created by another transaction already")
-        && message.contains(&format!(r#"attempting to create table "{table_name}""#))
+        && message.contains(table_name)
 }
 
 /// Parses `expire_snapshots_older_than` into seconds for cheap metadata-only
@@ -206,10 +202,10 @@ impl Default for DuckLakeExternalMaintenanceConfig {
 /// Returns the table-local semaphore shared by concurrent foreground writes.
 fn table_write_slot(
     table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
-    table_name: &str,
+    table_name: &DuckLakeTableName,
 ) -> Arc<Semaphore> {
     let mut slots = table_write_slots.lock();
-    let slot = slots.entry(table_name.to_owned()).or_insert_with(|| Arc::new(Semaphore::new(1)));
+    let slot = slots.entry(table_name.clone()).or_insert_with(|| Arc::new(Semaphore::new(1)));
     Arc::clone(slot)
 }
 
@@ -350,13 +346,13 @@ fn validate_ducklake_replica_identity(
 }
 
 /// Builds the query used to inspect a DuckLake table shape.
-fn ducklake_table_columns_sql(table_name: &str) -> String {
+fn ducklake_table_columns_sql(table_name: &DuckLakeTableName) -> String {
     format!(
         "select column_name from information_schema.columns where table_catalog = {} and \
          table_schema = {} and table_name = {} order by ordinal_position",
         quote_literal(LAKE_CATALOG),
-        quote_literal("main"),
-        quote_literal(table_name)
+        quote_literal(table_name.schema()),
+        quote_literal(table_name.table())
     )
 }
 
@@ -365,7 +361,7 @@ fn ducklake_table_columns_sql(table_name: &str) -> String {
 /// Call only from a [`run_duckdb_blocking`] closure.
 fn read_ducklake_table_column_names_blocking(
     conn: &duckdb::Connection,
-    table_name: &str,
+    table_name: &DuckLakeTableName,
 ) -> EtlResult<Vec<String>> {
     let sql = ducklake_table_columns_sql(table_name);
     let mut statement = conn.prepare(&sql).map_err(|source| {
@@ -506,7 +502,7 @@ fn tombstone_columns_to_cleanup_ducklake(
 
 /// Plans idempotent DuckLake schema DDL for the current destination columns.
 fn plan_schema_diff_sql_ducklake(
-    table_name: &str,
+    table_name: &DuckLakeTableName,
     mut column_names: Vec<String>,
     diff: &SchemaDiff,
 ) -> EtlResult<DuckLakeSchemaDiffPlan> {
@@ -1439,7 +1435,7 @@ where
                     )
                 )
             })?;
-        let table_name = metadata.destination_table_id.clone();
+        let table_name = DuckLakeTableName::from_metadata_id(&metadata.destination_table_id)?;
         let metadata = if metadata.is_applying() {
             self.recover_applying_metadata(
                 table_id,
@@ -1493,7 +1489,7 @@ where
         self.cleanup_tombstone_columns_after_applied(&table_name, &current_schema).await;
 
         let updated_metadata = DestinationTableMetadata::new_applied(
-            table_name.clone(),
+            table_name.to_metadata_id()?,
             current_snapshot_id,
             current_replication_mask,
         )
@@ -1534,7 +1530,11 @@ where
 
     /// Applies a schema diff while serializing with table-local writes and
     /// external maintenance.
-    async fn apply_schema_diff(&self, table_name: &str, diff: &SchemaDiff) -> EtlResult<()> {
+    async fn apply_schema_diff(
+        &self,
+        table_name: &DuckLakeTableName,
+        diff: &SchemaDiff,
+    ) -> EtlResult<()> {
         if diff.is_empty() {
             debug!(table = %table_name, "ducklake schema diff is empty");
             return Ok(());
@@ -1550,7 +1550,7 @@ where
 
         let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
-        let table_name = table_name.to_owned();
+        let table_name = table_name.clone();
         let diff = diff.clone();
 
         run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), move |conn| {
@@ -1598,10 +1598,10 @@ where
     /// Adds target replicated columns missing from the physical DuckLake table.
     async fn reconcile_missing_replicated_columns(
         &self,
-        table_name: &str,
+        table_name: &DuckLakeTableName,
         target_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        let table_name_for_read = table_name.to_owned();
+        let table_name_for_read = table_name.clone();
         let ducklake_columns = run_duckdb_blocking(
             Arc::clone(&self.pool),
             Arc::clone(&self.blocking_slots),
@@ -1632,12 +1632,12 @@ where
     /// Drops ETL tombstone columns after schema metadata is durably `Applied`.
     async fn cleanup_tombstone_columns(
         &self,
-        table_name: &str,
+        table_name: &DuckLakeTableName,
         target_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
-        let table_name = table_name.to_owned();
+        let table_name = table_name.clone();
         let target_schema = target_schema.clone();
 
         run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), move |conn| {
@@ -1695,7 +1695,7 @@ where
     /// Best-effort wrapper for post-`Applied` tombstone cleanup.
     async fn cleanup_tombstone_columns_after_applied(
         &self,
-        table_name: &str,
+        table_name: &DuckLakeTableName,
         target_schema: &ReplicatedTableSchema,
     ) {
         if let Err(error) = self.cleanup_tombstone_columns(table_name, target_schema).await {
@@ -1726,7 +1726,7 @@ where
                 continue;
             };
 
-            let table_name = metadata.destination_table_id.clone();
+            let table_name = DuckLakeTableName::from_metadata_id(&metadata.destination_table_id)?;
             if metadata.is_applying() {
                 self.recover_applying_metadata(table_id, &table_name, metadata, None).await?;
                 continue;
@@ -2062,11 +2062,11 @@ where
     async fn create_table_with_metadata(
         &self,
         table_id: TableId,
-        table_name: &str,
+        table_name: &DuckLakeTableName,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let metadata = DestinationTableMetadata::new_applying(
-            table_name.to_owned(),
+            table_name.to_metadata_id()?,
             replicated_table_schema.inner().snapshot_id,
             replicated_table_schema.replication_mask().clone(),
         );
@@ -2081,13 +2081,13 @@ where
     /// Issues DuckLake's idempotent `create table if not exists` statement.
     async fn issue_create_table_stmt(
         &self,
-        table_name: &str,
+        table_name: &DuckLakeTableName,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let column_schemas: Vec<_> = replicated_table_schema.column_schemas().cloned().collect();
         let ddl = build_create_table_sql_ducklake(table_name, &column_schemas);
         let created_tables = Arc::clone(&self.created_tables);
-        let table_name = table_name.to_owned();
+        let table_name = table_name.clone();
         let _checkpoint_guard = self.acquire_mutation_guard().await;
 
         run_duckdb_blocking(
@@ -2099,7 +2099,7 @@ where
                     Ok(()) => {
                         created_tables.lock().insert(table_name.clone());
                     }
-                    Err(error) if is_create_table_conflict(&error, &table_name) => {
+                    Err(error) if is_create_table_conflict(&error, table_name.table()) => {
                         created_tables.lock().insert(table_name.clone());
                     }
                     Err(error) => {
@@ -2215,7 +2215,7 @@ where
     async fn recover_applying_metadata(
         &self,
         table_id: TableId,
-        table_name: &str,
+        table_name: &DuckLakeTableName,
         metadata: DestinationTableMetadata,
         target_schema: Option<&ReplicatedTableSchema>,
     ) -> EtlResult<DestinationTableMetadata> {
@@ -2254,7 +2254,7 @@ where
         let metadata = metadata.to_applied();
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
         self.cleanup_tombstone_columns_after_applied(table_name, &target_schema).await;
-        self.created_tables.lock().insert(table_name.to_owned());
+        self.created_tables.lock().insert(table_name.clone());
 
         Ok(metadata)
     }
@@ -2268,7 +2268,7 @@ where
         let metadata = self.store.get_destination_table_metadata(table_id).await?;
         let table_name = metadata.as_ref().map_or_else(
             || table_name_to_ducklake_table_name(replicated_table_schema.name()),
-            |metadata| Ok(metadata.destination_table_id.clone()),
+            |metadata| DuckLakeTableName::from_metadata_id(&metadata.destination_table_id),
         )?;
 
         if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_applying)
@@ -2291,7 +2291,7 @@ where
         let metadata = self.store.get_destination_table_metadata(table_id).await?;
         let table_name = metadata.as_ref().map_or_else(
             || table_name_to_ducklake_table_name(replicated_table_schema.name()),
-            |metadata| Ok(metadata.destination_table_id.clone()),
+            |metadata| DuckLakeTableName::from_metadata_id(&metadata.destination_table_id),
         )?;
 
         if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_applying)
@@ -2375,14 +2375,17 @@ where
         let table_id = replicated_table_schema.id();
 
         if let Some(existing) = self.store.get_destination_table_metadata(table_id).await? {
-            return Ok(existing.destination_table_id);
+            return DuckLakeTableName::from_metadata_id(&existing.destination_table_id);
         }
 
         table_name_to_ducklake_table_name(replicated_table_schema.name())
     }
 
     /// Serializes table-local truncate and CDC mutation writes.
-    async fn acquire_table_write_slot(&self, table_name: &str) -> EtlResult<OwnedSemaphorePermit> {
+    async fn acquire_table_write_slot(
+        &self,
+        table_name: &DuckLakeTableName,
+    ) -> EtlResult<OwnedSemaphorePermit> {
         let table_slot = table_write_slot(&self.table_write_slots, table_name);
         match Arc::clone(&table_slot).try_acquire_owned() {
             Ok(permit) => Ok(permit),
@@ -2475,7 +2478,7 @@ where
         }
 
         for table_name in table_names {
-            if table_name.starts_with("__etl_") {
+            if table_name.is_internal_helper() {
                 continue;
             }
 
@@ -2509,13 +2512,17 @@ where
     }
 
     /// Lists active DuckLake table names from the metadata catalog.
-    async fn list_active_ducklake_tables(&self) -> EtlResult<Vec<String>> {
+    async fn list_active_ducklake_tables(&self) -> EtlResult<Vec<DuckLakeTableName>> {
         let sql = format!(
-            "SELECT table_name FROM {}.{} WHERE end_snapshot IS NULL ORDER BY table_name",
+            "SELECT s.schema_name, t.table_name FROM {}.{} AS t JOIN {}.{} AS s ON s.schema_id = \
+             t.schema_id WHERE t.end_snapshot IS NULL AND s.end_snapshot IS NULL ORDER BY \
+             s.schema_name, t.table_name",
             quote_postgres_identifier(self.metadata_schema.as_ref()),
-            quote_postgres_identifier("ducklake_table")
+            quote_postgres_identifier("ducklake_table"),
+            quote_postgres_identifier(self.metadata_schema.as_ref()),
+            quote_postgres_identifier("ducklake_schema")
         );
-        let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(sql))
+        let rows: Vec<(String, String)> = sqlx::query_as(AssertSqlSafe(sql))
             .fetch_all(&self.metadata_pg_pool)
             .await
             .map_err(|source| {
@@ -2526,7 +2533,10 @@ where
                     source: source
                 )
             })?;
-        Ok(rows.into_iter().map(|(table_name,)| table_name).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(schema_name, table_name)| DuckLakeTableName::new(schema_name, table_name))
+            .collect())
     }
 
     /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a
@@ -2632,19 +2642,12 @@ async fn wait_if_streaming_write_paused_for_tests() {
     let _ = resume_rx.await;
 }
 
-/// Converts a Postgres [`TableName`] to a DuckLake table name string.
+/// Converts a Postgres [`TableName`] to the matching DuckLake schema/table.
 ///
-/// Escapes underscores in schema and table name components by doubling them,
-/// then joins the two parts with a single `_`. This matches the convention
-/// used by other destinations in this crate.
-///
-/// # Example
-/// - `public.my_table` → `public_my__table`
-/// - `my_schema.orders` → `my__schema_orders`
-///
-/// Returns an error if the table name cannot be converted.
+/// Source schemas are preserved in DuckLake. For example, `public.my_table`
+/// becomes the DuckLake table `lake.public.my_table`.
 pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> EtlResult<DuckLakeTableName> {
-    try_stringify_table_name(table_name)
+    Ok(DuckLakeTableName::from_source(table_name))
 }
 
 #[cfg(test)]
@@ -2658,11 +2661,12 @@ mod tests {
     use duckdb::{Config, Connection};
     use etl::{
         config::{PgConnectionConfig, TcpKeepaliveConfig},
-        store::{both::memory::MemoryStore, schema::SchemaStore},
-        types::{
-            Cell, ColumnChange, ColumnModification, ColumnSchema, IdentityMask, PartialTableRow,
-            ReplicationMask, SchemaDiff, SnapshotId, TableRow, TableSchema, Type as PgType,
+        data::{Cell, PartialTableRow, TableRow},
+        schema::{
+            ColumnChange, ColumnModification, ColumnSchema, IdentityMask, ReplicationMask,
+            SchemaDiff, SnapshotId, TableSchema, Type as PgType,
         },
+        store::{MemoryStore, SchemaStore},
     };
     use etl_maintenance::ducklake::flush_table_inlined_data;
     use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
@@ -2697,6 +2701,10 @@ mod tests {
                 ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ],
         )
+    }
+
+    fn ducklake_table_name() -> DuckLakeTableName {
+        DuckLakeTableName::new("public", "users")
     }
 
     fn make_alternative_identity_schema() -> ReplicatedTableSchema {
@@ -2820,17 +2828,20 @@ mod tests {
             columns_to_change: vec![rename_change("name", "full_name", 2)],
         };
 
-        let plan =
-            plan_schema_diff_sql_ducklake("users", vec!["id".to_owned(), "name".to_owned()], &diff)
-                .expect("schema diff should plan");
+        let plan = plan_schema_diff_sql_ducklake(
+            &ducklake_table_name(),
+            vec!["id".to_owned(), "name".to_owned()],
+            &diff,
+        )
+        .expect("schema diff should plan");
         let statement_sql: Vec<_> =
             plan.statements.iter().map(|statement| statement.sql.clone()).collect();
 
         assert_eq!(
             statement_sql,
             vec![
-                r#"alter table "lake"."users" rename column "name" to "full_name""#,
-                r#"alter table "lake"."users" add column "name" varchar"#,
+                r#"alter table "lake"."public"."users" rename column "name" to "full_name""#,
+                r#"alter table "lake"."public"."users" add column "name" varchar"#,
             ]
         );
         assert_eq!(plan.column_names, vec!["id", "full_name", "name"]);
@@ -2847,15 +2858,20 @@ mod tests {
             columns_to_change: Vec::new(),
         };
 
-        let plan =
-            plan_schema_diff_sql_ducklake("users", vec!["id".to_owned(), "name".to_owned()], &diff)
-                .expect("schema diff should plan");
+        let plan = plan_schema_diff_sql_ducklake(
+            &ducklake_table_name(),
+            vec!["id".to_owned(), "name".to_owned()],
+            &diff,
+        )
+        .expect("schema diff should plan");
         let statement_sql: Vec<_> =
             plan.statements.iter().map(|statement| statement.sql.clone()).collect();
 
         assert_eq!(
             statement_sql,
-            vec![r#"alter table "lake"."users" add column "status" varchar default 'pending'"#]
+            vec![
+                r#"alter table "lake"."public"."users" add column "status" varchar default 'pending'"#
+            ]
         );
         assert_eq!(plan.column_names, vec!["id", "name", "status"]);
     }
@@ -2874,7 +2890,7 @@ mod tests {
         };
 
         let plan = plan_schema_diff_sql_ducklake(
-            "users",
+            &ducklake_table_name(),
             vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
             &diff,
         )
@@ -2893,7 +2909,7 @@ mod tests {
         };
 
         let plan = plan_schema_diff_sql_ducklake(
-            "users",
+            &ducklake_table_name(),
             vec!["id".to_owned(), "full_name".to_owned(), "name".to_owned()],
             &diff,
         )
@@ -2915,7 +2931,7 @@ mod tests {
         };
 
         let plan = plan_schema_diff_sql_ducklake(
-            "users",
+            &ducklake_table_name(),
             vec!["id".to_owned(), "full_name".to_owned(), "name".to_owned()],
             &diff,
         )
@@ -2934,7 +2950,7 @@ mod tests {
         };
 
         let plan = plan_schema_diff_sql_ducklake(
-            "users",
+            &ducklake_table_name(),
             vec!["id".to_owned(), "ddl_col_4_1".to_owned(), "ddl_col_4_0".to_owned()],
             &diff,
         )
@@ -2942,7 +2958,10 @@ mod tests {
         let statement_sql: Vec<_> =
             plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
 
-        assert_eq!(statement_sql, vec![r#"alter table "lake"."users" drop column "ddl_col_4_1""#]);
+        assert_eq!(
+            statement_sql,
+            vec![r#"alter table "lake"."public"."users" drop column "ddl_col_4_1""#]
+        );
         assert_eq!(plan.column_names, vec!["id", "ddl_col_4_0"]);
     }
 
@@ -2957,7 +2976,7 @@ mod tests {
         };
 
         let plan = plan_schema_diff_sql_ducklake(
-            "users",
+            &ducklake_table_name(),
             vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
             &diff,
         )
@@ -2969,9 +2988,10 @@ mod tests {
             statement_sql,
             vec![
                 format!(
-                    r#"alter table "lake"."users" rename column "status" to "{tombstone_name}""#
+                    r#"alter table "lake"."public"."users" rename column "status" to "{tombstone_name}""#
                 ),
-                r#"alter table "lake"."users" rename column "name" to "status""#.to_owned(),
+                r#"alter table "lake"."public"."users" rename column "name" to "status""#
+                    .to_owned(),
             ]
         );
         assert_eq!(plan.column_names, vec!["id", "status", tombstone_name.as_str()]);
@@ -2987,17 +3007,22 @@ mod tests {
             columns_to_change: Vec::new(),
         };
 
-        let plan =
-            plan_schema_diff_sql_ducklake("users", vec!["id".to_owned(), "name".to_owned()], &diff)
-                .expect("schema diff should tombstone reused removed name");
+        let plan = plan_schema_diff_sql_ducklake(
+            &ducklake_table_name(),
+            vec!["id".to_owned(), "name".to_owned()],
+            &diff,
+        )
+        .expect("schema diff should tombstone reused removed name");
         let statement_sql: Vec<_> =
             plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
 
         assert_eq!(
             statement_sql,
             vec![
-                format!(r#"alter table "lake"."users" rename column "name" to "{tombstone_name}""#),
-                r#"alter table "lake"."users" add column "name" varchar"#.to_owned(),
+                format!(
+                    r#"alter table "lake"."public"."users" rename column "name" to "{tombstone_name}""#
+                ),
+                r#"alter table "lake"."public"."users" add column "name" varchar"#.to_owned(),
             ]
         );
         assert_eq!(plan.column_names, vec!["id", tombstone_name.as_str(), "name"]);
@@ -3014,7 +3039,7 @@ mod tests {
         };
 
         let plan = plan_schema_diff_sql_ducklake(
-            "users",
+            &ducklake_table_name(),
             vec!["id".to_owned(), tombstone_name.clone(), "name".to_owned()],
             &diff,
         )
@@ -3266,14 +3291,14 @@ mod tests {
         conn
     }
 
-    fn lake_table_exists(conn: &Connection, table_name: &str) -> bool {
+    fn lake_table_exists(conn: &Connection, table_name: &DuckLakeTableName) -> bool {
         conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_catalog = {} AND \
                  table_schema = {} AND table_name = {}",
                 quote_literal(LAKE_CATALOG),
-                quote_literal("main"),
-                quote_literal(table_name),
+                quote_literal(table_name.schema()),
+                quote_literal(table_name.table()),
             ),
             [],
             |row| row.get::<_, i64>(0),
@@ -3284,7 +3309,7 @@ mod tests {
     async fn open_lake_conn_when_table_visible(
         catalog: &Url,
         data: &Url,
-        table_name: &str,
+        table_name: &DuckLakeTableName,
     ) -> Connection {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -3303,14 +3328,14 @@ mod tests {
     }
 
     #[test]
-    fn table_name_escaping() {
+    fn table_name_to_ducklake_table_name_preserves_schema() {
         assert_eq!(
             table_name_to_ducklake_table_name(&TableName {
                 schema: "public".to_owned(),
                 name: "orders".to_owned(),
             })
             .unwrap(),
-            "public_orders"
+            DuckLakeTableName::new("public", "orders")
         );
         assert_eq!(
             table_name_to_ducklake_table_name(&TableName {
@@ -3318,7 +3343,7 @@ mod tests {
                 name: "my_table".to_owned(),
             })
             .unwrap(),
-            "my__schema_my__table"
+            DuckLakeTableName::new("my_schema", "my_table")
         );
     }
 
@@ -3383,8 +3408,9 @@ mod tests {
                 .expect("failed to resolve metadata schema");
             let metadata_pg_pool =
                 build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
-            let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
-                .expect("failed to materialize inlined rows for storage metrics test");
+            let _rows_flushed =
+                flush_table_inlined_data(&conn, table_name.schema(), table_name.table())
+                    .expect("failed to materialize inlined rows for storage metrics test");
             let deadline = Instant::now() + Duration::from_secs(10);
             let metrics = loop {
                 let metrics =
@@ -3448,8 +3474,9 @@ mod tests {
                 .expect("failed to resolve metadata schema");
             let metadata_pg_pool =
                 build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
-            let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
-                .expect("failed to materialize inlined rows for catalog metrics test");
+            let _rows_flushed =
+                flush_table_inlined_data(&conn, table_name.schema(), table_name.table())
+                    .expect("failed to materialize inlined rows for catalog metrics test");
             let deadline = Instant::now() + Duration::from_secs(10);
             let metrics = loop {
                 let metrics =

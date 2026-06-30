@@ -4,8 +4,7 @@
 //! streaming changes, and maintaining replication consistency.
 
 mod apply;
-pub mod client;
-mod stream;
+pub(crate) mod state;
 mod table_cache;
 mod table_sync;
 mod worker_type;
@@ -13,7 +12,6 @@ mod worker_type;
 pub(crate) use apply::{
     ApplyLoop, ApplyLoopResult, ApplyWorkerContext, TableSyncWorkerContext, WorkerContext,
 };
-pub(crate) use stream::{EventsStream, StatusUpdateResult, StatusUpdateType, TableCopyStream};
 pub(crate) use table_cache::SharedTableCache;
 pub(crate) use table_sync::{TableSyncResult, start_table_sync};
 pub use worker_type::WorkerType;

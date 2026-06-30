@@ -281,7 +281,7 @@ async fn tenant_cannot_create_more_than_max_pipelines() {
         CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
     let response = app.create_pipeline(tenant_id, &pipeline).await;
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test(flavor = "multi_thread")]
