@@ -1,10 +1,7 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard},
     time::{Duration, Instant},
 };
 
@@ -13,10 +10,12 @@ use futures::{Stream, StreamExt};
 use metrics::{counter, gauge, histogram};
 use tokio::{
     pin,
-    sync::{Mutex, oneshot, watch},
+    sync::{Mutex, watch},
     task::{JoinHandle, JoinSet},
+    time::MissedTickBehavior,
 };
-use tracing::info;
+use tokio_postgres::types::PgLsn;
+use tracing::{info, warn};
 
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
@@ -26,15 +25,14 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::{
-        ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_TABLE_COPY_ACTIVE_WORKERS,
-        ETL_TABLE_COPY_PARTITION_DURATION_SECONDS, ETL_TABLE_COPY_PARTITION_ROWS,
-        ETL_TABLE_COPY_PARTITION_ROWS_IMBALANCE, ETL_TABLE_COPY_PARTITION_TIME_IMBALANCE,
-        ETL_TABLE_COPY_PARTITIONS_COMPLETED_CURRENT, ETL_TABLE_COPY_PARTITIONS_PLANNED,
-        ETL_TABLE_COPY_PARTITIONS_TOTAL, ETL_TABLE_COPY_ROWS_CURRENT, ETL_TABLE_COPY_ROWS_TOTAL,
-        OUTCOME_LABEL, TABLE_ID_LABEL, WORKER_TYPE_LABEL,
+        ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_TABLE_COPY_DURATION_SECONDS,
+        ETL_TABLE_COPY_END_TO_END_LAG_BYTES, ETL_TABLE_COPY_PARTITION_DURATION_SECONDS,
+        ETL_TABLE_COPY_PARTITION_PLANNED_BLOCKS, ETL_TABLE_COPY_PARTITION_ROWS,
+        ETL_TABLE_COPY_PARTITIONS_TOTAL, ETL_TABLE_COPY_ROWS_TOTAL, OUTCOME_LABEL,
+        WORKER_TYPE_LABEL,
     },
     postgres::{
-        TableCopyStream,
+        OutOfBandSourcePool, TableCopyStream,
         client::{
             CtidPartition, PgChildReplicationTransaction, PgReplicationTransaction,
             PostgresConnectionUpdate,
@@ -56,8 +54,10 @@ const CTID_PARTITIONS_PER_COPY_WORKER: u16 = 4;
 const CTID_COPY_ROWS_PER_PARTITION: i64 = 250_000;
 /// Maximum CTID ranges planned for one tracked table.
 const MAX_CTID_COPY_PARTITIONS: u16 = 1024;
-/// Interval for publishing in-flight table copy progress.
-const TABLE_COPY_PROGRESS_REPORT_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Latest table copy lag by active table copy.
+static TABLE_COPY_END_TO_END_LAG_BYTES_BY_TABLE: LazyLock<StdMutex<HashMap<TableId, u64>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 /// Result of a table copy operation.
 #[derive(Debug)]
@@ -90,168 +90,69 @@ struct PlannedCopyPartitions {
 
 /// Cumulative metrics shared by all workers copying one tracked table.
 #[derive(Clone, Debug)]
-struct TableCopyMetrics {
-    /// Stable label for the tracked table.
-    table_id_label: Arc<str>,
-    /// Rows flushed by all workers.
-    copied_rows: Arc<AtomicU64>,
-    /// Rows already emitted to the cumulative counter.
-    reported_rows: Arc<AtomicU64>,
-    /// Partitions finished by all workers.
-    completed_partitions: Arc<AtomicU64>,
-}
+struct TableCopyMetrics;
 
 impl TableCopyMetrics {
     /// Creates metrics for one table copy.
-    fn new(table_id: TableId, planned_partitions: usize, active_workers: usize) -> Self {
-        let metrics = Self {
-            table_id_label: Arc::from(table_id.to_string()),
-            copied_rows: Arc::new(AtomicU64::new(0)),
-            reported_rows: Arc::new(AtomicU64::new(0)),
-            completed_partitions: Arc::new(AtomicU64::new(0)),
-        };
-
-        gauge!(
-            ETL_TABLE_COPY_ROWS_CURRENT,
-            TABLE_ID_LABEL => metrics.table_id_label.to_string(),
-        )
-        .set(0.0);
-        gauge!(
-            ETL_TABLE_COPY_PARTITIONS_PLANNED,
-            TABLE_ID_LABEL => metrics.table_id_label.to_string(),
-        )
-        .set(planned_partitions as f64);
-        gauge!(
-            ETL_TABLE_COPY_PARTITIONS_COMPLETED_CURRENT,
-            TABLE_ID_LABEL => metrics.table_id_label.to_string(),
-        )
-        .set(0.0);
-        gauge!(
-            ETL_TABLE_COPY_ACTIVE_WORKERS,
-            TABLE_ID_LABEL => metrics.table_id_label.to_string(),
-        )
-        .set(active_workers as f64);
-
-        metrics
-    }
-
-    /// Records rows flushed by one destination batch.
-    fn record_copied_rows(&self, rows: u64) {
-        self.copied_rows.fetch_add(rows, Ordering::Relaxed);
-    }
-
-    /// Publishes the latest cumulative table-copy progress.
-    fn publish_progress(&self) {
-        let copied_rows = self.copied_rows.load(Ordering::Relaxed);
-        let reported_rows = self.reported_rows.swap(copied_rows, Ordering::Relaxed);
-
-        if copied_rows > reported_rows {
-            counter!(
-                ETL_TABLE_COPY_ROWS_TOTAL,
-                TABLE_ID_LABEL => self.table_id_label.to_string(),
-            )
-            .increment(copied_rows - reported_rows);
-        }
-
-        gauge!(
-            ETL_TABLE_COPY_ROWS_CURRENT,
-            TABLE_ID_LABEL => self.table_id_label.to_string(),
-        )
-        .set(copied_rows as f64);
-        gauge!(
-            ETL_TABLE_COPY_PARTITIONS_COMPLETED_CURRENT,
-            TABLE_ID_LABEL => self.table_id_label.to_string(),
-        )
-        .set(self.completed_partitions.load(Ordering::Relaxed) as f64);
+    fn new() -> Self {
+        Self
     }
 
     /// Records one successfully copied ctid partition.
     fn record_completed_partition(&self, rows: u64, duration_secs: f64) {
-        self.completed_partitions.fetch_add(1, Ordering::Relaxed);
-
         counter!(
             ETL_TABLE_COPY_PARTITIONS_TOTAL,
-            TABLE_ID_LABEL => self.table_id_label.to_string(),
             OUTCOME_LABEL => "completed",
         )
         .increment(1);
-        histogram!(
-            ETL_TABLE_COPY_PARTITION_ROWS,
-            TABLE_ID_LABEL => self.table_id_label.to_string(),
-        )
-        .record(rows as f64);
-        histogram!(
-            ETL_TABLE_COPY_PARTITION_DURATION_SECONDS,
-            TABLE_ID_LABEL => self.table_id_label.to_string(),
-        )
-        .record(duration_secs);
+        histogram!(ETL_TABLE_COPY_PARTITION_ROWS).record(rows as f64);
+        histogram!(ETL_TABLE_COPY_PARTITION_DURATION_SECONDS).record(duration_secs);
+    }
+
+    /// Records the planned block size of one ctid partition.
+    fn record_planned_partition_blocks(blocks: i64) {
+        histogram!(ETL_TABLE_COPY_PARTITION_PLANNED_BLOCKS).record(blocks.max(0) as f64);
     }
 
     /// Records one partition that observed shutdown before completing.
     fn record_shutdown_partition(&self) {
         counter!(
             ETL_TABLE_COPY_PARTITIONS_TOTAL,
-            TABLE_ID_LABEL => self.table_id_label.to_string(),
             OUTCOME_LABEL => "shutdown",
         )
         .increment(1);
     }
 
-    /// Records final load imbalance for completed copy partitions.
-    fn record_imbalance(&self, partition_durations: &[f64], partition_row_counts: &[u64]) {
-        let time_lif = calculate_skew_metrics(partition_durations);
-        let rows_lif = calculate_skew_metrics(
-            &partition_row_counts.iter().map(|rows| *rows as f64).collect::<Vec<_>>(),
-        );
-
-        histogram!(
-            ETL_TABLE_COPY_PARTITION_TIME_IMBALANCE,
-            TABLE_ID_LABEL => self.table_id_label.to_string(),
-        )
-        .record(time_lif);
-        histogram!(
-            ETL_TABLE_COPY_PARTITION_ROWS_IMBALANCE,
-            TABLE_ID_LABEL => self.table_id_label.to_string(),
-        )
-        .record(rows_lif);
-    }
-
-    /// Marks the table copy as no longer actively using worker connections.
-    fn finish(&self) {
-        self.publish_progress();
-        gauge!(
-            ETL_TABLE_COPY_ACTIVE_WORKERS,
-            TABLE_ID_LABEL => self.table_id_label.to_string(),
-        )
-        .set(0.0);
+    /// Records final metrics for one successful table copy.
+    fn record_completed_table_copy(&self, rows: u64, duration_secs: f64) {
+        counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(rows);
+        histogram!(ETL_TABLE_COPY_DURATION_SECONDS).record(duration_secs);
     }
 }
 
-/// Ensures terminal table-copy metrics are published on all return paths.
-struct ActiveTableCopyMetrics {
-    /// Metrics to finalize when the guard is dropped.
-    metrics: TableCopyMetrics,
-}
-
-impl ActiveTableCopyMetrics {
-    /// Creates an active metrics guard.
-    fn new(metrics: TableCopyMetrics) -> Self {
-        Self { metrics }
-    }
-}
-
-impl Drop for ActiveTableCopyMetrics {
-    fn drop(&mut self) {
-        self.metrics.finish();
-    }
-}
-
-/// Handle for the table-copy metrics reporter task.
-struct TableCopyMetricsReporter {
-    /// Signal used to stop the reporter after copy completion.
-    stop_tx: oneshot::Sender<()>,
-    /// Join handle for the reporter task.
+/// Handle for the table-copy replication lag reporter task.
+struct TableCopyLagReporter {
+    /// Join handle for the lag reporter task.
     handle: JoinHandle<()>,
+}
+
+/// Removes a table copy from lag aggregation when its reporter exits.
+struct TableCopyReplicationLagGuard {
+    /// Table whose latest copy lag is tracked by this reporter.
+    table_id: TableId,
+}
+
+impl TableCopyReplicationLagGuard {
+    /// Creates a guard for one table copy reporter.
+    fn new(table_id: TableId) -> Self {
+        Self { table_id }
+    }
+}
+
+impl Drop for TableCopyReplicationLagGuard {
+    fn drop(&mut self) {
+        remove_table_copy_replication_lag_metrics(self.table_id);
+    }
 }
 
 /// Rows and timings copied by a completed worker.
@@ -259,10 +160,6 @@ struct TableCopyMetricsReporter {
 struct CompletedCopyWorker {
     /// Rows copied by this worker.
     total_rows: u64,
-    /// Durations of completed partitions.
-    partition_durations: Vec<f64>,
-    /// Row counts of completed partitions.
-    partition_row_counts: Vec<u64>,
 }
 
 /// Outcome of one worker connection.
@@ -272,33 +169,6 @@ enum CopyWorkerOutcome {
     Completed(CompletedCopyWorker),
     /// The worker observed shutdown before committing its transaction.
     Shutdown,
-}
-
-/// Calculates Load Imbalance Factor (LIF) for a set of values.
-///
-/// LIF = max_value / mean_value.
-///
-/// A value of 1.0 indicates perfect balance. Higher values indicate more
-/// imbalance. Returns 0.0 if the input is empty or mean is zero.
-fn calculate_skew_metrics(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-
-    let n = values.len() as f64;
-    let mean = values.iter().sum::<f64>() / n;
-
-    if mean == 0.0 {
-        return 0.0;
-    }
-
-    let max_value = values
-        .iter()
-        .copied()
-        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap_or(0.0);
-
-    max_value / mean
 }
 
 /// Returns `numerator / denominator`, rounded up.
@@ -362,53 +232,132 @@ fn table_copy_partition_weight(
     if use_estimated_rows { estimated_rows } else { table_blocks }
 }
 
+/// Records planned heap block counts for the ctid ranges of one physical table.
+fn record_planned_partition_blocks(table_blocks: i64, partition_count: u16) {
+    debug_assert!(table_blocks > 0);
+    debug_assert!(partition_count > 0);
+
+    let effective_partitions = i64::from(partition_count).min(table_blocks);
+    for partition_index in 0..effective_partitions {
+        let start_block = partition_index * table_blocks / effective_partitions;
+        let end_block_exclusive = (partition_index + 1) * table_blocks / effective_partitions;
+
+        TableCopyMetrics::record_planned_partition_blocks(end_block_exclusive - start_block);
+    }
+}
+
 /// Returns true when the table copy should stop for shutdown.
 fn is_shutdown_requested(shutdown_rx: &ShutdownRx) -> bool {
     shutdown_rx.has_changed().unwrap_or(true)
 }
 
-/// Spawns a periodic reporter for progressive table-copy metrics.
-fn spawn_table_copy_metrics_reporter(
-    metrics: TableCopyMetrics,
+/// Spawns a periodic reporter for table-copy replication lag.
+fn spawn_table_copy_lag_reporter(
+    table_id: TableId,
+    consistent_point: PgLsn,
+    out_of_band_source_pool: OutOfBandSourcePool,
+    replication_lag_refresh_interval: Duration,
     mut shutdown_rx: ShutdownRx,
-) -> TableCopyMetricsReporter {
-    let (stop_tx, mut stop_rx) = oneshot::channel();
+) -> TableCopyLagReporter {
     let handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(TABLE_COPY_PROGRESS_REPORT_INTERVAL);
+        let _table_copy_replication_lag_guard = TableCopyReplicationLagGuard::new(table_id);
+        let mut replication_lag_interval = tokio::time::interval(replication_lag_refresh_interval);
+        replication_lag_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
                 biased;
 
-                _ = &mut stop_rx => {
-                    metrics.publish_progress();
-                    break;
-                }
                 _ = shutdown_rx.changed() => {
-                    metrics.publish_progress();
+                    emit_table_copy_replication_lag_metrics(
+                        table_id,
+                        consistent_point,
+                        &out_of_band_source_pool,
+                    ).await;
                     break;
                 }
-                _ = interval.tick() => {
-                    metrics.publish_progress();
+                _ = replication_lag_interval.tick() => {
+                    emit_table_copy_replication_lag_metrics(
+                        table_id,
+                        consistent_point,
+                        &out_of_band_source_pool,
+                    ).await;
                 }
             }
         }
     });
 
-    TableCopyMetricsReporter { stop_tx, handle }
+    TableCopyLagReporter { handle }
 }
 
-/// Stops the periodic reporter and emits one final progress sample.
-async fn stop_table_copy_metrics_reporter(
-    metrics_reporter: &mut Option<TableCopyMetricsReporter>,
-    metrics: &TableCopyMetrics,
+/// Emits end-to-end lag metrics for a table sync while initial copy runs.
+async fn emit_table_copy_replication_lag_metrics(
+    table_id: TableId,
+    consistent_point: PgLsn,
+    out_of_band_source_pool: &OutOfBandSourcePool,
 ) {
-    if let Some(metrics_reporter) = metrics_reporter.take() {
-        let _ = metrics_reporter.stop_tx.send(());
-        let _ = metrics_reporter.handle.await;
-    }
+    match out_of_band_source_pool.get_current_wal_lsn().await {
+        Ok(source_current_lsn) => {
+            let source_current_lsn = u64::from(source_current_lsn);
+            let consistent_point = u64::from(consistent_point);
+            let table_copy_lag_bytes = source_current_lsn.saturating_sub(consistent_point);
 
-    metrics.publish_progress();
+            record_table_copy_replication_lag(table_id, table_copy_lag_bytes);
+        }
+        Err(error) => {
+            warn!(
+                table_id = table_id.0,
+                error = %error,
+                "table copy replication lag reporter failed to poll source database"
+            );
+        }
+    }
+}
+
+/// Records one table copy lag sample and publishes the maximum active lag.
+fn record_table_copy_replication_lag(table_id: TableId, lag_bytes: u64) {
+    let mut lag_by_table = table_copy_replication_lag_metrics();
+    lag_by_table.insert(table_id, lag_bytes);
+
+    publish_max_table_copy_replication_lag(&lag_by_table);
+}
+
+/// Removes one completed table copy lag sample and publishes the remaining max.
+fn remove_table_copy_replication_lag_metrics(table_id: TableId) {
+    let mut lag_by_table = table_copy_replication_lag_metrics();
+    lag_by_table.remove(&table_id);
+
+    publish_max_table_copy_replication_lag(&lag_by_table);
+}
+
+/// Locks the table copy lag map, recovering through poisoning if needed.
+fn table_copy_replication_lag_metrics() -> MutexGuard<'static, HashMap<TableId, u64>> {
+    TABLE_COPY_END_TO_END_LAG_BYTES_BY_TABLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Publishes the maximum lag across active table copies.
+fn publish_max_table_copy_replication_lag(lag_by_table: &HashMap<TableId, u64>) {
+    let max_lag_bytes = lag_by_table.values().copied().max().unwrap_or(0);
+    gauge!(ETL_TABLE_COPY_END_TO_END_LAG_BYTES).set(max_lag_bytes as f64);
+}
+
+/// Stops the periodic replication lag reporter task.
+async fn stop_table_copy_lag_reporter(lag_reporter: &mut Option<TableCopyLagReporter>) {
+    if let Some(lag_reporter) = lag_reporter.take() {
+        let mut handle = lag_reporter.handle;
+        handle.abort();
+
+        if let Err(error) = (&mut handle).await
+            && !error.is_cancelled()
+        {
+            warn!(
+                error = %error,
+                "table copy lag reporter failed before completing"
+            );
+        }
+    }
 }
 
 /// Copies a table through ctid work items, using worker child connections.
@@ -419,6 +368,9 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     max_copy_connections: u16,
+    consistent_point: PgLsn,
+    out_of_band_source_pool: OutOfBandSourcePool,
+    replication_lag_refresh_interval: Duration,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
     destination: D,
@@ -431,6 +383,9 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
         replicated_table_schema,
         publication_name,
         max_copy_connections.max(1),
+        consistent_point,
+        out_of_band_source_pool,
+        replication_lag_refresh_interval,
         batch_config,
         shutdown_rx,
         destination,
@@ -449,6 +404,9 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     max_copy_connections: u16,
+    consistent_point: PgLsn,
+    out_of_band_source_pool: OutOfBandSourcePool,
+    replication_lag_refresh_interval: Duration,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
     destination: D,
@@ -461,11 +419,11 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     let target_partitions = planned_copy_partitions.target_partitions;
     let copy_partitions = planned_copy_partitions.copy_partitions;
     let worker_count = usize::from(max_copy_connections).min(copy_partitions.len());
-    let table_copy_metrics = TableCopyMetrics::new(table_id, copy_partitions.len(), worker_count);
-    let _active_table_copy_metrics = ActiveTableCopyMetrics::new(table_copy_metrics.clone());
+    let table_copy_metrics = TableCopyMetrics::new();
 
     if copy_partitions.is_empty() {
         info!(table_id = table_id.0, "table is empty, skipping table copy");
+        table_copy_metrics.record_completed_table_copy(0, 0.0);
 
         return Ok(TableCopyResult::Completed { total_rows: 0, total_duration_secs: 0.0 });
     }
@@ -483,15 +441,19 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     let work_queue = Arc::new(Mutex::new(VecDeque::from(copy_partitions)));
     let publication_name = publication_name.map(Arc::<str>::from);
     let mut join_set = JoinSet::new();
-    let mut metrics_reporter =
-        Some(spawn_table_copy_metrics_reporter(table_copy_metrics.clone(), shutdown_rx.clone()));
+    let mut lag_reporter = Some(spawn_table_copy_lag_reporter(
+        table_id,
+        consistent_point,
+        out_of_band_source_pool,
+        replication_lag_refresh_interval,
+        shutdown_rx.clone(),
+    ));
 
     for worker_index in 0..worker_count {
         let child_replication_client = match replication_transaction.fork_child().await {
             Ok(child_replication_client) => child_replication_client,
             Err(error) => {
-                abort_and_drain_copy_workers(&mut join_set).await;
-                stop_table_copy_metrics_reporter(&mut metrics_reporter, &table_copy_metrics).await;
+                stop_table_copy_lag_reporter(&mut lag_reporter).await;
 
                 return Err(error);
             }
@@ -529,15 +491,10 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     }
 
     let mut total_rows = 0;
-    let mut partition_durations = Vec::new();
-    let mut partition_row_counts = Vec::new();
-
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok(Ok(CopyWorkerOutcome::Completed(worker_result))) => {
                 total_rows += worker_result.total_rows;
-                partition_durations.extend(worker_result.partition_durations);
-                partition_row_counts.extend(worker_result.partition_row_counts);
             }
             Ok(Ok(CopyWorkerOutcome::Shutdown)) => {
                 info!(
@@ -545,19 +502,17 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
                     "shutting down table copy after worker received shutdown"
                 );
                 drain_copy_workers(&mut join_set).await?;
-                stop_table_copy_metrics_reporter(&mut metrics_reporter, &table_copy_metrics).await;
+                stop_table_copy_lag_reporter(&mut lag_reporter).await;
 
                 return Ok(TableCopyResult::Shutdown);
             }
             Ok(Err(error)) => {
-                abort_and_drain_copy_workers(&mut join_set).await;
-                stop_table_copy_metrics_reporter(&mut metrics_reporter, &table_copy_metrics).await;
+                stop_table_copy_lag_reporter(&mut lag_reporter).await;
 
                 return Err(error);
             }
             Err(join_error) => {
-                abort_and_drain_copy_workers(&mut join_set).await;
-                stop_table_copy_metrics_reporter(&mut metrics_reporter, &table_copy_metrics).await;
+                stop_table_copy_lag_reporter(&mut lag_reporter).await;
 
                 return Err(etl_error!(
                     ErrorKind::TableSyncWorkerPanic,
@@ -568,10 +523,10 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
         }
     }
 
-    stop_table_copy_metrics_reporter(&mut metrics_reporter, &table_copy_metrics).await;
-    table_copy_metrics.record_imbalance(&partition_durations, &partition_row_counts);
+    stop_table_copy_lag_reporter(&mut lag_reporter).await;
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
+    table_copy_metrics.record_completed_table_copy(total_rows, total_duration_secs);
 
     info!(table_id = table_id.0, total_rows, total_duration_secs, "completed table copy");
 
@@ -639,6 +594,9 @@ async fn plan_copy_partitions(
         let ctid_partitions = replication_transaction
             .plan_ctid_partitions(source_table_id, table_partition_count)
             .await?;
+        if !ctid_partitions.is_empty() {
+            record_planned_partition_blocks(estimate.table_blocks, ctid_partitions.len() as u16);
+        }
 
         copy_partitions.extend(ctid_partitions.into_iter().map(|ctid_partition| CopyPartition {
             source_table_id,
@@ -673,8 +631,6 @@ where
     let child_replication_transaction =
         child_replication_client.begin_transaction(&snapshot_id).await?;
     let mut total_rows = 0;
-    let mut partition_durations = Vec::new();
-    let mut partition_row_counts = Vec::new();
 
     loop {
         if is_shutdown_requested(&shutdown_rx) {
@@ -687,11 +643,7 @@ where
         let Some(copy_partition) = copy_partition else {
             child_replication_transaction.commit().await?;
 
-            return Ok(CopyWorkerOutcome::Completed(CompletedCopyWorker {
-                total_rows,
-                partition_durations,
-                partition_row_counts,
-            }));
+            return Ok(CopyWorkerOutcome::Completed(CompletedCopyWorker { total_rows }));
         };
 
         match copy_partition_rows(
@@ -709,10 +661,8 @@ where
         )
         .await?
         {
-            TableCopyResult::Completed { total_rows: partition_rows, total_duration_secs } => {
+            TableCopyResult::Completed { total_rows: partition_rows, .. } => {
                 total_rows += partition_rows;
-                partition_durations.push(total_duration_secs);
-                partition_row_counts.push(partition_rows);
             }
             TableCopyResult::Shutdown => return Ok(CopyWorkerOutcome::Shutdown),
         }
@@ -783,7 +733,6 @@ where
         connection_updates_rx,
         replicated_table_schema,
         destination,
-        table_copy_metrics.clone(),
     )
     .await?
     {
@@ -817,7 +766,6 @@ async fn copy_table_rows_from_stream<D, S>(
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     replicated_table_schema: ReplicatedTableSchema,
     destination: D,
-    table_copy_metrics: TableCopyMetrics,
 ) -> EtlResult<ShutdownResult<u64, u64>>
 where
     D: Destination + Clone + Send + 'static,
@@ -877,7 +825,6 @@ where
                 pending_flush_result.await.into_result()?;
 
                 total_rows += batch_size;
-                table_copy_metrics.record_copied_rows(batch_size);
 
                 let send_duration_seconds = before_sending.elapsed().as_secs_f64();
                 histogram!(
@@ -911,13 +858,6 @@ async fn drain_copy_workers(join_set: &mut JoinSet<EtlResult<CopyWorkerOutcome>>
     }
 
     Ok(())
-}
-
-/// Aborts and drains all remaining copy workers.
-async fn abort_and_drain_copy_workers(join_set: &mut JoinSet<EtlResult<CopyWorkerOutcome>>) {
-    join_set.abort_all();
-
-    while join_set.join_next().await.is_some() {}
 }
 
 #[cfg(test)]
