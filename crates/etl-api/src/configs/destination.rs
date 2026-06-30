@@ -179,20 +179,15 @@ pub enum DestinationConfigUpdateError {
 /// Represents an update field where the API must distinguish an omitted field
 /// from an explicit JSON `null`.
 ///
-/// This is used for optional secrets that can be cleared without first returning
-/// the existing secret to the client: omitted preserves the stored value, `null`
-/// clears it, and a provided value replaces it.
-#[derive(Debug, Clone)]
+/// This is used for optional secrets that can be cleared without first
+/// returning the existing secret to the client: omitted preserves the stored
+/// value, `null` clears it, and a provided value replaces it.
+#[derive(Debug, Clone, Default)]
 pub enum UpdateField<T> {
+    #[default]
     Preserve,
     Clear,
     Set(T),
-}
-
-impl<T> Default for UpdateField<T> {
-    fn default() -> Self {
-        Self::Preserve
-    }
 }
 
 impl<T> UpdateField<T> {
