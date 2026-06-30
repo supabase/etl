@@ -60,16 +60,10 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
             ]),
         ];
 
-        destination
-            .write_table_rows_for_tests(&replicated_table_schema, users_rows)
-            .await
-            .unwrap();
+        destination.write_table_rows_for_tests(&replicated_table_schema, users_rows).await.unwrap();
 
         let mut rows = parse_bigquery_table_rows::<BigQueryUser>(
-            bigquery_database
-                .query_table(table_schema.name.clone())
-                .await
-                .unwrap()
+            bigquery_database.query_table(table_schema.name.clone()).await.unwrap(),
         );
         rows.sort();
 
@@ -81,8 +75,6 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
             ]
         );
 
-        destination
-            .drop_table_for_copy_for_tests(&replicated_table_schema)
-            .await.unwrap();
+        destination.drop_table_for_copy_for_tests(&replicated_table_schema).await.unwrap();
     }
 }
