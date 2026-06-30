@@ -3,7 +3,7 @@ use etl_config::{
     shared::{ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode, IcebergConfig},
 };
 use secrecy::ExposeSecret;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use url::Url;
 use utoipa::ToSchema;
@@ -176,6 +176,89 @@ pub enum DestinationConfigUpdateError {
     MissingRequiredSecret { destination: &'static str, field: &'static str },
 }
 
+#[derive(Debug, Clone)]
+pub enum UpdateField<T> {
+    Preserve,
+    Clear,
+    Set(T),
+}
+
+impl<T> Default for UpdateField<T> {
+    fn default() -> Self {
+        Self::Preserve
+    }
+}
+
+impl<T> UpdateField<T> {
+    pub fn is_preserve(&self) -> bool {
+        matches!(self, Self::Preserve)
+    }
+
+    fn from_option(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::Set(value),
+            None => Self::Clear,
+        }
+    }
+
+    fn apply_to(self, stored: Option<T>) -> Option<T> {
+        match self {
+            Self::Preserve => stored,
+            Self::Clear => None,
+            Self::Set(value) => Some(value),
+        }
+    }
+
+    fn into_option(self) -> Option<T> {
+        match self {
+            Self::Set(value) => Some(value),
+            Self::Preserve | Self::Clear => None,
+        }
+    }
+}
+
+impl<T> Serialize for UpdateField<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Preserve | Self::Clear => serializer.serialize_none(),
+            Self::Set(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for UpdateField<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(|value| match value {
+            Some(value) => Self::Set(value),
+            None => Self::Clear,
+        })
+    }
+}
+
+fn trim_update_secret_field<'de, D>(
+    deserializer: D,
+) -> Result<UpdateField<SerializableSecretString>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(|value| match value {
+        Some(value) => UpdateField::Set(SerializableSecretString::from(value.trim().to_owned())),
+        None => UpdateField::Clear,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateApiDestinationConfig {
@@ -204,8 +287,9 @@ pub enum UpdateApiDestinationConfig {
         #[schema(example = "foo")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         user: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        password: Option<SerializableSecretString>,
+        #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+        #[schema(value_type = Option<String>)]
+        password: UpdateField<SerializableSecretString>,
         #[schema(example = "my_db")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         database: String,
@@ -234,17 +318,19 @@ pub enum UpdateApiDestinationConfig {
         #[schema(example = "my-access-key")]
         #[serde(
             default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "crate::utils::trim_option_secret_string"
+            skip_serializing_if = "UpdateField::is_preserve",
+            deserialize_with = "trim_update_secret_field"
         )]
-        s3_access_key_id: Option<SerializableSecretString>,
+        #[schema(value_type = Option<String>)]
+        s3_access_key_id: UpdateField<SerializableSecretString>,
         #[schema(example = "my-secret-key")]
         #[serde(
             default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "crate::utils::trim_option_secret_string"
+            skip_serializing_if = "UpdateField::is_preserve",
+            deserialize_with = "trim_update_secret_field"
         )]
-        s3_secret_access_key: Option<SerializableSecretString>,
+        #[schema(value_type = Option<String>)]
+        s3_secret_access_key: UpdateField<SerializableSecretString>,
         #[schema(example = "us-east-1")]
         #[serde(
             default,
@@ -304,8 +390,9 @@ pub enum UpdateApiDestinationConfig {
         #[schema(example = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADA...")]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         private_key: Option<SerializableSecretString>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        private_key_passphrase: Option<SerializableSecretString>,
+        #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+        #[schema(value_type = Option<String>)]
+        private_key_passphrase: UpdateField<SerializableSecretString>,
         #[schema(example = "ANALYTICS")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         database: String,
@@ -351,7 +438,7 @@ impl UpdateApiDestinationConfig {
             ) => Ok(StoredDestinationConfig::ClickHouse {
                 url,
                 user,
-                password: password.or(stored_password),
+                password: password.apply_to(stored_password),
                 database,
                 engine,
             }),
@@ -387,8 +474,8 @@ impl UpdateApiDestinationConfig {
                 catalog_url: catalog_url.unwrap_or(stored_catalog_url),
                 data_path,
                 pool_size: pool_size.unwrap_or(DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE),
-                s3_access_key_id: s3_access_key_id.or(stored_s3_access_key_id),
-                s3_secret_access_key: s3_secret_access_key.or(stored_s3_secret_access_key),
+                s3_access_key_id: s3_access_key_id.apply_to(stored_s3_access_key_id),
+                s3_secret_access_key: s3_secret_access_key.apply_to(stored_s3_secret_access_key),
                 s3_region,
                 s3_endpoint,
                 s3_url_style,
@@ -417,7 +504,8 @@ impl UpdateApiDestinationConfig {
                 account_id,
                 user,
                 private_key: private_key.unwrap_or(stored_private_key),
-                private_key_passphrase: private_key_passphrase.or(stored_private_key_passphrase),
+                private_key_passphrase: private_key_passphrase
+                    .apply_to(stored_private_key_passphrase),
                 database,
                 schema,
                 role,
@@ -449,7 +537,13 @@ impl UpdateApiDestinationConfig {
                     .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
             }),
             Self::ClickHouse { url, user, password, database, engine } => {
-                Ok(StoredDestinationConfig::ClickHouse { url, user, password, database, engine })
+                Ok(StoredDestinationConfig::ClickHouse {
+                    url,
+                    user,
+                    password: password.into_option(),
+                    database,
+                    engine,
+                })
             }
             Self::Iceberg { config } => config
                 .into_stored_requiring_secrets()
@@ -472,8 +566,8 @@ impl UpdateApiDestinationConfig {
                 catalog_url: require_secret(catalog_url, "DuckLake", "catalog_url")?,
                 data_path,
                 pool_size: pool_size.unwrap_or(DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE),
-                s3_access_key_id,
-                s3_secret_access_key,
+                s3_access_key_id: s3_access_key_id.into_option(),
+                s3_secret_access_key: s3_secret_access_key.into_option(),
                 s3_region,
                 s3_endpoint,
                 s3_url_style,
@@ -495,7 +589,7 @@ impl UpdateApiDestinationConfig {
                 account_id,
                 user,
                 private_key: require_secret(private_key, "Snowflake", "private_key")?,
-                private_key_passphrase,
+                private_key_passphrase: private_key_passphrase.into_option(),
                 database,
                 schema,
                 role,
@@ -902,7 +996,13 @@ impl From<FullApiDestinationConfig> for UpdateApiDestinationConfig {
                 connection_pool_size,
             },
             FullApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
-                Self::ClickHouse { url, user, password, database, engine }
+                Self::ClickHouse {
+                    url,
+                    user,
+                    password: UpdateField::from_option(password),
+                    database,
+                    engine,
+                }
             }
             FullApiDestinationConfig::Iceberg { config } => Self::Iceberg { config: config.into() },
             FullApiDestinationConfig::Ducklake {
@@ -923,8 +1023,8 @@ impl From<FullApiDestinationConfig> for UpdateApiDestinationConfig {
                 catalog_url: Some(catalog_url),
                 data_path,
                 pool_size,
-                s3_access_key_id,
-                s3_secret_access_key,
+                s3_access_key_id: UpdateField::from_option(s3_access_key_id),
+                s3_secret_access_key: UpdateField::from_option(s3_secret_access_key),
                 s3_region,
                 s3_endpoint,
                 s3_url_style,
@@ -946,7 +1046,7 @@ impl From<FullApiDestinationConfig> for UpdateApiDestinationConfig {
                 account_id,
                 user,
                 private_key: Some(private_key),
-                private_key_passphrase,
+                private_key_passphrase: UpdateField::from_option(private_key_passphrase),
                 database,
                 schema,
                 role,
@@ -2184,6 +2284,160 @@ mod tests {
             StoredDestinationConfig::BigQuery { service_account_key, .. } => {
                 assert_eq!(service_account_key.expose_secret(), "new-key");
             }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn update_api_destination_config_preserves_omitted_snowflake_passphrase() {
+        let stored_config = StoredDestinationConfig::Snowflake {
+            account_id: "myorg-myaccount".to_owned(),
+            user: "etl_user".to_owned(),
+            private_key: SerializableSecretString::from("existing-key".to_owned()),
+            private_key_passphrase: Some(SerializableSecretString::from(
+                "existing-passphrase".to_owned(),
+            )),
+            database: "analytics".to_owned(),
+            schema: "public".to_owned(),
+            role: None,
+        };
+        let update_config: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "snowflake": {
+                "account_id": "myorg-myaccount",
+                "user": "etl_user",
+                "private_key": "new-key",
+                "database": "analytics",
+                "schema": "public"
+            }
+        }))
+        .unwrap();
+
+        let updated_config = update_config.merge_into_stored(stored_config).unwrap();
+
+        match updated_config {
+            StoredDestinationConfig::Snowflake { private_key, private_key_passphrase, .. } => {
+                assert_eq!(private_key.expose_secret(), "new-key");
+                assert_eq!(
+                    private_key_passphrase.expect("passphrase should be preserved").expose_secret(),
+                    "existing-passphrase"
+                );
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn update_api_destination_config_clears_null_snowflake_passphrase() {
+        let stored_config = StoredDestinationConfig::Snowflake {
+            account_id: "myorg-myaccount".to_owned(),
+            user: "etl_user".to_owned(),
+            private_key: SerializableSecretString::from("existing-key".to_owned()),
+            private_key_passphrase: Some(SerializableSecretString::from(
+                "existing-passphrase".to_owned(),
+            )),
+            database: "analytics".to_owned(),
+            schema: "public".to_owned(),
+            role: None,
+        };
+        let update_config: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "snowflake": {
+                "account_id": "myorg-myaccount",
+                "user": "etl_user",
+                "private_key": "new-key",
+                "private_key_passphrase": null,
+                "database": "analytics",
+                "schema": "public"
+            }
+        }))
+        .unwrap();
+
+        let updated_config = update_config.merge_into_stored(stored_config).unwrap();
+
+        match updated_config {
+            StoredDestinationConfig::Snowflake { private_key, private_key_passphrase, .. } => {
+                assert_eq!(private_key.expose_secret(), "new-key");
+                assert!(private_key_passphrase.is_none());
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn update_api_destination_config_clears_null_clickhouse_password() {
+        let stored_config = StoredDestinationConfig::ClickHouse {
+            url: Url::parse("https://example.com:8443").unwrap(),
+            user: "etl".to_owned(),
+            password: Some(SerializableSecretString::from("existing-password".to_owned())),
+            database: "analytics".to_owned(),
+            engine: ClickHouseEngine::MergeTree,
+        };
+        let update_config = UpdateApiDestinationConfig::ClickHouse {
+            url: Url::parse("https://example.com:8443").unwrap(),
+            user: "etl".to_owned(),
+            password: UpdateField::Clear,
+            database: "analytics".to_owned(),
+            engine: ClickHouseEngine::MergeTree,
+        };
+
+        let updated_config = update_config.merge_into_stored(stored_config).unwrap();
+
+        match updated_config {
+            StoredDestinationConfig::ClickHouse { password, .. } => {
+                assert!(password.is_none());
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn update_api_destination_config_deserializes_optional_secret_update_fields() {
+        let omitted_password: UpdateApiDestinationConfig =
+            serde_json::from_value(serde_json::json!({
+                "clickhouse": {
+                    "url": "https://example.com:8443",
+                    "user": "etl",
+                    "database": "analytics"
+                }
+            }))
+            .unwrap();
+        let null_password: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "clickhouse": {
+                "url": "https://example.com:8443",
+                "user": "etl",
+                "password": null,
+                "database": "analytics"
+            }
+        }))
+        .unwrap();
+        let set_password: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "clickhouse": {
+                "url": "https://example.com:8443",
+                "user": "etl",
+                "password": "new-password",
+                "database": "analytics"
+            }
+        }))
+        .unwrap();
+
+        match omitted_password {
+            UpdateApiDestinationConfig::ClickHouse { password, .. } => {
+                assert!(matches!(password, UpdateField::Preserve));
+            }
+            _ => panic!("Config types don't match"),
+        }
+        match null_password {
+            UpdateApiDestinationConfig::ClickHouse { password, .. } => {
+                assert!(matches!(password, UpdateField::Clear));
+            }
+            _ => panic!("Config types don't match"),
+        }
+        match set_password {
+            UpdateApiDestinationConfig::ClickHouse { password, .. } => match password {
+                UpdateField::Set(password) => {
+                    assert_eq!(password.expose_secret(), "new-password");
+                }
+                _ => panic!("Password should be set"),
+            },
             _ => panic!("Config types don't match"),
         }
     }
