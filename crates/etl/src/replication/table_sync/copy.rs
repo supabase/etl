@@ -75,15 +75,6 @@ struct CopyPartition {
     ctid_partition: CtidPartition,
 }
 
-/// Planned work for one tracked table copy.
-#[derive(Debug)]
-struct PlannedCopyPartitions {
-    /// CTID work items workers will pull from.
-    copy_partitions: Vec<CopyPartition>,
-    /// Target partition count used before empty physical tables were skipped.
-    target_partitions: u16,
-}
-
 /// Rows and timings copied by a completed worker.
 #[derive(Debug)]
 struct CompletedCopyWorker {
@@ -189,12 +180,16 @@ fn partitions_for_table_weight(
     debug_assert!(total_weight > 0);
     debug_assert!(block_count > 0);
 
+    // Use a wide intermediate so very large row or block estimates cannot
+    // overflow while computing the proportional share.
     let partition_weight = partition_weight as u128;
     let total_weight = total_weight as u128;
     let block_count = block_count as u64;
     let target_partitions = u128::from(target_partitions);
     let weighted_partitions = div_ceil_u128(partition_weight * target_partitions, total_weight);
 
+    // CTID ranges split heap blocks, so more partitions than blocks would only
+    // create empty work items.
     weighted_partitions.min(u128::from(block_count)).min(u128::from(u16::MAX)).max(1) as u16
 }
 
@@ -338,10 +333,8 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     batch_budget: BatchBudgetController,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
-    let planned_copy_partitions =
+    let copy_partitions =
         plan_copy_partitions(replication_transaction, table_id, max_copy_connections).await?;
-    let target_partitions = planned_copy_partitions.target_partitions;
-    let copy_partitions = planned_copy_partitions.copy_partitions;
     let worker_count = usize::from(max_copy_connections).min(copy_partitions.len());
 
     if copy_partitions.is_empty() {
@@ -354,12 +347,13 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     info!(
         table_id = table_id.0,
         max_copy_connections,
-        target_partitions,
         planned_partitions = copy_partitions.len(),
         active_workers = worker_count,
         "starting table copy"
     );
 
+    // Every child copy connection imports the same exported snapshot, so all
+    // CTID ranges for this table copy see a consistent source view.
     let snapshot_id = replication_transaction.export_snapshot().await?;
     let work_queue = Arc::new(Mutex::new(VecDeque::from(copy_partitions)));
     let publication_name = publication_name.map(str::to_owned);
@@ -382,6 +376,8 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
             }
         };
 
+        // Keep these values owned by each worker. They are small, and cloning
+        // them avoids extra shared ownership machinery in the hot path.
         let snapshot_id = snapshot_id.clone();
         let work_queue = Arc::clone(&work_queue);
         let replicated_table_schema = replicated_table_schema.clone();
@@ -459,7 +455,7 @@ async fn plan_copy_partitions(
     replication_transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
     max_copy_connections: u16,
-) -> EtlResult<PlannedCopyPartitions> {
+) -> EtlResult<Vec<CopyPartition>> {
     let source_tables = if replication_transaction.is_partitioned_table(table_id).await? {
         replication_transaction.get_leaf_partitions(table_id).await?
     } else {
@@ -482,9 +478,12 @@ async fn plan_copy_partitions(
 
     // If there are no estimates, we don't need to copy any partitions.
     if table_estimates.is_empty() {
-        return Ok(PlannedCopyPartitions { copy_partitions: vec![], target_partitions: 0 });
+        return Ok(vec![]);
     }
 
+    // Row estimates are useful for allocating work across leaf tables, but only
+    // if every physical table has one. Otherwise, fall back to heap blocks so a
+    // non-empty table with stale stats is not weighted as zero.
     let use_estimated_rows =
         table_estimates.iter().all(|(_, estimate)| estimate.estimated_rows > 0);
     let total_estimated_rows = use_estimated_rows
@@ -517,10 +516,14 @@ async fn plan_copy_partitions(
         let ctid_partitions = replication_transaction
             .plan_ctid_partitions(source_table_id, table_partition_count)
             .await?;
+
         if !ctid_partitions.is_empty() {
             record_planned_partition_blocks(estimate.table_blocks, ctid_partitions.len() as u16);
         }
 
+        // Partitioned parents have no physical CTIDs, so COPY runs against the
+        // leaf table while publication row filters are resolved from the
+        // tracked table.
         copy_partitions.extend(ctid_partitions.into_iter().map(|ctid_partition| CopyPartition {
             source_table_id,
             filter_table_id: table_id,
@@ -528,7 +531,7 @@ async fn plan_copy_partitions(
         }));
     }
 
-    Ok(PlannedCopyPartitions { copy_partitions, target_partitions })
+    Ok(copy_partitions)
 }
 
 /// Runs one child connection until there is no more copy work to claim.
@@ -563,6 +566,8 @@ where
 
         let copy_partition = work_queue.lock().await.pop_front();
         let Some(copy_partition) = copy_partition else {
+            // The queue is fully populated before workers start; an empty queue
+            // means all CTID work has been claimed.
             child_replication_transaction.commit().await?;
 
             return Ok(CopyWorkerOutcome::Completed(CompletedCopyWorker { total_rows }));
