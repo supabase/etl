@@ -1,14 +1,18 @@
 # Scripts
 
-Legacy shell scripts for development workflows. All scripts are accessible through the `cargo x` task runner (see `cargo x --help`).
+Development workflows should be exposed through the `cargo x` task runner (see
+`cargo x --help`). Shell scripts in `scripts/bin` are legacy entrypoints kept
+only until their implementation is moved into native xtask commands and the
+scripts can be removed.
 
-New development commands should be added as xtask commands in `crates/xtask/src/commands/` rather than as shell scripts here. Existing scripts will be ported to native xtask commands over time.
+New development commands should be added as xtask commands in
+`crates/xtask/src/commands/` rather than as shell scripts here. Existing shell
+scripts are being removed over time as their logic moves into xtask.
 
 ## Script to xtask mapping
 
 | Script                                | xtask command             |
 | ------------------------------------- | ------------------------- |
-| `bin/fmt.sh` / `bin/fmt-check.sh`     | `cargo x fmt [--check]`   |
 | `bin/check-msrv-sync.sh`              | `cargo x msrv`            |
 | `bin/init.sh`                         | `cargo x init`            |
 | `bin/run-migrations.sh`               | `cargo x migrate`         |
