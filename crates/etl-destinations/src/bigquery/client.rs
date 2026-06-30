@@ -1244,18 +1244,21 @@ impl BigQueryClient {
             Ok(results) => results,
             Err(error) => {
                 let mut retryable_requests = Vec::new();
-                let mut has_terminal_request = false;
+                let mut has_non_retryable_request = false;
+
+                // A call-level Storage Write error is not tied to a single batch index. Retry
+                // only if the error is locally retryable for every append request in the call.
                 for request in append_requests {
                     if let Some(detail) =
                         retryable_storage_write_error_detail(self, &request, &error).await?
                     {
                         retryable_requests.push(RetryableAppendRequest { request, detail });
                     } else {
-                        has_terminal_request = true;
+                        has_non_retryable_request = true;
                     }
                 }
 
-                if !has_terminal_request && !retryable_requests.is_empty() {
+                if !has_non_retryable_request && !retryable_requests.is_empty() {
                     return Ok(AppendProcessingResult::Retry {
                         pending_requests: retryable_requests,
                         bytes_sent: 0,
@@ -1299,6 +1302,8 @@ impl BigQueryClient {
                     }
                 }
                 BatchProcessResult::RequestError { error: request_error } => {
+                    // Batch-level request errors keep their batch index, so only the affected
+                    // append request needs to be classified and retried.
                     if let Some(detail) = retryable_storage_write_error_detail(
                         self,
                         &append_requests[batch_index],
