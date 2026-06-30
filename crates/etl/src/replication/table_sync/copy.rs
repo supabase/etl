@@ -1,7 +1,7 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     pin::Pin,
-    sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -55,10 +55,6 @@ const CTID_COPY_ROWS_PER_PARTITION: i64 = 250_000;
 /// Maximum CTID ranges planned for one tracked table.
 const MAX_CTID_COPY_PARTITIONS: u16 = 1024;
 
-/// Latest table copy lag by active table copy.
-static TABLE_COPY_END_TO_END_LAG_BYTES_BY_TABLE: LazyLock<StdMutex<HashMap<TableId, u64>>> =
-    LazyLock::new(|| StdMutex::new(HashMap::new()));
-
 /// Result of a table copy operation.
 #[derive(Debug)]
 pub(crate) enum TableCopyResult {
@@ -88,71 +84,11 @@ struct PlannedCopyPartitions {
     target_partitions: u16,
 }
 
-/// Cumulative metrics shared by all workers copying one tracked table.
-#[derive(Clone, Debug)]
-struct TableCopyMetrics;
-
-impl TableCopyMetrics {
-    /// Creates metrics for one table copy.
-    fn new() -> Self {
-        Self
-    }
-
-    /// Records one successfully copied ctid partition.
-    fn record_completed_partition(&self, rows: u64, duration_secs: f64) {
-        counter!(
-            ETL_TABLE_COPY_PARTITIONS_TOTAL,
-            OUTCOME_LABEL => "completed",
-        )
-        .increment(1);
-        histogram!(ETL_TABLE_COPY_PARTITION_ROWS).record(rows as f64);
-        histogram!(ETL_TABLE_COPY_PARTITION_DURATION_SECONDS).record(duration_secs);
-    }
-
-    /// Records the planned block size of one ctid partition.
-    fn record_planned_partition_blocks(blocks: i64) {
-        histogram!(ETL_TABLE_COPY_PARTITION_PLANNED_BLOCKS).record(blocks.max(0) as f64);
-    }
-
-    /// Records one partition that observed shutdown before completing.
-    fn record_shutdown_partition(&self) {
-        counter!(
-            ETL_TABLE_COPY_PARTITIONS_TOTAL,
-            OUTCOME_LABEL => "shutdown",
-        )
-        .increment(1);
-    }
-
-    /// Records final metrics for one successful table copy.
-    fn record_completed_table_copy(&self, rows: u64, duration_secs: f64) {
-        counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(rows);
-        histogram!(ETL_TABLE_COPY_DURATION_SECONDS).record(duration_secs);
-    }
-}
-
 /// Handle for the table-copy replication lag reporter task.
+#[derive(Debug)]
 struct TableCopyLagReporter {
     /// Join handle for the lag reporter task.
     handle: JoinHandle<()>,
-}
-
-/// Removes a table copy from lag aggregation when its reporter exits.
-struct TableCopyReplicationLagGuard {
-    /// Table whose latest copy lag is tracked by this reporter.
-    table_id: TableId,
-}
-
-impl TableCopyReplicationLagGuard {
-    /// Creates a guard for one table copy reporter.
-    fn new(table_id: TableId) -> Self {
-        Self { table_id }
-    }
-}
-
-impl Drop for TableCopyReplicationLagGuard {
-    fn drop(&mut self) {
-        remove_table_copy_replication_lag_metrics(self.table_id);
-    }
 }
 
 /// Rows and timings copied by a completed worker.
@@ -171,6 +107,44 @@ enum CopyWorkerOutcome {
     Shutdown,
 }
 
+/// Records one successfully copied ctid partition.
+fn record_completed_partition(rows: u64, duration_secs: f64) {
+    counter!(
+        ETL_TABLE_COPY_PARTITIONS_TOTAL,
+        OUTCOME_LABEL => "completed",
+    )
+    .increment(1);
+    histogram!(ETL_TABLE_COPY_PARTITION_ROWS).record(rows as f64);
+    histogram!(ETL_TABLE_COPY_PARTITION_DURATION_SECONDS).record(duration_secs);
+}
+
+/// Records planned heap block counts for the ctid ranges of one physical table.
+fn record_planned_partition_blocks(table_blocks: i64, partition_count: u16) {
+    let effective_partitions = i64::from(partition_count).min(table_blocks);
+    for partition_index in 0..effective_partitions {
+        let start_block = partition_index * table_blocks / effective_partitions;
+        let end_block_exclusive = (partition_index + 1) * table_blocks / effective_partitions;
+
+        let blocks = end_block_exclusive - start_block;
+        histogram!(ETL_TABLE_COPY_PARTITION_PLANNED_BLOCKS).record(blocks.max(0) as f64);
+    }
+}
+
+/// Records one partition that observed shutdown before completing.
+fn record_shutdown_partition() {
+    counter!(
+        ETL_TABLE_COPY_PARTITIONS_TOTAL,
+        OUTCOME_LABEL => "shutdown",
+    )
+    .increment(1);
+}
+
+/// Records final metrics for one successful table copy.
+fn record_completed_table_copy(rows: u64, duration_secs: f64) {
+    counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(rows);
+    histogram!(ETL_TABLE_COPY_DURATION_SECONDS).record(duration_secs);
+}
+
 /// Returns `numerator / denominator`, rounded up.
 fn div_ceil_u128(numerator: u128, denominator: u128) -> u128 {
     debug_assert!(denominator > 0);
@@ -186,11 +160,16 @@ fn target_ctid_partition_count(
     max_copy_connections: u16,
     total_estimated_rows: Option<i64>,
 ) -> u16 {
+    // If we have just one copy connection, we just load everything as one partition.
     if max_copy_connections == 1 {
         return 1;
     }
 
+    // We try to estimate the number of partitions given the worker count.
     let worker_target = max_copy_connections.saturating_mul(CTID_PARTITIONS_PER_COPY_WORKER).max(1);
+
+    // We try to estimate the number of partitions also using the total number of estimated rows
+    // for the table(s).
     let row_target = total_estimated_rows.filter(|estimated_rows| *estimated_rows > 0).map_or(
         1,
         |estimated_rows| {
@@ -200,6 +179,7 @@ fn target_ctid_partition_count(
         },
     );
 
+    // We take the biggest number of partitions between the two, while remaining within sane limits.
     worker_target.max(row_target).clamp(1, MAX_CTID_COPY_PARTITIONS)
 }
 
@@ -232,20 +212,6 @@ fn table_copy_partition_weight(
     if use_estimated_rows { estimated_rows } else { table_blocks }
 }
 
-/// Records planned heap block counts for the ctid ranges of one physical table.
-fn record_planned_partition_blocks(table_blocks: i64, partition_count: u16) {
-    debug_assert!(table_blocks > 0);
-    debug_assert!(partition_count > 0);
-
-    let effective_partitions = i64::from(partition_count).min(table_blocks);
-    for partition_index in 0..effective_partitions {
-        let start_block = partition_index * table_blocks / effective_partitions;
-        let end_block_exclusive = (partition_index + 1) * table_blocks / effective_partitions;
-
-        TableCopyMetrics::record_planned_partition_blocks(end_block_exclusive - start_block);
-    }
-}
-
 /// Returns true when the table copy should stop for shutdown.
 fn is_shutdown_requested(shutdown_rx: &ShutdownRx) -> bool {
     shutdown_rx.has_changed().unwrap_or(true)
@@ -260,7 +226,6 @@ fn spawn_table_copy_lag_reporter(
     mut shutdown_rx: ShutdownRx,
 ) -> TableCopyLagReporter {
     let handle = tokio::spawn(async move {
-        let _table_copy_replication_lag_guard = TableCopyReplicationLagGuard::new(table_id);
         let mut replication_lag_interval = tokio::time::interval(replication_lag_refresh_interval);
         replication_lag_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -269,13 +234,9 @@ fn spawn_table_copy_lag_reporter(
                 biased;
 
                 _ = shutdown_rx.changed() => {
-                    emit_table_copy_replication_lag_metrics(
-                        table_id,
-                        consistent_point,
-                        &out_of_band_source_pool,
-                    ).await;
                     break;
                 }
+
                 _ = replication_lag_interval.tick() => {
                     emit_table_copy_replication_lag_metrics(
                         table_id,
@@ -302,7 +263,7 @@ async fn emit_table_copy_replication_lag_metrics(
             let consistent_point = u64::from(consistent_point);
             let table_copy_lag_bytes = source_current_lsn.saturating_sub(consistent_point);
 
-            record_table_copy_replication_lag(table_id, table_copy_lag_bytes);
+            gauge!(ETL_TABLE_COPY_END_TO_END_LAG_BYTES).set(table_copy_lag_bytes as f64);
         }
         Err(error) => {
             warn!(
@@ -312,35 +273,6 @@ async fn emit_table_copy_replication_lag_metrics(
             );
         }
     }
-}
-
-/// Records one table copy lag sample and publishes the maximum active lag.
-fn record_table_copy_replication_lag(table_id: TableId, lag_bytes: u64) {
-    let mut lag_by_table = table_copy_replication_lag_metrics();
-    lag_by_table.insert(table_id, lag_bytes);
-
-    publish_max_table_copy_replication_lag(&lag_by_table);
-}
-
-/// Removes one completed table copy lag sample and publishes the remaining max.
-fn remove_table_copy_replication_lag_metrics(table_id: TableId) {
-    let mut lag_by_table = table_copy_replication_lag_metrics();
-    lag_by_table.remove(&table_id);
-
-    publish_max_table_copy_replication_lag(&lag_by_table);
-}
-
-/// Locks the table copy lag map, recovering through poisoning if needed.
-fn table_copy_replication_lag_metrics() -> MutexGuard<'static, HashMap<TableId, u64>> {
-    TABLE_COPY_END_TO_END_LAG_BYTES_BY_TABLE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Publishes the maximum lag across active table copies.
-fn publish_max_table_copy_replication_lag(lag_by_table: &HashMap<TableId, u64>) {
-    let max_lag_bytes = lag_by_table.values().copied().max().unwrap_or(0);
-    gauge!(ETL_TABLE_COPY_END_TO_END_LAG_BYTES).set(max_lag_bytes as f64);
 }
 
 /// Stops the periodic replication lag reporter task.
@@ -419,11 +351,10 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     let target_partitions = planned_copy_partitions.target_partitions;
     let copy_partitions = planned_copy_partitions.copy_partitions;
     let worker_count = usize::from(max_copy_connections).min(copy_partitions.len());
-    let table_copy_metrics = TableCopyMetrics::new();
 
     if copy_partitions.is_empty() {
         info!(table_id = table_id.0, "table is empty, skipping table copy");
-        table_copy_metrics.record_completed_table_copy(0, 0.0);
+        record_completed_table_copy(0, 0.0);
 
         return Ok(TableCopyResult::Completed { total_rows: 0, total_duration_secs: 0.0 });
     }
@@ -468,7 +399,6 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
         let destination = destination.clone();
         let memory_monitor = memory_monitor.clone();
         let batch_budget = batch_budget.clone();
-        let table_copy_metrics = table_copy_metrics.clone();
 
         join_set.spawn(async move {
             copy_worker(
@@ -484,7 +414,6 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
                 destination,
                 memory_monitor,
                 batch_budget,
-                table_copy_metrics,
             )
             .await
         });
@@ -501,7 +430,7 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
                     table_id = table_id.0,
                     "shutting down table copy after worker received shutdown"
                 );
-                drain_copy_workers(&mut join_set).await?;
+
                 stop_table_copy_lag_reporter(&mut lag_reporter).await;
 
                 return Ok(TableCopyResult::Shutdown);
@@ -526,7 +455,7 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     stop_table_copy_lag_reporter(&mut lag_reporter).await;
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
-    table_copy_metrics.record_completed_table_copy(total_rows, total_duration_secs);
+    record_completed_table_copy(total_rows, total_duration_secs);
 
     info!(table_id = table_id.0, total_rows, total_duration_secs, "completed table copy");
 
@@ -551,6 +480,7 @@ async fn plan_copy_partitions(
         let estimate =
             replication_transaction.get_table_copy_planning_estimate(source_table_id).await?;
 
+        // If a table has no blocks, we don't want to consider it for the copy.
         if estimate.table_blocks == 0 {
             continue;
         }
@@ -558,6 +488,7 @@ async fn plan_copy_partitions(
         table_estimates.push((source_table_id, estimate));
     }
 
+    // If there are no estimates, we don't need to copy any partitions.
     if table_estimates.is_empty() {
         return Ok(PlannedCopyPartitions { copy_partitions: vec![], target_partitions: 0 });
     }
@@ -623,7 +554,6 @@ async fn copy_worker<D>(
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
-    table_copy_metrics: TableCopyMetrics,
 ) -> EtlResult<CopyWorkerOutcome>
 where
     D: Destination + Clone + Send + 'static,
@@ -657,7 +587,6 @@ where
             destination.clone(),
             memory_monitor.clone(),
             batch_budget.clone(),
-            table_copy_metrics.clone(),
         )
         .await?
         {
@@ -682,13 +611,12 @@ async fn copy_partition_rows<D>(
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
-    table_copy_metrics: TableCopyMetrics,
 ) -> EtlResult<TableCopyResult>
 where
     D: Destination + Clone + Send + 'static,
 {
     if is_shutdown_requested(&shutdown_rx) {
-        table_copy_metrics.record_shutdown_partition();
+        record_shutdown_partition();
 
         return Ok(TableCopyResult::Shutdown);
     }
@@ -738,14 +666,14 @@ where
     {
         ShutdownResult::Ok(total_rows) => total_rows,
         ShutdownResult::Shutdown(_) => {
-            table_copy_metrics.record_shutdown_partition();
+            record_shutdown_partition();
 
             return Ok(TableCopyResult::Shutdown);
         }
     };
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
-    table_copy_metrics.record_completed_partition(total_rows, total_duration_secs);
+    record_completed_partition(total_rows, total_duration_secs);
 
     info!(
         table_id = table_id.0,
@@ -839,25 +767,6 @@ where
             }
         }
     }
-}
-
-/// Drains remaining workers without aborting them.
-async fn drain_copy_workers(join_set: &mut JoinSet<EtlResult<CopyWorkerOutcome>>) -> EtlResult<()> {
-    while let Some(result) = join_set.join_next().await {
-        match result {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => return Err(error),
-            Err(join_error) => {
-                return Err(etl_error!(
-                    ErrorKind::TableSyncWorkerPanic,
-                    "One or more table copy workers panicked",
-                    source: join_error
-                ));
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
