@@ -1201,8 +1201,6 @@ impl BigQueryClient {
                         return Err(storage_write_retry_timeout_error(&retry_summary));
                     }
 
-                    self.invalidate_all_connections().await;
-
                     warn!(
                         attempt,
                         pending_batch_count,
