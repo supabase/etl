@@ -122,6 +122,7 @@ pub async fn update_destination(
         select config
         from app.destinations
         where tenant_id = $1 and id = $2
+        for update
         "#,
     )
     .bind(tenant_id)

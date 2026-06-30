@@ -304,9 +304,9 @@ pub(crate) async fn update_destination(
     let destination_id = destination_id.into_inner();
     let destination = destination.into_inner();
 
-    let mut conn = pool.acquire().await.map_err(DestinationsDbError::from)?;
+    let mut txn = pool.begin().await.map_err(DestinationsDbError::from)?;
     data::destinations::update_destination(
-        conn.deref_mut(),
+        txn.deref_mut(),
         tenant_id,
         &destination.name,
         destination_id,
@@ -315,6 +315,7 @@ pub(crate) async fn update_destination(
     )
     .await?
     .ok_or(DestinationError::DestinationNotFound(destination_id))?;
+    txn.commit().await.map_err(DestinationsDbError::from)?;
 
     Ok(StatusCode::OK)
 }
