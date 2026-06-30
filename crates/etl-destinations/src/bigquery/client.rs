@@ -602,14 +602,16 @@ async fn retryable_storage_write_error_detail(
     request: &BigQueryAppendRequest,
     error: &BQError,
 ) -> EtlResult<Option<String>> {
-    // We check if there is an explicit storage write metadata lag error, which is transient.
+    // Explicit Storage Write metadata-lag signals are transient.
     if let Some(detail) = explicit_storage_write_metadata_lag_detail(error) {
         return Ok(Some(detail));
     }
 
-    // We check if there is an ambiguous not found error while still the table exists, which could
-    // happen after a table was deleted and recreated.
-    if is_ambiguous_storage_write_not_found(error) && client.table_exists(&request.dataset_id, &request.table_id).await? {
+    // Generic `NOT_FOUND` can be stale Storage Write routing when the table
+    // exists after a delete/recreate.
+    if is_ambiguous_storage_write_not_found(error)
+        && client.table_exists(&request.dataset_id, &request.table_id).await?
+    {
         return Ok(Some(error.to_string()));
     }
 
