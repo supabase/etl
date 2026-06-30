@@ -58,16 +58,17 @@ const MAX_INFLIGHT_REQUESTS_PER_CONNECTION: usize = 100;
 /// This upper bound ensures reasonable memory usage and prevents overflow when
 /// computing max inflight requests from connection pool size.
 const MAX_SAFE_INFLIGHT_REQUESTS: usize = 100_000;
-/// Maximum time to retry writes while the BigQuery Storage Write API is still
-/// using stale table metadata.
+/// Maximum time to retry locally retryable BigQuery Storage Write append
+/// errors.
 ///
+/// The current retryable cases are metadata-convergence errors after DDL.
 /// Google documents schema update detection as happening on the order of
 /// minutes.
-const STORAGE_WRITE_METADATA_LAG_RETRY_TIMEOUT: Duration = Duration::from_secs(180);
+const STORAGE_WRITE_RETRY_TIMEOUT: Duration = Duration::from_secs(300);
 /// Initial backoff when retrying locally retryable Storage Write errors.
-const STORAGE_WRITE_METADATA_LAG_RETRY_DELAY: Duration = Duration::from_secs(1);
+const STORAGE_WRITE_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// Maximum backoff when retrying locally retryable Storage Write errors.
-const STORAGE_WRITE_METADATA_LAG_MAX_RETRY_DELAY: Duration = Duration::from_secs(15);
+const STORAGE_WRITE_MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// Retry policy for transient BigQuery query job failures.
 const QUERY_RETRY_POLICY: RetryPolicy = RetryPolicy {
     max_retries: 4,
@@ -143,8 +144,8 @@ enum AppendProcessingResult {
     Error(EtlError),
 }
 
-/// A batch append request that should be retried after Storage Write metadata
-/// lag clears.
+/// A batch append request that should be retried after a local Storage Write
+/// retry delay.
 #[derive(Debug)]
 struct RetryableAppendRequest {
     request: BigQueryAppendRequest,
@@ -201,6 +202,26 @@ fn compute_max_inflight_requests(connection_pool_size: usize) -> usize {
         .checked_mul(MAX_INFLIGHT_REQUESTS_PER_CONNECTION)
         .unwrap_or(MAX_SAFE_INFLIGHT_REQUESTS)
         .min(MAX_SAFE_INFLIGHT_REQUESTS)
+}
+
+/// Adds equal jitter to a retry delay.
+fn storage_write_retry_delay_with_jitter(delay: Duration) -> Duration {
+    if delay.is_zero() {
+        return delay;
+    }
+
+    let half_delay = delay / 2;
+    let jitter_range = delay.saturating_sub(half_delay);
+    let jitter_range_nanos = jitter_range.as_nanos();
+
+    if jitter_range_nanos == 0 {
+        return delay;
+    }
+
+    let jitter_nanos = u128::from(random::<u64>()) % (jitter_range_nanos + 1);
+    let jitter = Duration::from_nanos(jitter_nanos as u64);
+
+    half_delay + jitter
 }
 
 /// Processes a single batch result and determines success or failure mode.
@@ -295,16 +316,16 @@ fn log_query_retry(attempt: crate::retry::RetryAttempt<'_, BQError>) {
 
 /// Builds the error returned when local Storage Write retries are exhausted.
 ///
-/// The destination absorbs the common short lag window locally. If
-/// BigQuery still has not accepted the storage write metadata once that bounded
-/// window expires, the worker-level timed retry policy should take over.
+/// The destination absorbs common short Storage Write retry windows locally.
+/// If BigQuery still has not accepted the append once that bounded window
+/// expires, the worker-level timed retry policy should take over.
 fn storage_write_retry_timeout_error(detail: &str) -> EtlError {
     etl_error!(
         ErrorKind::DestinationAtomicBatchRetryable,
         "BigQuery storage write retry timed out",
         format!(
             "BigQuery did not accept the storage write request within {} seconds after DDL: {}",
-            STORAGE_WRITE_METADATA_LAG_RETRY_TIMEOUT.as_secs(),
+            STORAGE_WRITE_RETRY_TIMEOUT.as_secs(),
             detail
         )
     )
@@ -1132,7 +1153,7 @@ impl BigQueryClient {
 
         let started_at = Instant::now();
         let mut attempt = 1;
-        let mut retry_delay = STORAGE_WRITE_METADATA_LAG_RETRY_DELAY;
+        let mut retry_delay = STORAGE_WRITE_RETRY_DELAY;
 
         loop {
             match self.append_table_batches_once(pending_requests).await? {
@@ -1161,14 +1182,14 @@ impl BigQueryClient {
                     }
 
                     let elapsed = started_at.elapsed();
-                    let remaining_timeout =
-                        STORAGE_WRITE_METADATA_LAG_RETRY_TIMEOUT.saturating_sub(elapsed);
+                    let remaining_timeout = STORAGE_WRITE_RETRY_TIMEOUT.saturating_sub(elapsed);
 
                     if remaining_timeout.is_zero() {
                         return Err(storage_write_retry_timeout_error(&retry_summary));
                     }
 
-                    let sleep_delay = retry_delay.min(remaining_timeout);
+                    let sleep_delay =
+                        storage_write_retry_delay_with_jitter(retry_delay.min(remaining_timeout));
 
                     if sleep_delay.is_zero() {
                         return Err(storage_write_retry_timeout_error(&retry_summary));
@@ -1186,7 +1207,7 @@ impl BigQueryClient {
 
                     sleep(sleep_delay).await;
 
-                    retry_delay = (retry_delay * 2).min(STORAGE_WRITE_METADATA_LAG_MAX_RETRY_DELAY);
+                    retry_delay = (retry_delay * 2).min(STORAGE_WRITE_MAX_RETRY_DELAY);
                     attempt += 1;
                 }
                 AppendProcessingResult::Error(error) => return Err(error),
@@ -1502,6 +1523,18 @@ mod tests {
         let error = BQError::from(tonic::Status::not_found("Requested entity was not found"));
 
         assert!(is_ambiguous_storage_write_not_found(&error));
+    }
+
+    #[test]
+    fn storage_write_retry_jitter_stays_within_delay_bounds() {
+        let delay = Duration::from_secs(10);
+
+        for _ in 0..100 {
+            let jittered_delay = storage_write_retry_delay_with_jitter(delay);
+
+            assert!(jittered_delay >= Duration::from_secs(5));
+            assert!(jittered_delay <= delay);
+        }
     }
 
     #[test]
