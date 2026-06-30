@@ -122,7 +122,7 @@ jobs:
 
       - name: Run Cargo Fmt
         if: matrix.check == 'fmt'
-        run: ./scripts/bin/fmt-check.sh
+        run: cargo x fmt --check
 
       - name: Run Cargo Clippy
         if: matrix.check == 'clippy'
