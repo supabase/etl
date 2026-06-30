@@ -349,11 +349,6 @@ fn row_error_to_etl_error(err: RowError) -> EtlError {
     )
 }
 
-/// Converts a request-level append error into a [`BatchProcessResult`].
-fn batch_process_result_from_request_error(error: BQError) -> BatchProcessResult {
-    BatchProcessResult::RequestError { error }
-}
-
 /// Converts BigQuery errors to ETL errors with appropriate classification.
 ///
 /// Maps BigQuery error types to ETL error kinds for consistent error handling.
