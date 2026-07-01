@@ -1,8 +1,10 @@
 //! DuckLake-specific configuration helpers.
 
-use std::{io, path::PathBuf};
+use std::{io, path::PathBuf, str::FromStr};
 
+use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use thiserror::Error;
+use tokio_postgres::{Config as PgConfig, config::SslMode};
 use url::Url;
 
 /// Errors returned by [`parse_ducklake_url`].
@@ -23,6 +25,22 @@ pub enum ParseDucklakeUrlError {
     /// DuckLake data path did not use S3 storage.
     #[error("DuckLake data path must use the s3:// scheme, got {0}://")]
     UnsupportedDataPathScheme(String),
+}
+
+/// Errors returned by [`ducklake_catalog_metadata_connect_options`].
+#[derive(Debug, Error)]
+pub enum DuckLakeCatalogConnectOptionsError {
+    /// The catalog URL could not be parsed as a tokio-postgres connection.
+    #[error("Invalid DuckLake PostgreSQL catalog URL")]
+    TokioPostgres(#[source] tokio_postgres::Error),
+
+    /// The catalog URL could not be parsed as a sqlx Postgres connection.
+    #[error("Invalid DuckLake PostgreSQL catalog URL")]
+    Sqlx(#[source] sqlx::Error),
+
+    /// The catalog URL uses an SSL mode that cannot be represented for sqlx.
+    #[error("DuckLake PostgreSQL catalog URL uses an unsupported sslmode")]
+    UnsupportedSslMode,
 }
 
 /// Parses a DuckLake URL or local path into a normalized [`Url`].
@@ -60,6 +78,45 @@ pub fn libpq_tcp_host(host: &str) -> &str {
     }
 }
 
+/// Builds sqlx connection options for DuckLake metadata catalog queries.
+pub fn ducklake_catalog_metadata_connect_options(
+    catalog_url: &Url,
+) -> Result<PgConnectOptions, DuckLakeCatalogConnectOptionsError> {
+    let config = PgConfig::from_str(catalog_url.as_str())
+        .map_err(DuckLakeCatalogConnectOptionsError::TokioPostgres)?;
+    let mut options = PgConnectOptions::from_str(catalog_url.as_str())
+        .map_err(DuckLakeCatalogConnectOptionsError::Sqlx)?;
+
+    if let Some(hostaddr) = config.get_hostaddrs().first() {
+        options = options.host(&hostaddr.to_string());
+    } else if let Some(host) = catalog_url.host_str() {
+        options = options.host(libpq_tcp_host(host));
+    }
+
+    options = options.ssl_mode(sqlx_ssl_mode(config.get_ssl_mode(), config.get_hostaddrs())?);
+
+    Ok(options)
+}
+
+/// Maps libpq-style SSL modes onto sqlx's Postgres SSL modes.
+fn sqlx_ssl_mode(
+    ssl_mode: SslMode,
+    hostaddrs: &[std::net::IpAddr],
+) -> Result<PgSslMode, DuckLakeCatalogConnectOptionsError> {
+    match ssl_mode {
+        SslMode::Disable => Ok(PgSslMode::Disable),
+        SslMode::Prefer => Ok(PgSslMode::Prefer),
+        SslMode::Require => Ok(PgSslMode::Require),
+        SslMode::VerifyCa => Ok(PgSslMode::VerifyCa),
+        SslMode::VerifyFull if hostaddrs.is_empty() => Ok(PgSslMode::VerifyFull),
+        // sqlx does not expose libpq's separate hostaddr field. When dialing a
+        // numeric address, verify the CA but avoid hostname verification
+        // against the IP literal.
+        SslMode::VerifyFull => Ok(PgSslMode::VerifyCa),
+        _ => Err(DuckLakeCatalogConnectOptionsError::UnsupportedSslMode),
+    }
+}
+
 /// Parses a DuckLake data path and requires an `s3://` URL.
 pub fn parse_ducklake_s3_data_path(value: &str) -> Result<Url, ParseDucklakeUrlError> {
     let url = parse_ducklake_url(value)?;
@@ -75,6 +132,7 @@ pub fn parse_ducklake_s3_data_path(value: &str) -> Result<Url, ParseDucklakeUrlE
 mod tests {
     use std::sync::{Mutex, OnceLock};
 
+    use sqlx::postgres::PgSslMode;
     use tempfile::TempDir;
 
     use super::*;
@@ -146,5 +204,60 @@ mod tests {
             error,
             ParseDucklakeUrlError::UnsupportedDataPathScheme(scheme) if scheme == "file"
         ));
+    }
+
+    #[test]
+    fn ducklake_catalog_metadata_connect_options_uses_catalog_host_without_hostaddr() {
+        let catalog_url = Url::parse(
+            "postgres://user:password@catalog.example.test:5432/ducklake?sslmode=verify-full",
+        )
+        .unwrap();
+
+        let options = ducklake_catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "catalog.example.test");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
+    }
+
+    #[test]
+    fn ducklake_catalog_metadata_connect_options_uses_ipv4_hostaddr_as_network_target() {
+        let catalog_url = Url::parse(
+            "postgres://user:password@catalog.example.test:5432/ducklake?hostaddr=192.0.2.10&\
+             sslmode=verify-full",
+        )
+        .unwrap();
+
+        let options = ducklake_catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "192.0.2.10");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyCa));
+    }
+
+    #[test]
+    fn ducklake_catalog_metadata_connect_options_uses_ipv6_hostaddr_as_network_target() {
+        let catalog_url = Url::parse(
+            "postgres://user:password@catalog.example.test:5432/ducklake?hostaddr=2001:db8::10&\
+             sslmode=verify-full",
+        )
+        .unwrap();
+
+        let options = ducklake_catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "2001:db8::10");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyCa));
+    }
+
+    #[test]
+    fn ducklake_catalog_metadata_connect_options_supports_ipv6_literal_host() {
+        let catalog_url = Url::parse(
+            "postgres://postgres:FAKE_SECRET@[2a05:dddd:c3c:b703:e52f:e170:4155:c8dd]:5432/\
+             postgres?sslmode=prefer",
+        )
+        .unwrap();
+
+        let options = ducklake_catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "2a05:dddd:c3c:b703:e52f:e170:4155:c8dd");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::Prefer));
     }
 }
