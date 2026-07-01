@@ -15,7 +15,7 @@ use tokio::{
     time::MissedTickBehavior,
 };
 use tokio_postgres::types::PgLsn;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
@@ -383,12 +383,19 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
 
                 return Err(error);
             }
+            Err(join_error) if join_error.is_cancelled() => {
+                debug!(error = %join_error, "table copy worker task was cancelled");
+
+                stop_table_copy_lag_reporter(&mut lag_reporter).await;
+
+                return Ok(TableCopyResult::Shutdown);
+            }
             Err(join_error) => {
                 stop_table_copy_lag_reporter(&mut lag_reporter).await;
 
                 return Err(etl_error!(
-                    ErrorKind::TableSyncWorkerPanic,
-                    "One or more table copy workers panicked",
+                    ErrorKind::TableCopyWorkerPanic,
+                    "Table copy worker panicked",
                     source: join_error
                 ));
             }
