@@ -1042,7 +1042,7 @@ async fn table_copy_stream_is_consistent() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_copy_estimate_plans_ctid_partitions_for_non_empty_table() {
+async fn plan_ctid_partitions_returns_correct_partitions() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1107,7 +1107,7 @@ async fn table_copy_estimate_plans_ctid_partitions_for_non_empty_table() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_copy_estimate_plans_no_ctid_partitions_for_empty_table() {
+async fn plan_ctid_partitions_returns_empty_for_empty_table() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1130,7 +1130,7 @@ async fn table_copy_estimate_plans_no_ctid_partitions_for_empty_table() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_copy_stream_with_estimated_ctid_partitions_covers_table_rows() {
+async fn table_copy_stream_with_ctid_partition() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
