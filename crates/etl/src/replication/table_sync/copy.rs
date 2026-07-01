@@ -321,6 +321,9 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     ));
 
     for worker_index in 0..worker_count {
+        // We fork the connection for each worker since the main replication transaction has to remain
+        // open for the whole duration of the copy. This is needed since the snapshot exported by the
+        // replication transaction is only valid while that transaction's connection is active.
         let child_replication_client = match replication_transaction.fork_child().await {
             Ok(child_replication_client) => child_replication_client,
             Err(error) => {
