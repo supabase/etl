@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     configs::{
-        destination::FullApiDestinationConfig,
+        destination::{FullApiDestinationConfig, UpdateApiDestinationConfig},
         encryption::EncryptionKeyring,
         pipeline::FullApiPipelineConfig,
         serde::{DbDeserializationError, DbSerializationError},
@@ -75,7 +75,7 @@ pub async fn update_destination_and_pipeline(
     pipeline_id: i64,
     source_id: i64,
     destination_name: &str,
-    destination_config: FullApiDestinationConfig,
+    destination_config: UpdateApiDestinationConfig,
     pipeline_config: FullApiPipelineConfig,
     encryption_key: &EncryptionKeyring,
 ) -> Result<(), DestinationPipelinesDbError> {
