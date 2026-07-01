@@ -22,8 +22,9 @@ use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use url::Url;
 
-use crate::support::clickhouse::{
-    AllTypesRow, BoundaryValuesRow, DateBoundariesRow, current_state_query, install_crypto_provider,
+use crate::support::{
+    clickhouse::{AllTypesRow, BoundaryValuesRow, DateBoundariesRow, current_state_query},
+    crypto::install_crypto_provider,
 };
 
 /// User-column projection for the all-types test, with `uuid_col` rendered

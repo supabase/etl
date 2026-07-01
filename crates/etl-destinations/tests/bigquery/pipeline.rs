@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Once, time::Duration};
+use std::{str::FromStr, time::Duration};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
@@ -24,21 +24,12 @@ use etl_telemetry::tracing::init_test_tracing;
 use rand::{Rng, distr::Alphanumeric, random};
 use tokio::time::sleep;
 
-/// Ensures crypto provider is only initialized once.
-static INIT_CRYPTO: Once = Once::new();
-
-/// Installs the default cryptographic provider for rustls in tests.
-fn install_crypto_provider() {
-    INIT_CRYPTO.call_once(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .expect("failed to install default crypto provider");
-    });
-}
-
-use crate::support::bigquery::{
-    BigQueryDefaultsRow, BigQueryOrder, BigQuerySchemaChangeRow, BigQueryUser,
-    NonNullableColsScalar, NullableColsArray, NullableColsScalar, parse_bigquery_table_rows,
+use crate::support::{
+    bigquery::{
+        BigQueryDefaultsRow, BigQueryOrder, BigQuerySchemaChangeRow, BigQueryUser,
+        NonNullableColsScalar, NullableColsArray, NullableColsScalar, parse_bigquery_table_rows,
+    },
+    crypto::install_crypto_provider,
 };
 
 const REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES: usize = 8192;

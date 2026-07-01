@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use commands::{
     BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
-    FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, NextestArgs, PostgresArgs,
+    FixArgs, FixPipelineArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, NextestArgs, PostgresArgs,
     RotateEncryptionKeyArgs, SeedArgs, TestArgs, TestClickhouseArgs, TestSnowflakeArgs,
     VendorDuckdbArgs,
 };
@@ -41,6 +41,9 @@ enum Command {
     Init(InitArgs),
     /// Run database migrations.
     Migrate(MigrateArgs),
+    /// Fix a pipeline by applying one of the available repair sub-commands.
+    #[command(name = "fix-pipeline")]
+    FixPipeline(FixPipelineArgs),
     /// Verify MSRV consistency across Cargo.toml, rust-toolchain.toml, and
     /// cargo-msrv.
     Msrv(MsrvArgs),
@@ -83,6 +86,7 @@ async fn main() -> Result<()> {
         Command::Fmt(cmd) => cmd.run(),
         Command::Init(cmd) => cmd.run(),
         Command::Migrate(cmd) => cmd.run(),
+        Command::FixPipeline(cmd) => cmd.run().await,
         Command::Msrv(cmd) => cmd.run(),
         Command::Nextest(cmd) => cmd.run(),
         Command::Postgres(cmd) => cmd.run(),

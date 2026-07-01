@@ -19,8 +19,9 @@ use etl_destinations::clickhouse::test_utils::setup_clickhouse_database;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
-use crate::support::clickhouse::{
-    current_state_query, install_crypto_provider, optimize_final_cleanup_sql, table_engine_query,
+use crate::support::{
+    clickhouse::{current_state_query, optimize_final_cleanup_sql, table_engine_query},
+    crypto::install_crypto_provider,
 };
 
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
