@@ -132,7 +132,7 @@ fn plan_ctid_partitions_for_table_blocks(
 pub struct TableCopyPlanningEstimate {
     /// Current physical relation size in Postgres blocks.
     ///
-    /// This comes from [`pg_relation_size`], so it reflects relation storage at
+    /// This comes from `pg_relation_size`, so it reflects relation storage at
     /// planning time rather than MVCC-visible tuples.
     table_blocks: u64,
     /// Estimated row count from Postgres statistics.

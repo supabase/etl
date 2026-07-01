@@ -120,9 +120,11 @@ fn target_ctid_partition_count(
     let row_target = total_estimated_rows.filter(|estimated_rows| *estimated_rows > 0).map_or(
         1,
         |estimated_rows| {
-            div_ceil_u128(estimated_rows, CTID_COPY_ROWS_PER_PARTITION)
+            let row_target = div_ceil_u128(estimated_rows, CTID_COPY_ROWS_PER_PARTITION)
                 .min(u128::from(u16::MAX))
-                .max(1) as u16
+                .max(1);
+
+            u16::try_from(row_target).expect("clamped partition count should fit in u16")
         },
     );
 
@@ -151,7 +153,9 @@ fn partitions_for_table_weight(
 
     // CTID ranges split heap blocks, so more partitions than blocks would only
     // create empty work items.
-    weighted_partitions.min(block_count).min(u128::from(u16::MAX)).max(1) as u16
+    let partition_count = weighted_partitions.min(block_count).min(u128::from(u16::MAX)).max(1);
+
+    u16::try_from(partition_count).expect("clamped partition count should fit in u16")
 }
 
 /// Returns true when the table copy should stop for shutdown.

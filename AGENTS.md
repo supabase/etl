@@ -110,6 +110,10 @@
   explicit integration boundary or the item is not re-exported.
 - After visibility changes, verify with `cargo rustc -p <crate> --all-features -- -W unreachable_pub` for the relevant target and then rerun the smallest relevant checks/tests.
 - Keep log message prose lowercase; SQL fragments, identifiers, and external product names may keep their required casing.
+- Prefer `From`/`TryFrom` numeric conversions over `as` casts when the trait
+  conversion exists or a value was explicitly range-checked. Use `as` for
+  intentionally lossy conversions or conversions that Rust does not expose via
+  `From`, such as `u64` to `f64` metric values.
 
 ## Error Handling And Panics
 - Use typed errors and `Result` for recoverable failures.
