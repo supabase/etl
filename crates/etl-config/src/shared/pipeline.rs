@@ -321,6 +321,7 @@ impl PipelineConfig {
 
     /// Default maximum worker connections per table during initial copy.
     pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 4;
+
     /// Default interval in milliseconds between one memory refresh and another.
     pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
 
