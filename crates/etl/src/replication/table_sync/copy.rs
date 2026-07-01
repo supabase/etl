@@ -29,8 +29,7 @@ use crate::{
         ETL_TABLE_COPY_EFFECTIVE_PARTITIONS, ETL_TABLE_COPY_END_TO_END_LAG_BYTES,
         ETL_TABLE_COPY_PARTITION_BLOCKS, ETL_TABLE_COPY_PARTITION_DURATION_SECONDS,
         ETL_TABLE_COPY_PARTITION_ROWS, ETL_TABLE_COPY_PARTITIONS_TOTAL,
-        ETL_TABLE_COPY_PLANNED_PARTITIONS, ETL_TABLE_COPY_ROWS_TOTAL, OUTCOME_LABEL,
-        WORKER_TYPE_LABEL,
+        ETL_TABLE_COPY_PLANNED_PARTITIONS, ETL_TABLE_COPY_ROWS_TOTAL, WORKER_TYPE_LABEL,
     },
     postgres::{
         OutOfBandSourcePool, TableCopyStream,
@@ -568,12 +567,6 @@ where
     D: Destination + Clone + Send + 'static,
 {
     if is_shutdown_requested(&shutdown_rx) {
-        counter!(
-            ETL_TABLE_COPY_PARTITIONS_TOTAL,
-            OUTCOME_LABEL => "shutdown",
-        )
-        .increment(1);
-
         return Ok(TableCopyResult::Shutdown);
     }
 
@@ -622,22 +615,12 @@ where
     {
         ShutdownResult::Ok(total_rows) => total_rows,
         ShutdownResult::Shutdown(_) => {
-            counter!(
-                ETL_TABLE_COPY_PARTITIONS_TOTAL,
-                OUTCOME_LABEL => "shutdown",
-            )
-            .increment(1);
-
             return Ok(TableCopyResult::Shutdown);
         }
     };
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
-    counter!(
-        ETL_TABLE_COPY_PARTITIONS_TOTAL,
-        OUTCOME_LABEL => "completed",
-    )
-    .increment(1);
+    counter!(ETL_TABLE_COPY_PARTITIONS_TOTAL).increment(1);
     histogram!(ETL_TABLE_COPY_PARTITION_ROWS).record(total_rows as f64);
     histogram!(ETL_TABLE_COPY_PARTITION_DURATION_SECONDS).record(total_duration_secs);
 

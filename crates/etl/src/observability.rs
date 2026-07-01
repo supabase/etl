@@ -135,19 +135,19 @@ pub(crate) fn register_metrics() {
         describe_histogram!(
             ETL_TABLE_COPY_PARTITION_ROWS,
             Unit::Count,
-            "Rows flushed by one table copy partition."
+            "Rows flushed by one completed table copy partition."
         );
 
         describe_histogram!(
             ETL_TABLE_COPY_PARTITION_DURATION_SECONDS,
             Unit::Seconds,
-            "Duration in seconds to copy one table copy partition."
+            "Duration in seconds to copy one completed table copy partition."
         );
 
         describe_counter!(
             ETL_TABLE_COPY_PARTITIONS_TOTAL,
             Unit::Count,
-            "Total table copy partitions by outcome."
+            "Total completed table copy partitions."
         );
 
         describe_gauge!(
