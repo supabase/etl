@@ -295,6 +295,9 @@ impl StoredPipelineConfig {
             table_sync_copy: self.table_sync_copy,
             invalidated_slot_behavior: self.invalidated_slot_behavior,
             max_copy_connections_per_table: self.max_copy_connections_per_table,
+            // The API-managed pipelines run with an elevated role, so keep the
+            // existing behavior of installing source migrations on start.
+            run_source_migrations: true,
         }
     }
 }
