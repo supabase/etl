@@ -51,7 +51,7 @@ use crate::{
 /// Target number of CTID ranges per worker when copy is parallel.
 const CTID_PARTITIONS_PER_COPY_WORKER: u16 = 4;
 /// Target estimated rows per CTID range for large tables.
-const CTID_COPY_ROWS_PER_PARTITION: i64 = 250_000;
+const CTID_COPY_ROWS_PER_PARTITION: u128 = 250_000;
 /// Maximum CTID ranges planned for one tracked table.
 const MAX_CTID_COPY_PARTITIONS: u16 = 1024;
 
@@ -104,7 +104,7 @@ fn div_ceil_u128(numerator: u128, denominator: u128) -> u128 {
 /// Returns how many ctid ranges to target for a table copy.
 fn target_ctid_partition_count(
     max_copy_connections: u16,
-    total_estimated_rows: Option<i64>,
+    total_estimated_rows: Option<u128>,
 ) -> u16 {
     // If we have just one copy connection, we just load everything as one
     // partition.
@@ -120,7 +120,7 @@ fn target_ctid_partition_count(
     let row_target = total_estimated_rows.filter(|estimated_rows| *estimated_rows > 0).map_or(
         1,
         |estimated_rows| {
-            div_ceil_u128(estimated_rows as u128, CTID_COPY_ROWS_PER_PARTITION as u128)
+            div_ceil_u128(estimated_rows, CTID_COPY_ROWS_PER_PARTITION)
                 .min(u128::from(u16::MAX))
                 .max(1) as u16
         },
@@ -133,9 +133,9 @@ fn target_ctid_partition_count(
 
 /// Allocates ctid partition count to one physical table by planning weight.
 fn partitions_for_table_weight(
-    partition_weight: i64,
-    total_weight: i64,
-    block_count: i64,
+    partition_weight: u128,
+    total_weight: u128,
+    block_count: u64,
     target_partitions: u16,
 ) -> u16 {
     debug_assert!(partition_weight > 0);
@@ -144,15 +144,13 @@ fn partitions_for_table_weight(
 
     // Use a wide intermediate so very large row or block estimates cannot
     // overflow while computing the proportional share.
-    let partition_weight = partition_weight as u128;
-    let total_weight = total_weight as u128;
-    let block_count = block_count as u64;
+    let block_count = u128::from(block_count);
     let target_partitions = u128::from(target_partitions);
     let weighted_partitions = div_ceil_u128(partition_weight * target_partitions, total_weight);
 
     // CTID ranges split heap blocks, so more partitions than blocks would only
     // create empty work items.
-    weighted_partitions.min(u128::from(block_count)).min(u128::from(u16::MAX)).max(1) as u16
+    weighted_partitions.min(block_count).min(u128::from(u16::MAX)).max(1) as u16
 }
 
 /// Returns true when the table copy should stop for shutdown.
@@ -454,11 +452,11 @@ async fn plan_copy_partitions(
         table_estimates.iter().all(|(_, estimate)| estimate.estimated_rows() > 0);
 
     let total_estimated_rows = use_estimated_rows
-        .then(|| table_estimates.iter().map(|(_, estimate)| estimate.estimated_rows()).sum());
+        .then(|| table_estimates.iter().map(|(_, estimate)| estimate.partition_weight(true)).sum());
 
     let target_partitions = target_ctid_partition_count(max_copy_connections, total_estimated_rows);
 
-    let total_weight: i64 = table_estimates
+    let total_weight: u128 = table_estimates
         .iter()
         .map(|(_, estimate)| estimate.partition_weight(use_estimated_rows))
         .sum();
@@ -741,7 +739,18 @@ mod tests {
 
     #[test]
     fn target_ctid_partition_count_caps_large_values() {
-        assert_eq!(target_ctid_partition_count(u16::MAX, Some(i64::MAX)), MAX_CTID_COPY_PARTITIONS);
+        assert_eq!(
+            target_ctid_partition_count(u16::MAX, Some(i64::MAX as u128)),
+            MAX_CTID_COPY_PARTITIONS
+        );
+    }
+
+    #[test]
+    fn target_ctid_partition_count_uses_wide_row_estimates() {
+        assert_eq!(
+            target_ctid_partition_count(8, Some((i64::MAX as u128) * 2)),
+            MAX_CTID_COPY_PARTITIONS
+        );
     }
 
     #[test]

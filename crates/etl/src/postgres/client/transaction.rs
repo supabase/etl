@@ -63,10 +63,10 @@ fn build_ctid_copy_query(
 
 /// Returns the half-open heap block range assigned to one ctid partition.
 fn ctid_partition_block_range(
-    partition_index: i64,
-    table_blocks: i64,
-    effective_partitions: i64,
-) -> (i64, i64) {
+    partition_index: u64,
+    table_blocks: u64,
+    effective_partitions: u64,
+) -> (u64, u64) {
     let start_block = partition_index * table_blocks / effective_partitions;
     let end_block_exclusive = (partition_index + 1) * table_blocks / effective_partitions;
 
@@ -75,7 +75,7 @@ fn ctid_partition_block_range(
 
 /// Builds ctid partition plans from a known physical table block count.
 fn plan_ctid_partitions_for_table_blocks(
-    table_blocks: i64,
+    table_blocks: u64,
     num_partitions: u16,
 ) -> EtlResult<Vec<PlannedCtidPartition>> {
     if num_partitions == 0 {
@@ -89,10 +89,10 @@ fn plan_ctid_partitions_for_table_blocks(
         return Ok(vec![]);
     }
 
-    let requested_partitions = i64::from(num_partitions);
+    let requested_partitions = u64::from(num_partitions);
     let effective_partitions = requested_partitions.min(table_blocks);
 
-    let mut partitions = Vec::with_capacity(effective_partitions as usize);
+    let mut partitions = Vec::with_capacity(usize::from(num_partitions));
     for i in 0..effective_partitions {
         // Proportional block boundaries cover [0, table_blocks) exactly and
         // avoid producing empty trailing ranges when table_blocks is not
@@ -129,33 +129,33 @@ fn plan_ctid_partitions_for_table_blocks(
 /// and last ranges open-ended so a stale physical-size estimate cannot exclude
 /// visible tuples at the relation edges.
 #[derive(Debug)]
-pub(crate) struct TableCopyPlanningEstimate {
+pub struct TableCopyPlanningEstimate {
     /// Current physical relation size in Postgres blocks.
     ///
     /// This comes from [`pg_relation_size`], so it reflects relation storage at
     /// planning time rather than MVCC-visible tuples.
-    table_blocks: i64,
+    table_blocks: u64,
     /// Estimated row count from Postgres statistics.
     ///
     /// This comes from `pg_class.reltuples`, so it can be stale and is used
     /// only as a planning weight when all copied physical tables have a
     /// positive estimate.
-    estimated_rows: i64,
+    estimated_rows: u64,
 }
 
 impl TableCopyPlanningEstimate {
     /// Creates planning statistics from Postgres relation metadata.
-    fn new(table_blocks: i64, estimated_rows: i64) -> Self {
+    fn new(table_blocks: u64, estimated_rows: u64) -> Self {
         Self { table_blocks, estimated_rows }
     }
 
     /// Returns the current physical relation size in Postgres blocks.
-    pub(crate) fn table_blocks(&self) -> i64 {
+    pub(crate) fn table_blocks(&self) -> u64 {
         self.table_blocks
     }
 
     /// Returns the estimated row count from Postgres statistics.
-    pub(crate) fn estimated_rows(&self) -> i64 {
+    pub(crate) fn estimated_rows(&self) -> u64 {
         self.estimated_rows
     }
 
@@ -165,8 +165,10 @@ impl TableCopyPlanningEstimate {
     }
 
     /// Returns the weight to use when allocating copy partitions.
-    pub(crate) fn partition_weight(&self, use_estimated_rows: bool) -> i64 {
-        if use_estimated_rows { self.estimated_rows } else { self.table_blocks }
+    pub(crate) fn partition_weight(&self, use_estimated_rows: bool) -> u128 {
+        let weight = if use_estimated_rows { self.estimated_rows } else { self.table_blocks };
+
+        u128::from(weight)
     }
 
     /// Computes balanced ctid partition ranges for this estimate.
@@ -174,7 +176,7 @@ impl TableCopyPlanningEstimate {
     /// The first and last planned ranges are open-ended because
     /// [`TableCopyPlanningEstimate::table_blocks`] is a physical estimate, not
     /// an MVCC snapshot boundary.
-    pub(crate) fn plan_ctid_partitions(
+    pub fn plan_ctid_partitions(
         &self,
         num_partitions: u16,
     ) -> EtlResult<Vec<PlannedCtidPartition>> {
@@ -184,16 +186,16 @@ impl TableCopyPlanningEstimate {
 
 /// One planned ctid partition and the heap blocks assigned to it.
 #[derive(Debug)]
-pub(crate) struct PlannedCtidPartition {
+pub struct PlannedCtidPartition {
     /// The physical ctid range to query.
     ctid_partition: CtidPartition,
     /// Number of estimated heap blocks assigned to this partition.
-    planned_blocks: i64,
+    planned_blocks: u64,
 }
 
 impl PlannedCtidPartition {
     /// Returns the partition range and assigned heap blocks.
-    pub(crate) fn into_parts(self) -> (CtidPartition, i64) {
+    pub fn into_parts(self) -> (CtidPartition, u64) {
         (self.ctid_partition, self.planned_blocks)
     }
 }
@@ -432,7 +434,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
                 };
 
                 if let (Ok(table_blocks), Ok(estimated_rows)) =
-                    (table_blocks.parse(), estimated_rows.parse())
+                    (table_blocks.parse::<u64>(), estimated_rows.parse::<u64>())
                 {
                     return Ok(TableCopyPlanningEstimate::new(table_blocks, estimated_rows));
                 }
@@ -796,7 +798,7 @@ impl<'a> PgReplicationTransaction<'a> {
     }
 
     /// Returns quick planner statistics for table copy.
-    pub(crate) async fn get_table_copy_planning_estimate(
+    pub async fn get_table_copy_planning_estimate(
         &self,
         table_id: TableId,
     ) -> EtlResult<TableCopyPlanningEstimate> {
@@ -865,7 +867,7 @@ impl<'a> PgChildReplicationTransaction<'a> {
     /// `table_id` is the physical table to copy from. `filter_table_id` is the
     /// table used to resolve publication row filters, which can differ when
     /// copying a leaf partition for a partitioned table.
-    pub(crate) async fn get_table_copy_stream_with_ctid_partition(
+    pub async fn get_table_copy_stream_with_ctid_partition(
         &self,
         table_id: TableId,
         filter_table_id: TableId,
@@ -972,7 +974,7 @@ mod tests {
             partitions.into_iter().map(|partition| partition.into_parts().1).collect::<Vec<_>>();
 
         assert_eq!(planned_blocks, vec![1, 2, 2, 1, 2, 2]);
-        assert_eq!(planned_blocks.iter().sum::<i64>(), 10);
+        assert_eq!(planned_blocks.iter().sum::<u64>(), 10);
     }
 
     #[test]
