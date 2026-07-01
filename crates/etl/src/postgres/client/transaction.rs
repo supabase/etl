@@ -165,10 +165,8 @@ impl TableCopyPlanningEstimate {
     }
 
     /// Returns the weight to use when allocating copy partitions.
-    pub(crate) fn partition_weight(&self, use_estimated_rows: bool) -> u128 {
-        let weight = if use_estimated_rows { self.estimated_rows } else { self.table_blocks };
-
-        u128::from(weight)
+    pub(crate) fn partition_weight(&self, use_estimated_rows: bool) -> u64 {
+        if use_estimated_rows { self.estimated_rows } else { self.table_blocks }
     }
 
     /// Computes balanced ctid partition ranges for this estimate.

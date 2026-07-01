@@ -115,15 +115,15 @@ pub(crate) fn register_metrics() {
         describe_histogram!(
             ETL_TABLE_COPY_PLANNED_PARTITIONS,
             Unit::Count,
-            "Target ctid partitions planned for one table copy before empty table and block-count \
-             clamping."
+            "Target ctid partitions planned for one table copy before per-physical-table \
+             block-count clamping."
         );
 
         describe_histogram!(
             ETL_TABLE_COPY_EFFECTIVE_PARTITIONS,
             Unit::Count,
-            "Actual ctid partitions used for one table copy after empty table and block-count \
-             clamping."
+            "Actual ctid partitions used for one table copy after empty physical-table filtering \
+             and block-count clamping."
         );
 
         describe_histogram!(

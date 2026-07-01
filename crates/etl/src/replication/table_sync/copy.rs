@@ -75,7 +75,7 @@ struct CopyPartition {
     ctid_partition: CtidPartition,
 }
 
-/// Rows and timings copied by a completed worker.
+/// Rows copied by a completed worker.
 #[derive(Debug)]
 struct CompletedCopyWorker {
     /// Rows copied by this worker.
@@ -133,7 +133,7 @@ fn target_ctid_partition_count(
 
 /// Allocates ctid partition count to one physical table by planning weight.
 fn partitions_for_table_weight(
-    partition_weight: u128,
+    partition_weight: u64,
     total_weight: u128,
     block_count: u64,
     target_partitions: u16,
@@ -144,6 +144,7 @@ fn partitions_for_table_weight(
 
     // Use a wide intermediate so very large row or block estimates cannot
     // overflow while computing the proportional share.
+    let partition_weight = u128::from(partition_weight);
     let block_count = u128::from(block_count);
     let target_partitions = u128::from(target_partitions);
     let weighted_partitions = div_ceil_u128(partition_weight * target_partitions, total_weight);
@@ -451,14 +452,20 @@ async fn plan_copy_partitions(
     let use_estimated_rows =
         table_estimates.iter().all(|(_, estimate)| estimate.estimated_rows() > 0);
 
-    let total_estimated_rows = use_estimated_rows
-        .then(|| table_estimates.iter().map(|(_, estimate)| estimate.partition_weight(true)).sum());
+    let total_estimated_rows = use_estimated_rows.then(|| {
+        table_estimates
+            .iter()
+            .map(|(_, estimate)| u128::from(estimate.partition_weight(true)))
+            .sum()
+    });
 
     let target_partitions = target_ctid_partition_count(max_copy_connections, total_estimated_rows);
 
+    // Estimate values fit in u64, but totals and weighted multiplication use
+    // u128 so large physical-table groups cannot overflow during planning.
     let total_weight: u128 = table_estimates
         .iter()
-        .map(|(_, estimate)| estimate.partition_weight(use_estimated_rows))
+        .map(|(_, estimate)| u128::from(estimate.partition_weight(use_estimated_rows)))
         .sum();
 
     let mut copy_partitions = Vec::with_capacity(usize::from(target_partitions));
