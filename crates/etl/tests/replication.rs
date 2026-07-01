@@ -1042,6 +1042,153 @@ async fn table_copy_stream_is_consistent() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn plan_ctid_partitions_returns_correct_partitions() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+
+    let table_id = database
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
+        .await
+        .unwrap();
+
+    database.insert_generate_series(test_table_name("table_1"), &["age"], 1, 100, 1).await.unwrap();
+
+    let (transaction, _) =
+        client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+
+    let estimate = transaction.get_table_copy_planning_estimate(table_id).await.unwrap();
+    let partitions = estimate.plan_ctid_partitions(4).unwrap();
+
+    assert!(!partitions.is_empty(), "expected at least one partition for non-empty table");
+    assert!(partitions.len() <= 4, "planner should not exceed requested partitions");
+
+    let partitions = partitions
+        .into_iter()
+        .map(|planned_partition| planned_partition.into_parts().0)
+        .collect::<Vec<_>>();
+
+    if partitions.len() == 1 {
+        assert!(matches!(partitions.first(), Some(CtidPartition::OpenEnd { .. })));
+    } else {
+        assert!(matches!(partitions.first(), Some(CtidPartition::OpenStart { .. })));
+        assert!(matches!(partitions.last(), Some(CtidPartition::OpenEnd { .. })));
+    }
+
+    for partition in &partitions {
+        match partition {
+            CtidPartition::OpenStart { end_tid } => {
+                assert!(
+                    end_tid.starts_with('(') && end_tid.ends_with(')'),
+                    "end_tid should be a valid tid format: {end_tid}"
+                );
+            }
+            CtidPartition::Closed { start_tid, end_tid } => {
+                assert!(
+                    start_tid.starts_with('(') && start_tid.ends_with(')'),
+                    "start_tid should be a valid tid format: {start_tid}"
+                );
+                assert!(
+                    end_tid.starts_with('(') && end_tid.ends_with(')'),
+                    "end_tid should be a valid tid format: {end_tid}"
+                );
+            }
+            CtidPartition::OpenEnd { start_tid } => {
+                assert!(
+                    start_tid.starts_with('(') && start_tid.ends_with(')'),
+                    "start_tid should be a valid tid format: {start_tid}"
+                );
+            }
+        }
+    }
+
+    transaction.commit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plan_ctid_partitions_returns_empty_for_empty_table() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+
+    let table_id = database
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
+        .await
+        .unwrap();
+
+    let (transaction, _) =
+        client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+
+    let estimate = transaction.get_table_copy_planning_estimate(table_id).await.unwrap();
+    let partitions = estimate.plan_ctid_partitions(4).unwrap();
+
+    assert!(partitions.is_empty(), "expected no partitions for empty table");
+
+    transaction.commit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_stream_with_ctid_partition() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+
+    let table_id = database
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
+        .await
+        .unwrap();
+
+    let expected_rows = 100;
+    database
+        .insert_generate_series(test_table_name("table_1"), &["age"], 1, expected_rows, 1)
+        .await
+        .unwrap();
+
+    let (transaction, _) =
+        client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+
+    let column_schemas = [test_column("age", Type::INT4, 2, true, false)];
+    let estimate = transaction.get_table_copy_planning_estimate(table_id).await.unwrap();
+    let partitions = estimate.plan_ctid_partitions(4).unwrap();
+    assert!(!partitions.is_empty(), "expected at least one partition for non-empty table");
+    assert!(partitions.len() <= 4, "planner should not exceed requested partitions");
+
+    let snapshot_id = transaction.export_snapshot().await.unwrap();
+    assert!(!snapshot_id.is_empty(), "snapshot id should not be empty");
+
+    let mut total_rows = 0;
+    for planned_partition in partitions {
+        let (partition, _) = planned_partition.into_parts();
+        let mut child = transaction.fork_child().await.unwrap();
+        let child_tx = child.begin_transaction(&snapshot_id).await.unwrap();
+
+        let stream = child_tx
+            .get_table_copy_stream_with_ctid_partition(
+                table_id,
+                table_id,
+                &column_schemas,
+                None,
+                &partition,
+            )
+            .await
+            .unwrap();
+
+        total_rows += count_stream_rows(stream).await;
+        child_tx.commit().await.unwrap();
+    }
+
+    transaction.commit().await.unwrap();
+
+    assert_eq!(
+        total_rows, expected_rows as u64,
+        "total rows across all partitions should match inserted rows"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_copy_stream_respects_row_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -2236,144 +2383,6 @@ async fn exclusive_get_slot_state_returns_invalidated_for_lost_slot() {
         slot_state,
         SlotState::Invalidated,
         "Slot should be invalidated after exceeding WAL limit"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn plan_ctid_partitions_returns_correct_partitions() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-
-    let table_id = database
-        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
-        .await
-        .unwrap();
-
-    let expected_rows: i64 = 100;
-    database
-        .insert_generate_series(test_table_name("table_1"), &["age"], 1, expected_rows, 1)
-        .await
-        .unwrap();
-
-    let (transaction, _) =
-        client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
-
-    let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
-
-    assert!(!partitions.is_empty(), "expected at least one partition for non-empty table");
-    assert!(partitions.len() <= 4, "planner should not exceed requested partitions");
-
-    if partitions.len() == 1 {
-        assert!(matches!(partitions.first(), Some(CtidPartition::OpenEnd { .. })));
-    } else {
-        assert!(matches!(partitions.first(), Some(CtidPartition::OpenStart { .. })));
-        assert!(matches!(partitions.last(), Some(CtidPartition::OpenEnd { .. })));
-    }
-
-    for partition in &partitions {
-        match partition {
-            CtidPartition::OpenStart { end_tid } => {
-                assert!(
-                    end_tid.starts_with('(') && end_tid.ends_with(')'),
-                    "end_tid should be a valid tid format: {end_tid}"
-                );
-            }
-            CtidPartition::Closed { start_tid, end_tid } => {
-                assert!(
-                    start_tid.starts_with('(') && start_tid.ends_with(')'),
-                    "start_tid should be a valid tid format: {start_tid}"
-                );
-                assert!(
-                    end_tid.starts_with('(') && end_tid.ends_with(')'),
-                    "end_tid should be a valid tid format: {end_tid}"
-                );
-            }
-            CtidPartition::OpenEnd { start_tid } => {
-                assert!(
-                    start_tid.starts_with('(') && start_tid.ends_with(')'),
-                    "start_tid should be a valid tid format: {start_tid}"
-                );
-            }
-        }
-    }
-
-    transaction.commit().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn plan_ctid_partitions_returns_empty_for_empty_table() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-
-    let table_id = database
-        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
-        .await
-        .unwrap();
-
-    let (transaction, _) =
-        client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
-
-    let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
-
-    assert!(partitions.is_empty(), "expected no partitions for empty table");
-
-    transaction.commit().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_copy_stream_with_ctid_partition() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-
-    let table_id = database
-        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
-        .await
-        .unwrap();
-
-    let expected_rows: i64 = 100;
-    database
-        .insert_generate_series(test_table_name("table_1"), &["age"], 1, expected_rows, 1)
-        .await
-        .unwrap();
-
-    let (transaction, _) =
-        client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
-
-    let column_schemas = &[ColumnSchema::new("age".to_owned(), Type::INT4, -1, 1, true)];
-
-    let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
-    assert!(!partitions.is_empty(), "expected at least one partition for non-empty table");
-    assert!(partitions.len() <= 4, "planner should not exceed requested partitions");
-
-    // Export the snapshot so child connections can share it.
-    let snapshot_id = transaction.export_snapshot().await.unwrap();
-    assert!(!snapshot_id.is_empty(), "snapshot id should not be empty");
-
-    let mut total_rows: u64 = 0;
-    for partition in &partitions {
-        let mut child = transaction.fork_child().await.unwrap();
-        let child_tx = child.begin_transaction(&snapshot_id).await.unwrap();
-
-        let stream = child_tx
-            .get_table_copy_stream_with_ctid_partition(table_id, column_schemas, None, partition)
-            .await
-            .unwrap();
-
-        total_rows += count_stream_rows(stream).await;
-        child_tx.commit().await.unwrap();
-    }
-
-    transaction.commit().await.unwrap();
-
-    assert_eq!(
-        total_rows, expected_rows as u64,
-        "total rows across all partitions should match inserted rows"
     );
 }
 

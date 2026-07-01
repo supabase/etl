@@ -170,6 +170,8 @@ pub enum ErrorKind {
     ApplyWorkerCancelled,
     /// A table sync worker task panicked.
     TableSyncWorkerPanic,
+    /// A table copy worker task panicked.
+    TableCopyWorkerPanic,
     /// A table sync worker task was canceled.
     TableSyncWorkerCancelled,
     /// Table state rollback failed.

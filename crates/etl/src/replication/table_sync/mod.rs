@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 mod copy;
 
@@ -7,7 +7,6 @@ use etl_config::shared::PipelineConfig;
 use etl_postgres::slots::EtlReplicationSlot;
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
-use metrics::histogram;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info, warn};
 
@@ -23,9 +22,8 @@ use crate::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    observability::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL},
     pipeline::PipelineId,
-    postgres::client::PgReplicationClient,
+    postgres::{OutOfBandSourcePool, client::PgReplicationClient},
     replication::{
         state::{TableState, TableStateType},
         table_cache::SharedTableCache,
@@ -103,6 +101,7 @@ pub(crate) async fn start_table_sync<S, D>(
     store: S,
     destination: D,
     shared_table_cache: &SharedTableCache,
+    out_of_band_source_pool: OutOfBandSourcePool,
     shutdown_rx: ShutdownRx,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -308,6 +307,9 @@ where
                     replicated_table_schema.clone(),
                     Some(&config.publication_name),
                     config.max_copy_connections_per_table,
+                    slot.consistent_point,
+                    out_of_band_source_pool.clone(),
+                    Duration::from_millis(config.replication_lag_refresh_interval_ms),
                     config.batch.clone(),
                     shutdown_rx.clone(),
                     destination.clone(),
@@ -326,6 +328,7 @@ where
                             table_id = table_id.0,
                             "table copy interrupted by shutdown, terminating table sync"
                         );
+
                         return Ok(TableSyncResult::Stopped);
                     }
                 }
@@ -346,16 +349,9 @@ where
                     .write_table_rows(&replicated_table_schema, vec![], flush_result)
                     .await?;
                 pending_flush_result.await.into_result()?;
+
                 info!(table_id = table_id.0, "writing empty table rows for empty table");
             }
-
-            // Record the table copy duration.
-            let with_partitioning = config.max_copy_connections_per_table > 1;
-            histogram!(
-                ETL_TABLE_COPY_DURATION_SECONDS,
-                PARTITIONING_LABEL => with_partitioning.to_string(),
-            )
-            .record(total_table_copy_duration_secs);
 
             info!(
                 table_id = table_id.0,

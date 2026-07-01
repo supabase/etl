@@ -85,13 +85,11 @@ pub trait Destination {
     /// The method return value is reserved for immediate dispatch/setup
     /// failures before the work has been accepted.
     ///
-    /// ETL still waits for each table-copy batch to finish before reading the
-    /// next batch for the same copy partition. For non-parallel table copy,
-    /// that means a new batch is requested only after the previous result
-    /// completes. For parallel table copy, ETL already invokes this
-    /// method concurrently across partitions, so the asynchronous result is
-    /// mostly an API consistency tool rather than a way to queue all copy
-    /// batches and wait at the end.
+    /// ETL waits for each table-copy batch to finish before reading the next
+    /// batch for the same copy partition. When multiple copy workers are
+    /// configured, this method can still run concurrently across different
+    /// partitions, so the asynchronous result is mostly an API consistency tool
+    /// rather than a way to queue all copy batches and wait at the end.
     ///
     /// This immediate waiting is intentional: it preserves backpressure and
     /// avoids accumulating too many in-flight row batches in memory.

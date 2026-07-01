@@ -747,6 +747,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             &self.shared_table_cache,
+            self.out_of_band_source_pool.clone(),
             self.shutdown_rx.clone(),
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
