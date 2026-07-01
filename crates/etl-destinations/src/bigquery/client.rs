@@ -65,7 +65,7 @@ const MAX_SAFE_INFLIGHT_REQUESTS: usize = 100_000;
 /// `NOT_FOUND` responses when the BigQuery table API confirms that the target
 /// table exists. Google documents schema update detection as happening on the
 /// order of minutes.
-const STORAGE_WRITE_RETRY_TIMEOUT: Duration = Duration::from_secs(300);
+const STORAGE_WRITE_RETRY_TIMEOUT: Duration = Duration::from_secs(600);
 /// Initial backoff when retrying locally retryable Storage Write errors.
 const STORAGE_WRITE_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// Maximum backoff when retrying locally retryable Storage Write errors.
