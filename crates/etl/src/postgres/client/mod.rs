@@ -7,6 +7,8 @@ mod utils;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use child::ChildPgReplicationClient;
+#[cfg(not(any(test, feature = "test-utils")))]
+pub(crate) use child::ChildPgReplicationClient;
 #[cfg(any(test, feature = "test-utils"))]
 pub use raw::PgReplicationClient;
 #[cfg(not(any(test, feature = "test-utils")))]

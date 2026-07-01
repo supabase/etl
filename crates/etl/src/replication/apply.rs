@@ -595,7 +595,7 @@ impl ApplyLoopTasks {
         loop {
             interval.tick().await;
 
-            match Self::query_source_current_lsn(&out_of_band_source_pool).await {
+            match out_of_band_source_pool.get_current_wal_lsn().await {
                 Ok(source_current_lsn) => {
                     replication_lag_metrics.update_last_source_current_lsn(source_current_lsn);
                     replication_lag_metrics.emit_lag_metrics(worker_type);
@@ -608,30 +608,6 @@ impl ApplyLoopTasks {
                 }
             }
         }
-    }
-
-    /// Queries the current WAL LSN from the source database.
-    async fn query_source_current_lsn(
-        out_of_band_source_pool: &OutOfBandSourcePool,
-    ) -> EtlResult<PgLsn> {
-        let source_current_lsn: String = sqlx::query_scalar("select pg_current_wal_lsn()::text")
-            .fetch_one(out_of_band_source_pool.pool())
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceConnectionFailed,
-                    "Source current LSN query failed",
-                    source: err
-                )
-            })?;
-
-        PgLsn::from_str(&source_current_lsn).map_err(|_| {
-            etl_error!(
-                ErrorKind::InvalidState,
-                "Invalid source current LSN returned by Postgres",
-                source_current_lsn
-            )
-        })
     }
 
     /// Schedules schema cleanup again after the configured interval.

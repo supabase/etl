@@ -282,10 +282,11 @@ pub struct PipelineConfig {
     /// Maximum number of table sync workers that can run at a time
     #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
-    /// Maximum parallel connections per table during initial copy.
-    /// When 1, the existing serial copy path is used.
-    /// When >1 (default), ctid-based partitioning splits the table across N
-    /// connections.
+    /// Maximum worker connections per table during initial copy.
+    ///
+    /// Initial copy always uses ctid range work items, including when this is
+    /// set to 1. ETL may plan more ctid ranges than worker connections so
+    /// workers can pull new ranges as they finish.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
     /// Number of milliseconds between one memory usage refresh and another.
@@ -318,8 +319,9 @@ impl PipelineConfig {
     /// Default maximum number of concurrent table sync workers.
     pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
 
-    /// Default maximum parallel connections per table during initial copy.
-    pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 2;
+    /// Default maximum worker connections per table during initial copy.
+    pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 4;
+
     /// Default interval in milliseconds between one memory refresh and another.
     pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
 
@@ -448,10 +450,11 @@ pub struct PipelineConfigWithoutSecrets {
     /// Maximum number of table sync workers that can run at a time
     #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
-    /// Maximum parallel connections per table during initial copy.
-    /// When 1, the existing serial copy path is used.
-    /// When >1 (default), ctid-based partitioning splits the table across N
-    /// connections.
+    /// Maximum worker connections per table during initial copy.
+    ///
+    /// Initial copy always uses ctid range work items, including when this is
+    /// set to 1. ETL may plan more ctid ranges than worker connections so
+    /// workers can pull new ranges as they finish.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
     /// Number of milliseconds between one memory usage refresh and another.

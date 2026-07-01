@@ -106,7 +106,7 @@ pub(crate) struct BenchmarkArgs {
     /// Maximum table sync workers.
     #[arg(long, default_value_t = 4)]
     max_table_sync_workers: u16,
-    /// Maximum parallel copy connections per table.
+    /// Maximum worker connections per table during initial copy.
     #[arg(long, default_value_t = 2)]
     max_copy_connections_per_table: u16,
     /// Enable ETL memory backpressure. Benchmark orchestration disables it by
