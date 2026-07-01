@@ -659,6 +659,16 @@ where
         Ok(())
     }
 
+    /// Writes table-copy rows through the destination write path in tests.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_table_rows_for_tests(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        self.write_table_rows(replicated_table_schema, table_rows).await
+    }
+
     /// Handles a schema change event (Relation) by computing the diff and
     /// applying changes.
     ///
@@ -1289,6 +1299,16 @@ where
         info!(table_id = table_id.0, "dropped bigquery table before copy");
 
         Ok(())
+    }
+
+    /// Drops destination table objects through the destination drop path in
+    /// tests.
+    #[cfg(feature = "test-utils")]
+    pub async fn drop_table_for_copy_for_tests(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        self.drop_table_for_copy_inner(replicated_table_schema).await
     }
 }
 
