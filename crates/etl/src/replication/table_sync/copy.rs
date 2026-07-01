@@ -26,9 +26,10 @@ use crate::{
     etl_error,
     observability::{
         ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_TABLE_COPY_DURATION_SECONDS,
-        ETL_TABLE_COPY_END_TO_END_LAG_BYTES, ETL_TABLE_COPY_PARTITION_DURATION_SECONDS,
-        ETL_TABLE_COPY_PARTITION_PLANNED_BLOCKS, ETL_TABLE_COPY_PARTITION_ROWS,
-        ETL_TABLE_COPY_PARTITIONS_TOTAL, ETL_TABLE_COPY_ROWS_TOTAL, OUTCOME_LABEL,
+        ETL_TABLE_COPY_EFFECTIVE_PARTITIONS, ETL_TABLE_COPY_END_TO_END_LAG_BYTES,
+        ETL_TABLE_COPY_PARTITION_BLOCKS, ETL_TABLE_COPY_PARTITION_DURATION_SECONDS,
+        ETL_TABLE_COPY_PARTITION_ROWS, ETL_TABLE_COPY_PARTITIONS_TOTAL,
+        ETL_TABLE_COPY_PLANNED_PARTITIONS, ETL_TABLE_COPY_ROWS_TOTAL, OUTCOME_LABEL,
         WORKER_TYPE_LABEL,
     },
     postgres::{
@@ -89,44 +90,6 @@ enum CopyWorkerOutcome {
     Completed(CompletedCopyWorker),
     /// The worker observed shutdown before committing its transaction.
     Shutdown,
-}
-
-/// Records one successfully copied ctid partition.
-fn record_completed_partition(rows: u64, duration_secs: f64) {
-    counter!(
-        ETL_TABLE_COPY_PARTITIONS_TOTAL,
-        OUTCOME_LABEL => "completed",
-    )
-    .increment(1);
-    histogram!(ETL_TABLE_COPY_PARTITION_ROWS).record(rows as f64);
-    histogram!(ETL_TABLE_COPY_PARTITION_DURATION_SECONDS).record(duration_secs);
-}
-
-/// Records planned heap block counts for the ctid ranges of one physical table.
-fn record_planned_partition_blocks(table_blocks: i64, partition_count: u16) {
-    let effective_partitions = i64::from(partition_count).min(table_blocks);
-    for partition_index in 0..effective_partitions {
-        let start_block = partition_index * table_blocks / effective_partitions;
-        let end_block_exclusive = (partition_index + 1) * table_blocks / effective_partitions;
-
-        let blocks = end_block_exclusive - start_block;
-        histogram!(ETL_TABLE_COPY_PARTITION_PLANNED_BLOCKS).record(blocks.max(0) as f64);
-    }
-}
-
-/// Records one partition that observed shutdown before completing.
-fn record_shutdown_partition() {
-    counter!(
-        ETL_TABLE_COPY_PARTITIONS_TOTAL,
-        OUTCOME_LABEL => "shutdown",
-    )
-    .increment(1);
-}
-
-/// Records final metrics for one successful table copy.
-fn record_completed_table_copy(rows: u64, duration_secs: f64) {
-    counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(rows);
-    histogram!(ETL_TABLE_COPY_DURATION_SECONDS).record(duration_secs);
 }
 
 /// Returns `numerator / denominator`, rounded up.
@@ -191,15 +154,6 @@ fn partitions_for_table_weight(
     // CTID ranges split heap blocks, so more partitions than blocks would only
     // create empty work items.
     weighted_partitions.min(u128::from(block_count)).min(u128::from(u16::MAX)).max(1) as u16
-}
-
-/// Chooses the planning weight for one physical table.
-fn table_copy_partition_weight(
-    estimated_rows: i64,
-    table_blocks: i64,
-    use_estimated_rows: bool,
-) -> i64 {
-    if use_estimated_rows { estimated_rows } else { table_blocks }
 }
 
 /// Returns true when the table copy should stop for shutdown.
@@ -339,7 +293,9 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
 
     if copy_partitions.is_empty() {
         info!(table_id = table_id.0, "table is empty, skipping table copy");
-        record_completed_table_copy(0, 0.0);
+
+        counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(0);
+        histogram!(ETL_TABLE_COPY_DURATION_SECONDS).record(0.0);
 
         return Ok(TableCopyResult::Completed { total_rows: 0, total_duration_secs: 0.0 });
     }
@@ -443,7 +399,8 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     stop_table_copy_lag_reporter(&mut lag_reporter).await;
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
-    record_completed_table_copy(total_rows, total_duration_secs);
+    counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(total_rows);
+    histogram!(ETL_TABLE_COPY_DURATION_SECONDS).record(total_duration_secs);
 
     info!(table_id = table_id.0, total_rows, total_duration_secs, "completed table copy");
 
@@ -469,7 +426,7 @@ async fn plan_copy_partitions(
             replication_transaction.get_table_copy_planning_estimate(source_table_id).await?;
 
         // If a table has no blocks, we don't want to consider it for the copy.
-        if estimate.table_blocks == 0 {
+        if estimate.is_empty() {
             continue;
         }
 
@@ -478,6 +435,9 @@ async fn plan_copy_partitions(
 
     // If there are no estimates, we don't need to copy any partitions.
     if table_estimates.is_empty() {
+        histogram!(ETL_TABLE_COPY_PLANNED_PARTITIONS).record(0.0);
+        histogram!(ETL_TABLE_COPY_EFFECTIVE_PARTITIONS).record(0.0);
+
         return Ok(vec![]);
     }
 
@@ -485,51 +445,46 @@ async fn plan_copy_partitions(
     // if every physical table has one. Otherwise, fall back to heap blocks so a
     // non-empty table with stale stats is not weighted as zero.
     let use_estimated_rows =
-        table_estimates.iter().all(|(_, estimate)| estimate.estimated_rows > 0);
+        table_estimates.iter().all(|(_, estimate)| estimate.estimated_rows() > 0);
+
     let total_estimated_rows = use_estimated_rows
-        .then(|| table_estimates.iter().map(|(_, estimate)| estimate.estimated_rows).sum());
+        .then(|| table_estimates.iter().map(|(_, estimate)| estimate.estimated_rows()).sum());
+
     let target_partitions = target_ctid_partition_count(max_copy_connections, total_estimated_rows);
+
     let total_weight: i64 = table_estimates
         .iter()
-        .map(|(_, estimate)| {
-            table_copy_partition_weight(
-                estimate.estimated_rows,
-                estimate.table_blocks,
-                use_estimated_rows,
-            )
-        })
+        .map(|(_, estimate)| estimate.partition_weight(use_estimated_rows))
         .sum();
 
-    let mut copy_partitions = Vec::new();
+    let mut copy_partitions = Vec::with_capacity(usize::from(target_partitions));
     for (source_table_id, estimate) in table_estimates {
-        let partition_weight = table_copy_partition_weight(
-            estimate.estimated_rows,
-            estimate.table_blocks,
-            use_estimated_rows,
-        );
+        let partition_weight = estimate.partition_weight(use_estimated_rows);
         let table_partition_count = partitions_for_table_weight(
             partition_weight,
             total_weight,
-            estimate.table_blocks,
+            estimate.table_blocks(),
             target_partitions,
         );
-        let ctid_partitions = replication_transaction
-            .plan_ctid_partitions(source_table_id, table_partition_count)
-            .await?;
+        let ctid_partitions = estimate.plan_ctid_partitions(table_partition_count)?;
 
-        if !ctid_partitions.is_empty() {
-            record_planned_partition_blocks(estimate.table_blocks, ctid_partitions.len() as u16);
+        for planned_partition in ctid_partitions {
+            let (ctid_partition, planned_blocks) = planned_partition.into_parts();
+            histogram!(ETL_TABLE_COPY_PARTITION_BLOCKS).record(planned_blocks as f64);
+
+            // Partitioned parents have no physical CTIDs, so COPY runs against
+            // the leaf table while publication row filters are resolved from
+            // the tracked table.
+            copy_partitions.push(CopyPartition {
+                source_table_id,
+                filter_table_id: table_id,
+                ctid_partition,
+            });
         }
-
-        // Partitioned parents have no physical CTIDs, so COPY runs against the
-        // leaf table while publication row filters are resolved from the
-        // tracked table.
-        copy_partitions.extend(ctid_partitions.into_iter().map(|ctid_partition| CopyPartition {
-            source_table_id,
-            filter_table_id: table_id,
-            ctid_partition,
-        }));
     }
+
+    histogram!(ETL_TABLE_COPY_PLANNED_PARTITIONS).record(f64::from(target_partitions));
+    histogram!(ETL_TABLE_COPY_EFFECTIVE_PARTITIONS).record(copy_partitions.len() as f64);
 
     Ok(copy_partitions)
 }
@@ -613,7 +568,11 @@ where
     D: Destination + Clone + Send + 'static,
 {
     if is_shutdown_requested(&shutdown_rx) {
-        record_shutdown_partition();
+        counter!(
+            ETL_TABLE_COPY_PARTITIONS_TOTAL,
+            OUTCOME_LABEL => "shutdown",
+        )
+        .increment(1);
 
         return Ok(TableCopyResult::Shutdown);
     }
@@ -629,7 +588,7 @@ where
     );
 
     let copy_stream = child_replication_transaction
-        .get_table_copy_stream_with_ctid_partition_and_filter_table(
+        .get_table_copy_stream_with_ctid_partition(
             partition.source_table_id,
             partition.filter_table_id,
             &replicated_column_schemas,
@@ -663,14 +622,24 @@ where
     {
         ShutdownResult::Ok(total_rows) => total_rows,
         ShutdownResult::Shutdown(_) => {
-            record_shutdown_partition();
+            counter!(
+                ETL_TABLE_COPY_PARTITIONS_TOTAL,
+                OUTCOME_LABEL => "shutdown",
+            )
+            .increment(1);
 
             return Ok(TableCopyResult::Shutdown);
         }
     };
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
-    record_completed_partition(total_rows, total_duration_secs);
+    counter!(
+        ETL_TABLE_COPY_PARTITIONS_TOTAL,
+        OUTCOME_LABEL => "completed",
+    )
+    .increment(1);
+    histogram!(ETL_TABLE_COPY_PARTITION_ROWS).record(total_rows as f64);
+    histogram!(ETL_TABLE_COPY_PARTITION_DURATION_SECONDS).record(total_duration_secs);
 
     info!(
         table_id = table_id.0,

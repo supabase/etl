@@ -12,11 +12,12 @@ pub(crate) const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
 pub(crate) const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub(crate) const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
 pub(crate) const ETL_TABLE_COPY_ROWS_TOTAL: &str = "etl_table_copy_rows_total";
+pub(crate) const ETL_TABLE_COPY_PLANNED_PARTITIONS: &str = "etl_table_copy_planned_partitions";
+pub(crate) const ETL_TABLE_COPY_EFFECTIVE_PARTITIONS: &str = "etl_table_copy_effective_partitions";
+pub(crate) const ETL_TABLE_COPY_PARTITION_BLOCKS: &str = "etl_table_copy_partition_blocks";
 pub(crate) const ETL_TABLE_COPY_PARTITION_ROWS: &str = "etl_table_copy_partition_rows";
 pub(crate) const ETL_TABLE_COPY_PARTITION_DURATION_SECONDS: &str =
     "etl_table_copy_partition_duration_seconds";
-pub(crate) const ETL_TABLE_COPY_PARTITION_PLANNED_BLOCKS: &str =
-    "etl_table_copy_partition_planned_blocks";
 pub(crate) const ETL_TABLE_COPY_PARTITIONS_TOTAL: &str = "etl_table_copy_partitions_total";
 pub(crate) const ETL_TABLE_COPY_END_TO_END_LAG_BYTES: &str = "etl_table_copy_end_to_end_lag_bytes";
 pub(crate) const ETL_BYTES_RECEIVED_TOTAL: &str = "etl_bytes_received_total";
@@ -112,6 +113,26 @@ pub(crate) fn register_metrics() {
         );
 
         describe_histogram!(
+            ETL_TABLE_COPY_PLANNED_PARTITIONS,
+            Unit::Count,
+            "Target ctid partitions planned for one table copy before empty table and block-count \
+             clamping."
+        );
+
+        describe_histogram!(
+            ETL_TABLE_COPY_EFFECTIVE_PARTITIONS,
+            Unit::Count,
+            "Actual ctid partitions used for one table copy after empty table and block-count \
+             clamping."
+        );
+
+        describe_histogram!(
+            ETL_TABLE_COPY_PARTITION_BLOCKS,
+            Unit::Count,
+            "Estimated heap blocks assigned to one table copy partition."
+        );
+
+        describe_histogram!(
             ETL_TABLE_COPY_PARTITION_ROWS,
             Unit::Count,
             "Rows flushed by one table copy partition."
@@ -121,12 +142,6 @@ pub(crate) fn register_metrics() {
             ETL_TABLE_COPY_PARTITION_DURATION_SECONDS,
             Unit::Seconds,
             "Duration in seconds to copy one table copy partition."
-        );
-
-        describe_histogram!(
-            ETL_TABLE_COPY_PARTITION_PLANNED_BLOCKS,
-            Unit::Count,
-            "Planned heap blocks per table copy ctid partition."
         );
 
         describe_counter!(

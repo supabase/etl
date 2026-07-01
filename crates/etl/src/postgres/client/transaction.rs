@@ -73,13 +73,129 @@ fn ctid_partition_block_range(
     (start_block, end_block_exclusive)
 }
 
+/// Builds ctid partition plans from a known physical table block count.
+fn plan_ctid_partitions_for_table_blocks(
+    table_blocks: i64,
+    num_partitions: u16,
+) -> EtlResult<Vec<PlannedCtidPartition>> {
+    if num_partitions == 0 {
+        return Err(etl_error!(
+            ErrorKind::ConfigError,
+            "Number of ctid partitions must be greater than zero"
+        ));
+    }
+
+    if table_blocks == 0 {
+        return Ok(vec![]);
+    }
+
+    let requested_partitions = i64::from(num_partitions);
+    let effective_partitions = requested_partitions.min(table_blocks);
+
+    let mut partitions = Vec::with_capacity(effective_partitions as usize);
+    for i in 0..effective_partitions {
+        // Proportional block boundaries cover [0, table_blocks) exactly and
+        // avoid producing empty trailing ranges when table_blocks is not
+        // divisible by the number of partitions.
+        let (start_block, end_block_exclusive) =
+            ctid_partition_block_range(i, table_blocks, effective_partitions);
+        let planned_blocks = end_block_exclusive - start_block;
+
+        let ctid_partition = if effective_partitions == 1 {
+            CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() }
+        } else if i == 0 {
+            CtidPartition::OpenStart { end_tid: format!("({end_block_exclusive},1)") }
+        } else if i == effective_partitions - 1 {
+            CtidPartition::OpenEnd { start_tid: format!("({start_block},1)") }
+        } else {
+            CtidPartition::Closed {
+                start_tid: format!("({start_block},1)"),
+                end_tid: format!("({end_block_exclusive},1)"),
+            }
+        };
+
+        partitions.push(PlannedCtidPartition { ctid_partition, planned_blocks });
+    }
+
+    Ok(partitions)
+}
+
 /// Planning statistics used to split table copy work.
+///
+/// These values are cheap physical/catalog estimates observed at planning
+/// time, not MVCC snapshot-visible row counts. They are used only to size CTID
+/// work ranges; the actual copied rows are selected later by COPY queries that
+/// run inside the exported snapshot. CTID planning therefore keeps the first
+/// and last ranges open-ended so a stale physical-size estimate cannot exclude
+/// visible tuples at the relation edges.
 #[derive(Debug)]
 pub(crate) struct TableCopyPlanningEstimate {
     /// Current physical relation size in Postgres blocks.
-    pub(crate) table_blocks: i64,
+    ///
+    /// This comes from [`pg_relation_size`], so it reflects relation storage at
+    /// planning time rather than MVCC-visible tuples.
+    table_blocks: i64,
     /// Estimated row count from Postgres statistics.
-    pub(crate) estimated_rows: i64,
+    ///
+    /// This comes from `pg_class.reltuples`, so it can be stale and is used
+    /// only as a planning weight when all copied physical tables have a
+    /// positive estimate.
+    estimated_rows: i64,
+}
+
+impl TableCopyPlanningEstimate {
+    /// Creates planning statistics from Postgres relation metadata.
+    fn new(table_blocks: i64, estimated_rows: i64) -> Self {
+        Self { table_blocks, estimated_rows }
+    }
+
+    /// Returns the current physical relation size in Postgres blocks.
+    pub(crate) fn table_blocks(&self) -> i64 {
+        self.table_blocks
+    }
+
+    /// Returns the estimated row count from Postgres statistics.
+    pub(crate) fn estimated_rows(&self) -> i64 {
+        self.estimated_rows
+    }
+
+    /// Returns true if the table has no heap blocks to copy.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.table_blocks == 0
+    }
+
+    /// Returns the weight to use when allocating copy partitions.
+    pub(crate) fn partition_weight(&self, use_estimated_rows: bool) -> i64 {
+        if use_estimated_rows { self.estimated_rows } else { self.table_blocks }
+    }
+
+    /// Computes balanced ctid partition ranges for this estimate.
+    ///
+    /// The first and last planned ranges are open-ended because
+    /// [`TableCopyPlanningEstimate::table_blocks`] is a physical estimate, not
+    /// an MVCC snapshot boundary.
+    pub(crate) fn plan_ctid_partitions(
+        &self,
+        num_partitions: u16,
+    ) -> EtlResult<Vec<PlannedCtidPartition>> {
+        plan_ctid_partitions_for_table_blocks(self.table_blocks, num_partitions)
+    }
+}
+
+/// One planned ctid partition and the heap blocks assigned to it.
+#[derive(Debug)]
+pub(crate) struct PlannedCtidPartition {
+    /// The physical ctid range to query.
+    ctid_partition: CtidPartition,
+    /// Number of estimated heap blocks assigned to this partition.
+    planned_blocks: i64,
+}
+
+impl PlannedCtidPartition {
+    /// Returns the partition range and assigned heap blocks.
+    pub(crate) fn into_parts(self) -> (CtidPartition, i64) {
+        (self.ctid_partition, self.planned_blocks)
+    }
 }
 
 /// Common state for an open replication transaction.
@@ -290,55 +406,6 @@ impl<'a> PgReplicationTransactionCore<'a> {
         Err(etl_error!(ErrorKind::InvalidState, "PostgreSQL pg_export_snapshot returned no rows"))
     }
 
-    /// Computes balanced ctid partition ranges using page-based estimation.
-    async fn plan_ctid_partitions(
-        &self,
-        table_id: TableId,
-        num_partitions: u16,
-    ) -> EtlResult<Vec<CtidPartition>> {
-        if num_partitions == 0 {
-            return Err(etl_error!(
-                ErrorKind::ConfigError,
-                "Number of ctid partitions must be greater than zero"
-            ));
-        }
-
-        let table_blocks = self.get_table_copy_planning_estimate(table_id).await?.table_blocks;
-
-        if table_blocks == 0 {
-            return Ok(vec![]);
-        }
-
-        let requested_partitions = i64::from(num_partitions);
-        let effective_partitions = requested_partitions.min(table_blocks);
-
-        let mut partitions = Vec::with_capacity(effective_partitions as usize);
-        for i in 0..effective_partitions {
-            // Proportional block boundaries cover [0, table_blocks) exactly and avoid
-            // producing empty trailing ranges when table_blocks is not divisible by the
-            // number of partitions.
-            let (start_block, end_block_exclusive) =
-                ctid_partition_block_range(i, table_blocks, effective_partitions);
-
-            let partition = if effective_partitions == 1 {
-                CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() }
-            } else if i == 0 {
-                CtidPartition::OpenStart { end_tid: format!("({end_block_exclusive},1)") }
-            } else if i == effective_partitions - 1 {
-                CtidPartition::OpenEnd { start_tid: format!("({start_block},1)") }
-            } else {
-                CtidPartition::Closed {
-                    start_tid: format!("({start_block},1)"),
-                    end_tid: format!("({end_block_exclusive},1)"),
-                }
-            };
-
-            partitions.push(partition);
-        }
-
-        Ok(partitions)
-    }
-
     /// Returns quick planner statistics for table copy.
     async fn get_table_copy_planning_estimate(
         &self,
@@ -367,7 +434,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
                 if let (Ok(table_blocks), Ok(estimated_rows)) =
                     (table_blocks.parse(), estimated_rows.parse())
                 {
-                    return Ok(TableCopyPlanningEstimate { table_blocks, estimated_rows });
+                    return Ok(TableCopyPlanningEstimate::new(table_blocks, estimated_rows));
                 }
             }
         }
@@ -403,27 +470,12 @@ impl<'a> PgReplicationTransactionCore<'a> {
         Ok(leaves)
     }
 
-    /// Creates a COPY stream for a ctid partition range of the specified table.
+    /// Creates a COPY stream for a ctid range from `table_id`.
+    ///
+    /// `table_id` is the physical table to copy from. `filter_table_id` is the
+    /// table used to resolve publication row filters, which can differ when
+    /// copying a leaf partition for a partitioned table.
     async fn get_table_copy_stream_with_ctid_partition(
-        &self,
-        table_id: TableId,
-        column_schemas: &[ColumnSchema],
-        publication_name: Option<&str>,
-        partition: &CtidPartition,
-    ) -> EtlResult<CopyOutStream> {
-        self.get_table_copy_stream_with_ctid_partition_and_filter_table(
-            table_id,
-            table_id,
-            column_schemas,
-            publication_name,
-            partition,
-        )
-        .await
-    }
-
-    /// Creates a COPY stream for a ctid range from `table_id`, using
-    /// `filter_table_id` to resolve publication row filters.
-    async fn get_table_copy_stream_with_ctid_partition_and_filter_table(
         &self,
         table_id: TableId,
         filter_table_id: TableId,
@@ -743,18 +795,6 @@ impl<'a> PgReplicationTransaction<'a> {
         self.core.export_snapshot().await
     }
 
-    /// Computes balanced ctid partition ranges using page-based estimation.
-    ///
-    /// Returns one [`CtidPartition`] per partition, or an empty vec if the
-    /// table has no rows.
-    pub async fn plan_ctid_partitions(
-        &self,
-        table_id: TableId,
-        num_partitions: u16,
-    ) -> EtlResult<Vec<CtidPartition>> {
-        self.core.plan_ctid_partitions(table_id, num_partitions).await
-    }
-
     /// Returns quick planner statistics for table copy.
     pub(crate) async fn get_table_copy_planning_estimate(
         &self,
@@ -820,30 +860,12 @@ impl<'a> PgChildReplicationTransaction<'a> {
         Self { core }
     }
 
-    /// Creates a COPY stream for a ctid partition range of the specified table.
+    /// Creates a COPY stream for a ctid partition of `table_id`.
     ///
-    /// Resolves the table name and row filter internally, then streams rows
-    /// whose ctid falls within the given partition bounds.
-    pub async fn get_table_copy_stream_with_ctid_partition(
-        &self,
-        table_id: TableId,
-        column_schemas: &[ColumnSchema],
-        publication_name: Option<&str>,
-        partition: &CtidPartition,
-    ) -> EtlResult<CopyOutStream> {
-        self.core
-            .get_table_copy_stream_with_ctid_partition(
-                table_id,
-                column_schemas,
-                publication_name,
-                partition,
-            )
-            .await
-    }
-
-    /// Creates a COPY stream for a ctid partition of `table_id`, using
-    /// `filter_table_id` to resolve publication row filters.
-    pub(crate) async fn get_table_copy_stream_with_ctid_partition_and_filter_table(
+    /// `table_id` is the physical table to copy from. `filter_table_id` is the
+    /// table used to resolve publication row filters, which can differ when
+    /// copying a leaf partition for a partitioned table.
+    pub(crate) async fn get_table_copy_stream_with_ctid_partition(
         &self,
         table_id: TableId,
         filter_table_id: TableId,
@@ -852,7 +874,7 @@ impl<'a> PgChildReplicationTransaction<'a> {
         partition: &CtidPartition,
     ) -> EtlResult<CopyOutStream> {
         self.core
-            .get_table_copy_stream_with_ctid_partition_and_filter_table(
+            .get_table_copy_stream_with_ctid_partition(
                 table_id,
                 filter_table_id,
                 column_schemas,
@@ -875,7 +897,9 @@ impl<'a> PgChildReplicationTransaction<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CtidPartition, build_ctid_copy_query, ctid_partition_block_range};
+    use super::{
+        CtidPartition, TableCopyPlanningEstimate, build_ctid_copy_query, ctid_partition_block_range,
+    };
     use crate::schema::TableName;
 
     #[test]
@@ -938,5 +962,26 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ranges, vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
+    }
+
+    #[test]
+    fn planned_ctid_partitions_include_assigned_blocks() {
+        let estimate = TableCopyPlanningEstimate::new(10, 0);
+        let partitions = estimate.plan_ctid_partitions(6).unwrap();
+        let planned_blocks =
+            partitions.into_iter().map(|partition| partition.into_parts().1).collect::<Vec<_>>();
+
+        assert_eq!(planned_blocks, vec![1, 2, 2, 1, 2, 2]);
+        assert_eq!(planned_blocks.iter().sum::<i64>(), 10);
+    }
+
+    #[test]
+    fn planned_ctid_partitions_are_clamped_to_table_blocks() {
+        let estimate = TableCopyPlanningEstimate::new(4, 0);
+        let partitions = estimate.plan_ctid_partitions(128).unwrap();
+        let planned_blocks =
+            partitions.into_iter().map(|partition| partition.into_parts().1).collect::<Vec<_>>();
+
+        assert_eq!(planned_blocks, vec![1, 1, 1, 1]);
     }
 }
