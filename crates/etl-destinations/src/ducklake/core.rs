@@ -21,6 +21,7 @@ use etl::{
     },
     store::DestinationStore,
 };
+use etl_config::ducklake_catalog_metadata_connect_options;
 use metrics::gauge;
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
@@ -87,19 +88,20 @@ pub(super) const DUCKLAKE_DROPPED_COLUMN_PREFIX: &str = "__etl_ducklake_dropped_
 
 /// Builds the shared Postgres metadata pool used by background samplers.
 fn build_ducklake_metadata_pg_pool(catalog_url: &Url) -> EtlResult<PgPool> {
-    PgPoolOptions::new()
+    let options = ducklake_catalog_metadata_connect_options(catalog_url).map_err(|source| {
+        etl_error!(
+            ErrorKind::ConfigError,
+            "DuckLake metadata pool configuration failed",
+            source: source
+        )
+    })?;
+
+    Ok(PgPoolOptions::new()
         .max_connections(DUCKLAKE_METADATA_PG_POOL_SIZE)
         .min_connections(0)
         .acquire_timeout(std::time::Duration::from_secs(5))
         .idle_timeout(Some(std::time::Duration::from_secs(30)))
-        .connect_lazy(catalog_url.as_str())
-        .map_err(|source| {
-            etl_error!(
-                ErrorKind::ConfigError,
-                "DuckLake metadata pool configuration failed",
-                source: source
-            )
-        })
+        .connect_lazy_with(options))
 }
 
 /// Returns whether a DuckLake DDL error indicates another transaction already
