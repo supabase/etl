@@ -1,10 +1,12 @@
 //! BigQuery initial-copy load-job primitives.
 
+pub(crate) mod avro;
 pub mod gcs;
 
 use std::future::Future;
 
 use etl::{
+    data::TableRow,
     error::{ErrorKind, EtlResult},
     etl_error,
     pipeline::PipelineId,
@@ -12,13 +14,10 @@ use etl::{
 };
 use rand::random;
 
-use crate::{
-    bigquery::{BigQueryDatasetId, BigQueryTableId},
-    snapshot::{SnapshotFormat, UploadBody},
-};
+use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 
 /// Fixed GCS prefix used until the destination exposes staging configuration.
-pub const DEFAULT_GCS_PREFIX: &str = "etl/bigquery/initial-copy";
+pub const DEFAULT_GCS_PREFIX: &str = "supabase-etl/initial-copy";
 /// Fixed staging table prefix used for snapshot load jobs.
 pub const DEFAULT_STAGING_TABLE_PREFIX: &str = "_snapshot_";
 /// Fixed Avro logical type behavior for BigQuery load jobs.
@@ -29,6 +28,61 @@ pub const DEFAULT_DECIMAL_TARGET_TYPES: &[&str] = &["NUMERIC", "BIGNUMERIC", "ST
 pub const DEFAULT_CREATE_DISPOSITION: &str = "CREATE_IF_NEEDED";
 /// Fixed BigQuery load-job write disposition for staging tables.
 pub const DEFAULT_WRITE_DISPOSITION: &str = "WRITE_TRUNCATE";
+/// Avro file extension used in staged object names.
+const AVRO_FILE_EXTENSION: &str = "avro";
+/// Parquet file extension used in staged object names.
+const PARQUET_FILE_EXTENSION: &str = "parquet";
+/// Avro upload content type used for staged files.
+const AVRO_CONTENT_TYPE: &str = "application/avro";
+/// Parquet upload content type used for staged files.
+const PARQUET_CONTENT_TYPE: &str = "application/vnd.apache.parquet";
+/// BigQuery load-job source format for Avro.
+const BIGQUERY_AVRO_SOURCE_FORMAT: &str = "AVRO";
+/// BigQuery load-job source format for Parquet.
+const BIGQUERY_PARQUET_SOURCE_FORMAT: &str = "PARQUET";
+
+/// Snapshot file format for BigQuery initial-copy files.
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub enum SnapshotFormat {
+    /// Avro object container files.
+    #[default]
+    Avro,
+    /// Parquet files.
+    Parquet,
+}
+
+impl SnapshotFormat {
+    /// Returns the file extension used in object names.
+    pub fn file_extension(self) -> &'static str {
+        match self {
+            Self::Avro => AVRO_FILE_EXTENSION,
+            Self::Parquet => PARQUET_FILE_EXTENSION,
+        }
+    }
+
+    /// Returns the upload content type used for staged files.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Self::Avro => AVRO_CONTENT_TYPE,
+            Self::Parquet => PARQUET_CONTENT_TYPE,
+        }
+    }
+}
+
+/// Upload body produced by a BigQuery initial-copy encoder.
+#[derive(Clone)]
+pub enum UploadBody {
+    /// In-memory bytes for small files, tests, and mocks.
+    Bytes(Vec<u8>),
+    /// Local file path for bounded temp-file based uploads.
+    File(std::path::PathBuf),
+}
+
+/// One batch of initial-copy rows passed to a file encoder.
+pub struct SnapshotBatch {
+    /// Rows in source table column order.
+    pub rows: Vec<TableRow>,
+}
 
 /// Generates an opaque run id for one BigQuery initial-copy attempt.
 pub fn generate_random_run_id() -> String {
@@ -162,8 +216,8 @@ impl BigQueryLoadJobRequest {
 /// Returns the BigQuery load-job source format for a snapshot file format.
 pub fn bigquery_source_format(format: SnapshotFormat) -> &'static str {
     match format {
-        SnapshotFormat::Avro => "AVRO",
-        SnapshotFormat::Parquet => "PARQUET",
+        SnapshotFormat::Avro => BIGQUERY_AVRO_SOURCE_FORMAT,
+        SnapshotFormat::Parquet => BIGQUERY_PARQUET_SOURCE_FORMAT,
     }
 }
 
@@ -408,7 +462,7 @@ mod tests {
         DEFAULT_GCS_PREFIX, bigquery_source_format, gcs_object_name, gcs_uri,
         generate_random_run_id, load_job_id, staging_table_id,
     };
-    use crate::snapshot::SnapshotFormat;
+    use crate::bigquery::initial_copy::SnapshotFormat;
 
     #[test]
     fn gcs_object_name_uses_stable_layout() {

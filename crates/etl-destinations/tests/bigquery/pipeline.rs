@@ -4,6 +4,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     config::{BatchConfig, PipelineConfig},
     data::{Cell, OldTableRow, PgNumeric, TableRow, UpdatedTableRow},
+    destination::PipelineDestination,
     error::ErrorKind,
     event::{Event, EventType},
     pipeline::PipelineId,
@@ -16,6 +17,7 @@ use etl::{
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
 };
+use etl_config::shared::PgConnectionConfig;
 use etl_destinations::bigquery::test_utils::{
     get_gcs_staging_bucket, setup_bigquery_database, skip_if_missing_bigquery_env_vars,
     skip_if_missing_bigquery_gcs_staging_bucket,
@@ -35,9 +37,44 @@ use crate::support::{
 
 const REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES: usize = 8192;
 const BIGQUERY_RECREATED_TABLE_READY_TIMEOUT: Duration = Duration::from_secs(600);
+const SCALAR_PARITY_COLUMNS: &[&str] = &[
+    "b", "t", "i2", "i4", "i8", "f4", "f8", "n", "by", "d", "ti", "ts", "tstz", "u", "j", "jb", "o",
+];
+const ARRAY_PARITY_COLUMNS: &[&str] = &[
+    "b_arr", "t_arr", "i2_arr", "i4_arr", "i8_arr", "f4_arr", "f8_arr", "n_arr", "by_arr", "d_arr",
+    "ti_arr", "ts_arr", "tstz_arr", "u_arr", "j_arr", "jb_arr", "o_arr",
+];
 
 fn generate_random_ascii_string(length: usize) -> String {
     rand::rng().sample_iter(&Alphanumeric).take(length).map(char::from).collect()
+}
+
+async fn run_initial_copy<D>(
+    database_config: &PgConnectionConfig,
+    pipeline_id: PipelineId,
+    publication_name: String,
+    store: NotifyingStore,
+    destination: D,
+    table_ids: &[etl::schema::TableId],
+) where
+    D: PipelineDestination,
+{
+    let mut pipeline =
+        create_pipeline(database_config, pipeline_id, publication_name, store.clone(), destination);
+
+    let mut ready_notifications = Vec::with_capacity(table_ids.len());
+    for table_id in table_ids {
+        ready_notifications
+            .push(store.notify_on_table_state_type(*table_id, TableStateType::Ready).await);
+    }
+
+    pipeline.start().await.unwrap();
+
+    for ready in ready_notifications {
+        ready.notified().await;
+    }
+
+    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 fn data_events(events: Vec<Event>) -> Vec<Event> {
@@ -454,6 +491,283 @@ async fn table_copy_uses_gcs_avro_initial_copy_when_bucket_configured() {
         parse_bigquery_table_rows::<BigQueryOrder>(orders_rows),
         vec![BigQueryOrder::new(1, "description_1"), BigQueryOrder::new(2, "description_2"),]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_gcs_avro_matches_storage_write_for_initial_copy_types() {
+    if skip_if_missing_bigquery_gcs_staging_bucket() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let scalar_table_name = test_table_name("initial_copy_scalar_parity");
+    let scalar_table_id = database
+        .create_table(
+            scalar_table_name.clone(),
+            true,
+            &[
+                ("b", "boolean"),
+                ("t", "text"),
+                ("i2", "smallint"),
+                ("i4", "integer"),
+                ("i8", "bigint"),
+                ("f4", "real"),
+                ("f8", "double precision"),
+                ("n", "numeric"),
+                ("by", "bytea"),
+                ("d", "date"),
+                ("ti", "time"),
+                ("ts", "timestamp"),
+                ("tstz", "timestamptz"),
+                ("u", "uuid"),
+                ("j", "json"),
+                ("jb", "jsonb"),
+                ("o", "oid"),
+            ],
+        )
+        .await
+        .unwrap();
+    let array_table_name = test_table_name("initial_copy_array_parity");
+    let array_table_id = database
+        .create_table(
+            array_table_name.clone(),
+            true,
+            &[
+                ("b_arr", "boolean[]"),
+                ("t_arr", "text[]"),
+                ("i2_arr", "smallint[]"),
+                ("i4_arr", "integer[]"),
+                ("i8_arr", "bigint[]"),
+                ("f4_arr", "real[]"),
+                ("f8_arr", "double precision[]"),
+                ("n_arr", "numeric[]"),
+                ("by_arr", "bytea[]"),
+                ("d_arr", "date[]"),
+                ("ti_arr", "time[]"),
+                ("ts_arr", "timestamp[]"),
+                ("tstz_arr", "timestamptz[]"),
+                ("u_arr", "uuid[]"),
+                ("j_arr", "json[]"),
+                ("jb_arr", "jsonb[]"),
+                ("o_arr", "oid[]"),
+            ],
+        )
+        .await
+        .unwrap();
+    let publication_name = "test_pub";
+    database
+        .create_publication(
+            publication_name,
+            &[scalar_table_name.clone(), array_table_name.clone()],
+        )
+        .await
+        .unwrap();
+
+    let bool_value = true;
+    let text_value = "initial_copy_text".to_owned();
+    let i2_value = 42_i16;
+    let i4_value = 1000_i32;
+    let i8_value = 123_456_789_i64;
+    let f4_value = 3.15_f32;
+    let f8_value = 2.717_f64;
+    let numeric_value = PgNumeric::from_str("99.99").unwrap();
+    let bytes_value = b"initial_copy_bytes".to_vec();
+    let date_value = NaiveDate::from_ymd_opt(2023, 7, 15).unwrap();
+    let time_value = NaiveTime::from_hms_opt(14, 30, 0).unwrap();
+    let timestamp_value = NaiveDateTime::new(date_value, time_value);
+    let timestamptz_value = DateTime::<Utc>::from_naive_utc_and_offset(timestamp_value, Utc);
+    let uuid_value = uuid::Uuid::new_v4();
+    let json_value = serde_json::json!({"key": "value", "nested": {"n": 1}});
+    let jsonb_value = serde_json::json!({"jsonb": "data", "items": [1, 2, 3]});
+    let oid_value = 12_345_u32;
+
+    database
+        .insert_values(
+            scalar_table_name.clone(),
+            SCALAR_PARITY_COLUMNS,
+            &[
+                &bool_value,
+                &text_value,
+                &i2_value,
+                &i4_value,
+                &i8_value,
+                &f4_value,
+                &f8_value,
+                &numeric_value,
+                &bytes_value,
+                &date_value,
+                &time_value,
+                &timestamp_value,
+                &timestamptz_value,
+                &uuid_value,
+                &json_value,
+                &jsonb_value,
+                &oid_value,
+            ],
+        )
+        .await
+        .unwrap();
+
+    let array_bool_value = vec![true, false, true];
+    let array_text_value = vec!["hello".to_owned(), "world".to_owned()];
+    let array_i2_value = vec![1_i16, 2_i16, 3_i16];
+    let array_i4_value = vec![100_i32, 200_i32];
+    let array_i8_value = vec![1000_i64, 2000_i64, 3000_i64];
+    let array_f4_value = vec![1.5_f32, 2.5_f32];
+    let array_f8_value = vec![std::f64::consts::PI, std::f64::consts::E];
+    let array_numeric_value =
+        vec![PgNumeric::from_str("3.141").unwrap(), PgNumeric::from_str("2.718").unwrap()];
+    let array_bytes_value = vec![b"test_bytes1".to_vec(), b"test_bytes2".to_vec()];
+    let array_date_value = vec![
+        NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+    ];
+    let array_time_value = vec![
+        NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+        NaiveTime::from_hms_opt(17, 30, 0).unwrap(),
+    ];
+    let array_base_date = NaiveDate::from_ymd_opt(2023, 6, 15).unwrap();
+    let array_timestamp_value = vec![
+        NaiveDateTime::new(array_base_date, NaiveTime::from_hms_opt(10, 30, 0).unwrap()),
+        NaiveDateTime::new(array_base_date, NaiveTime::from_hms_opt(15, 45, 0).unwrap()),
+    ];
+    let array_timestamptz_value = vec![
+        DateTime::<Utc>::from_naive_utc_and_offset(array_timestamp_value[0], Utc),
+        DateTime::<Utc>::from_naive_utc_and_offset(array_timestamp_value[1], Utc),
+    ];
+    let array_uuid_value = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+    let array_json_value =
+        vec![serde_json::json!({"key1": "value1"}), serde_json::json!({"key2": "value2"})];
+    let array_jsonb_value =
+        vec![serde_json::json!({"jsonb1": "data1"}), serde_json::json!({"jsonb2": "data2"})];
+    let array_oid_value = vec![12_345_u32, 67_890_u32];
+
+    database
+        .insert_values(
+            array_table_name.clone(),
+            ARRAY_PARITY_COLUMNS,
+            &[
+                &array_bool_value,
+                &array_text_value,
+                &array_i2_value,
+                &array_i4_value,
+                &array_i8_value,
+                &array_f4_value,
+                &array_f8_value,
+                &array_numeric_value,
+                &array_bytes_value,
+                &array_date_value,
+                &array_time_value,
+                &array_timestamp_value,
+                &array_timestamptz_value,
+                &array_uuid_value,
+                &array_json_value,
+                &array_jsonb_value,
+                &array_oid_value,
+            ],
+        )
+        .await
+        .unwrap();
+
+    let expected_scalar_row = NullableColsScalar::with_non_null_values(
+        1,
+        bool_value,
+        text_value,
+        i2_value,
+        i4_value,
+        i8_value,
+        f4_value,
+        f8_value,
+        numeric_value,
+        bytes_value,
+        date_value,
+        time_value,
+        timestamp_value,
+        timestamptz_value,
+        uuid_value,
+        json_value,
+        jsonb_value,
+        oid_value,
+    );
+    let expected_array_row = NullableColsArray::with_non_null_values(
+        1,
+        array_bool_value,
+        array_text_value,
+        array_i2_value,
+        array_i4_value,
+        array_i8_value,
+        array_f4_value,
+        array_f8_value,
+        array_numeric_value,
+        array_bytes_value,
+        array_date_value,
+        array_time_value,
+        array_timestamp_value,
+        array_timestamptz_value,
+        array_uuid_value,
+        array_json_value,
+        array_jsonb_value,
+        array_oid_value,
+    );
+    let table_ids = [scalar_table_id, array_table_id];
+
+    let storage_bigquery_database = setup_bigquery_database().await;
+    let storage_store = NotifyingStore::new();
+    let storage_pipeline_id: PipelineId = random();
+    let storage_destination = storage_bigquery_database
+        .build_destination(storage_pipeline_id, storage_store.clone())
+        .await;
+
+    run_initial_copy(
+        &database.config,
+        storage_pipeline_id,
+        publication_name.to_owned(),
+        storage_store,
+        storage_destination,
+        &table_ids,
+    )
+    .await;
+
+    let avro_bigquery_database = setup_bigquery_database().await;
+    let avro_store = NotifyingStore::new();
+    let avro_pipeline_id: PipelineId = random();
+    let avro_destination = avro_bigquery_database
+        .build_gcs_initial_copy_destination(
+            avro_pipeline_id,
+            avro_store.clone(),
+            get_gcs_staging_bucket(),
+            PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        )
+        .await;
+
+    run_initial_copy(
+        &database.config,
+        avro_pipeline_id,
+        publication_name.to_owned(),
+        avro_store,
+        avro_destination,
+        &table_ids,
+    )
+    .await;
+
+    let storage_scalar_rows =
+        storage_bigquery_database.query_table(scalar_table_name.clone()).await.unwrap();
+    let storage_scalar_rows = parse_bigquery_table_rows::<NullableColsScalar>(storage_scalar_rows);
+    let avro_scalar_rows = avro_bigquery_database.query_table(scalar_table_name).await.unwrap();
+    let avro_scalar_rows = parse_bigquery_table_rows::<NullableColsScalar>(avro_scalar_rows);
+    let storage_array_rows =
+        storage_bigquery_database.query_table(array_table_name.clone()).await.unwrap();
+    let storage_array_rows = parse_bigquery_table_rows::<NullableColsArray>(storage_array_rows);
+    let avro_array_rows = avro_bigquery_database.query_table(array_table_name).await.unwrap();
+    let avro_array_rows = parse_bigquery_table_rows::<NullableColsArray>(avro_array_rows);
+
+    assert_eq!(storage_scalar_rows, vec![expected_scalar_row]);
+    assert_eq!(avro_scalar_rows, storage_scalar_rows);
+    assert_eq!(storage_array_rows, vec![expected_array_row]);
+    assert_eq!(avro_array_rows, storage_array_rows);
 }
 
 #[tokio::test(flavor = "multi_thread")]

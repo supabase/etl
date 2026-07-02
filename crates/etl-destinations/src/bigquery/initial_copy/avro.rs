@@ -18,12 +18,7 @@ use etl::{
 };
 use serde_json::{Value as JsonValue, json};
 
-use crate::{
-    bigquery::validation::validate_cell_for_bigquery,
-    snapshot::{
-        CompletedSnapshotFile, SnapshotBatch, SnapshotFileEncoder, SnapshotFormat, UploadBody,
-    },
-};
+use crate::bigquery::{initial_copy::SnapshotBatch, validation::validate_cell_for_bigquery};
 
 /// BigQuery BIGNUMERIC precision used by the Avro decimal mapping.
 const BIGQUERY_BIGNUMERIC_PRECISION: usize = 76;
@@ -50,8 +45,6 @@ pub struct AvroColumnMapping {
 /// Parsed Avro schema plus field mapping metadata.
 #[derive(Debug, Clone)]
 pub struct AvroSchemaDefinition {
-    /// Avro record name.
-    pub record_name: String,
     /// Parsed Avro schema used by [`apache_avro::Writer`].
     pub schema: Schema,
     /// Source-to-Avro field mapping in replicated column order.
@@ -106,33 +99,7 @@ impl AvroSchemaDefinition {
             )
         })?;
 
-        Ok(Self { record_name, schema, column_mappings, dialect: AvroSchemaDialect::BigQuery })
-    }
-}
-
-/// Avro object-container encoder for snapshot batches.
-pub struct AvroSnapshotFileEncoder {
-    schema_definition: AvroSchemaDefinition,
-    rows: Vec<Value>,
-    row_count: u64,
-    estimated_bytes: usize,
-}
-
-impl AvroSnapshotFileEncoder {
-    /// Creates a new Avro encoder from a schema definition.
-    pub fn new(schema_definition: AvroSchemaDefinition) -> Self {
-        Self { schema_definition, rows: Vec::new(), row_count: 0, estimated_bytes: 0 }
-    }
-
-    /// Creates a BigQuery-compatible Avro encoder for a replicated table
-    /// schema.
-    pub fn for_bigquery(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<Self> {
-        Ok(Self::new(AvroSchemaDefinition::for_bigquery(replicated_table_schema)?))
-    }
-
-    /// Returns the schema definition used by this encoder.
-    pub fn schema_definition(&self) -> &AvroSchemaDefinition {
-        &self.schema_definition
+        Ok(Self { schema, column_mappings, dialect: AvroSchemaDialect::BigQuery })
     }
 }
 
@@ -209,56 +176,6 @@ impl<'a, W: Write> AvroSnapshotStreamEncoder<'a, W> {
 enum AvroSchemaDialect {
     /// BigQuery load-job compatible encoding.
     BigQuery,
-}
-
-impl SnapshotFileEncoder for AvroSnapshotFileEncoder {
-    fn write_batch(&mut self, batch: SnapshotBatch) -> EtlResult<()> {
-        for row in batch.rows {
-            self.estimated_bytes = self.estimated_bytes.saturating_add(row.size_hint());
-            let avro_row = encode_row_for_avro(&self.schema_definition, row)?;
-            self.rows.push(avro_row);
-            self.row_count += 1;
-        }
-
-        Ok(())
-    }
-
-    fn estimated_bytes(&self) -> usize {
-        self.estimated_bytes
-    }
-
-    fn finish(self) -> EtlResult<CompletedSnapshotFile> {
-        let mut writer =
-            Writer::with_codec(&self.schema_definition.schema, Vec::new(), Codec::Snappy);
-
-        for row in &self.rows {
-            writer.append_value_ref(row).map_err(|err| {
-                etl_error!(
-                    ErrorKind::SerializationError,
-                    "Avro row serialization failed",
-                    "Failed to append a row to the snapshot Avro file.",
-                    source: err
-                )
-            })?;
-        }
-
-        let bytes = writer.into_inner().map_err(|err| {
-            etl_error!(
-                ErrorKind::SerializationError,
-                "Avro file finalization failed",
-                "Failed to finalize the snapshot Avro object container file.",
-                source: err
-            )
-        })?;
-        let size_bytes = bytes.len() as u64;
-
-        Ok(CompletedSnapshotFile {
-            format: SnapshotFormat::Avro,
-            row_count: self.row_count,
-            size_bytes,
-            body: UploadBody::Bytes(bytes),
-        })
-    }
 }
 
 /// Converts one table row into an Avro record.
@@ -827,7 +744,8 @@ mod tests {
             column("active", Type::BOOL, 3, false),
             column("created_at", Type::TIMESTAMPTZ, 4, false),
         ]);
-        let mut encoder = AvroSnapshotFileEncoder::for_bigquery(&schema).unwrap();
+        let definition = AvroSchemaDefinition::for_bigquery(&schema).unwrap();
+        let mut encoder = AvroSnapshotStreamEncoder::new(&definition, Vec::new());
         let timestamp = Utc.with_ymd_and_hms(2026, 6, 29, 12, 0, 0).unwrap();
 
         encoder
@@ -841,14 +759,10 @@ mod tests {
             })
             .unwrap();
 
-        let file = encoder.finish().unwrap();
-        let UploadBody::Bytes(bytes) = file.body else {
-            panic!("expected in-memory bytes");
-        };
+        let (bytes, row_count, _) = encoder.finish().unwrap();
         let rows = Reader::new(bytes.as_slice()).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
 
-        assert_eq!(file.format, SnapshotFormat::Avro);
-        assert_eq!(file.row_count, 1);
+        assert_eq!(row_count, 1);
         assert_eq!(rows.len(), 1);
     }
 
@@ -860,7 +774,8 @@ mod tests {
             column("ts", Type::TIMESTAMP, 3, false),
             column("arr", Type::INT4_ARRAY, 4, true),
         ]);
-        let mut encoder = AvroSnapshotFileEncoder::for_bigquery(&schema).unwrap();
+        let definition = AvroSchemaDefinition::for_bigquery(&schema).unwrap();
+        let mut encoder = AvroSnapshotStreamEncoder::new(&definition, Vec::new());
 
         encoder
             .write_batch(SnapshotBatch {
@@ -876,14 +791,15 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(encoder.row_count, 1);
+        assert_eq!(encoder.row_count(), 1);
         assert!(encoder.estimated_bytes() > 0);
     }
 
     #[test]
     fn encoder_rejects_row_width_mismatch() {
         let schema = replicated_schema(vec![column("id", Type::INT8, 1, false)]);
-        let mut encoder = AvroSnapshotFileEncoder::for_bigquery(&schema).unwrap();
+        let definition = AvroSchemaDefinition::for_bigquery(&schema).unwrap();
+        let mut encoder = AvroSnapshotStreamEncoder::new(&definition, Vec::new());
         let err =
             encoder.write_batch(SnapshotBatch { rows: vec![TableRow::new(vec![])] }).unwrap_err();
 
@@ -893,7 +809,8 @@ mod tests {
     #[test]
     fn encoder_rejects_special_numeric_values() {
         let schema = replicated_schema(vec![column("amount", Type::NUMERIC, 1, false)]);
-        let mut encoder = AvroSnapshotFileEncoder::for_bigquery(&schema).unwrap();
+        let definition = AvroSchemaDefinition::for_bigquery(&schema).unwrap();
+        let mut encoder = AvroSnapshotStreamEncoder::new(&definition, Vec::new());
         let err = encoder
             .write_batch(SnapshotBatch {
                 rows: vec![TableRow::new(vec![Cell::Numeric(PgNumeric::from_str("NaN").unwrap())])],
@@ -906,7 +823,8 @@ mod tests {
     #[test]
     fn encoder_finalizes_numeric_decimal_values() {
         let schema = replicated_schema(vec![column("amount", Type::NUMERIC, 1, false)]);
-        let mut encoder = AvroSnapshotFileEncoder::for_bigquery(&schema).unwrap();
+        let definition = AvroSchemaDefinition::for_bigquery(&schema).unwrap();
+        let mut encoder = AvroSnapshotStreamEncoder::new(&definition, Vec::new());
 
         encoder
             .write_batch(SnapshotBatch {
@@ -916,9 +834,9 @@ mod tests {
             })
             .unwrap();
 
-        let file = encoder.finish().unwrap();
+        let (bytes, row_count, _) = encoder.finish().unwrap();
 
-        assert_eq!(file.row_count, 1);
-        assert!(file.size_bytes > 0);
+        assert_eq!(row_count, 1);
+        assert!(!bytes.is_empty());
     }
 }

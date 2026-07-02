@@ -50,16 +50,14 @@ use crate::{
         encoding::BigQueryTableRow,
         initial_copy::{
             BigQueryLoadJobRequest, BigQueryLoadJobStatus, DEFAULT_GCS_PREFIX, GcsDeleteRequest,
-            GcsObjectMetadata, GcsStreamingUploadRequest, gcs::GcsStreamingUploadWriter,
+            GcsObjectMetadata, GcsStreamingUploadRequest, SnapshotBatch, SnapshotFormat,
+            avro::{AvroColumnMapping, AvroSchemaDefinition, AvroSnapshotStreamEncoder},
+            gcs::GcsStreamingUploadWriter,
             gcs_object_name, generate_random_run_id, load_job_id, staging_table_id,
         },
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
         schema::{column_schemas_to_table_descriptor, supports_column_default},
         sql::quote_identifier,
-    },
-    snapshot::{
-        SnapshotBatch, SnapshotFormat,
-        avro::{AvroColumnMapping, AvroSchemaDefinition, AvroSnapshotStreamEncoder},
     },
     table_name::try_stringify_table_name,
 };

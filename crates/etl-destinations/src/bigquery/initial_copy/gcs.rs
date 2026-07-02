@@ -36,10 +36,9 @@ use tracing::warn;
 use crate::{
     bigquery::initial_copy::{
         GcsDeleteRequest, GcsObjectMetadata, GcsStreamingUploadRequest, GcsUploadRequest,
-        GcsUploader, gcs_uri,
+        GcsUploader, UploadBody, gcs_uri,
     },
     retry::{RetryAttempt, RetryDecision, RetryPolicy, retry_with_backoff},
-    snapshot::UploadBody,
 };
 
 /// OAuth scope used to upload staged snapshot files to GCS.
@@ -137,7 +136,14 @@ impl GoogleCloudStorageUploader {
             )
             .await?;
         let response = self
-            .upload_resumable_body(&bucket, &object_name, &body, size_bytes, &session_url, &token)
+            .upload_resumable_body(
+                &bucket,
+                &object_name,
+                &body,
+                size_bytes,
+                &session_url,
+                &self.auth,
+            )
             .await?;
         let bucket = response.bucket.unwrap_or(bucket);
         let object_name = response.name.unwrap_or(object_name);
@@ -247,7 +253,7 @@ impl GoogleCloudStorageUploader {
         Ok(GcsStreamingUploadWriter::new(
             self.client.clone(),
             Handle::current(),
-            token,
+            self.auth.clone(),
             request.bucket,
             request.object_name,
             session_url,
@@ -262,7 +268,7 @@ impl GoogleCloudStorageUploader {
         body: &PreparedUploadBody,
         size_bytes: u64,
         session_url: &str,
-        token: &str,
+        auth: &GcsAuth,
     ) -> EtlResult<GcsObjectResponse> {
         let mut offset = 0_u64;
 
@@ -284,11 +290,13 @@ impl GoogleCloudStorageUploader {
                 |delay| delay,
                 log_gcs_request_retry,
                 || {
+                    let auth = auth.clone();
                     let bytes = bytes.clone();
-                    let token = token.to_owned();
                     let session_url = session_url.to_owned();
 
                     async move {
+                        let token =
+                            auth.access_token().await.map_err(GcsRequestAttemptError::Auth)?;
                         upload_resumable_chunk_with_status_check(
                             &self.client,
                             &session_url,
@@ -379,7 +387,7 @@ impl GoogleCloudStorageUploader {
 pub(crate) struct GcsStreamingUploadWriter {
     client: Client,
     runtime: Handle,
-    token: String,
+    auth: GcsAuth,
     bucket: String,
     object_name: String,
     session_url: String,
@@ -392,7 +400,7 @@ impl GcsStreamingUploadWriter {
     fn new(
         client: Client,
         runtime: Handle,
-        token: String,
+        auth: GcsAuth,
         bucket: String,
         object_name: String,
         session_url: String,
@@ -400,7 +408,7 @@ impl GcsStreamingUploadWriter {
         Self {
             client,
             runtime,
-            token,
+            auth,
             bucket,
             object_name,
             session_url,
@@ -477,12 +485,16 @@ impl GcsStreamingUploadWriter {
         let mut offset = self.offset;
 
         while !bytes.is_empty() {
+            let token = self
+                .runtime
+                .block_on(self.auth.access_token())
+                .map_err(|err| self.io_error(GcsRequestAttemptError::Auth(err)))?;
             let step = self
                 .runtime
                 .block_on(upload_resumable_chunk_with_status_check(
                     &self.client,
                     &self.session_url,
-                    &self.token,
+                    &token,
                     offset,
                     total_size,
                     bytes.clone(),
@@ -558,6 +570,8 @@ impl Write for GcsStreamingUploadWriter {
 /// Failure from one retryable GCS request attempt.
 #[derive(Debug)]
 enum GcsRequestAttemptError {
+    /// Authentication failed before a request could be sent.
+    Auth(etl::error::EtlError),
     /// HTTP transport failure before a response was received.
     Request(reqwest::Error),
     /// HTTP response decoding failed.
@@ -571,6 +585,7 @@ enum GcsRequestAttemptError {
 impl fmt::Display for GcsRequestAttemptError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Auth(error) => write!(f, "{error}"),
             Self::Request(error) => write!(f, "{error}"),
             Self::Response(error) => write!(f, "{error}"),
             Self::Protocol(error) => write!(f, "{error}"),
@@ -582,6 +597,7 @@ impl fmt::Display for GcsRequestAttemptError {
 impl std::error::Error for GcsRequestAttemptError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Auth(error) => Some(error),
             Self::Request(error) => Some(error),
             Self::Response(error) => Some(error),
             Self::Protocol(_) => None,
@@ -869,6 +885,7 @@ fn gcs_attempt_error(
     object_name: &str,
 ) -> etl::error::EtlError {
     match error {
+        GcsRequestAttemptError::Auth(error) => error,
         GcsRequestAttemptError::Request(error) => gcs_request_error(error),
         GcsRequestAttemptError::Response(error) => gcs_response_error(error),
         GcsRequestAttemptError::Protocol(error) => etl_error!(
@@ -883,6 +900,7 @@ fn gcs_attempt_error(
 /// Returns whether a failed GCS request attempt should be retried.
 fn gcs_request_retry_decision(error: &GcsRequestAttemptError) -> RetryDecision {
     match error {
+        GcsRequestAttemptError::Auth(_) => RetryDecision::Stop,
         GcsRequestAttemptError::Request(error)
             if error.is_timeout() || error.is_connect() || error.is_request() =>
         {
@@ -901,6 +919,7 @@ fn gcs_request_retry_decision(error: &GcsRequestAttemptError) -> RetryDecision {
 /// Returns whether a failed chunk attempt should be reconciled with GCS.
 fn should_check_resumable_upload_status(error: &GcsRequestAttemptError) -> bool {
     match error {
+        GcsRequestAttemptError::Auth(_) => false,
         GcsRequestAttemptError::Request(error) => {
             error.is_timeout() || error.is_connect() || error.is_request()
         }
@@ -1157,7 +1176,8 @@ mod tests {
         validate_upload_request,
     };
     use crate::{
-        bigquery::initial_copy::GcsUploadRequest, retry::RetryDecision, snapshot::UploadBody,
+        bigquery::initial_copy::{GcsUploadRequest, UploadBody},
+        retry::RetryDecision,
     };
 
     #[test]
