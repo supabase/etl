@@ -5,9 +5,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use commands::{
     BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
-    FixArgs, FixPipelineArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, NextestArgs, PostgresArgs,
-    RotateEncryptionKeyArgs, SeedArgs, TestArgs, TestClickhouseArgs, TestSnowflakeArgs,
-    VendorDuckdbArgs,
+    FixArgs, FixPipelineArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, NextestArgs,
+    PgFillTableArgs, PostgresArgs, RotateEncryptionKeyArgs, SeedArgs, TestArgs, TestClickhouseArgs,
+    TestSnowflakeArgs, VendorDuckdbArgs,
 };
 
 #[derive(Parser)]
@@ -49,6 +49,9 @@ enum Command {
     Msrv(MsrvArgs),
     /// Run tests via nextest, sharded across multiple Postgres clusters.
     Nextest(NextestArgs),
+    /// Fill one Postgres table to a target size using parallel COPY workers.
+    #[command(name = "pg-fill-table")]
+    PgFillTable(PgFillTableArgs),
     /// Manage test Postgres clusters.
     Postgres(PostgresArgs),
     /// Re-encrypt API source and destination configs with the latest configured
@@ -89,6 +92,7 @@ async fn main() -> Result<()> {
         Command::FixPipeline(cmd) => cmd.run().await,
         Command::Msrv(cmd) => cmd.run(),
         Command::Nextest(cmd) => cmd.run(),
+        Command::PgFillTable(cmd) => cmd.run(),
         Command::Postgres(cmd) => cmd.run(),
         Command::RotateEncryptionKey(cmd) => cmd.run().await,
         Command::Seed(cmd) => cmd.run(),
