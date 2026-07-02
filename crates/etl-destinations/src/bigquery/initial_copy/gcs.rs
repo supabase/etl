@@ -125,15 +125,8 @@ impl GoogleCloudStorageUploader {
         let GcsUploadRequest { bucket, object_name, content_type, body } = request;
         let body = PreparedUploadBody::new(body).await?;
         let size_bytes = body.size_bytes();
-        let token = self.auth.access_token().await?;
         let session_url = self
-            .start_resumable_upload_session(
-                &bucket,
-                &object_name,
-                &content_type,
-                Some(size_bytes),
-                &token,
-            )
+            .start_resumable_upload_session(&bucket, &object_name, &content_type, Some(size_bytes))
             .await?;
         let response = self
             .upload_resumable_body(
@@ -164,7 +157,6 @@ impl GoogleCloudStorageUploader {
         object_name: &str,
         content_type: &str,
         size_bytes: Option<u64>,
-        token: &str,
     ) -> EtlResult<String> {
         let url = format!("{GCS_UPLOAD_BASE_URL}/{bucket}/o");
         let metadata = GcsObjectUploadMetadata { name: object_name };
@@ -175,12 +167,13 @@ impl GoogleCloudStorageUploader {
             |delay| delay,
             log_gcs_request_retry,
             || {
+                let auth = self.auth.clone();
                 let metadata = &metadata;
-                let token = token.to_owned();
                 let url = url.clone();
                 let content_type = content_type.to_owned();
 
                 async move {
+                    let token = auth.access_token().await.map_err(GcsRequestAttemptError::Auth)?;
                     let mut request = self
                         .client
                         .post(url)
@@ -239,14 +232,12 @@ impl GoogleCloudStorageUploader {
             ));
         }
 
-        let token = self.auth.access_token().await?;
         let session_url = self
             .start_resumable_upload_session(
                 &request.bucket,
                 &request.object_name,
                 &request.content_type,
                 None,
-                &token,
             )
             .await?;
 
@@ -335,7 +326,6 @@ impl GoogleCloudStorageUploader {
     async fn delete_object_inner(&self, request: GcsDeleteRequest) -> EtlResult<()> {
         validate_object_location(&request.bucket, &request.object_name)?;
 
-        let token = self.auth.access_token().await?;
         let encoded_object_name = encode_uri_path_part(&request.object_name);
         let url = format!("{}/{}/o/{}", GCS_JSON_BASE_URL, request.bucket, encoded_object_name);
 
@@ -345,10 +335,11 @@ impl GoogleCloudStorageUploader {
             |delay| delay,
             log_gcs_request_retry,
             || {
-                let token = token.clone();
+                let auth = self.auth.clone();
                 let url = url.clone();
 
                 async move {
+                    let token = auth.access_token().await.map_err(GcsRequestAttemptError::Auth)?;
                     let response = self
                         .client
                         .delete(url)
