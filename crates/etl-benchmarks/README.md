@@ -196,9 +196,11 @@ cargo xtask pg-fill-table \
   --force
 ```
 
-The command defaults to an `UNLOGGED` table, `synchronous_commit=off`, TLS
+The command defaults to a logged table with an identity primary key so it can be
+used with logical replication. It still uses `synchronous_commit=off`, TLS
 connection parameters, and `storage external` for the payload column. Pass
-`--logged` if the table must use normal WAL logging.
+`--unlogged` only for non-replication experiments where crash safety and logical
+replication do not matter.
 
 ## Copy-Only And Streaming-Only
 
