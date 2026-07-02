@@ -110,6 +110,9 @@ pub enum DestinationConfig {
         project_id: String,
         /// BigQuery dataset identifier.
         dataset_id: String,
+        /// Optional GCS bucket used to stage Avro files for BigQuery initial
+        /// copy load jobs.
+        gcs_staging_bucket: Option<String>,
         /// Service account key for authenticating with BigQuery.
         service_account_key: SecretString,
         /// Maximum staleness in minutes for BigQuery CDC reads.
@@ -340,6 +343,10 @@ pub enum DestinationConfigWithoutSecrets {
         project_id: String,
         /// BigQuery dataset identifier.
         dataset_id: String,
+        /// Optional GCS bucket used to stage Avro files for BigQuery initial
+        /// copy load jobs.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gcs_staging_bucket: Option<String>,
         /// Maximum staleness in minutes for BigQuery CDC reads.
         ///
         /// If not set, the default staleness behavior is used. See
@@ -420,12 +427,14 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
             DestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key: _,
                 max_staleness_mins,
                 connection_pool_size,
             } => DestinationConfigWithoutSecrets::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 max_staleness_mins,
                 connection_pool_size,
             },

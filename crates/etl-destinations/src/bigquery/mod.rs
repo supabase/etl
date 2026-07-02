@@ -1,12 +1,13 @@
 mod client;
 mod core;
 mod encoding;
+pub mod initial_copy;
 mod metrics;
 mod schema;
 mod sql;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
-mod validation;
+pub(crate) mod validation;
 
 pub use core::BigQueryDestination;
 #[cfg(feature = "test-utils")]

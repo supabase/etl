@@ -146,7 +146,8 @@ async fn run(args: RunArgs) -> Result<()> {
     let table_ids = args.table_ids.clone();
     let store = NotifyingStore::new();
     let destination =
-        BenchDestination::new(&args.destination, args.pipeline_id, store.clone()).await?;
+        BenchDestination::new(&args.destination, &args.tuning, args.pipeline_id, store.clone())
+            .await?;
 
     let notifications = register_table_ready_notifications(&store, &table_ids).await?;
 

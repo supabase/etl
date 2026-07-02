@@ -434,6 +434,7 @@ BigQuery destination tests require Google Cloud credentials:
 |----------|----------|-------------|
 | `TESTS_BIGQUERY_PROJECT_ID` | **Yes** | GCP project ID for BigQuery |
 | `TESTS_BIGQUERY_SA_KEY_PATH` | **Yes** | Path to service account JSON key file |
+| `TESTS_BIGQUERY_GCS_STAGING_BUCKET` | No | GCS bucket used by BigQuery Avro/GCS initial-copy tests |
 
 **Note:** BigQuery tests are only run when the `bigquery` and `test-utils` features are enabled. Each test creates a unique dataset with a UUID-based name for isolation.
 
@@ -501,6 +502,7 @@ export TESTS_DATABASE_TLS_ENABLED=true
 # BigQuery test configuration (optional - only needed for BigQuery tests)
 export TESTS_BIGQUERY_PROJECT_ID=your-gcp-project-id
 export TESTS_BIGQUERY_SA_KEY_PATH=/path/to/service-account-key.json
+export TESTS_BIGQUERY_GCS_STAGING_BUCKET=your-gcs-staging-bucket
 
 # ClickHouse test configuration (optional - only needed for ClickHouse tests)
 export TESTS_CLICKHOUSE_URL=http://localhost:8123
@@ -531,6 +533,7 @@ TESTS_DATABASE_PASSWORD=postgres
 # BigQuery (optional - only for BigQuery tests)
 TESTS_BIGQUERY_PROJECT_ID=your-gcp-project-id
 TESTS_BIGQUERY_SA_KEY_PATH=/path/to/service-account-key.json
+TESTS_BIGQUERY_GCS_STAGING_BUCKET=your-gcs-staging-bucket
 
 # ClickHouse (optional - only for ClickHouse tests)
 TESTS_CLICKHOUSE_URL=http://localhost:8123

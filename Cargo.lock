@@ -304,6 +304,7 @@ checksum = "36fa98bc79671c7981272d91a8753a928ff6a1cd8e4f20a44c45bd5d313840bf"
 dependencies = [
  "bigdecimal",
  "bon",
+ "crc32fast",
  "digest 0.10.7",
  "log",
  "miniz_oxide",
@@ -314,6 +315,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "snap",
  "strum",
  "strum_macros",
  "thiserror 2.0.18",
@@ -2059,6 +2061,7 @@ dependencies = [
 name = "etl-destinations"
 version = "0.1.0"
 dependencies = [
+ "apache-avro",
  "arrow 57.3.1",
  "async-trait",
  "aws-lc-rs",

@@ -93,7 +93,7 @@ fn is_json_integer_literal(number: &str) -> bool {
 /// Destination-domain checks that BigQuery rejects with row errors are
 /// intentionally delegated to BigQuery to avoid duplicating destination logic
 /// in the append hot path.
-pub(super) fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()> {
+pub(crate) fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()> {
     match cell {
         CellNonOptional::Null => Ok(()),
         CellNonOptional::Bool(_) => Ok(()),

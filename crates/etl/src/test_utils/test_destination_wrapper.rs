@@ -14,7 +14,7 @@ use crate::{
     data::TableRow,
     destination::{
         ApplyLoopAsyncResultMetadata, Destination, DispatchMetrics, DropTableForCopyResult,
-        PipelineDestination, WriteEventsResult, WriteTableRowsResult,
+        FinishTableCopyResult, PipelineDestination, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::{Event, EventType},
@@ -311,6 +311,25 @@ where
 
             inner.check_conditions();
         }
+
+        Ok(())
+    }
+
+    async fn finish_table_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        async_result: FinishTableCopyResult<()>,
+    ) -> EtlResult<()> {
+        let destination = {
+            let inner = self.inner.read().await;
+            inner.wrapped_destination.clone()
+        };
+
+        let (wrapped_finish_result, pending_finish_result) = FinishTableCopyResult::new(());
+        destination.finish_table_copy(replicated_table_schema, wrapped_finish_result).await?;
+
+        let result = pending_finish_result.await.into_result();
+        async_result.send(result);
 
         Ok(())
     }

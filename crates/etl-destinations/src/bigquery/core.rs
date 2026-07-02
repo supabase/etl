@@ -1,8 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
+    num::NonZeroUsize,
     str::FromStr,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
 };
 
 use etl::{
@@ -10,7 +15,8 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
-        DropTableForCopyResult, TaskSet, WriteEventsResult, WriteTableRowsResult,
+        DropTableForCopyResult, FinishTableCopyResult, TaskSet, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -18,13 +24,21 @@ use etl::{
     pipeline::PipelineId,
     schema::{
         ColumnModification, IdentityType, ReplicatedTableSchema, SchemaDiff, TableId, TableName,
+        Type,
     },
     store::DestinationStore,
 };
-use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
+use gcp_bigquery_client::{
+    model::query_request::QueryRequest,
+    storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor},
+};
 use metrics::histogram;
 use prost::Message;
-use tokio::sync::Mutex;
+use tokio::{
+    sync::{Mutex, RwLock, oneshot},
+    task::JoinHandle,
+    time::{Duration, Instant, sleep, timeout},
+};
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "egress")]
@@ -34,8 +48,18 @@ use crate::{
         BigQueryDatasetId, BigQueryTableId,
         client::{BigQueryClient, BigQueryOperationType},
         encoding::BigQueryTableRow,
+        initial_copy::{
+            BigQueryLoadJobRequest, BigQueryLoadJobStatus, DEFAULT_GCS_PREFIX, GcsDeleteRequest,
+            GcsObjectMetadata, GcsStreamingUploadRequest, gcs::GcsStreamingUploadWriter,
+            gcs_object_name, generate_random_run_id, load_job_id, staging_table_id,
+        },
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
         schema::{column_schemas_to_table_descriptor, supports_column_default},
+        sql::quote_identifier,
+    },
+    snapshot::{
+        SnapshotBatch, SnapshotFormat,
+        avro::{AvroColumnMapping, AvroSchemaDefinition, AvroSnapshotStreamEncoder},
     },
     table_name::try_stringify_table_name,
 };
@@ -44,7 +68,14 @@ use crate::{
 const BIGQUERY_SEQUENCE_ORDINAL_FIRST: u64 = 0;
 /// Internal CDC sequence ordinal for generated upserts after generated deletes.
 const BIGQUERY_SEQUENCE_ORDINAL_SECOND: u64 = 1;
-
+/// Fixed load-job polling interval for the first GCS initial-copy iteration.
+const BIGQUERY_INITIAL_COPY_LOAD_JOB_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Fixed load-job timeout for the first GCS initial-copy iteration.
+const BIGQUERY_INITIAL_COPY_LOAD_JOB_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
+/// Timeout for best-effort GCS staging file cleanup after initial-copy loading.
+const BIGQUERY_INITIAL_COPY_GCS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Timeout for a single best-effort GCS staging object deletion.
+const BIGQUERY_INITIAL_COPY_GCS_DELETE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
 /// Uses the shared underscore-escaped destination naming logic.
@@ -176,6 +207,26 @@ fn metadata_sequenced_table_id_for_base(
     Ok(sequenced_bigquery_table_id)
 }
 
+/// Initial-copy write path used by BigQuery.
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum BigQueryInitialCopyMode {
+    /// Write initial-copy rows through the BigQuery Storage Write API.
+    StorageWrite,
+    /// Stage initial-copy rows as Avro files in GCS, then load them into
+    /// BigQuery with a load job.
+    GcsAvro(BigQueryInitialCopyConfig),
+}
+
+impl BigQueryInitialCopyMode {
+    /// Returns the mode name used in logs.
+    fn as_str(&self) -> &'static str {
+        match self {
+            BigQueryInitialCopyMode::StorageWrite => "storage_write",
+            BigQueryInitialCopyMode::GcsAvro(_) => "gcs_avro",
+        }
+    }
+}
+
 /// Internal state for [`BigQueryDestination`] wrapped in `Arc<Mutex<>>`.
 ///
 /// Contains caches and state that require synchronization across concurrent
@@ -195,18 +246,358 @@ struct Inner {
     /// # Example
     /// `{ users_table: users_table_10, orders_table: orders_table_3 }`
     created_views: HashMap<BigQueryTableId, SequencedBigQueryTableId>,
+    /// Pending GCS-backed initial-copy runs keyed by source table id.
+    initial_copy_runs: HashMap<TableId, Arc<BigQueryInitialCopyRun>>,
 }
 
 impl Inner {
     /// Creates empty synchronized destination state.
     fn new() -> Self {
-        Self { created_tables: HashSet::new(), created_views: HashMap::new() }
+        Self {
+            created_tables: HashSet::new(),
+            created_views: HashMap::new(),
+            initial_copy_runs: HashMap::new(),
+        }
     }
 
     /// Clears cached state for a destination table.
     fn clear_table_cache(&mut self, base_table_id: &BigQueryTableId) {
         self.created_views.remove(base_table_id);
         self.created_tables.retain(|table_id| !table_id.belongs_to_base(base_table_id));
+    }
+}
+
+/// GCS-backed initial-copy configuration for BigQuery.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct BigQueryInitialCopyConfig {
+    /// GCS bucket used to stage Avro snapshot files.
+    gcs_staging_bucket: String,
+}
+
+impl BigQueryInitialCopyConfig {
+    /// Creates a configuration using `gcs_staging_bucket`.
+    pub fn new(gcs_staging_bucket: impl Into<String>) -> Self {
+        Self { gcs_staging_bucket: gcs_staging_bucket.into() }
+    }
+
+    /// Returns the staging bucket name.
+    fn gcs_staging_bucket(&self) -> &str {
+        &self.gcs_staging_bucket
+    }
+}
+
+/// Pending writer state for one BigQuery GCS-backed initial copy.
+#[derive(Debug)]
+struct BigQueryInitialCopyRun {
+    /// Stable run id used in GCS object names and BigQuery job ids.
+    run_id: String,
+    /// Staging table that receives the Avro load job.
+    staging_table_id: BigQueryTableId,
+    /// Source-column mappings used for staging-to-final SQL.
+    column_mappings: Vec<AvroColumnMapping>,
+    /// Streaming Avro/GCS writer slots for this table copy.
+    ///
+    /// The vector is fixed after construction. The read lock is only held long
+    /// enough to clone a slot handle; each slot mutex serializes one Avro
+    /// object-container stream.
+    slots: RwLock<Vec<Arc<Mutex<BigQueryInitialCopyWriterSlot>>>>,
+    /// Next writer slot to receive a batch.
+    next_slot_index: AtomicUsize,
+}
+
+impl BigQueryInitialCopyRun {
+    /// Prepares a pending GCS/Avro initial-copy run and its writer slots.
+    fn prepare_gcs_avro(
+        pipeline_id: PipelineId,
+        table_name: &TableName,
+        base_table_id: &BigQueryTableId,
+        schema_definition: AvroSchemaDefinition,
+        client: BigQueryClient,
+        gcs_staging_bucket: String,
+        avro_file_count: usize,
+    ) -> Self {
+        let run_id = generate_random_run_id();
+        let staging_table = staging_table_id(base_table_id, &run_id);
+        let column_mappings = schema_definition.column_mappings.clone();
+        let mut slots = Vec::with_capacity(avro_file_count);
+        for file_index in 0..avro_file_count {
+            let object_name = gcs_object_name(
+                DEFAULT_GCS_PREFIX,
+                pipeline_id,
+                table_name,
+                &run_id,
+                0,
+                file_index,
+                SnapshotFormat::Avro,
+            );
+            let upload_request = GcsStreamingUploadRequest {
+                bucket: gcs_staging_bucket.clone(),
+                object_name,
+                content_type: SnapshotFormat::Avro.content_type().to_owned(),
+            };
+            let slot = BigQueryInitialCopyWriterSlot::new(
+                schema_definition.clone(),
+                client.clone(),
+                upload_request,
+            );
+            slots.push(Arc::new(Mutex::new(slot)));
+        }
+
+        Self {
+            run_id,
+            staging_table_id: staging_table,
+            column_mappings,
+            slots: RwLock::new(slots),
+            next_slot_index: AtomicUsize::new(0),
+        }
+    }
+
+    /// Writes one source batch to the next streaming Avro/GCS file.
+    async fn write_batch(&self, table_rows: Vec<TableRow>) -> EtlResult<AvroInitialCopyWriteStats> {
+        let slot = self.next_write_slot().await?;
+
+        // Holding the slot lock across the await is intentional: each slot owns
+        // one Avro object and GCS resumable upload session, both of which must
+        // receive bytes in order.
+        slot.lock().await.write_batch(table_rows).await
+    }
+
+    /// Finalizes all streaming Avro/GCS files and returns the non-empty files.
+    async fn finish(&self) -> EtlResult<Vec<BigQueryInitialCopyFinishedFile>> {
+        let mut finished_files = Vec::new();
+        let slots = self.slots.read().await.clone();
+
+        for slot in slots {
+            let mut slot = slot.lock().await;
+            let Some(finished_file) = slot.finish().await? else {
+                continue;
+            };
+            if finished_file.row_count > 0 {
+                finished_files.push(finished_file);
+            }
+        }
+
+        Ok(finished_files)
+    }
+
+    /// Returns the next writer slot using round-robin dispatch.
+    async fn next_write_slot(&self) -> EtlResult<Arc<Mutex<BigQueryInitialCopyWriterSlot>>> {
+        let slots = self.slots.read().await;
+        if slots.is_empty() {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "BigQuery initial-copy Avro writer slots are missing"
+            ));
+        }
+
+        // This counter is only a load-balancing cursor. It does not protect
+        // shared data, so relaxed ordering is sufficient.
+        let slot_index = self.next_slot_index.fetch_add(1, Ordering::Relaxed) % slots.len();
+
+        Ok(Arc::clone(&slots[slot_index]))
+    }
+}
+
+/// One streaming Avro/GCS writer for a table-copy run.
+#[derive(Debug)]
+struct BigQueryInitialCopyWriterSlot {
+    /// Schema used to create the Avro object container.
+    schema_definition: AvroSchemaDefinition,
+    /// BigQuery client that owns the GCS uploader.
+    client: BigQueryClient,
+    /// Request used when lazily opening the streaming GCS object.
+    upload_request: GcsStreamingUploadRequest,
+    /// Command sender for the blocking Avro writer worker.
+    commands: Option<mpsc::Sender<AvroInitialCopyCommand>>,
+    /// Worker task that owns the Avro writer.
+    worker: Option<JoinHandle<()>>,
+}
+
+impl BigQueryInitialCopyWriterSlot {
+    /// Creates a lazy writer slot for one GCS Avro object.
+    fn new(
+        schema_definition: AvroSchemaDefinition,
+        client: BigQueryClient,
+        upload_request: GcsStreamingUploadRequest,
+    ) -> Self {
+        Self { schema_definition, client, upload_request, commands: None, worker: None }
+    }
+
+    /// Writes one source batch to this streaming Avro file.
+    async fn write_batch(
+        &mut self,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<AvroInitialCopyWriteStats> {
+        self.ensure_worker().await?;
+        let commands = self.commands.as_ref().ok_or_else(|| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "BigQuery initial-copy Avro writer is not initialized"
+            )
+        })?;
+        let (sender, receiver) = oneshot::channel();
+        commands.send(AvroInitialCopyCommand::Write { table_rows, result: sender }).map_err(
+            |_| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "BigQuery initial-copy Avro writer stopped before accepting rows"
+                )
+            },
+        )?;
+
+        receiver.await.map_err(|_| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "BigQuery initial-copy Avro writer stopped before acknowledging rows"
+            )
+        })?
+    }
+
+    /// Finalizes the streaming Avro file.
+    async fn finish(&mut self) -> EtlResult<Option<BigQueryInitialCopyFinishedFile>> {
+        let Some(commands) = self.commands.take() else {
+            return Ok(None);
+        };
+
+        let (sender, receiver) = oneshot::channel();
+        commands.send(AvroInitialCopyCommand::Finish { result: sender }).map_err(|_| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "BigQuery initial-copy Avro writer stopped before finalization"
+            )
+        })?;
+
+        let finished_writer = receiver.await.map_err(|_| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "BigQuery initial-copy Avro writer stopped without finalizing"
+            )
+        })??;
+
+        if let Some(worker) = self.worker.take() {
+            worker.await.map_err(|err| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "BigQuery initial-copy Avro writer task failed",
+                    source: err
+                )
+            })?;
+        }
+
+        Ok(Some(BigQueryInitialCopyFinishedFile {
+            row_count: finished_writer.row_count,
+            size_bytes: finished_writer.size_bytes,
+            gcs_object: finished_writer.gcs_object,
+        }))
+    }
+
+    /// Starts the blocking Avro worker and GCS upload session if needed.
+    async fn ensure_worker(&mut self) -> EtlResult<()> {
+        if self.commands.is_some() {
+            return Ok(());
+        }
+
+        let writer = self.client.start_gcs_streaming_upload(self.upload_request.clone()).await?;
+        let schema_definition = self.schema_definition.clone();
+        let (commands, receiver) = mpsc::channel();
+        // The Apache Avro writer targets `std::io::Write`, so the encoder and
+        // its GCS upload bridge run on Tokio's blocking pool.
+        let worker = tokio::task::spawn_blocking(move || {
+            run_avro_initial_copy_worker(schema_definition, writer, receiver);
+        });
+
+        self.commands = Some(commands);
+        self.worker = Some(worker);
+
+        Ok(())
+    }
+}
+
+/// One finalized Avro file for a BigQuery initial-copy run.
+#[derive(Debug)]
+struct BigQueryInitialCopyFinishedFile {
+    /// Number of rows in the Avro file.
+    row_count: u64,
+    /// Uploaded Avro object size in bytes.
+    size_bytes: u64,
+    /// Metadata for the uploaded GCS object.
+    gcs_object: GcsObjectMetadata,
+}
+
+/// Finalized state returned by a streaming Avro writer.
+#[derive(Debug)]
+struct FinishedGcsAvroWriter {
+    /// Number of rows in the Avro file.
+    row_count: u64,
+    /// Uploaded Avro object size in bytes.
+    size_bytes: u64,
+    /// Metadata for the uploaded GCS object.
+    gcs_object: GcsObjectMetadata,
+}
+
+/// Work item sent to the per-table Avro writer worker.
+enum AvroInitialCopyCommand {
+    /// Append rows to the current Avro file.
+    Write {
+        /// Rows in source table column order.
+        table_rows: Vec<TableRow>,
+        /// Completion sender for the write.
+        result: oneshot::Sender<EtlResult<AvroInitialCopyWriteStats>>,
+    },
+    /// Finalize the Avro file.
+    Finish {
+        /// Completion sender for the completed file metadata.
+        result: oneshot::Sender<EtlResult<FinishedGcsAvroWriter>>,
+    },
+}
+
+/// Per-batch write statistics returned by the Avro worker.
+#[derive(Debug, Clone, Copy)]
+struct AvroInitialCopyWriteStats {
+    /// Number of rows appended by the batch.
+    row_count: u64,
+    /// Estimated source byte count for the batch.
+    estimated_bytes: usize,
+}
+
+/// Runs a blocking Avro writer for one BigQuery table-copy session.
+fn run_avro_initial_copy_worker(
+    schema_definition: AvroSchemaDefinition,
+    writer: GcsStreamingUploadWriter,
+    receiver: mpsc::Receiver<AvroInitialCopyCommand>,
+) {
+    let mut encoder = AvroSnapshotStreamEncoder::new(&schema_definition, writer);
+
+    for command in receiver {
+        match command {
+            AvroInitialCopyCommand::Write { table_rows, result } => {
+                let rows_before = encoder.row_count();
+                let bytes_before = encoder.estimated_bytes();
+                let write_result =
+                    encoder.write_batch(SnapshotBatch { rows: table_rows }).map(|()| {
+                        AvroInitialCopyWriteStats {
+                            row_count: encoder.row_count() - rows_before,
+                            estimated_bytes: encoder.estimated_bytes().saturating_sub(bytes_before),
+                        }
+                    });
+
+                let failed = write_result.is_err();
+                let _ = result.send(write_result);
+                if failed {
+                    return;
+                }
+            }
+            AvroInitialCopyCommand::Finish { result } => {
+                let finish_result = encoder.finish().and_then(|(writer, row_count, _)| {
+                    let gcs_object = writer.finish_upload()?;
+                    let size_bytes = gcs_object.size_bytes.unwrap_or(0);
+
+                    Ok(FinishedGcsAvroWriter { row_count, size_bytes, gcs_object })
+                });
+                let _ = result.send(finish_result);
+                return;
+            }
+        }
     }
 }
 
@@ -224,6 +615,8 @@ pub struct BigQueryDestination<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
+    initial_copy_mode: BigQueryInitialCopyMode,
+    initial_copy_parallelism: Option<NonZeroUsize>,
     pipeline_id: PipelineId,
     state_store: S,
     inner: Arc<Mutex<Inner>>,
@@ -253,11 +646,29 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            initial_copy_mode: BigQueryInitialCopyMode::StorageWrite,
+            initial_copy_parallelism: None,
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
             tasks: TaskSet::new(),
         }
+    }
+
+    /// Enables GCS-backed Avro initial copy using `gcs_staging_bucket`.
+    pub fn with_gcs_initial_copy_staging_bucket(
+        mut self,
+        gcs_staging_bucket: impl Into<String>,
+    ) -> Self {
+        self.initial_copy_mode =
+            BigQueryInitialCopyMode::GcsAvro(BigQueryInitialCopyConfig::new(gcs_staging_bucket));
+        self
+    }
+
+    /// Sets the destination-side initial-copy parallelism.
+    pub fn with_initial_copy_parallelism(mut self, initial_copy_parallelism: u16) -> Self {
+        self.initial_copy_parallelism = NonZeroUsize::new(usize::from(initial_copy_parallelism));
+        self
     }
 
     /// Creates a new [`BigQueryDestination`] using a service account key file
@@ -285,6 +696,8 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            initial_copy_mode: BigQueryInitialCopyMode::StorageWrite,
+            initial_copy_parallelism: None,
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -316,6 +729,8 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            initial_copy_mode: BigQueryInitialCopyMode::StorageWrite,
+            initial_copy_parallelism: None,
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -345,6 +760,8 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            initial_copy_mode: BigQueryInitialCopyMode::StorageWrite,
+            initial_copy_parallelism: None,
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -388,6 +805,8 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            initial_copy_mode: BigQueryInitialCopyMode::StorageWrite,
+            initial_copy_parallelism: None,
             pipeline_id,
             state_store: store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -592,12 +1011,101 @@ where
         Ok(())
     }
 
-    /// Writes table-copy rows using the BigQuery upsert row format.
+    /// Writes table-copy rows using the configured initial-copy mode.
+    async fn write_initial_copy_rows(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        debug!(
+            table_id = replicated_table_schema.id().0,
+            initial_copy_mode = self.initial_copy_mode.as_str(),
+            "writing bigquery initial-copy rows"
+        );
+
+        match &self.initial_copy_mode {
+            BigQueryInitialCopyMode::StorageWrite => {
+                self.write_initial_copy_rows_with_storage_write(replicated_table_schema, table_rows)
+                    .await
+            }
+            BigQueryInitialCopyMode::GcsAvro(config) => {
+                self.write_initial_copy_rows_with_gcs_avro(
+                    replicated_table_schema,
+                    table_rows,
+                    config,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Writes table-copy rows by staging Avro files in GCS.
+    async fn write_initial_copy_rows_with_gcs_avro(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+        config: &BigQueryInitialCopyConfig,
+    ) -> EtlResult<()> {
+        validate_bigquery_table_shape(replicated_table_schema)?;
+
+        if table_rows.is_empty() {
+            self.prepare_table_for_streaming(replicated_table_schema, false).await?;
+            return Ok(());
+        }
+
+        let schema_definition = AvroSchemaDefinition::for_bigquery(replicated_table_schema)?;
+        let base_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name())?;
+        let initial_copy_parallelism = self.initial_copy_parallelism.ok_or_else(|| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "BigQuery initial-copy parallelism is not configured",
+                "GCS-backed Avro initial copy requires the destination initial-copy parallelism \
+                 to be set from the pipeline copy concurrency."
+            )
+        })?;
+
+        let run = {
+            let mut inner = self.inner.lock().await;
+
+            let table_id = replicated_table_schema.id();
+
+            if let Some(run) = inner.initial_copy_runs.get(&table_id) {
+                Arc::clone(run)
+            } else {
+                let run = Arc::new(BigQueryInitialCopyRun::prepare_gcs_avro(
+                    self.pipeline_id,
+                    replicated_table_schema.name(),
+                    &base_table_id,
+                    schema_definition,
+                    self.client.clone(),
+                    config.gcs_staging_bucket().to_owned(),
+                    initial_copy_parallelism.get(),
+                ));
+
+                inner.initial_copy_runs.insert(table_id, Arc::clone(&run));
+
+                run
+            }
+        };
+
+        let stats = run.write_batch(table_rows).await?;
+
+        info!(
+            table_id = replicated_table_schema.id().0,
+            row_count = stats.row_count,
+            estimated_bytes = stats.estimated_bytes,
+            "streamed bigquery initial-copy rows to gcs avro file"
+        );
+
+        Ok(())
+    }
+
+    /// Writes table-copy rows using the BigQuery Storage Write API.
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal
     /// batches based on estimated row size to maximize the 10MB per request
     /// limit, and streams them to BigQuery concurrently.
-    async fn write_table_rows(
+    async fn write_initial_copy_rows_with_storage_write(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         mut table_rows: Vec<TableRow>,
@@ -659,6 +1167,251 @@ where
         Ok(())
     }
 
+    /// Finishes table-copy work for the configured initial-copy mode.
+    async fn finish_initial_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        async_result: FinishTableCopyResult<()>,
+    ) -> EtlResult<()> {
+        debug!(
+            table_id = replicated_table_schema.id().0,
+            initial_copy_mode = self.initial_copy_mode.as_str(),
+            "finishing bigquery initial copy"
+        );
+
+        match &self.initial_copy_mode {
+            BigQueryInitialCopyMode::StorageWrite => {
+                async_result.send(Ok(()));
+                Ok(())
+            }
+            BigQueryInitialCopyMode::GcsAvro(config) => {
+                self.finish_gcs_avro_initial_copy(replicated_table_schema, config, async_result)
+                    .await
+            }
+        }
+    }
+
+    /// Finishes a GCS-backed Avro initial-copy run, if one exists for the
+    /// table.
+    async fn finish_gcs_avro_initial_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        _config: &BigQueryInitialCopyConfig,
+        async_result: FinishTableCopyResult<()>,
+    ) -> EtlResult<()> {
+        let result = self.finish_gcs_avro_initial_copy_inner(replicated_table_schema).await;
+        async_result.send(result);
+
+        Ok(())
+    }
+
+    /// Finalizes, loads, promotes, and cleans up one GCS-backed Avro
+    /// initial-copy run.
+    async fn finish_gcs_avro_initial_copy_inner(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let Some(run) = ({
+            let mut inner = self.inner.lock().await;
+            inner.initial_copy_runs.remove(&replicated_table_schema.id())
+        }) else {
+            return Ok(());
+        };
+
+        let finished_files = run.finish().await?;
+        let row_count = finished_files.iter().map(|file| file.row_count).sum::<u64>();
+        if row_count == 0 {
+            return Ok(());
+        }
+        let size_bytes = finished_files.iter().map(|file| file.size_bytes).sum::<u64>();
+        let run_id = run.run_id.clone();
+        let staging_table_id = run.staging_table_id.clone();
+        let column_mappings = run.column_mappings.clone();
+        let uploaded_files =
+            finished_files.iter().map(|file| file.gcs_object.clone()).collect::<Vec<_>>();
+
+        let result: EtlResult<()> = async {
+            let (sequenced_bigquery_table_id, _) =
+                self.prepare_table_for_streaming(replicated_table_schema, false).await?;
+            // Promotion inserts into the physical sequenced table, not the base view.
+            // `drop_table_for_copy` removes all previous versions and clears destination
+            // metadata before the next copy, so a fresh copy recreates version 0.
+            let source_uris = uploaded_files.iter().map(|file| file.uri.clone()).collect();
+            let job_id = load_job_id(self.pipeline_id, replicated_table_schema.name(), &run_id, 0);
+            let load_job = BigQueryLoadJobRequest::new(
+                job_id,
+                self.dataset_id.clone(),
+                staging_table_id.clone(),
+                source_uris,
+                SnapshotFormat::Avro,
+            )?;
+            let job_ref = self.client.insert_load_job(load_job).await?;
+            let status = self.wait_for_initial_copy_load_job(&job_ref).await?;
+            status.ensure_done_success()?;
+
+            self.promote_initial_copy_staging_table(
+                replicated_table_schema,
+                &column_mappings,
+                &staging_table_id,
+                &sequenced_bigquery_table_id.to_string(),
+            )
+            .await?;
+
+            if let Err(error) =
+                self.client.drop_table_if_exists(&self.dataset_id, &staging_table_id).await
+            {
+                warn!(
+                    staging_table_id = %staging_table_id,
+                    error = %error,
+                    "failed to drop bigquery initial-copy staging table"
+                );
+            }
+
+            Ok(())
+        }
+        .await;
+
+        let file_count = uploaded_files.len();
+        self.cleanup_gcs_initial_copy_files(uploaded_files).await;
+        result?;
+
+        info!(
+            table_id = replicated_table_schema.id().0,
+            staging_table_id = %staging_table_id,
+            row_count,
+            file_count,
+            size_bytes,
+            "finished bigquery gcs-backed initial copy"
+        );
+
+        Ok(())
+    }
+
+    /// Schedules best-effort cleanup for staged GCS files after the load
+    /// attempt.
+    async fn cleanup_gcs_initial_copy_files(&self, files: Vec<GcsObjectMetadata>) {
+        let client = self.client.clone();
+
+        self.tasks
+            .spawn(async move {
+                let cleanup = async move {
+                    for file in files {
+                        let bucket = file.bucket;
+                        let object_name = file.object_name;
+                        let request = GcsDeleteRequest {
+                            bucket: bucket.clone(),
+                            object_name: object_name.clone(),
+                        };
+
+                        match timeout(
+                            BIGQUERY_INITIAL_COPY_GCS_DELETE_TIMEOUT,
+                            client.delete_gcs_object(request),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                warn!(
+                                    bucket = %bucket,
+                                    object_name = %object_name,
+                                    error = %error,
+                                    "failed to delete bigquery initial-copy staging object"
+                                );
+                            }
+                            Err(error) => {
+                                warn!(
+                                    bucket = %bucket,
+                                    object_name = %object_name,
+                                    error = %error,
+                                    "timed out deleting bigquery initial-copy staging object"
+                                );
+                            }
+                        }
+                    }
+                };
+
+                if let Err(error) =
+                    timeout(BIGQUERY_INITIAL_COPY_GCS_CLEANUP_TIMEOUT, cleanup).await
+                {
+                    warn!(
+                        error = %error,
+                        "timed out cleaning up bigquery initial-copy staging objects"
+                    );
+                }
+            })
+            .await;
+    }
+
+    /// Waits for an initial-copy BigQuery load job to finish.
+    async fn wait_for_initial_copy_load_job(
+        &self,
+        job_ref: &crate::bigquery::initial_copy::BigQueryLoadJobRef,
+    ) -> EtlResult<BigQueryLoadJobStatus> {
+        let started_at = Instant::now();
+
+        loop {
+            let status = self.client.get_load_job(job_ref).await?;
+            if status.done() {
+                return Ok(status);
+            }
+
+            if started_at.elapsed() >= BIGQUERY_INITIAL_COPY_LOAD_JOB_TIMEOUT {
+                return Err(etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "BigQuery initial-copy load job timed out",
+                    format!(
+                        "Load job '{}' in location '{}' did not finish within {} seconds.",
+                        job_ref.job_id,
+                        job_ref.location.as_deref().unwrap_or("inferred"),
+                        BIGQUERY_INITIAL_COPY_LOAD_JOB_TIMEOUT.as_secs()
+                    )
+                ));
+            }
+
+            sleep(BIGQUERY_INITIAL_COPY_LOAD_JOB_POLL_INTERVAL).await;
+        }
+    }
+
+    /// Inserts loaded staging rows into the source-shaped destination table.
+    async fn promote_initial_copy_staging_table(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        column_mappings: &[AvroColumnMapping],
+        staging_table_id: &BigQueryTableId,
+        destination_table_id: &BigQueryTableId,
+    ) -> EtlResult<()> {
+        let query = self.initial_copy_promotion_query(
+            replicated_table_schema,
+            column_mappings,
+            staging_table_id,
+            destination_table_id,
+        )?;
+
+        let _ = self.client.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Builds the source-column promotion query from staging to destination.
+    fn initial_copy_promotion_query(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        column_mappings: &[AvroColumnMapping],
+        staging_table_id: &BigQueryTableId,
+        destination_table_id: &BigQueryTableId,
+    ) -> EtlResult<String> {
+        let destination_table =
+            self.client.full_table_name(&self.dataset_id, destination_table_id)?;
+        let staging_table = self.client.full_table_name(&self.dataset_id, staging_table_id)?;
+
+        build_initial_copy_promotion_query(
+            &destination_table,
+            &staging_table,
+            replicated_table_schema,
+            column_mappings,
+        )
+    }
+
     /// Writes table-copy rows through the destination write path in tests.
     #[cfg(feature = "test-utils")]
     pub async fn write_table_rows_for_tests(
@@ -666,7 +1419,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.write_table_rows(replicated_table_schema, table_rows).await
+        self.write_initial_copy_rows(replicated_table_schema, table_rows).await
     }
 
     /// Handles a schema change event (Relation) by computing the diff and
@@ -1295,6 +2048,7 @@ where
         // Once destination cleanup is done, remove any stale local cache entries.
         let mut inner = self.inner.lock().await;
         inner.clear_table_cache(&base_bigquery_table_id);
+        inner.initial_copy_runs.remove(&table_id);
 
         info!(table_id = table_id.0, "dropped bigquery table before copy");
 
@@ -1348,6 +2102,57 @@ fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema
     Ok(())
 }
 
+/// Builds the SQL that promotes loaded initial-copy rows into the destination.
+fn build_initial_copy_promotion_query(
+    destination_table: &str,
+    staging_table: &str,
+    replicated_table_schema: &ReplicatedTableSchema,
+    column_mappings: &[AvroColumnMapping],
+) -> EtlResult<String> {
+    let destination_columns = replicated_table_schema
+        .column_schemas()
+        .map(|column_schema| quote_identifier(&column_schema.name, "BigQuery column name"))
+        .collect::<EtlResult<Vec<_>>>()?;
+    let staging_columns = column_mappings
+        .iter()
+        .map(bigquery_initial_copy_staging_expression)
+        .collect::<EtlResult<Vec<_>>>()?;
+
+    if destination_columns.len() != staging_columns.len() {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "BigQuery initial-copy column mappings do not match destination schema",
+            format!(
+                "Destination has {} columns but the Avro staging mapping has {} columns.",
+                destination_columns.len(),
+                staging_columns.len()
+            )
+        ));
+    }
+
+    Ok(format!(
+        "insert into {destination_table} ({destination_columns}) select {staging_columns} from \
+         {staging_table}",
+        destination_columns = destination_columns.join(","),
+        staging_columns = staging_columns.join(",")
+    ))
+}
+
+/// Builds one staging-table expression for initial-copy promotion.
+fn bigquery_initial_copy_staging_expression(
+    column_mapping: &AvroColumnMapping,
+) -> EtlResult<String> {
+    let column = quote_identifier(&column_mapping.avro_field_name, "BigQuery staging column name")?;
+
+    Ok(match column_mapping.source_type {
+        Type::JSON | Type::JSONB => format!("parse_json({column})"),
+        Type::JSON_ARRAY | Type::JSONB_ARRAY => {
+            format!("array(select parse_json(value) from unnest({column}) as value)")
+        }
+        _ => column,
+    })
+}
+
 impl<S> Destination for BigQueryDestination<S>
 where
     S: DestinationStore,
@@ -1381,11 +2186,20 @@ where
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
 
-        let result =
-            BigQueryDestination::write_table_rows(self, replicated_table_schema, table_rows).await;
+        let result = self.write_initial_copy_rows(replicated_table_schema, table_rows).await;
         async_result.send(result);
 
         Ok(())
+    }
+
+    async fn finish_table_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        async_result: FinishTableCopyResult<()>,
+    ) -> EtlResult<()> {
+        self.tasks.try_reap().await?;
+
+        self.finish_initial_copy(replicated_table_schema, async_result).await
     }
 
     async fn write_events(
@@ -1894,6 +2708,19 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    fn avro_column_mapping(
+        source_column_name: &str,
+        avro_field_name: &str,
+        source_type: Type,
+    ) -> AvroColumnMapping {
+        AvroColumnMapping {
+            source_column_name: source_column_name.to_owned(),
+            avro_field_name: avro_field_name.to_owned(),
+            nullable: true,
+            source_type,
+        }
+    }
+
     #[test]
     fn table_name_to_bigquery_table_id_no_underscores() {
         let table_name = TableName::new("schema".to_owned(), "table".to_owned());
@@ -1924,6 +2751,86 @@ mod tests {
     fn table_name_to_bigquery_table_id_multiple_underscores() {
         let table_name = TableName::new("a__b".to_owned(), "c__d".to_owned());
         assert_eq!(table_name_to_bigquery_table_id(&table_name).unwrap(), "a____b_c____d");
+    }
+
+    #[test]
+    fn initial_copy_promotion_query_targets_sequenced_table_with_source_columns() {
+        let schema = replicated_schema(IdentityType::PrimaryKey);
+        let query = build_initial_copy_promotion_query(
+            "`project.dataset.users_0`",
+            "`project.dataset._snapshot_users_run`",
+            &schema,
+            &[
+                avro_column_mapping("id", "id", Type::INT4),
+                avro_column_mapping("name", "name_avro", Type::TEXT),
+            ],
+        )
+        .expect("promotion query should be built");
+
+        assert_eq!(
+            query,
+            "insert into `project.dataset.users_0` (`id`,`name`) select `id`,`name_avro` from \
+             `project.dataset._snapshot_users_run`"
+        );
+        assert!(query.starts_with("insert into `project.dataset.users_0`"));
+        assert!(!query.starts_with("insert into `project.dataset.users`"));
+        assert!(!query.contains("_CHANGE_TYPE"));
+    }
+
+    #[test]
+    fn initial_copy_promotion_query_rejects_mapping_width_mismatch() {
+        let schema = replicated_schema(IdentityType::PrimaryKey);
+        let result = build_initial_copy_promotion_query(
+            "`project.dataset.users_0`",
+            "`project.dataset._snapshot_users_run`",
+            &schema,
+            &[avro_column_mapping("id", "id", Type::INT4)],
+        );
+
+        assert!(matches!(result, Err(error) if error.kind() == ErrorKind::InvalidState));
+    }
+
+    #[test]
+    fn initial_copy_promotion_query_parses_json_columns() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("payload".to_owned(), Type::JSONB, -1, 2, true),
+                ColumnSchema::new("payloads".to_owned(), Type::JSONB_ARRAY, -1, 3, true),
+            ],
+        ));
+        let schema = ReplicatedTableSchema::all(table_schema);
+        let query = build_initial_copy_promotion_query(
+            "`project.dataset.events_0`",
+            "`project.dataset._snapshot_events_run`",
+            &schema,
+            &[
+                avro_column_mapping("id", "id", Type::INT4),
+                avro_column_mapping("payload", "payload", Type::JSONB),
+                avro_column_mapping("payloads", "payloads", Type::JSONB_ARRAY),
+            ],
+        )
+        .expect("promotion query should be built");
+
+        assert_eq!(
+            query,
+            "insert into `project.dataset.events_0` (`id`,`payload`,`payloads`) select \
+             `id`,parse_json(`payload`),array(select parse_json(value) from unnest(`payloads`) as \
+             value) from `project.dataset._snapshot_events_run`"
+        );
+    }
+
+    #[test]
+    fn avro_initial_copy_round_robin_dispatches_across_writer_slots() {
+        let next_slot_index = AtomicUsize::new(0);
+        let slot_count = 3;
+        let slot_indexes = (0..(slot_count + 1))
+            .map(|_| next_slot_index.fetch_add(1, Ordering::Relaxed) % slot_count)
+            .collect::<Vec<_>>();
+
+        assert_eq!(slot_indexes, vec![0, 1, 2, 0]);
     }
 
     #[test]

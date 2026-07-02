@@ -2,7 +2,9 @@ use std::future::Future;
 
 use crate::{
     data::TableRow,
-    destination::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+    destination::{
+        DropTableForCopyResult, FinishTableCopyResult, WriteEventsResult, WriteTableRowsResult,
+    },
     error::EtlResult,
     event::Event,
     schema::ReplicatedTableSchema,
@@ -99,6 +101,25 @@ pub trait Destination {
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
+
+    /// Finishes the initial table copy after all row batches are written.
+    ///
+    /// ETL calls this once per table after the copy stream has ended and any
+    /// empty-table preparation write has completed. Destinations that stage
+    /// copy rows outside the final table can use this hook to commit, promote,
+    /// or load the staged data before streaming catchup begins. The default
+    /// implementation acknowledges immediately for destinations that write
+    /// each copy batch directly.
+    fn finish_table_copy(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        async_result: FinishTableCopyResult<()>,
+    ) -> impl Future<Output = EtlResult<()>> + Send {
+        async move {
+            async_result.send(Ok(()));
+            Ok(())
+        }
+    }
 
     /// Writes streaming replication events to the destination.
     ///

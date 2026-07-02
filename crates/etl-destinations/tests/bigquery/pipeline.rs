@@ -2,7 +2,7 @@ use std::{str::FromStr, time::Duration};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
-    config::BatchConfig,
+    config::{BatchConfig, PipelineConfig},
     data::{Cell, OldTableRow, PgNumeric, TableRow, UpdatedTableRow},
     error::ErrorKind,
     event::{Event, EventType},
@@ -17,7 +17,8 @@ use etl::{
     },
 };
 use etl_destinations::bigquery::test_utils::{
-    setup_bigquery_database, skip_if_missing_bigquery_env_vars,
+    get_gcs_staging_bucket, setup_bigquery_database, skip_if_missing_bigquery_env_vars,
+    skip_if_missing_bigquery_gcs_staging_bucket,
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
@@ -82,7 +83,6 @@ async fn table_copy_and_streaming_with_restart() {
 
     let bigquery_database = setup_bigquery_database().await;
 
-    // Insert initial test data.
     insert_mock_data(
         &mut database,
         &database_schema.users_schema().name,
@@ -385,6 +385,75 @@ async fn table_insert_update_delete() {
     // We query BigQuery to check for deletion.
     let users_rows = bigquery_database.query_table(database_schema.users_schema().name).await;
     assert!(users_rows.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_uses_gcs_avro_initial_copy_when_bucket_configured() {
+    if skip_if_missing_bigquery_gcs_staging_bucket() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+    let bigquery_database = setup_bigquery_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+
+    insert_mock_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        &database_schema.orders_schema().name,
+        1..=2,
+        false,
+    )
+    .await;
+
+    let raw_destination = bigquery_database
+        .build_gcs_initial_copy_destination(
+            pipeline_id,
+            store.clone(),
+            get_gcs_staging_bucket(),
+            PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        )
+        .await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+
+    let users_state_notify = store
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .await;
+    let orders_state_notify = store
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
+        .await;
+
+    pipeline.start().await.unwrap();
+    users_state_notify.notified().await;
+    orders_state_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let users_rows =
+        bigquery_database.query_table(database_schema.users_schema().name).await.unwrap();
+    assert_eq!(
+        parse_bigquery_table_rows::<BigQueryUser>(users_rows),
+        vec![BigQueryUser::new(1, "user_1", 1), BigQueryUser::new(2, "user_2", 2),]
+    );
+
+    let orders_rows =
+        bigquery_database.query_table(database_schema.orders_schema().name).await.unwrap();
+    assert_eq!(
+        parse_bigquery_table_rows::<BigQueryOrder>(orders_rows),
+        vec![BigQueryOrder::new(1, "description_1"), BigQueryOrder::new(2, "description_2"),]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

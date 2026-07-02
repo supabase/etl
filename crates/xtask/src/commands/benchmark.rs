@@ -78,6 +78,9 @@ pub(crate) struct BenchmarkArgs {
     /// BigQuery service account key file.
     #[arg(long, env = "BQ_SA_KEY_FILE")]
     bq_sa_key_file: Option<PathBuf>,
+    /// Optional GCS bucket used for BigQuery Avro initial-copy staging.
+    #[arg(long, env = "BQ_GCS_STAGING_BUCKET")]
+    bq_gcs_staging_bucket: Option<String>,
     /// ClickHouse HTTP URL (for example, `http://localhost:8123`).
     #[arg(long, env = "BENCH_CLICKHOUSE_URL")]
     clickhouse_url: Option<String>,
@@ -706,6 +709,10 @@ impl BenchmarkArgs {
 
                 if let Some(sa_key_file) = &self.bq_sa_key_file {
                     args.extend(["--bq-sa-key-file".to_owned(), sa_key_file.display().to_string()]);
+                }
+
+                if let Some(gcs_staging_bucket) = &self.bq_gcs_staging_bucket {
+                    args.extend(["--bq-gcs-staging-bucket".to_owned(), gcs_staging_bucket.clone()]);
                 }
             }
             Destination::ClickHouse => {

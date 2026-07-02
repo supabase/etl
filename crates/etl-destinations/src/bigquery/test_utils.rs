@@ -87,6 +87,9 @@ pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
 /// Environment variable name for the BigQuery service account key path.
 pub const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
 
+/// Environment variable name for the BigQuery GCS staging bucket.
+pub const BIGQUERY_GCS_STAGING_BUCKET_ENV: &str = "TESTS_BIGQUERY_GCS_STAGING_BUCKET";
+
 /// When set, tests panic instead of skipping when BigQuery credentials are
 /// missing.
 pub const REQUIRE_BIGQUERY_CREDENTIALS_ENV: &str = "REQUIRE_BIGQUERY_CREDENTIALS";
@@ -137,6 +140,20 @@ pub fn skip_if_missing_bigquery_env_vars() -> bool {
     true
 }
 
+/// Returns whether BigQuery GCS initial-copy tests should be skipped.
+pub fn skip_if_missing_bigquery_gcs_staging_bucket() -> bool {
+    if skip_if_missing_bigquery_env_vars() {
+        return true;
+    }
+
+    if std::env::var_os(BIGQUERY_GCS_STAGING_BUCKET_ENV).is_some_and(|v| !v.is_empty()) {
+        return false;
+    }
+
+    eprintln!("skipping BigQuery GCS initial-copy test: {BIGQUERY_GCS_STAGING_BUCKET_ENV} not set");
+    true
+}
+
 /// Returns the BigQuery project ID from the environment.
 ///
 /// # Panics
@@ -155,6 +172,17 @@ pub fn get_project_id() -> String {
 pub fn get_sa_key_path() -> String {
     std::env::var(BIGQUERY_SA_KEY_PATH_ENV)
         .unwrap_or_else(|_| panic!("{BIGQUERY_SA_KEY_PATH_ENV} must be set"))
+}
+
+/// Returns the BigQuery GCS staging bucket from the environment.
+///
+/// # Panics
+///
+/// Panics if the `TESTS_BIGQUERY_GCS_STAGING_BUCKET` environment variable is
+/// not set.
+pub fn get_gcs_staging_bucket() -> String {
+    std::env::var(BIGQUERY_GCS_STAGING_BUCKET_ENV)
+        .unwrap_or_else(|_| panic!("{BIGQUERY_GCS_STAGING_BUCKET_ENV} must be set"))
 }
 
 /// Generates a unique dataset ID for test isolation.
@@ -410,6 +438,23 @@ impl BigQueryDatabase {
         )
         .await
         .expect("Failed to create BigQuery destination")
+    }
+
+    /// Creates a [`BigQueryDestination`] using GCS-backed Avro initial copy.
+    pub async fn build_gcs_initial_copy_destination<S>(
+        &self,
+        pipeline_id: PipelineId,
+        schema_store: S,
+        gcs_staging_bucket: impl Into<String>,
+        initial_copy_parallelism: u16,
+    ) -> BigQueryDestination<S>
+    where
+        S: DestinationStore,
+    {
+        self.build_destination(pipeline_id, schema_store)
+            .await
+            .with_initial_copy_parallelism(initial_copy_parallelism)
+            .with_gcs_initial_copy_staging_bucket(gcs_staging_bucket)
     }
 }
 

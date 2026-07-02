@@ -15,8 +15,8 @@ use clap::{Args, ValueEnum};
 use etl::{
     data::{SizeHint, TableRow},
     destination::{
-        Destination, DropTableForCopyResult, PipelineDestination, WriteEventsResult,
-        WriteTableRowsResult,
+        Destination, DropTableForCopyResult, FinishTableCopyResult, PipelineDestination,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -174,6 +174,9 @@ pub struct DestinationArgs {
     /// BigQuery service account key file path.
     #[arg(long)]
     pub bq_sa_key_file: Option<String>,
+    /// Optional GCS bucket used for BigQuery Avro initial-copy staging.
+    #[arg(long)]
+    pub bq_gcs_staging_bucket: Option<String>,
     /// BigQuery maximum staleness in minutes.
     #[arg(long)]
     pub bq_max_staleness_mins: Option<u16>,
@@ -405,6 +408,14 @@ where
         Ok(())
     }
 
+    async fn finish_table_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        async_result: FinishTableCopyResult<()>,
+    ) -> EtlResult<()> {
+        self.inner.finish_table_copy(replicated_table_schema, async_result).await
+    }
+
     async fn write_events(
         &self,
         events: Vec<Event>,
@@ -490,6 +501,7 @@ impl BenchDestination {
     )]
     pub async fn new(
         destination_args: &DestinationArgs,
+        tuning: &PipelineTuningArgs,
         pipeline_id: u64,
         store: NotifyingStore,
     ) -> Result<Self> {
@@ -515,7 +527,7 @@ impl BenchDestination {
                     .filter(|sa_key_file| !sa_key_file.trim().is_empty())
                     .context("BigQuery service account key file is required")?;
 
-                let destination = BigQueryDestination::new_with_key_path(
+                let mut destination = BigQueryDestination::new_with_key_path(
                     project_id,
                     dataset_id,
                     &sa_key_file,
@@ -524,7 +536,17 @@ impl BenchDestination {
                     pipeline_id,
                     store,
                 )
-                .await?;
+                .await?
+                .with_initial_copy_parallelism(tuning.max_copy_connections_per_table);
+
+                if let Some(gcs_staging_bucket) = destination_args
+                    .bq_gcs_staging_bucket
+                    .clone()
+                    .filter(|bucket| !bucket.trim().is_empty())
+                {
+                    destination =
+                        destination.with_gcs_initial_copy_staging_bucket(gcs_staging_bucket);
+                }
 
                 Ok(Self::BigQuery(CountingDestination::new(destination)))
             }
@@ -713,6 +735,30 @@ impl Destination for BenchDestination {
                 destination
                     .write_table_rows(replicated_table_schema, table_rows, async_result)
                     .await
+            }
+        }
+    }
+
+    async fn finish_table_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        async_result: FinishTableCopyResult<()>,
+    ) -> EtlResult<()> {
+        match self {
+            Self::Null(destination) => {
+                destination.finish_table_copy(replicated_table_schema, async_result).await
+            }
+            #[cfg(feature = "bigquery")]
+            Self::BigQuery(destination) => {
+                destination.finish_table_copy(replicated_table_schema, async_result).await
+            }
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse(destination) => {
+                destination.finish_table_copy(replicated_table_schema, async_result).await
+            }
+            #[cfg(feature = "snowflake")]
+            Self::Snowflake(destination) => {
+                destination.finish_table_copy(replicated_table_schema, async_result).await
             }
         }
     }

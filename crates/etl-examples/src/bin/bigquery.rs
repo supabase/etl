@@ -218,7 +218,8 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         pipeline_config.id,
         store.clone(),
     )
-    .await?;
+    .await?
+    .with_initial_copy_parallelism(pipeline_config.max_copy_connections_per_table);
 
     // Create the pipeline instance with all components
     let mut pipeline = Pipeline::new(pipeline_config, store, bigquery_destination);

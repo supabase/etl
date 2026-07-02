@@ -2272,6 +2272,7 @@ mod tests {
                 service_account_key: "sa-key".into(),
                 max_staleness_mins: None,
                 connection_pool_size: 4,
+                gcs_staging_bucket: None,
             },
             pipeline: PipelineConfig {
                 id: 42,

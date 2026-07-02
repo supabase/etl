@@ -16,6 +16,7 @@ fn create_bigquery_config() -> FullApiDestinationConfig {
         service_account_key: SerializableSecretString::from("service-account-key".to_owned()),
         max_staleness_mins: None,
         connection_pool_size: Some(1),
+        gcs_staging_bucket: None,
     }
 }
 

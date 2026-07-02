@@ -117,7 +117,8 @@ async fn run(args: RunArgs) -> Result<()> {
 
     let store = NotifyingStore::new();
     let destination =
-        BenchDestination::new(&args.destination, args.pipeline_id, store.clone()).await?;
+        BenchDestination::new(&args.destination, &args.tuning, args.pipeline_id, store.clone())
+            .await?;
     let config = pipeline_config(
         args.pipeline_id,
         args.publication_name.clone(),

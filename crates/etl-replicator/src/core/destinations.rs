@@ -107,6 +107,7 @@ mod bigquery {
         let DestinationConfig::BigQuery {
             project_id,
             dataset_id,
+            gcs_staging_bucket,
             service_account_key,
             max_staleness_mins,
             connection_pool_size,
@@ -115,7 +116,7 @@ mod bigquery {
             unreachable!("Destination kind should match BigQuery config");
         };
 
-        let destination = BigQueryDestination::new_with_key(
+        let mut destination = BigQueryDestination::new_with_key(
             project_id.clone(),
             dataset_id.clone(),
             service_account_key.expose_secret(),
@@ -124,7 +125,13 @@ mod bigquery {
             pipeline_id,
             store.clone(),
         )
-        .await?;
+        .await?
+        .with_initial_copy_parallelism(replicator_config.pipeline.max_copy_connections_per_table);
+
+        if let Some(gcs_staging_bucket) = gcs_staging_bucket {
+            destination =
+                destination.with_gcs_initial_copy_staging_bucket(gcs_staging_bucket.clone());
+        }
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
         pipeline::start(pipeline).await

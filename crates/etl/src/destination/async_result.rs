@@ -25,6 +25,13 @@ use crate::{
 pub type WriteTableRowsResult<T = ()> = AsyncResult<T>;
 
 /// Async completion handle used for
+/// [`crate::destination::Destination::finish_table_copy`].
+///
+/// ETL waits for this result after all initial-copy row batches for one table
+/// have been accepted and before the table advances to streaming catchup.
+pub type FinishTableCopyResult<T = ()> = AsyncResult<T>;
+
+/// Async completion handle used for
 /// [`crate::destination::Destination::drop_table_for_copy`].
 ///
 /// ETL waits for this result immediately before clearing stored table-copy

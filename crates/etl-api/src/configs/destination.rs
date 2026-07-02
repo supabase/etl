@@ -36,6 +36,13 @@ pub enum FullApiDestinationConfig {
         #[schema(example = "my_dataset")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         dataset_id: String,
+        #[schema(example = "my-gcs-staging-bucket")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        gcs_staging_bucket: Option<String>,
         #[schema(example = "{\"type\": \"service_account\", \"project_id\": \"my-project\"}")]
         service_account_key: SerializableSecretString,
         #[schema(example = 15)]
@@ -258,6 +265,17 @@ where
     Ok(Some(SerializableSecretString::from(value.trim().to_owned())))
 }
 
+/// Trims a string update field while preserving explicit JSON `null`.
+fn trim_update_string<'de, D>(deserializer: D) -> Result<UpdateField<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(|value| match value {
+        Some(value) => UpdateField::Set(value.trim().to_owned()),
+        None => UpdateField::Clear,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateApiDestinationConfig {
@@ -268,6 +286,13 @@ pub enum UpdateApiDestinationConfig {
         #[schema(example = "my_dataset")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         dataset_id: String,
+        #[schema(value_type = Option<String>, example = "my-gcs-staging-bucket")]
+        #[serde(
+            default,
+            skip_serializing_if = "UpdateField::is_preserve",
+            deserialize_with = "trim_update_string"
+        )]
+        gcs_staging_bucket: UpdateField<String>,
         #[schema(example = "{\"type\": \"service_account\", \"project_id\": \"my-project\"}")]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         service_account_key: Option<SerializableSecretString>,
@@ -419,14 +444,20 @@ impl UpdateApiDestinationConfig {
                 Self::BigQuery {
                     project_id,
                     dataset_id,
+                    gcs_staging_bucket,
                     service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
                 },
-                StoredDestinationConfig::BigQuery { service_account_key: stored_key, .. },
+                StoredDestinationConfig::BigQuery {
+                    gcs_staging_bucket: stored_gcs_staging_bucket,
+                    service_account_key: stored_key,
+                    ..
+                },
             ) => Ok(StoredDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket: gcs_staging_bucket.apply_to(stored_gcs_staging_bucket),
                 service_account_key: service_account_key.unwrap_or(stored_key),
                 max_staleness_mins,
                 connection_pool_size: connection_pool_size
@@ -521,12 +552,14 @@ impl UpdateApiDestinationConfig {
             Self::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
             } => Ok(StoredDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket: gcs_staging_bucket.into_option(),
                 service_account_key: require_secret(
                     service_account_key,
                     "BigQuery",
@@ -606,12 +639,14 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
             StoredDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size: Some(connection_pool_size),
@@ -712,6 +747,7 @@ pub enum StoredDestinationConfig {
     BigQuery {
         project_id: String,
         dataset_id: String,
+        gcs_staging_bucket: Option<String>,
         service_account_key: SerializableSecretString,
         max_staleness_mins: Option<u16>,
         connection_pool_size: usize,
@@ -758,12 +794,14 @@ impl StoredDestinationConfig {
             Self::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
             } => DestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key: service_account_key.into(),
                 max_staleness_mins,
                 connection_pool_size,
@@ -871,12 +909,14 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
             FullApiDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size: connection_pool_size
@@ -979,12 +1019,14 @@ impl From<FullApiDestinationConfig> for UpdateApiDestinationConfig {
             FullApiDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket: UpdateField::from_option(gcs_staging_bucket),
                 service_account_key: Some(service_account_key),
                 max_staleness_mins,
                 connection_pool_size,
@@ -1091,6 +1133,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
             Self::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
@@ -1101,6 +1144,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 Ok(EncryptedStoredDestinationConfig::BigQuery {
                     project_id,
                     dataset_id,
+                    gcs_staging_bucket,
                     service_account_key: encrypted_service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
@@ -1300,6 +1344,8 @@ pub enum EncryptedStoredDestinationConfig {
     BigQuery {
         project_id: String,
         dataset_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gcs_staging_bucket: Option<String>,
         service_account_key: EncryptedValue,
         max_staleness_mins: Option<u16>,
         #[serde(default = "default_connection_pool_size")]
@@ -1356,6 +1402,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
             Self::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key: encrypted_service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
@@ -1368,6 +1415,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 Ok(StoredDestinationConfig::BigQuery {
                     project_id,
                     dataset_id,
+                    gcs_staging_bucket,
                     service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
@@ -1790,6 +1838,7 @@ mod tests {
             ),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            gcs_staging_bucket: Some("test-staging-bucket".to_owned()),
         };
 
         let key = EncryptionKeyring::from(EncryptionKey {
@@ -1816,6 +1865,7 @@ mod tests {
                     service_account_key: key1,
                     max_staleness_mins: staleness1,
                     connection_pool_size: connection_pool_size1,
+                    gcs_staging_bucket: gcs_staging_bucket1,
                 },
                 StoredDestinationConfig::BigQuery {
                     project_id: p2,
@@ -1823,12 +1873,14 @@ mod tests {
                     service_account_key: key2,
                     max_staleness_mins: staleness2,
                     connection_pool_size: connection_pool_size2,
+                    gcs_staging_bucket: gcs_staging_bucket2,
                 },
             ) => {
                 assert_eq!(p1, p2);
                 assert_eq!(d1, d2);
                 assert_eq!(staleness1, staleness2);
                 assert_eq!(connection_pool_size1, connection_pool_size2);
+                assert_eq!(gcs_staging_bucket1, gcs_staging_bucket2);
                 // Assert that service account key was encrypted and decrypted correctly
                 assert_eq!(key1.expose_secret(), key2.expose_secret());
             }
@@ -2172,6 +2224,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: None,
+            gcs_staging_bucket: Some("test-staging-bucket".to_owned()),
         };
 
         let stored: StoredDestinationConfig = full_config.clone().into();
@@ -2185,6 +2238,7 @@ mod tests {
                     service_account_key: p1_service_account_key,
                     max_staleness_mins: p1_max_staleness_mins,
                     connection_pool_size: p1_connection_pool_size,
+                    gcs_staging_bucket: p1_gcs_staging_bucket,
                 },
                 FullApiDestinationConfig::BigQuery {
                     project_id: p2_project_id,
@@ -2192,6 +2246,7 @@ mod tests {
                     service_account_key: p2_service_account_key,
                     max_staleness_mins: p2_max_staleness_mins,
                     connection_pool_size: p2_connection_pool_size,
+                    gcs_staging_bucket: p2_gcs_staging_bucket,
                 },
             ) => {
                 assert_eq!(p1_project_id, p2_project_id);
@@ -2201,6 +2256,7 @@ mod tests {
                     p2_service_account_key.expose_secret()
                 );
                 assert_eq!(p1_max_staleness_mins, p2_max_staleness_mins);
+                assert_eq!(p1_gcs_staging_bucket, p2_gcs_staging_bucket);
                 // Note: connection_pool_size should be set to DEFAULT_POOL_SIZE when None
                 assert_eq!(p1_connection_pool_size, None);
                 assert_eq!(
@@ -2217,6 +2273,7 @@ mod tests {
         let stored_config = StoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
+            gcs_staging_bucket: Some("existing-staging-bucket".to_owned()),
             service_account_key: SerializableSecretString::from("existing-key".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
@@ -2224,6 +2281,7 @@ mod tests {
         let update_config = UpdateApiDestinationConfig::BigQuery {
             project_id: "updated-project".to_owned(),
             dataset_id: "updated_dataset".to_owned(),
+            gcs_staging_bucket: UpdateField::Preserve,
             service_account_key: None,
             max_staleness_mins: None,
             connection_pool_size: None,
@@ -2235,15 +2293,94 @@ mod tests {
             StoredDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
+                gcs_staging_bucket,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
             } => {
                 assert_eq!(project_id, "updated-project");
                 assert_eq!(dataset_id, "updated_dataset");
+                assert_eq!(gcs_staging_bucket, Some("existing-staging-bucket".to_owned()));
                 assert_eq!(service_account_key.expose_secret(), "existing-key");
                 assert_eq!(max_staleness_mins, None);
                 assert_eq!(connection_pool_size, DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE);
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn update_api_destination_config_clears_bigquery_gcs_staging_bucket() {
+        let stored_config = StoredDestinationConfig::BigQuery {
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            gcs_staging_bucket: Some("existing-staging-bucket".to_owned()),
+            service_account_key: SerializableSecretString::from("existing-key".to_owned()),
+            max_staleness_mins: Some(15),
+            connection_pool_size: 8,
+        };
+        let update_config = UpdateApiDestinationConfig::BigQuery {
+            project_id: "updated-project".to_owned(),
+            dataset_id: "updated_dataset".to_owned(),
+            gcs_staging_bucket: UpdateField::Clear,
+            service_account_key: None,
+            max_staleness_mins: None,
+            connection_pool_size: None,
+        };
+
+        let updated_config = update_config.merge_into_stored(stored_config).unwrap();
+
+        match updated_config {
+            StoredDestinationConfig::BigQuery { gcs_staging_bucket, .. } => {
+                assert_eq!(gcs_staging_bucket, None);
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn update_api_destination_config_deserializes_bigquery_gcs_staging_bucket_updates() {
+        let omitted: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "big_query": {
+                "project_id": "test-project",
+                "dataset_id": "test_dataset"
+            }
+        }))
+        .unwrap();
+        let null: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "big_query": {
+                "project_id": "test-project",
+                "dataset_id": "test_dataset",
+                "gcs_staging_bucket": null
+            }
+        }))
+        .unwrap();
+        let set: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "big_query": {
+                "project_id": "test-project",
+                "dataset_id": "test_dataset",
+                "gcs_staging_bucket": " test-bucket "
+            }
+        }))
+        .unwrap();
+
+        match omitted {
+            UpdateApiDestinationConfig::BigQuery { gcs_staging_bucket, .. } => {
+                assert!(matches!(gcs_staging_bucket, UpdateField::Preserve));
+            }
+            _ => panic!("Config types don't match"),
+        }
+        match null {
+            UpdateApiDestinationConfig::BigQuery { gcs_staging_bucket, .. } => {
+                assert!(matches!(gcs_staging_bucket, UpdateField::Clear));
+            }
+            _ => panic!("Config types don't match"),
+        }
+        match set {
+            UpdateApiDestinationConfig::BigQuery { gcs_staging_bucket, .. } => {
+                assert!(
+                    matches!(gcs_staging_bucket, UpdateField::Set(bucket) if bucket == "test-bucket")
+                );
             }
             _ => panic!("Config types don't match"),
         }
@@ -2254,6 +2391,7 @@ mod tests {
         let stored_config = StoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
+            gcs_staging_bucket: None,
             service_account_key: SerializableSecretString::from("existing-key".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
@@ -2261,6 +2399,7 @@ mod tests {
         let update_config = UpdateApiDestinationConfig::BigQuery {
             project_id: "updated-project".to_owned(),
             dataset_id: "updated_dataset".to_owned(),
+            gcs_staging_bucket: UpdateField::Preserve,
             service_account_key: Some(SerializableSecretString::from("new-key".to_owned())),
             max_staleness_mins: None,
             connection_pool_size: None,
@@ -2434,6 +2573,7 @@ mod tests {
         let update_config = UpdateApiDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
+            gcs_staging_bucket: UpdateField::Preserve,
             service_account_key: None,
             max_staleness_mins: None,
             connection_pool_size: None,

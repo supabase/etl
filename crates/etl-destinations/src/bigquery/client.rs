@@ -18,9 +18,11 @@ use gcp_bigquery_client::{
         rpc::Status as GoogleRpcStatus,
     },
     model::{
-        query_parameter::QueryParameter, query_parameter_type::QueryParameterType,
-        query_parameter_value::QueryParameterValue, query_request::QueryRequest,
-        query_response::ResultSet,
+        job::Job, job_configuration::JobConfiguration,
+        job_configuration_load::JobConfigurationLoad, job_reference::JobReference,
+        job_status::JobStatus, query_parameter::QueryParameter,
+        query_parameter_type::QueryParameterType, query_parameter_value::QueryParameterValue,
+        query_request::QueryRequest, query_response::ResultSet, table_reference::TableReference,
     },
     storage::{
         BatchAppendRequest, BatchAppendResult, StorageApiConfig, StreamName, TableBatch,
@@ -38,6 +40,12 @@ use tracing::{debug, error, info, warn};
 use crate::{
     bigquery::{
         encoding::BigQueryTableRow,
+        initial_copy::{
+            BigQueryLoadJobRef, BigQueryLoadJobRequest, BigQueryLoadJobStatus, GcsDeleteRequest,
+            GcsObjectMetadata, GcsStreamingUploadRequest, GcsUploadRequest, GcsUploader,
+            bigquery_source_format,
+            gcs::{GcsStreamingUploadWriter, GoogleCloudStorageUploader},
+        },
         metrics::{
             ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
         },
@@ -463,12 +471,12 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
 
             // Code::PermissionDenied (7) - Authorization failure.
             // Requires IAM permission changes. Never retry.
-            Code::PermissionDenied => (ErrorKind::DestinationError, "BigQuery permission denied"),
+            Code::PermissionDenied => (ErrorKind::PermissionDenied, "BigQuery permission denied"),
 
             // Code::Unauthenticated (16) - Authentication failure.
             // Requires credential refresh or configuration fix. Never retry.
             Code::Unauthenticated => {
-                (ErrorKind::DestinationError, "BigQuery authentication failed")
+                (ErrorKind::DestinationAuthenticationError, "BigQuery authentication failed")
             }
 
             // Code::InvalidArgument (3) - Malformed request or invalid data.
@@ -648,6 +656,7 @@ async fn retryable_storage_write_error_detail(
 pub struct BigQueryClient {
     project_id: BigQueryProjectId,
     client: Client,
+    gcs_uploader: Option<GoogleCloudStorageUploader>,
 }
 
 impl BigQueryClient {
@@ -669,8 +678,9 @@ impl BigQueryClient {
             .build_from_service_account_key_file(sa_key_file)
             .await
             .map_err(bq_error_to_etl_error)?;
+        let gcs_uploader = Some(GoogleCloudStorageUploader::new_with_key_path(sa_key_file));
 
-        Ok(BigQueryClient { project_id, client })
+        Ok(BigQueryClient { project_id, client, gcs_uploader })
     }
 
     /// Creates a new [`BigQueryClient`] from a service account key JSON string.
@@ -685,6 +695,7 @@ impl BigQueryClient {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
 
+        let gcs_uploader = Some(GoogleCloudStorageUploader::new_with_key(sa_key.to_owned()));
         let sa_key = parse_service_account_key(sa_key)
             .map_err(BQError::from)
             .map_err(bq_error_to_etl_error)?;
@@ -694,7 +705,7 @@ impl BigQueryClient {
             .await
             .map_err(bq_error_to_etl_error)?;
 
-        Ok(BigQueryClient { project_id, client })
+        Ok(BigQueryClient { project_id, client, gcs_uploader })
     }
 
     /// Creates a new [`BigQueryClient`] using Application Default Credentials.
@@ -714,8 +725,9 @@ impl BigQueryClient {
             .build_from_application_default_credentials()
             .await
             .map_err(bq_error_to_etl_error)?;
+        let gcs_uploader = Some(GoogleCloudStorageUploader::new_with_adc());
 
-        Ok(BigQueryClient { project_id, client })
+        Ok(BigQueryClient { project_id, client, gcs_uploader })
     }
 
     /// Creates a new [`BigQueryClient`] using OAuth2 installed flow
@@ -731,14 +743,70 @@ impl BigQueryClient {
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
+        let secret = secret.as_ref().to_vec();
+        let persistent_file_path = persistent_file_path.into();
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
-            .build_from_installed_flow_authenticator(secret, persistent_file_path)
+            .build_from_installed_flow_authenticator(
+                secret.as_slice(),
+                persistent_file_path.clone(),
+            )
             .await
             .map_err(bq_error_to_etl_error)?;
+        let gcs_uploader = Some(GoogleCloudStorageUploader::new_with_flow_authenticator(
+            secret,
+            persistent_file_path,
+        ));
 
-        Ok(BigQueryClient { project_id, client })
+        Ok(BigQueryClient { project_id, client, gcs_uploader })
+    }
+
+    /// Returns the GCS uploader configured for initial-copy staging.
+    pub(crate) fn gcs_uploader(&self) -> Option<&GoogleCloudStorageUploader> {
+        self.gcs_uploader.as_ref()
+    }
+
+    /// Uploads one object to GCS using the configured initial-copy uploader.
+    pub(crate) async fn upload_gcs_object(
+        &self,
+        request: GcsUploadRequest,
+    ) -> EtlResult<GcsObjectMetadata> {
+        let Some(uploader) = self.gcs_uploader() else {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "BigQuery GCS uploader is not configured"
+            ));
+        };
+
+        uploader.upload_object(request).await
+    }
+
+    /// Starts one streaming upload to GCS using the configured uploader.
+    pub(crate) async fn start_gcs_streaming_upload(
+        &self,
+        request: GcsStreamingUploadRequest,
+    ) -> EtlResult<GcsStreamingUploadWriter> {
+        let Some(uploader) = self.gcs_uploader() else {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "BigQuery GCS uploader is not configured"
+            ));
+        };
+
+        uploader.start_streaming_upload(request).await
+    }
+
+    /// Deletes one object from GCS using the configured initial-copy uploader.
+    pub(crate) async fn delete_gcs_object(&self, request: GcsDeleteRequest) -> EtlResult<()> {
+        let Some(uploader) = self.gcs_uploader() else {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "BigQuery GCS uploader is not configured"
+            ));
+        };
+
+        uploader.delete_object(request).await
     }
 
     /// Returns the fully qualified BigQuery table name.
@@ -972,6 +1040,79 @@ impl BigQueryClient {
         }
 
         Ok(table_ids)
+    }
+
+    /// Inserts a BigQuery load job for staged initial-copy files.
+    pub async fn insert_load_job(
+        &self,
+        request: BigQueryLoadJobRequest,
+    ) -> EtlResult<BigQueryLoadJobRef> {
+        let job = Job {
+            configuration: Some(JobConfiguration {
+                load: Some(JobConfigurationLoad {
+                    create_disposition: Some(request.create_disposition.clone()),
+                    decimal_target_types: Some(request.decimal_target_types.clone()),
+                    destination_table: Some(TableReference::new(
+                        &self.project_id,
+                        &request.dataset_id,
+                        &request.destination_table_id,
+                    )),
+                    source_format: Some(bigquery_source_format(request.source_format).to_owned()),
+                    source_uris: Some(request.source_uris.clone()),
+                    use_avro_logical_types: Some(request.use_avro_logical_types),
+                    write_disposition: Some(request.write_disposition.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            job_reference: Some(JobReference {
+                job_id: Some(request.job_id.clone()),
+                location: request.location.clone(),
+                project_id: Some(self.project_id.clone()),
+            }),
+            ..Default::default()
+        };
+
+        info!(
+            job_id = %request.job_id,
+            location = request.location.as_deref().unwrap_or("inferred"),
+            dataset_id = %request.dataset_id,
+            destination_table_id = %request.destination_table_id,
+            source_format = bigquery_source_format(request.source_format),
+            source_uri_count = request.source_uris.len(),
+            "inserting bigquery initial-copy load job"
+        );
+
+        let job =
+            self.client.job().insert(&self.project_id, job).await.map_err(bq_error_to_etl_error)?;
+
+        let job_reference = job.job_reference.ok_or_else(|| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "BigQuery load job response did not include a job reference"
+            )
+        })?;
+
+        Ok(BigQueryLoadJobRef {
+            project_id: job_reference.project_id.unwrap_or_else(|| self.project_id.clone()),
+            job_id: job_reference.job_id.unwrap_or(request.job_id),
+            location: job_reference.location.or(request.location),
+        })
+    }
+
+    /// Reads the current status for a BigQuery initial-copy load job.
+    pub async fn get_load_job(
+        &self,
+        job_ref: &BigQueryLoadJobRef,
+    ) -> EtlResult<BigQueryLoadJobStatus> {
+        let job = self
+            .client
+            .job()
+            .get_job(&job_ref.project_id, &job_ref.job_id, job_ref.location.as_deref())
+            .await
+            .map_err(bq_error_to_etl_error)?;
+
+        Ok(load_job_status_from_job_status(job.status))
     }
 
     /// Adds a column to an existing BigQuery table.
@@ -1423,6 +1564,23 @@ impl fmt::Debug for BigQueryClient {
     }
 }
 
+/// Converts BigQuery REST job status into the destination load-job status.
+fn load_job_status_from_job_status(status: Option<JobStatus>) -> BigQueryLoadJobStatus {
+    let Some(status) = status else {
+        return BigQueryLoadJobStatus { state: None, error_result: None, errors: Vec::new() };
+    };
+
+    let error_result = status.error_result.map(|error| error.message.unwrap_or_default());
+    let errors = status
+        .errors
+        .unwrap_or_default()
+        .into_iter()
+        .map(|error| error.message.unwrap_or_default())
+        .collect();
+
+    BigQueryLoadJobStatus { state: status.state, error_result, errors }
+}
+
 #[cfg(test)]
 mod tests {
     use gcp_bigquery_client::{
@@ -1460,6 +1618,19 @@ mod tests {
             )
         );
         assert!(!error.to_string().contains("customer@example.com"));
+    }
+
+    #[test]
+    fn bigquery_grpc_auth_errors_are_classified_for_operator_action() {
+        let permission_error = bq_error_to_etl_error(BQError::from(
+            tonic::Status::permission_denied("missing bigquery.tables.updateData"),
+        ));
+        let authentication_error = bq_error_to_etl_error(BQError::from(
+            tonic::Status::unauthenticated("invalid credentials"),
+        ));
+
+        assert_eq!(permission_error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(authentication_error.kind(), ErrorKind::DestinationAuthenticationError);
     }
 
     #[test]

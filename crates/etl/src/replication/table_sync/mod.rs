@@ -18,7 +18,8 @@ use crate::failpoints::{
 use crate::{
     bail,
     destination::{
-        DestinationTableMetadata, DropTableForCopyResult, PipelineDestination, WriteTableRowsResult,
+        DestinationTableMetadata, DropTableForCopyResult, FinishTableCopyResult,
+        PipelineDestination, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -352,6 +353,10 @@ where
 
                 info!(table_id = table_id.0, "writing empty table rows for empty table");
             }
+
+            let (finish_result, pending_finish_result) = FinishTableCopyResult::new(());
+            destination.finish_table_copy(&replicated_table_schema, finish_result).await?;
+            pending_finish_result.await.into_result()?;
 
             info!(
                 table_id = table_id.0,
