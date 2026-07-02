@@ -176,10 +176,10 @@ processed event count from destination observations after the stream drains.
 ## Filling A Table To A Target Size
 
 Use `pg-fill-table` when you need raw bulk-load throughput rather than TPC-C
-semantics. It creates one index-free table and runs parallel `copy from stdin`
-workers until the committed generated payload reaches the requested target. The
-command also prints `pg_total_relation_size` so relation bloat and physical
-growth are visible during the run:
+semantics. It creates one logged table with an identity primary key and runs
+parallel `copy from stdin` workers until the committed generated payload reaches
+the requested target. The command also prints `pg_total_relation_size` so
+relation bloat and physical growth are visible during the run:
 
 ```bash
 cargo xtask pg-fill-table \
@@ -190,9 +190,9 @@ cargo xtask pg-fill-table \
   --password "$POSTGRES_PASSWORD" \
   --table bulk_fill \
   --target-size 450gb \
-  --parallelism 32 \
-  --row-bytes 16384 \
-  --rows-per-copy 4096 \
+  --parallelism 64 \
+  --row-bytes 65536 \
+  --rows-per-copy 64 \
   --force
 ```
 
