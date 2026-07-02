@@ -74,7 +74,7 @@ use crate::{
         },
     },
     replication::{
-        SharedTableCache, WorkerType,
+        SharedTableCache, SharedTableState, WorkerType,
         state::{TableState, TableStateType},
     },
     runtime::{
@@ -3540,17 +3540,17 @@ async fn get_replicated_table_schema(
         );
     };
 
-    let Some(replicated_table_schema) = shared_table_state.replicated_table_schema().cloned()
-    else {
-        bail!(
-            ErrorKind::InvalidState,
-            "Waiting for relation state cannot decode row event",
-            format!(
-                "Table {} is waiting for a relation refresh before row events can be decoded",
-                table_id
-            )
-        );
-    };
-
-    Ok(replicated_table_schema)
+    match shared_table_state {
+        SharedTableState::Ready { replicated_table_schema } => Ok(replicated_table_schema),
+        SharedTableState::WaitingForRelation { .. } => {
+            bail!(
+                ErrorKind::InvalidState,
+                "Waiting for relation state cannot decode row event",
+                format!(
+                    "Table {} is waiting for a relation refresh before row events can be decoded",
+                    table_id
+                )
+            );
+        }
+    }
 }
