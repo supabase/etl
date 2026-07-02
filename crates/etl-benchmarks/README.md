@@ -173,6 +173,33 @@ The workload itself determines the event mix via `go-tpc`'s NewOrder, Payment,
 OrderStatus, Delivery, and StockLevel transactions. The report infers the
 processed event count from destination observations after the stream drains.
 
+## Filling A Table To A Target Size
+
+Use `pg-fill-table` when you need raw bulk-load throughput rather than TPC-C
+semantics. It creates one index-free table and runs parallel `copy from stdin`
+workers until the committed generated payload reaches the requested target. The
+command also prints `pg_total_relation_size` so relation bloat and physical
+growth are visible during the run:
+
+```bash
+cargo xtask pg-fill-table \
+  --host my-db.example.com \
+  --port 5432 \
+  --database bench \
+  --username postgres \
+  --password "$POSTGRES_PASSWORD" \
+  --table bulk_fill \
+  --target-size 450gb \
+  --parallelism 32 \
+  --row-bytes 16384 \
+  --rows-per-copy 4096 \
+  --force
+```
+
+The command defaults to an `UNLOGGED` table, `synchronous_commit=off`, TLS
+connection parameters, and `storage external` for the payload column. Pass
+`--logged` if the table must use normal WAL logging.
+
 ## Copy-Only And Streaming-Only
 
 Run only the table-copy benchmark:
