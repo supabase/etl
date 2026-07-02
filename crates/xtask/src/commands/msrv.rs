@@ -1,7 +1,10 @@
+use std::{env, path::PathBuf};
+
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use xshell::{Shell, cmd};
 
+/// Arguments for verifying workspace MSRV consistency.
 #[derive(Args)]
 pub(crate) struct MsrvArgs {
     /// Also verify that the workspace compiles with the declared MSRV.
@@ -10,7 +13,13 @@ pub(crate) struct MsrvArgs {
 }
 
 impl MsrvArgs {
+    /// Verifies that all MSRV declarations agree.
     pub(crate) fn run(self) -> Result<()> {
+        let workspace_root = workspace_root()?;
+        env::set_current_dir(&workspace_root).with_context(|| {
+            format!("failed to change directory to {}", workspace_root.display())
+        })?;
+
         let sh = Shell::new()?;
 
         if cmd!(sh, "which cargo-msrv").quiet().run().is_err() {
@@ -78,4 +87,13 @@ impl MsrvArgs {
 
         Ok(())
     }
+}
+
+/// Returns the workspace root containing the xtask crate.
+fn workspace_root() -> Result<PathBuf> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|crates_dir| crates_dir.parent())
+        .map(PathBuf::from)
+        .context("failed to determine workspace root")
 }

@@ -85,14 +85,10 @@ jobs:
           tool: cargo-msrv
 
       - name: Check MSRV Sync
-        run: ./scripts/bin/check-msrv-sync.sh
+        run: cargo x msrv
 
       - name: Verify MSRV
-        run: |
-          cargo msrv verify \
-            --manifest-path crates/etl/Cargo.toml \
-            --output-format minimal \
-            -- cargo check --workspace --all-features --locked
+        run: cargo x msrv --verify
 
   check:
     name: Lint

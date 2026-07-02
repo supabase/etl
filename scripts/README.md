@@ -13,7 +13,6 @@ scripts are being removed over time as their logic moves into xtask.
 
 | Script                                | xtask command             |
 | ------------------------------------- | ------------------------- |
-| `bin/check-msrv-sync.sh`              | `cargo x msrv`            |
 | `bin/init.sh`                         | `cargo x init`            |
 | `bin/run-migrations.sh`               | `cargo x migrate`         |
 | `bin/deploy-local-replicator-orbstack.sh` | `cargo x deploy-local` |
