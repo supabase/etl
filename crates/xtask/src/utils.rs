@@ -1,5 +1,9 @@
-use std::io::{self, Write as _};
+use std::{
+    io::{self, Write as _},
+    path::PathBuf,
+};
 
+use anyhow::{Context, Result};
 use clap::ValueEnum;
 use xshell::Cmd;
 
@@ -20,6 +24,15 @@ const YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
 /// ANSI reset sequence.
 const RESET: &str = "\x1b[0m";
+
+/// Returns the workspace root containing the xtask crate.
+pub(crate) fn workspace_root() -> Result<PathBuf> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|crates_dir| crates_dir.parent())
+        .map(PathBuf::from)
+        .context("Failed to determine workspace root")
+}
 
 /// Default feature behavior for a Cargo command.
 #[derive(Clone, Copy, Debug)]

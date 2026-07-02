@@ -3,7 +3,7 @@
 # deps whose unified feature sets differ between the two graphs.
 [alias]
 xtask = "run --target-dir target/xtask --package xtask --"
-x = "run --target-dir target/xtask --package xtask --"
+x = "run --quiet --target-dir target/xtask --package xtask --"
 
 # Use lld linker for faster linking (1.5-2x faster than default ld)
 # lld is part of the LLVM toolchain and widely available

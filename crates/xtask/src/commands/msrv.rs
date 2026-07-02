@@ -1,8 +1,10 @@
-use std::{env, path::PathBuf};
+use std::env;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use xshell::{Shell, cmd};
+
+use crate::utils::workspace_root;
 
 /// Arguments for verifying workspace MSRV consistency.
 #[derive(Args)]
@@ -87,13 +89,4 @@ impl MsrvArgs {
 
         Ok(())
     }
-}
-
-/// Returns the workspace root containing the xtask crate.
-fn workspace_root() -> Result<PathBuf> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|crates_dir| crates_dir.parent())
-        .map(PathBuf::from)
-        .context("failed to determine workspace root")
 }
