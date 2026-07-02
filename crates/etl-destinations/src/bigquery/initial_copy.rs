@@ -479,10 +479,13 @@ mod tests {
             SnapshotFormat::Avro,
         );
 
-        assert_eq!(object_name, "etl/bigquery/initial-copy/42/public.users/run-01/part-3-7.avro");
+        assert_eq!(
+            object_name,
+            "supabase-etl/initial-copy/42/public.users/run-01/part-3-7.avro"
+        );
         assert_eq!(
             gcs_uri("bucket-name", &object_name),
-            "gs://bucket-name/etl/bigquery/initial-copy/42/public.users/run-01/part-3-7.avro"
+            "gs://bucket-name/supabase-etl/initial-copy/42/public.users/run-01/part-3-7.avro"
         );
     }
 
