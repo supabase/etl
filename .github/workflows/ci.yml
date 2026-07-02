@@ -233,7 +233,7 @@ jobs:
       - name: Migrate Database
         run: |
           sudo apt-get install libpq-dev -y
-          ./scripts/bin/run-migrations.sh etl-api
+          cargo x migrate etl-api
 
       - name: Set up BigQuery Credentials
         # Conditional: fork PRs never receive secrets, BigQuery tests skipped gracefully.
