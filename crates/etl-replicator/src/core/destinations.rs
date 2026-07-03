@@ -90,8 +90,12 @@ fn disabled_destination_error(kind: DestinationKind) -> crate::error::Replicator
 #[cfg(feature = "bigquery")]
 mod bigquery {
     use etl::pipeline::Pipeline;
-    use etl_config::shared::{DestinationConfig, ReplicatorConfig};
-    use etl_destinations::bigquery::BigQueryDestination;
+    use etl_config::shared::{
+        BigQueryWriteMode as ConfigBigQueryWriteMode, DestinationConfig, ReplicatorConfig,
+    };
+    use etl_destinations::bigquery::{
+        BigQueryDestination, BigQueryWriteMode as DestinationBigQueryWriteMode,
+    };
     use secrecy::ExposeSecret;
 
     use super::super::{ReplicatorStore, pipeline};
@@ -110,9 +114,14 @@ mod bigquery {
             service_account_key,
             max_staleness_mins,
             connection_pool_size,
+            write_mode,
         } = &replicator_config.destination
         else {
             unreachable!("Destination kind should match BigQuery config");
+        };
+        let write_mode = match write_mode {
+            ConfigBigQueryWriteMode::CurrentState => DestinationBigQueryWriteMode::CurrentState,
+            ConfigBigQueryWriteMode::AppendOnly => DestinationBigQueryWriteMode::AppendOnly,
         };
 
         let destination = BigQueryDestination::new_with_key(
@@ -124,7 +133,8 @@ mod bigquery {
             pipeline_id,
             store.clone(),
         )
-        .await?;
+        .await?
+        .with_write_mode(write_mode);
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
         pipeline::start(pipeline).await

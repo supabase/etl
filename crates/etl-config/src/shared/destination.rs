@@ -12,6 +12,10 @@ const fn default_ducklake_pool_size() -> u32 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
 }
 
+fn is_default_bigquery_write_mode(write_mode: &BigQueryWriteMode) -> bool {
+    *write_mode == BigQueryWriteMode::default()
+}
+
 /// Table engine used by the ClickHouse destination when creating replicated
 /// tables.
 ///
@@ -60,6 +64,18 @@ pub enum DuckLakeMaintenanceMode {
     Disabled,
     Kubernetes,
     Postgres,
+}
+
+/// Write layout used by the BigQuery destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum BigQueryWriteMode {
+    /// Maintain a current-state table using BigQuery CDC.
+    #[default]
+    CurrentState,
+    /// Preserve each source change as an append-only history row.
+    AppendOnly,
 }
 
 /// Supported product destination kind.
@@ -127,6 +143,9 @@ pub enum DestinationConfig {
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+        /// BigQuery table write layout.
+        #[serde(default)]
+        write_mode: BigQueryWriteMode,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -356,6 +375,9 @@ pub enum DestinationConfigWithoutSecrets {
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+        /// BigQuery table write layout.
+        #[serde(default, skip_serializing_if = "is_default_bigquery_write_mode")]
+        write_mode: BigQueryWriteMode,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -423,11 +445,13 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 service_account_key: _,
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode,
             } => DestinationConfigWithoutSecrets::BigQuery {
                 project_id,
                 dataset_id,
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode,
             },
             DestinationConfig::ClickHouse { url, user, password: _, database, engine } => {
                 DestinationConfigWithoutSecrets::ClickHouse { url, user, database, engine }
@@ -517,5 +541,56 @@ mod tests {
         assert_eq!(DestinationKind::Ducklake.as_str(), "ducklake");
         assert_eq!(DestinationKind::Iceberg.as_str(), "iceberg");
         assert_eq!(DestinationKind::Snowflake.as_str(), "snowflake");
+    }
+
+    #[test]
+    fn bigquery_write_mode_deserializes_append_only() {
+        let config: DestinationConfig = serde_json::from_value(serde_json::json!({
+            "big_query": {
+                "project_id": "project",
+                "dataset_id": "dataset",
+                "service_account_key": "{}",
+                "max_staleness_mins": null,
+                "write_mode": "append_only"
+            }
+        }))
+        .unwrap();
+
+        let DestinationConfig::BigQuery { write_mode, connection_pool_size, .. } = config else {
+            panic!("expected BigQuery destination config");
+        };
+
+        assert_eq!(write_mode, BigQueryWriteMode::AppendOnly);
+        assert_eq!(connection_pool_size, DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE);
+    }
+
+    #[test]
+    fn bigquery_write_mode_omits_default_current_state_without_secrets() {
+        let config = DestinationConfigWithoutSecrets::BigQuery {
+            project_id: "project".to_owned(),
+            dataset_id: "dataset".to_owned(),
+            max_staleness_mins: None,
+            connection_pool_size: DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE,
+            write_mode: BigQueryWriteMode::CurrentState,
+        };
+
+        let json = serde_json::to_value(config).unwrap();
+
+        assert!(json["big_query"].get("write_mode").is_none());
+    }
+
+    #[test]
+    fn bigquery_write_mode_serializes_append_only_without_secrets() {
+        let config = DestinationConfigWithoutSecrets::BigQuery {
+            project_id: "project".to_owned(),
+            dataset_id: "dataset".to_owned(),
+            max_staleness_mins: None,
+            connection_pool_size: DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE,
+            write_mode: BigQueryWriteMode::AppendOnly,
+        };
+
+        let json = serde_json::to_value(config).unwrap();
+
+        assert_eq!(json["big_query"]["write_mode"], "append_only");
     }
 }

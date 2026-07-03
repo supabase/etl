@@ -2,7 +2,10 @@ use etl_api::{
     configs::destination::FullApiDestinationConfig,
     validation::{FailureType, validate_destination},
 };
-use etl_config::{SerializableSecretString, shared::ClickHouseEngine};
+use etl_config::{
+    SerializableSecretString,
+    shared::{BigQueryWriteMode, ClickHouseEngine},
+};
 use etl_postgres::{sqlx::test_utils::drop_pg_database, version::POSTGRES_15};
 use sqlx::Executor;
 use url::Url;
@@ -16,6 +19,7 @@ fn create_bigquery_config() -> FullApiDestinationConfig {
         service_account_key: SerializableSecretString::from("service-account-key".to_owned()),
         max_staleness_mins: None,
         connection_pool_size: Some(1),
+        write_mode: BigQueryWriteMode::CurrentState,
     }
 }
 

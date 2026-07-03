@@ -10,7 +10,8 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
-        DropTableForCopyResult, TaskSet, WriteEventsResult, WriteTableRowsResult,
+        DestinationWriteStreamState, DropTableForCopyResult, TaskSet, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -32,10 +33,18 @@ use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_p
 use crate::{
     bigquery::{
         BigQueryDatasetId, BigQueryTableId,
-        client::{BigQueryClient, BigQueryOperationType},
+        append_only::{
+            AppendOnlyChangeType, append_only_backfill_timestamp, append_only_copy_metadata,
+            append_only_delete_old_row, append_only_event_metadata, append_only_row,
+            append_only_schema_columns_to_add, append_only_update_rows,
+        },
+        client::{BigQueryClient, BigQueryOperationType, create_append_trace_id},
         encoding::BigQueryTableRow,
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
-        schema::{column_schemas_to_table_descriptor, supports_column_default},
+        schema::{
+            append_only_table_descriptor, column_schemas_to_table_descriptor,
+            supports_column_default,
+        },
     },
     table_name::try_stringify_table_name,
 };
@@ -44,6 +53,19 @@ use crate::{
 const BIGQUERY_SEQUENCE_ORDINAL_FIRST: u64 = 0;
 /// Internal CDC sequence ordinal for generated upserts after generated deletes.
 const BIGQUERY_SEQUENCE_ORDINAL_SECOND: u64 = 1;
+/// Fallback source timestamp used by tests and paths that do not carry a source
+/// timestamp.
+const APPEND_ONLY_UNKNOWN_SOURCE_TIMESTAMP: i64 = 0;
+
+/// BigQuery destination write mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BigQueryWriteMode {
+    /// Maintain a current-state table with BigQuery CDC.
+    #[default]
+    CurrentState,
+    /// Preserve source changes as append-only history rows.
+    AppendOnly,
+}
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -195,16 +217,30 @@ struct Inner {
     /// # Example
     /// `{ users_table: users_table_10, orders_table: orders_table_3 }`
     created_views: HashMap<BigQueryTableId, SequencedBigQueryTableId>,
+    /// Source timestamp for the currently open append-only transaction.
+    ///
+    /// Huge transactions may be flushed to the destination before the commit
+    /// event arrives, so this cannot be kept only in `write_append_only_events`
+    /// local state.
+    current_append_only_source_timestamp: Option<i64>,
+    /// Per physical append-only table locks used to serialize explicit stream
+    /// offsets without blocking unrelated tables.
+    append_only_table_locks: HashMap<String, Arc<Mutex<()>>>,
 }
 
 impl Inner {
     /// Creates empty synchronized destination state.
     fn new() -> Self {
-        Self { created_tables: HashSet::new(), created_views: HashMap::new() }
+        Self {
+            created_tables: HashSet::new(),
+            created_views: HashMap::new(),
+            current_append_only_source_timestamp: None,
+            append_only_table_locks: HashMap::new(),
+        }
     }
 
     /// Clears cached state for a destination table.
-    fn clear_table_cache(&mut self, base_table_id: &BigQueryTableId) {
+    fn clear_table_cache(&mut self, _table_id: TableId, base_table_id: &BigQueryTableId) {
         self.created_views.remove(base_table_id);
         self.created_tables.retain(|table_id| !table_id.belongs_to_base(base_table_id));
     }
@@ -224,6 +260,7 @@ pub struct BigQueryDestination<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
+    write_mode: BigQueryWriteMode,
     pipeline_id: PipelineId,
     state_store: S,
     inner: Arc<Mutex<Inner>>,
@@ -253,6 +290,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            write_mode: BigQueryWriteMode::CurrentState,
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -285,6 +323,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            write_mode: BigQueryWriteMode::CurrentState,
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -316,6 +355,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            write_mode: BigQueryWriteMode::CurrentState,
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -345,6 +385,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            write_mode: BigQueryWriteMode::CurrentState,
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -388,11 +429,18 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            write_mode: BigQueryWriteMode::CurrentState,
             pipeline_id,
             state_store: store,
             inner: Arc::new(Mutex::new(Inner::new())),
             tasks: TaskSet::new(),
         })
+    }
+
+    /// Returns a copy of this destination with a different write mode.
+    pub fn with_write_mode(mut self, write_mode: BigQueryWriteMode) -> Self {
+        self.write_mode = write_mode;
+        self
     }
 
     /// Prepares a table for BigQuery writes with schema-aware table creation.
@@ -491,6 +539,57 @@ where
             column_schemas_to_table_descriptor(replicated_table_schema, use_cdc_sequence_column);
 
         Ok((sequenced_bigquery_table_id, table_descriptor))
+    }
+
+    /// Prepares a table for append-only history writes.
+    async fn prepare_table_for_append_only(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<SequencedBigQueryTableId> {
+        let mut inner = self.inner.lock().await;
+
+        let table_id = replicated_table_schema.id();
+        let bigquery_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name())?;
+        let snapshot_id = replicated_table_schema.inner().snapshot_id;
+        let replication_mask = replicated_table_schema.replication_mask().clone();
+
+        let existing_metadata =
+            self.state_store.get_applied_destination_table_metadata(table_id).await?;
+        let sequenced_bigquery_table_id = match &existing_metadata {
+            Some(metadata) => metadata.destination_table_id.parse()?,
+            None => SequencedBigQueryTableId::new(bigquery_table_id.clone()),
+        };
+
+        if !inner.created_tables.contains(&sequenced_bigquery_table_id) {
+            let metadata = DestinationTableMetadata::new_applying(
+                sequenced_bigquery_table_id.to_string(),
+                snapshot_id,
+                replication_mask,
+            );
+            self.state_store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+
+            self.client
+                .create_append_only_table_if_missing(
+                    &self.dataset_id,
+                    &sequenced_bigquery_table_id.to_string(),
+                    replicated_table_schema,
+                )
+                .await?;
+
+            self.state_store
+                .store_destination_table_metadata(table_id, metadata.to_applied())
+                .await?;
+            Self::add_to_created_tables_cache(&mut inner, &sequenced_bigquery_table_id);
+        }
+
+        self.ensure_view_points_to_table(
+            &mut inner,
+            &bigquery_table_id,
+            &sequenced_bigquery_table_id,
+        )
+        .await?;
+
+        Ok(sequenced_bigquery_table_id)
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
@@ -602,6 +701,16 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        if self.write_mode == BigQueryWriteMode::AppendOnly {
+            return self
+                .write_append_only_table_rows(
+                    replicated_table_schema,
+                    table_rows,
+                    append_only_backfill_timestamp()?,
+                )
+                .await;
+        }
+
         // Prepare table for streaming.
         let (sequenced_bigquery_table_id, table_descriptor) =
             self.prepare_table_for_streaming(replicated_table_schema, false).await?;
@@ -657,6 +766,85 @@ where
         }
 
         Ok(())
+    }
+
+    /// Writes table-copy rows as append-only inserts.
+    async fn write_append_only_table_rows(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+        source_timestamp: i64,
+    ) -> EtlResult<()> {
+        let sequenced_bigquery_table_id =
+            self.prepare_table_for_append_only(replicated_table_schema).await?;
+        if table_rows.is_empty() {
+            return Ok(());
+        }
+
+        let table_lock = self.append_only_table_lock(&sequenced_bigquery_table_id).await;
+        let _guard = table_lock.lock().await;
+        let stream_state = self
+            .ensure_append_only_write_stream_state(
+                replicated_table_schema.id(),
+                &sequenced_bigquery_table_id,
+            )
+            .await?;
+        let copy_base_offset = u64::try_from(stream_state.next_offset).map_err(|_| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "Append-only write stream state has a negative offset",
+                format!(
+                    "Destination table '{}' has invalid next_offset {}",
+                    stream_state.destination_table_id, stream_state.next_offset
+                )
+            )
+        })?;
+        let rows = table_rows
+            .into_iter()
+            .enumerate()
+            .map(|(row_index, table_row)| {
+                let copy_ordinal =
+                    copy_base_offset.checked_add(row_index as u64).ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "Append-only copy ordinal exceeded supported range",
+                            "Initial-copy row offset overflowed"
+                        )
+                    })?;
+                let metadata = append_only_copy_metadata(
+                    replicated_table_schema,
+                    &table_row,
+                    source_timestamp,
+                    copy_ordinal,
+                );
+                append_only_row(
+                    replicated_table_schema,
+                    table_row,
+                    AppendOnlyChangeType::Insert,
+                    metadata,
+                )
+            })
+            .collect::<EtlResult<Vec<_>>>()?;
+
+        self.append_append_only_rows_with_state(
+            replicated_table_schema,
+            &sequenced_bigquery_table_id,
+            rows,
+            stream_state,
+        )
+        .await
+    }
+
+    async fn append_only_table_lock(
+        &self,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+    ) -> Arc<Mutex<()>> {
+        let mut inner = self.inner.lock().await;
+        inner
+            .append_only_table_locks
+            .entry(sequenced_bigquery_table_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Writes table-copy rows through the destination write path in tests.
@@ -812,6 +1000,95 @@ where
         Ok(())
     }
 
+    /// Handles a schema change event for append-only history tables.
+    async fn handle_append_only_relation_event(
+        &self,
+        new_replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_id = new_replicated_table_schema.id();
+        let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
+
+        let Some(metadata) =
+            self.state_store.get_applied_destination_table_metadata(table_id).await?
+        else {
+            self.prepare_table_for_append_only(new_replicated_table_schema).await?;
+            return Ok(());
+        };
+
+        let current_snapshot_id = metadata.snapshot_id;
+        let current_replication_mask = metadata.replication_mask.clone();
+        let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
+        if current_snapshot_id == new_snapshot_id
+            && current_replication_mask == new_replication_mask
+        {
+            info!(
+                "append-only schema for table {} unchanged (snapshot_id: {}, replication_mask: {})",
+                table_id, new_snapshot_id, new_replication_mask
+            );
+
+            return Ok(());
+        }
+
+        let current_table_schema =
+            self.state_store.get_table_schema(&table_id, current_snapshot_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "Stored schema snapshot missing for BigQuery append-only schema change",
+                        format!(
+                            "Table {} needs stored schema snapshot {} to compare with incoming \
+                             snapshot {}, but it was not found.",
+                            table_id, current_snapshot_id, new_snapshot_id
+                        )
+                    )
+                },
+            )?;
+        let current_schema = ReplicatedTableSchema::from_mask(
+            current_table_schema,
+            current_replication_mask.clone(),
+        );
+        let sequenced_bigquery_table_id = metadata.destination_table_id.parse()?;
+        let table_lock = self.append_only_table_lock(&sequenced_bigquery_table_id).await;
+        let _guard = table_lock.lock().await;
+
+        let updated_metadata = DestinationTableMetadata::new_applied(
+            metadata.destination_table_id.clone(),
+            current_snapshot_id,
+            current_replication_mask.clone(),
+        )
+        .with_schema_change(
+            new_snapshot_id,
+            new_replication_mask.clone(),
+            DestinationTableSchemaStatus::Applying,
+        );
+        self.state_store
+            .store_destination_table_metadata(table_id, updated_metadata.clone())
+            .await?;
+
+        let diff = current_schema.diff(new_replicated_table_schema);
+        if let Err(err) =
+            self.apply_append_only_schema_diff(&table_id, &sequenced_bigquery_table_id, &diff).await
+        {
+            warn!(
+                "append-only schema change failed for table {}: {}. Manual intervention may be \
+                 required.",
+                table_id, err
+            );
+            return Err(err);
+        }
+
+        let bigquery_table_id = sequenced_bigquery_table_id.to_bigquery_table_id();
+        self.recreate_view_for_table(&bigquery_table_id, &sequenced_bigquery_table_id).await?;
+        self.state_store
+            .delete_destination_write_stream_state(table_id, metadata.destination_table_id.clone())
+            .await?;
+        self.state_store
+            .store_destination_table_metadata(table_id, updated_metadata.to_applied())
+            .await?;
+
+        Ok(())
+    }
+
     /// Applies a schema diff to the BigQuery table.
     ///
     /// Executes the necessary DDL operations (ADD COLUMN, DROP COLUMN, RENAME
@@ -958,6 +1235,58 @@ where
         Ok(())
     }
 
+    /// Applies a schema diff to an append-only BigQuery history table.
+    async fn apply_append_only_schema_diff(
+        &self,
+        table_id: &TableId,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+        diff: &SchemaDiff,
+    ) -> EtlResult<()> {
+        if diff.is_empty() {
+            debug!(%table_id, "no append-only schema changes to apply for table");
+            return Ok(());
+        }
+
+        for column in append_only_schema_columns_to_add(diff) {
+            self.client
+                .add_column(&self.dataset_id, &sequenced_bigquery_table_id.to_string(), column)
+                .await?;
+        }
+
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                match modification {
+                    ColumnModification::Rename { old_name, new_name } => {
+                        debug!(
+                            table_id = %table_id,
+                            old_column_name = %old_name,
+                            new_column_name = %new_name,
+                            "preserving renamed append-only source column and writing future rows \
+                             to the added column"
+                        );
+                    }
+                    ColumnModification::Default { .. } | ColumnModification::Nullability { .. } => {
+                        debug!(
+                            table_id = %table_id,
+                            column_name = %change.new_column.name,
+                            "skipping source column constraint change for append-only BigQuery table"
+                        );
+                    }
+                }
+            }
+        }
+
+        for column in &diff.columns_to_remove {
+            debug!(
+                table_id = %table_id,
+                column_name = %column.name,
+                "preserving removed source column in append-only BigQuery history table"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Processes CDC events in batches with proper ordering and truncate
     /// handling.
     ///
@@ -966,6 +1295,10 @@ where
     /// creating new versioned tables. Uses the schema from the first event
     /// of each table for table creation and descriptor building.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+        if self.write_mode == BigQueryWriteMode::AppendOnly {
+            return self.write_append_only_events(events).await;
+        }
+
         let mut events_iter = events.into_iter().peekable();
 
         while events_iter.peek().is_some() {
@@ -1121,6 +1454,237 @@ where
                 self.process_truncate_for_schemas(truncate_schemas.into_values()).await?;
             }
         }
+
+        Ok(())
+    }
+
+    /// Writes CDC events as append-only history rows.
+    async fn write_append_only_events(&self, events: Vec<Event>) -> EtlResult<()> {
+        let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<BigQueryTableRow>)> =
+            HashMap::new();
+        let mut current_source_timestamp = self
+            .inner
+            .lock()
+            .await
+            .current_append_only_source_timestamp
+            .unwrap_or(APPEND_ONLY_UNKNOWN_SOURCE_TIMESTAMP);
+
+        for event in events {
+            match event {
+                Event::Begin(begin) => {
+                    current_source_timestamp = begin.timestamp;
+                    self.inner.lock().await.current_append_only_source_timestamp =
+                        Some(begin.timestamp);
+                }
+                Event::Commit(_) => {
+                    current_source_timestamp = APPEND_ONLY_UNKNOWN_SOURCE_TIMESTAMP;
+                    self.inner.lock().await.current_append_only_source_timestamp = None;
+                }
+                Event::Insert(insert) => {
+                    let metadata = append_only_event_metadata(
+                        insert.event_sequence_key(),
+                        BIGQUERY_SEQUENCE_ORDINAL_FIRST,
+                        current_source_timestamp,
+                    );
+                    let row = append_only_row(
+                        &insert.replicated_table_schema,
+                        insert.table_row,
+                        AppendOnlyChangeType::Insert,
+                        metadata,
+                    )?;
+                    let table_id = insert.replicated_table_schema.id();
+                    let entry = table_id_to_data
+                        .entry(table_id)
+                        .or_insert_with(|| (insert.replicated_table_schema.clone(), Vec::new()));
+                    entry.1.push(row);
+                }
+                Event::Update(update) => {
+                    let sequence_key = update.event_sequence_key();
+                    let table_id = update.replicated_table_schema.id();
+                    let entry = table_id_to_data
+                        .entry(table_id)
+                        .or_insert_with(|| (update.replicated_table_schema.clone(), Vec::new()));
+                    entry.1.extend(append_only_update_rows(
+                        &update.replicated_table_schema,
+                        update.old_table_row,
+                        update.updated_table_row,
+                        sequence_key,
+                        current_source_timestamp,
+                    )?);
+                }
+                Event::Delete(delete) => {
+                    let metadata = append_only_event_metadata(
+                        delete.event_sequence_key(),
+                        BIGQUERY_SEQUENCE_ORDINAL_FIRST,
+                        current_source_timestamp,
+                    );
+                    let old_table_row = append_only_delete_old_row(
+                        &delete.replicated_table_schema,
+                        delete.old_table_row,
+                    )?;
+                    let row = append_only_row(
+                        &delete.replicated_table_schema,
+                        old_table_row,
+                        AppendOnlyChangeType::Delete,
+                        metadata,
+                    )?;
+                    let table_id = delete.replicated_table_schema.id();
+                    let entry = table_id_to_data
+                        .entry(table_id)
+                        .or_insert_with(|| (delete.replicated_table_schema.clone(), Vec::new()));
+                    entry.1.push(row);
+                }
+                Event::Relation(relation) => {
+                    self.flush_append_only_rows(&mut table_id_to_data).await?;
+                    self.handle_append_only_relation_event(&relation.replicated_table_schema)
+                        .await?;
+                }
+                Event::Truncate(_) => {
+                    self.flush_append_only_rows(&mut table_id_to_data).await?;
+                }
+                event => {
+                    debug!(event_type = %event.event_type(), "skipping unsupported event type");
+                }
+            }
+        }
+
+        self.flush_append_only_rows(&mut table_id_to_data).await?;
+
+        Ok(())
+    }
+
+    /// Flushes accumulated append-only rows.
+    async fn flush_append_only_rows(
+        &self,
+        table_id_to_data: &mut HashMap<TableId, (ReplicatedTableSchema, Vec<BigQueryTableRow>)>,
+    ) -> EtlResult<()> {
+        for (_, (replicated_table_schema, rows)) in std::mem::take(table_id_to_data) {
+            let sequenced_bigquery_table_id =
+                self.prepare_table_for_append_only(&replicated_table_schema).await?;
+            self.append_append_only_rows(
+                &replicated_table_schema,
+                &sequenced_bigquery_table_id,
+                rows,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Appends append-only history rows through the BigQuery Storage Write API.
+    async fn append_append_only_rows(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+        rows: Vec<BigQueryTableRow>,
+    ) -> EtlResult<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let table_lock = self.append_only_table_lock(sequenced_bigquery_table_id).await;
+        let _guard = table_lock.lock().await;
+        let stream_state = self
+            .ensure_append_only_write_stream_state(
+                replicated_table_schema.id(),
+                sequenced_bigquery_table_id,
+            )
+            .await?;
+
+        self.append_append_only_rows_with_state(
+            replicated_table_schema,
+            sequenced_bigquery_table_id,
+            rows,
+            stream_state,
+        )
+        .await
+    }
+
+    async fn ensure_append_only_write_stream_state(
+        &self,
+        table_id: TableId,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+    ) -> EtlResult<DestinationWriteStreamState> {
+        let destination_table_id = sequenced_bigquery_table_id.to_string();
+        if let Some(state) = self
+            .state_store
+            .get_destination_write_stream_state(table_id, destination_table_id.clone())
+            .await?
+        {
+            if state.next_offset < 0 {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "Append-only write stream state has a negative offset",
+                    format!(
+                        "Destination table '{}' has invalid next_offset {}",
+                        state.destination_table_id, state.next_offset
+                    )
+                ));
+            }
+
+            return Ok(state);
+        }
+
+        let stream_name = self
+            .client
+            .create_committed_write_stream(&self.dataset_id, &destination_table_id)
+            .await?;
+        let state = DestinationWriteStreamState::new(destination_table_id, stream_name, 0);
+        self.state_store.store_destination_write_stream_state(table_id, state.clone()).await?;
+
+        Ok(state)
+    }
+
+    async fn append_append_only_rows_with_state(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+        rows: Vec<BigQueryTableRow>,
+        stream_state: DestinationWriteStreamState,
+    ) -> EtlResult<()> {
+        let table_descriptor = append_only_table_descriptor(replicated_table_schema);
+        let target_batches = calculate_target_batches_for_table_copy(&rows)?;
+        let row_batches = split_table_rows(rows, target_batches);
+        let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
+        let mut next_offset = stream_state.next_offset;
+        let stream_name = stream_state.stream_name.clone();
+
+        for (batch_index, rows) in row_batches.into_iter().enumerate() {
+            if rows.is_empty() {
+                continue;
+            }
+
+            histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(rows.len() as f64);
+            let trace_id = create_append_trace_id(
+                self.pipeline_id,
+                &sequenced_bigquery_table_id_string,
+                batch_index,
+            );
+            let _ = self
+                .client
+                .append_committed_stream_rows(
+                    &stream_name,
+                    table_descriptor.clone(),
+                    &rows,
+                    next_offset,
+                    trace_id,
+                )
+                .await?;
+
+            next_offset += rows.len() as i64;
+        }
+
+        self.state_store
+            .store_destination_write_stream_state(
+                replicated_table_schema.id(),
+                DestinationWriteStreamState::new(
+                    sequenced_bigquery_table_id_string,
+                    stream_name,
+                    next_offset,
+                ),
+            )
+            .await?;
 
         Ok(())
     }
@@ -1294,7 +1858,7 @@ where
 
         // Once destination cleanup is done, remove any stale local cache entries.
         let mut inner = self.inner.lock().await;
-        inner.clear_table_cache(&base_bigquery_table_id);
+        inner.clear_table_cache(table_id, &base_bigquery_table_id);
 
         info!(table_id = table_id.0, "dropped bigquery table before copy");
 
@@ -1494,7 +2058,7 @@ fn bigquery_update_rows(
 }
 
 /// Returns the full new row required for a BigQuery update upsert.
-fn bigquery_update_new_row(
+pub(super) fn bigquery_update_new_row(
     replicated_table_schema: &ReplicatedTableSchema,
     updated_table_row: UpdatedTableRow,
 ) -> EtlResult<TableRow> {
@@ -1513,7 +2077,7 @@ fn bigquery_update_new_row(
 }
 
 /// Returns the old row image required for a BigQuery delete.
-fn bigquery_delete_old_row(
+pub(super) fn bigquery_delete_old_row(
     replicated_table_schema: &ReplicatedTableSchema,
     old_table_row: Option<OldTableRow>,
 ) -> EtlResult<OldTableRow> {
@@ -1553,7 +2117,7 @@ fn ensure_bigquery_update_without_old_row_can_skip_delete(
 }
 
 /// Verifies that a key-only row image carries source primary-key values.
-fn ensure_bigquery_key_image_matches_primary_key(
+pub(super) fn ensure_bigquery_key_image_matches_primary_key(
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
     if matches!(replicated_table_schema.identity_type(), IdentityType::PrimaryKey) {
@@ -1850,11 +2414,14 @@ mod tests {
     use std::sync::Arc;
 
     use etl::{
-        data::CellNonOptional,
-        schema::{ColumnSchema, IdentityMask, PgLsn, TableId, TableSchema, Type},
+        data::{ArrayCellNonOptional, CellNonOptional},
+        schema::{
+            ColumnModification, ColumnSchema, IdentityMask, PgLsn, TableId, TableSchema, Type,
+        },
     };
     use prost::Message;
 
+    use super::super::append_only::append_only_sequence_number;
     use super::*;
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
@@ -2093,7 +2660,7 @@ mod tests {
             SequencedBigQueryTableId("orders_table".to_owned(), 0),
         );
 
-        inner.clear_table_cache(&base_table_id);
+        inner.clear_table_cache(TableId::new(1), &base_table_id);
 
         assert_eq!(
             inner.created_tables,
@@ -2106,6 +2673,120 @@ mod tests {
                 SequencedBigQueryTableId("orders_table".to_owned(), 0),
             )])
         );
+    }
+
+    #[test]
+    fn append_only_copy_sort_key_sorts_before_cdc_even_when_copy_timestamp_is_newer() {
+        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let table_row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+        let copy_metadata =
+            append_only_copy_metadata(&replicated_table_schema, &table_row, 1000, 0);
+        let cdc_metadata =
+            append_only_event_metadata(EventSequenceKey::new(PgLsn::from(1), 0), 0, 900);
+
+        assert!(copy_metadata.sort_keys < cdc_metadata.sort_keys);
+        assert!(copy_metadata.change_sequence_number < cdc_metadata.change_sequence_number);
+    }
+
+    #[test]
+    fn append_only_copy_metadata_uses_stable_row_identity() {
+        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let source_timestamp = 42;
+        let table_row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+        let same_table_row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+        let changed_non_key_table_row =
+            TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_owned())]);
+        let different_table_row =
+            TableRow::new(vec![Cell::I32(2), Cell::String("alice".to_owned())]);
+
+        let metadata =
+            append_only_copy_metadata(&replicated_table_schema, &table_row, source_timestamp, 0);
+        let same_metadata = append_only_copy_metadata(
+            &replicated_table_schema,
+            &same_table_row,
+            source_timestamp,
+            0,
+        );
+        let changed_non_key_metadata = append_only_copy_metadata(
+            &replicated_table_schema,
+            &changed_non_key_table_row,
+            source_timestamp,
+            0,
+        );
+        let different_metadata = append_only_copy_metadata(
+            &replicated_table_schema,
+            &different_table_row,
+            source_timestamp,
+            0,
+        );
+        let same_row_different_copy_ordinal = append_only_copy_metadata(
+            &replicated_table_schema,
+            &same_table_row,
+            source_timestamp,
+            1,
+        );
+
+        assert_eq!(metadata.uuid, same_metadata.uuid);
+        assert_eq!(metadata.uuid, changed_non_key_metadata.uuid);
+        assert_eq!(metadata.change_sequence_number, same_metadata.change_sequence_number);
+        assert_ne!(metadata.uuid, different_metadata.uuid);
+        assert_ne!(metadata.uuid, same_row_different_copy_ordinal.uuid);
+        assert_eq!(metadata.source_timestamp, source_timestamp);
+        assert_eq!(
+            metadata.sort_keys,
+            vec![
+                "0000000000000000".to_owned(),
+                "0000000000000000/0000000000000000/0000000000000000".to_owned(),
+                metadata.uuid.clone(),
+            ]
+        );
+    }
+
+    #[test]
+    fn append_only_event_metadata_preserves_source_timestamp_and_sort_keys() {
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 2);
+        let metadata = append_only_event_metadata(sequence_key, 3, 42);
+
+        assert_eq!(metadata.uuid, "0000000000000001/0000000000000002/0000000000000003");
+        assert_eq!(metadata.source_timestamp, 42);
+        assert_eq!(metadata.change_sequence_number, metadata.uuid);
+        assert_eq!(
+            metadata.sort_keys,
+            vec![
+                "800000000000002a".to_owned(),
+                "0000000000000001/0000000000000002".to_owned(),
+                "0000000000000003".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn append_only_schema_columns_to_add_preserves_renamed_and_removed_history_columns() {
+        let id_column = ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false);
+        let old_name_column = ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true);
+        let new_name_column = ColumnSchema::new("display_name".to_owned(), Type::TEXT, -1, 2, true);
+        let added_column = ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true);
+
+        let diff = SchemaDiff {
+            columns_to_add: vec![added_column.clone()],
+            columns_to_remove: vec![id_column],
+            columns_to_change: vec![etl::schema::ColumnChange {
+                ordinal_position: 2,
+                old_column: old_name_column,
+                new_column: new_name_column.clone(),
+                modifications: vec![ColumnModification::Rename {
+                    old_name: "name".to_owned(),
+                    new_name: "display_name".to_owned(),
+                }],
+            }],
+        };
+
+        let columns = append_only_schema_columns_to_add(&diff)
+            .into_iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(columns, vec!["email", "display_name"]);
     }
 
     #[test]
@@ -2551,6 +3232,208 @@ mod tests {
                     CellNonOptional::String(
                         "0000000000000001/0000000000000000/0000000000000001".to_owned(),
                     ),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn append_only_update_rows_emits_before_and_after_images_for_full_identity() {
+        let replicated_table_schema = replicated_schema(IdentityType::Full);
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 0);
+        let source_timestamp = 42;
+
+        let rows = append_only_update_rows(
+            &replicated_table_schema,
+            Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("before".to_owned()),
+            ]))),
+            UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("after".to_owned()),
+            ])),
+            sequence_key,
+            source_timestamp,
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].debug_cells(),
+            vec![
+                (1, CellNonOptional::I32(1)),
+                (2, CellNonOptional::String("before".to_owned())),
+                (
+                    3,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
+                    ),
+                ),
+                (4, CellNonOptional::I64(source_timestamp)),
+                (
+                    5,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
+                    ),
+                ),
+                (6, CellNonOptional::String("UPDATE-DELETE".to_owned())),
+                (
+                    7,
+                    CellNonOptional::Array(ArrayCellNonOptional::String(vec![
+                        "800000000000002a".to_owned(),
+                        "0000000000000001/0000000000000000".to_owned(),
+                        "0000000000000000".to_owned(),
+                    ])),
+                ),
+            ]
+        );
+        assert_eq!(
+            rows[1].debug_cells(),
+            vec![
+                (1, CellNonOptional::I32(2)),
+                (2, CellNonOptional::String("after".to_owned())),
+                (
+                    3,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000001".to_owned(),
+                    ),
+                ),
+                (4, CellNonOptional::I64(source_timestamp)),
+                (
+                    5,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000001".to_owned(),
+                    ),
+                ),
+                (6, CellNonOptional::String("UPDATE-INSERT".to_owned())),
+                (
+                    7,
+                    CellNonOptional::Array(ArrayCellNonOptional::String(vec![
+                        "800000000000002a".to_owned(),
+                        "0000000000000001/0000000000000000".to_owned(),
+                        "0000000000000001".to_owned(),
+                    ])),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn append_only_update_rows_expands_key_old_image_to_before_image() {
+        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 0);
+        let source_timestamp = 42;
+
+        let rows = append_only_update_rows(
+            &replicated_table_schema,
+            Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
+            UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("after".to_owned()),
+            ])),
+            sequence_key,
+            source_timestamp,
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].debug_cells(),
+            vec![
+                (1, CellNonOptional::I32(1)),
+                (2, CellNonOptional::Null),
+                (
+                    3,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
+                    ),
+                ),
+                (4, CellNonOptional::I64(source_timestamp)),
+                (
+                    5,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
+                    ),
+                ),
+                (6, CellNonOptional::String("UPDATE-DELETE".to_owned())),
+                (
+                    7,
+                    CellNonOptional::Array(ArrayCellNonOptional::String(vec![
+                        "800000000000002a".to_owned(),
+                        "0000000000000001/0000000000000000".to_owned(),
+                        "0000000000000000".to_owned(),
+                    ])),
+                ),
+            ]
+        );
+        assert_eq!(
+            rows[1].debug_cells(),
+            vec![
+                (1, CellNonOptional::I32(2)),
+                (2, CellNonOptional::String("after".to_owned())),
+                (
+                    3,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000001".to_owned(),
+                    ),
+                ),
+                (4, CellNonOptional::I64(source_timestamp)),
+                (
+                    5,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000001".to_owned(),
+                    ),
+                ),
+                (6, CellNonOptional::String("UPDATE-INSERT".to_owned())),
+                (
+                    7,
+                    CellNonOptional::Array(ArrayCellNonOptional::String(vec![
+                        "800000000000002a".to_owned(),
+                        "0000000000000001/0000000000000000".to_owned(),
+                        "0000000000000001".to_owned(),
+                    ])),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn append_only_delete_key_row_expands_to_sparse_storage_write_row() {
+        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 0);
+        let source_timestamp = 42;
+        let sequence_number = append_only_sequence_number(sequence_key, 0);
+
+        let old_table_row = append_only_delete_old_row(
+            &replicated_table_schema,
+            Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(42)]))),
+        )
+        .unwrap();
+        let row = append_only_row(
+            &replicated_table_schema,
+            old_table_row,
+            AppendOnlyChangeType::Delete,
+            append_only_event_metadata(sequence_key, 0, source_timestamp),
+        )
+        .unwrap();
+
+        assert_eq!(
+            row.debug_cells(),
+            vec![
+                (1, CellNonOptional::I32(42)),
+                (2, CellNonOptional::Null),
+                (3, CellNonOptional::String(sequence_number.clone())),
+                (4, CellNonOptional::I64(source_timestamp)),
+                (5, CellNonOptional::String(sequence_number.clone())),
+                (6, CellNonOptional::String("DELETE".to_owned())),
+                (
+                    7,
+                    CellNonOptional::Array(ArrayCellNonOptional::String(vec![
+                        "800000000000002a".to_owned(),
+                        "0000000000000001/0000000000000000".to_owned(),
+                        "0000000000000000".to_owned(),
+                    ])),
                 ),
             ]
         );

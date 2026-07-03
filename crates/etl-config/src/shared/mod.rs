@@ -13,8 +13,8 @@ pub use connection::{
     PgConnectionOptionsBuilder, TcpKeepaliveConfig, TlsConfig,
 };
 pub use destination::{
-    ClickHouseEngine, DestinationConfig, DestinationConfigWithoutSecrets, DestinationKind,
-    DuckLakeMaintenanceMode, IcebergConfig, IcebergConfigWithoutSecrets,
+    BigQueryWriteMode, ClickHouseEngine, DestinationConfig, DestinationConfigWithoutSecrets,
+    DestinationKind, DuckLakeMaintenanceMode, IcebergConfig, IcebergConfigWithoutSecrets,
 };
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,

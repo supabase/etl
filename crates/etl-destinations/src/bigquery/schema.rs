@@ -16,6 +16,13 @@ const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 /// Special column name for Change Data Capture sequence ordering in BigQuery.
 const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
 
+/// Append-only metadata column names.
+pub(super) const APPEND_ONLY_UUID_COLUMN: &str = "_etl_uuid";
+pub(super) const APPEND_ONLY_SOURCE_TIMESTAMP_COLUMN: &str = "_etl_source_timestamp";
+pub(super) const APPEND_ONLY_CHANGE_SEQUENCE_NUMBER_COLUMN: &str = "_etl_change_sequence_number";
+pub(super) const APPEND_ONLY_CHANGE_TYPE_COLUMN: &str = "_etl_change_type";
+pub(super) const APPEND_ONLY_SORT_KEYS_COLUMN: &str = "_etl_sort_keys";
+
 /// Generates SQL column specification for CREATE TABLE statements.
 pub(super) fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
     let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
@@ -192,6 +199,35 @@ pub(super) fn create_columns_spec(
     Ok(format!("({column_spec})"))
 }
 
+/// Builds column specifications for append-only history tables.
+pub(super) fn create_append_only_columns_spec(
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> EtlResult<String> {
+    let mut column_specs = replicated_table_schema
+        .column_schemas()
+        .map(append_only_column_spec)
+        .collect::<EtlResult<Vec<_>>>()?;
+    column_specs.extend(append_only_metadata_column_specs());
+
+    Ok(format!("({})", column_specs.join(",")))
+}
+
+fn append_only_metadata_column_specs() -> Vec<String> {
+    vec![
+        format!("`{APPEND_ONLY_UUID_COLUMN}` string not null"),
+        format!("`{APPEND_ONLY_SOURCE_TIMESTAMP_COLUMN}` int64 not null"),
+        format!("`{APPEND_ONLY_CHANGE_SEQUENCE_NUMBER_COLUMN}` string not null"),
+        format!("`{APPEND_ONLY_CHANGE_TYPE_COLUMN}` string not null"),
+        format!("`{APPEND_ONLY_SORT_KEYS_COLUMN}` array<string> not null"),
+    ]
+}
+
+/// Generates nullable SQL column specification for append-only history tables.
+fn append_only_column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
+    let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
+    Ok(format!("{} {}", column_name, postgres_to_bigquery_type(&column_schema.typ)))
+}
+
 /// Converts Postgres data types to BigQuery equivalent types.
 pub(super) fn postgres_to_bigquery_type(typ: &Type) -> String {
     if is_array_type(typ) {
@@ -304,6 +340,85 @@ pub(crate) fn column_schemas_to_table_descriptor(
     }
 
     TableDescriptor { field_descriptors }
+}
+
+/// Converts append-only table schemas to a BigQuery [`TableDescriptor`].
+///
+/// Source columns are nullable because delete rows contain sparse source
+/// images. Metadata columns are appended as flat fields so the
+/// existing Storage Write protobuf encoder can write append-only rows without
+/// nested message support.
+pub(crate) fn append_only_table_descriptor(
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> TableDescriptor {
+    let mut field_descriptors = vec![];
+    let mut number = 1;
+
+    for column_schema in replicated_table_schema.column_schemas() {
+        field_descriptors.push(FieldDescriptor {
+            number,
+            name: column_schema.name.clone(),
+            typ: column_schema_to_storage_type(&column_schema.typ),
+            mode: if is_array_type(&column_schema.typ) {
+                ColumnMode::Repeated
+            } else {
+                ColumnMode::Nullable
+            },
+        });
+        number += 1;
+    }
+
+    field_descriptors.extend([
+        FieldDescriptor {
+            number,
+            name: APPEND_ONLY_UUID_COLUMN.to_owned(),
+            typ: ColumnType::String,
+            mode: ColumnMode::Required,
+        },
+        FieldDescriptor {
+            number: number + 1,
+            name: APPEND_ONLY_SOURCE_TIMESTAMP_COLUMN.to_owned(),
+            typ: ColumnType::Int64,
+            mode: ColumnMode::Required,
+        },
+        FieldDescriptor {
+            number: number + 2,
+            name: APPEND_ONLY_CHANGE_SEQUENCE_NUMBER_COLUMN.to_owned(),
+            typ: ColumnType::String,
+            mode: ColumnMode::Required,
+        },
+        FieldDescriptor {
+            number: number + 3,
+            name: APPEND_ONLY_CHANGE_TYPE_COLUMN.to_owned(),
+            typ: ColumnType::String,
+            mode: ColumnMode::Required,
+        },
+        FieldDescriptor {
+            number: number + 4,
+            name: APPEND_ONLY_SORT_KEYS_COLUMN.to_owned(),
+            typ: ColumnType::String,
+            mode: ColumnMode::Repeated,
+        },
+    ]);
+
+    TableDescriptor { field_descriptors }
+}
+
+/// Maps a Postgres source type to the scalar protobuf type used by the Storage
+/// Write row descriptor.
+fn column_schema_to_storage_type(typ: &Type) -> ColumnType {
+    match typ {
+        &Type::BOOL | &Type::BOOL_ARRAY => ColumnType::Bool,
+        &Type::INT2 | &Type::INT4 | &Type::INT2_ARRAY | &Type::INT4_ARRAY => ColumnType::Int32,
+        &Type::INT8 | &Type::TIMESTAMPTZ | &Type::INT8_ARRAY | &Type::TIMESTAMPTZ_ARRAY => {
+            ColumnType::Int64
+        }
+        &Type::FLOAT4 | &Type::FLOAT4_ARRAY => ColumnType::Float,
+        &Type::FLOAT8 | &Type::FLOAT8_ARRAY => ColumnType::Double,
+        &Type::OID | &Type::OID_ARRAY => ColumnType::Int32,
+        &Type::BYTEA | &Type::BYTEA_ARRAY => ColumnType::Bytes,
+        _ => ColumnType::String,
+    }
 }
 
 #[cfg(test)]
@@ -629,5 +744,63 @@ mod tests {
         assert!(matches!(descriptor.field_descriptors[8].mode, ColumnMode::Repeated));
         assert!(matches!(descriptor.field_descriptors[9].typ, ColumnType::Int64));
         assert!(matches!(descriptor.field_descriptors[9].mode, ColumnMode::Repeated));
+    }
+
+    #[test]
+    fn create_append_only_columns_spec_appends_flat_metadata_without_pk() {
+        let columns = vec![
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
+        ];
+        let schema = test_replicated_schema(columns);
+
+        let spec = create_append_only_columns_spec(&schema).unwrap();
+
+        assert_eq!(
+            spec,
+            "(`id` int64,`name` string,`_etl_uuid` string not null,`_etl_source_timestamp` int64 \
+             not null,`_etl_change_sequence_number` string not null,`_etl_change_type` string not \
+             null,`_etl_sort_keys` array<string> not null)"
+        );
+        assert!(!spec.contains("primary key"));
+    }
+
+    #[test]
+    fn append_only_table_descriptor_appends_flat_metadata_fields() {
+        let columns = vec![
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("payload", Type::JSONB, 2, true, None),
+        ];
+        let schema = test_replicated_schema(columns);
+
+        let descriptor = append_only_table_descriptor(&schema);
+
+        assert_eq!(descriptor.field_descriptors.len(), 7);
+        assert_eq!(descriptor.field_descriptors[0].name, "id");
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Nullable));
+        assert_eq!(descriptor.field_descriptors[1].name, "payload");
+        assert!(matches!(descriptor.field_descriptors[1].typ, ColumnType::String));
+        assert!(matches!(descriptor.field_descriptors[1].mode, ColumnMode::Nullable));
+
+        let metadata = &descriptor.field_descriptors[2..];
+        assert_eq!(metadata[0].name, APPEND_ONLY_UUID_COLUMN);
+        assert!(matches!(metadata[0].typ, ColumnType::String));
+        assert!(matches!(metadata[0].mode, ColumnMode::Required));
+        assert_eq!(metadata[1].name, APPEND_ONLY_SOURCE_TIMESTAMP_COLUMN);
+        assert!(matches!(metadata[1].typ, ColumnType::Int64));
+        assert!(matches!(metadata[1].mode, ColumnMode::Required));
+        assert_eq!(metadata[2].name, APPEND_ONLY_CHANGE_SEQUENCE_NUMBER_COLUMN);
+        assert!(matches!(metadata[2].typ, ColumnType::String));
+        assert!(matches!(metadata[2].mode, ColumnMode::Required));
+        assert_eq!(metadata[3].name, APPEND_ONLY_CHANGE_TYPE_COLUMN);
+        assert!(matches!(metadata[3].typ, ColumnType::String));
+        assert!(matches!(metadata[3].mode, ColumnMode::Required));
+        assert_eq!(metadata[4].name, APPEND_ONLY_SORT_KEYS_COLUMN);
+        assert!(matches!(metadata[4].typ, ColumnType::String));
+        assert!(matches!(metadata[4].mode, ColumnMode::Repeated));
+
+        let field_numbers: Vec<u32> =
+            descriptor.field_descriptors.iter().map(|field| field.number).collect();
+        assert_eq!(field_numbers, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 }

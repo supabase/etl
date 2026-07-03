@@ -1,5 +1,6 @@
-use std::fmt;
+use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
 
+use async_trait::async_trait;
 use etl::{
     data::Cell,
     error::{ErrorKind, EtlError, EtlResult},
@@ -9,11 +10,14 @@ use etl::{
 };
 use gcp_bigquery_client::{
     Client,
+    auth::Authenticator,
     client_builder::ClientBuilder,
     error::BQError,
     google::{
         cloud::bigquery::storage::v1::{
-            RowError, StorageError, row_error::RowErrorCode, storage_error::StorageErrorCode,
+            AppendRowsRequest, CreateWriteStreamRequest, RowError, StorageError, WriteStream,
+            append_rows_request, append_rows_response, big_query_write_client::BigQueryWriteClient,
+            row_error::RowErrorCode, storage_error::StorageErrorCode, write_stream,
         },
         rpc::Status as GoogleRpcStatus,
     },
@@ -23,16 +27,30 @@ use gcp_bigquery_client::{
         query_response::ResultSet,
     },
     storage::{
-        BatchAppendRequest, BatchAppendResult, StorageApiConfig, StreamName, TableBatch,
-        TableDescriptor,
+        BatchAppendRequest, BatchAppendResult, MAX_BATCH_SIZE_BYTES, StorageApi, StorageApiConfig,
+        StreamName, TableBatch, TableDescriptor,
     },
-    yup_oauth2::parse_service_account_key,
+    yup_oauth2::{
+        ApplicationDefaultCredentialsAuthenticator as YupApplicationDefaultCredentialsAuthenticator,
+        ApplicationDefaultCredentialsFlowOpts, ApplicationSecret,
+        AuthorizedUserAuthenticator as YupAuthorizedUserAuthenticator,
+        InstalledFlowAuthenticator as YupInstalledFlowAuthenticator, InstalledFlowReturnMethod,
+        ServiceAccountKey,
+        authenticator::{ApplicationDefaultCredentialsTypes, DefaultAuthenticator},
+        authorized_user::AuthorizedUserSecret,
+        parse_application_secret, parse_service_account_key,
+    },
 };
 use metrics::counter;
 use prost::Message;
 use rand::random;
+use serde::Deserialize;
 use tokio::time::{Duration, Instant, sleep};
-use tonic::Code;
+use tonic::{
+    Code, Request, Status,
+    codec::CompressionEncoding,
+    transport::{Channel, ClientTlsConfig},
+};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -41,7 +59,10 @@ use crate::{
         metrics::{
             ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
         },
-        schema::{create_columns_spec, default_expression_sql, postgres_to_bigquery_type},
+        schema::{
+            create_append_only_columns_spec, create_columns_spec, default_expression_sql,
+            postgres_to_bigquery_type,
+        },
         sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
     },
     retry::{RetryDecision, RetryPolicy, retry_with_backoff},
@@ -83,13 +104,163 @@ const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] =
 /// Protobuf type name for BigQuery storage errors embedded in gRPC status
 /// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
-
+/// BigQuery OAuth scope used by the upstream BigQuery client.
+const BIG_QUERY_AUTH_URL: &str = "https://www.googleapis.com/auth/bigquery";
+/// Base URL for the BigQuery Storage Write API endpoint.
+const BIG_QUERY_STORAGE_API_URL: &str = "https://bigquerystorage.googleapis.com";
+/// Domain name for BigQuery Storage API TLS configuration.
+const BIGQUERY_STORAGE_API_DOMAIN: &str = "bigquerystorage.googleapis.com";
+/// Maximum message size for Storage Write gRPC requests and responses.
+const STORAGE_WRITE_MAX_MESSAGE_SIZE_BYTES: usize = 20 * 1024 * 1024;
+/// HTTP/2 keepalive interval for committed-stream Storage Write connections.
+const STORAGE_WRITE_HTTP2_KEEPALIVE_INTERVAL_SECS: u64 = 30;
+/// HTTP/2 keepalive timeout for committed-stream Storage Write connections.
+const STORAGE_WRITE_HTTP2_KEEPALIVE_TIMEOUT_SECS: u64 = 10;
+/// Retry policy for committed-stream append RPC failures.
+const COMMITTED_STREAM_RETRY_POLICY: RetryPolicy = RetryPolicy {
+    max_retries: 8,
+    initial_delay: Duration::from_secs(1),
+    max_delay: Duration::from_secs(30),
+};
 /// BigQuery project identifier.
 pub type BigQueryProjectId = String;
 /// BigQuery dataset identifier.
 pub type BigQueryDatasetId = String;
 /// BigQuery table identifier.
 pub type BigQueryTableId = String;
+
+/// Local authenticator used for low-level Storage Write RPCs not exposed by
+/// the high-level client wrapper.
+#[derive(Clone)]
+struct BigQueryAuthenticator {
+    auth: DefaultAuthenticator,
+    scopes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct CredentialType {
+    #[serde(rename = "type")]
+    cred_type: String,
+}
+
+fn default_adc_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("APPDATA").ok().map(|appdata| {
+            PathBuf::from(appdata).join("gcloud/application_default_credentials.json")
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var("HOME").ok().map(|home| {
+            PathBuf::from(home).join(".config/gcloud/application_default_credentials.json")
+        })
+    }
+}
+
+fn adc_credential_path() -> Option<PathBuf> {
+    std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(default_adc_path)
+}
+
+impl BigQueryAuthenticator {
+    async fn from_service_account_key(
+        service_account_key: ServiceAccountKey,
+        scopes: &[&str],
+    ) -> Result<Arc<dyn Authenticator>, BQError> {
+        let auth = gcp_bigquery_client::yup_oauth2::ServiceAccountAuthenticator::builder(
+            service_account_key,
+        )
+        .build()
+        .await
+        .map_err(BQError::InvalidServiceAccountAuthenticator)?;
+
+        Ok(Arc::new(Self { auth, scopes: scopes.iter().map(|scope| scope.to_string()).collect() }))
+    }
+
+    async fn from_application_default_credentials(
+        scopes: &[&str],
+    ) -> Result<Arc<dyn Authenticator>, BQError> {
+        if let Some(auth) =
+            Self::try_authorized_user_application_default_credentials(scopes).await?
+        {
+            return Ok(auth);
+        }
+
+        let opts = ApplicationDefaultCredentialsFlowOpts::default();
+        let auth = match YupApplicationDefaultCredentialsAuthenticator::builder(opts).await {
+            ApplicationDefaultCredentialsTypes::InstanceMetadata(auth) => auth.build().await,
+            ApplicationDefaultCredentialsTypes::ServiceAccount(auth) => auth.build().await,
+        }
+        .map_err(BQError::InvalidApplicationDefaultCredentialsAuthenticator)?;
+
+        Ok(Arc::new(Self { auth, scopes: scopes.iter().map(|scope| scope.to_string()).collect() }))
+    }
+
+    async fn try_authorized_user_application_default_credentials(
+        scopes: &[&str],
+    ) -> Result<Option<Arc<dyn Authenticator>>, BQError> {
+        let Some(credential_path) = adc_credential_path() else {
+            return Ok(None);
+        };
+        let Ok(contents) = tokio::fs::read_to_string(&credential_path).await else {
+            return Ok(None);
+        };
+        let Ok(credential_type) = serde_json::from_str::<CredentialType>(&contents) else {
+            return Ok(None);
+        };
+        if credential_type.cred_type != "authorized_user" {
+            return Ok(None);
+        }
+
+        let secret: AuthorizedUserSecret = serde_json::from_str(&contents)?;
+        let auth = YupAuthorizedUserAuthenticator::builder(secret)
+            .build()
+            .await
+            .map_err(BQError::InvalidAuthorizedUserAuthenticator)?;
+
+        Ok(Some(Arc::new(Self {
+            auth,
+            scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+        })))
+    }
+
+    async fn from_installed_flow<S: AsRef<[u8]>, P: Into<PathBuf>>(
+        secret: S,
+        scopes: &[&str],
+        persistent_file_path: P,
+    ) -> Result<Arc<dyn Authenticator>, BQError> {
+        let app_secret: ApplicationSecret = parse_application_secret(secret)?;
+        let auth = YupInstalledFlowAuthenticator::builder(
+            app_secret,
+            InstalledFlowReturnMethod::HTTPRedirect,
+        )
+        .persist_tokens_to_disk(persistent_file_path)
+        .build()
+        .await
+        .map_err(BQError::InvalidInstalledFlowAuthenticator)?;
+
+        auth.token(scopes).await.map_err(BQError::YupAuthError)?;
+
+        Ok(Arc::new(Self { auth, scopes: scopes.iter().map(|scope| scope.to_string()).collect() }))
+    }
+}
+
+#[async_trait]
+impl Authenticator for BigQueryAuthenticator {
+    async fn access_token(&self) -> Result<String, BQError> {
+        Ok(self
+            .auth
+            .clone()
+            .token(self.scopes.as_ref())
+            .await?
+            .token()
+            .ok_or(BQError::NoToken)?
+            .to_string())
+    }
+}
 
 /// Change Data Capture operation types for BigQuery streaming.
 #[derive(Debug)]
@@ -188,8 +359,97 @@ fn format_retryable_storage_write_requests(requests: &[RetryableAppendRequest]) 
 }
 
 /// Creates a per-batch BigQuery trace identifier for Storage Write requests.
-fn create_append_trace_id(pipeline_id: PipelineId, table_id: &str, batch_index: usize) -> String {
+pub(super) fn create_append_trace_id(
+    pipeline_id: PipelineId,
+    table_id: &str,
+    batch_index: usize,
+) -> String {
     format!("supabase_etl_{pipeline_id}_{table_id}_{batch_index}_{}", random::<u32>())
+}
+
+/// Creates an authenticated gRPC request with Bearer token authorization.
+async fn new_authorized_storage_request<T>(
+    auth: Arc<dyn Authenticator>,
+    message: T,
+) -> Result<Request<T>, BQError> {
+    let bearer_token = format!("Bearer {}", auth.access_token().await?);
+    let bearer_value = bearer_token.as_str().try_into()?;
+
+    let mut request = Request::new(message);
+    request.metadata_mut().insert("authorization", bearer_value);
+
+    Ok(request)
+}
+
+/// Creates a configured gRPC client for BigQuery Storage Write API.
+async fn create_storage_grpc_client() -> Result<BigQueryWriteClient<Channel>, BQError> {
+    let tls_config =
+        ClientTlsConfig::new().domain_name(BIGQUERY_STORAGE_API_DOMAIN).with_enabled_roots();
+
+    let channel = Channel::from_static(BIG_QUERY_STORAGE_API_URL)
+        .tls_config(tls_config)?
+        .http2_keep_alive_interval(Duration::from_secs(STORAGE_WRITE_HTTP2_KEEPALIVE_INTERVAL_SECS))
+        .keep_alive_timeout(Duration::from_secs(STORAGE_WRITE_HTTP2_KEEPALIVE_TIMEOUT_SECS))
+        .keep_alive_while_idle(true)
+        .connect()
+        .await?;
+
+    Ok(BigQueryWriteClient::new(channel)
+        .max_encoding_message_size(STORAGE_WRITE_MAX_MESSAGE_SIZE_BYTES)
+        .max_decoding_message_size(STORAGE_WRITE_MAX_MESSAGE_SIZE_BYTES)
+        .send_compressed(CompressionEncoding::Gzip)
+        .accept_compressed(CompressionEncoding::Gzip))
+}
+
+/// Returns true when a committed-stream append status can be retried locally.
+fn is_retryable_committed_stream_status(status: &Status) -> bool {
+    matches!(
+        status.code(),
+        Code::Aborted | Code::Internal | Code::ResourceExhausted | Code::Unavailable
+    )
+}
+
+/// Returns true when a committed-stream response error can be retried locally.
+fn is_retryable_committed_stream_response_status(status: &GoogleRpcStatus) -> bool {
+    matches!(
+        Code::from_i32(status.code),
+        Code::Aborted | Code::Internal | Code::ResourceExhausted | Code::Unavailable
+    )
+}
+
+/// Returns true when BigQuery has already accepted the rows at this offset.
+fn is_committed_stream_already_exists(status: &GoogleRpcStatus) -> bool {
+    Code::from_i32(status.code) == Code::AlreadyExists
+}
+
+/// Converts a committed-stream append response error into an ETL error.
+fn committed_stream_response_error_to_etl_error(status: &GoogleRpcStatus) -> EtlError {
+    etl_error!(
+        ErrorKind::DestinationError,
+        "BigQuery committed stream append failed",
+        format!(
+            "BigQuery returned gRPC code {} while appending with an explicit offset",
+            status.code
+        )
+    )
+}
+
+/// Converts a committed-stream transport status into an ETL error.
+fn committed_stream_status_to_etl_error(status: Status) -> EtlError {
+    let kind = if is_retryable_committed_stream_status(&status) {
+        ErrorKind::DestinationAtomicBatchRetryable
+    } else {
+        ErrorKind::DestinationError
+    };
+
+    etl_error!(
+        kind,
+        "BigQuery committed stream append failed",
+        format!(
+            "BigQuery Storage Write API returned {} while appending with an explicit offset",
+            status.code()
+        )
+    )
 }
 
 /// Computes the maximum number of inflight requests for the BigQuery Storage
@@ -384,13 +644,11 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
             (ErrorKind::DestinationAuthenticationError, "BigQuery authentication token missing")
         }
 
-        // Network and transport errors
         BQError::RequestError(_) => (ErrorKind::DestinationIoError, "BigQuery request failed"),
         BQError::TonicTransportError(_) => {
             (ErrorKind::DestinationIoError, "BigQuery transport error")
         }
 
-        // Query and data errors
         BQError::ResponseError { .. } => {
             (ErrorKind::DestinationQueryFailed, "BigQuery response error")
         }
@@ -407,103 +665,41 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
             (ErrorKind::ConversionError, "BigQuery column type mismatch")
         }
 
-        // Serialization errors
         BQError::SerializationError(_) => {
             (ErrorKind::SerializationError, "BigQuery JSON serialization error")
         }
 
-        // gRPC errors
         BQError::TonicInvalidMetadataValueError(_) => {
             (ErrorKind::InvalidData, "BigQuery invalid metadata value")
         }
         BQError::TonicStatusError(status) => match status.code() {
-            // Code::Unavailable (14) - Canonical "service unavailable" code.
-            // Indicates transient conditions like network issues, server overload, or intentional
-            // throttling. BigQuery returns this with messages like "Task is overloaded".
-            // Retriable per Google's Storage Write API guidance.
             Code::Unavailable => (ErrorKind::DestinationError, "BigQuery unavailable"),
-
-            // Code::Internal (13) - Internal server errors.
-            // In BigQuery context, often manifests as transient backend issues, GOAWAY frames,
-            // or temporary processing failures. Retriable per BigQuery backend team guidance.
             Code::Internal => (ErrorKind::DestinationError, "BigQuery internal error"),
-
-            // Code::Aborted (10) - Concurrency conflicts or server-initiated aborts.
-            // For Storage Write API, includes sequencer failures and stream aborts due to
-            // transient conditions. Retriable per BigQuery backend team guidance.
             Code::Aborted => (ErrorKind::DestinationError, "BigQuery operation aborted"),
-
-            // Code::Cancelled (1) - Server-cancelled operations.
-            // In streaming context, server may cancel in-flight appends due to internal
-            // reshuffling. Retriable per BigQuery backend team guidance.
             Code::Cancelled => (ErrorKind::DestinationError, "BigQuery operation cancelled"),
-
-            // Code::DeadlineExceeded (4) - Operation timeout.
-            // Request may or may not have completed server-side. Safe to retry with offset-based
-            // deduplication in Storage Write API. Retriable per Google's guidance.
             Code::DeadlineExceeded => (ErrorKind::DestinationError, "BigQuery deadline exceeded"),
-
-            // Code::ResourceExhausted (8) - Quota or rate limit exhaustion.
-            // Requires exponential backoff to allow server capacity recovery. Retriable per
-            // Google's Storage Write API guidance, though may need longer backoff periods.
             Code::ResourceExhausted => (ErrorKind::DestinationError, "BigQuery resource exhausted"),
-
-            // Code::FailedPrecondition (9) - Precondition failures.
-            // Indicates issues like STREAM_FINALIZED, INVALID_STREAM_STATE, or SCHEMA_MISMATCH.
-            // Requires fixing the underlying issue before retrying. Never retry automatically.
             Code::FailedPrecondition => {
                 (ErrorKind::DestinationError, "BigQuery precondition failed")
             }
-
-            // Code::Unknown (2) - Transport-level errors.
-            // When message contains "transport" or "connection", indicates errors that never
-            // reached the server (TCP resets, HTTP/2 GOAWAY). Retriable as per transport error
-            // guidance.
             Code::Unknown => (ErrorKind::DestinationError, "BigQuery unknown error"),
-
-            // Code::PermissionDenied (7) - Authorization failure.
-            // Requires IAM permission changes. Never retry.
             Code::PermissionDenied => (ErrorKind::DestinationError, "BigQuery permission denied"),
-
-            // Code::Unauthenticated (16) - Authentication failure.
-            // Requires credential refresh or configuration fix. Never retry.
             Code::Unauthenticated => {
                 (ErrorKind::DestinationError, "BigQuery authentication failed")
             }
-
-            // Code::InvalidArgument (3) - Malformed request or invalid data.
-            // Client bug that requires code changes. Never retry.
             Code::InvalidArgument => (ErrorKind::DestinationError, "BigQuery invalid argument"),
-
-            // Code::NotFound (5) - Resource doesn't exist.
-            // Requires creating the resource (table, dataset, stream) first. Never retry.
             Code::NotFound => (ErrorKind::DestinationTableMissing, "BigQuery entity not found"),
-
-            // Code::AlreadyExists (6) - Entity conflict during creation.
-            // For streaming with offsets, may indicate row was already written. Never retry.
             Code::AlreadyExists => {
                 (ErrorKind::DestinationTableAlreadyExists, "BigQuery entity already exists")
             }
-
-            // Code::OutOfRange (11) - Invalid offset for streaming.
-            // Offset beyond current stream end. Requires application-level recovery. Never retry.
             Code::OutOfRange => (ErrorKind::DestinationError, "BigQuery offset out of range"),
-
-            // Code::Unimplemented (12) - Operation not available.
-            // Feature not supported by BigQuery. Never retry.
             Code::Unimplemented => {
                 (ErrorKind::DestinationError, "BigQuery operation not supported")
             }
-
-            // Code::DataLoss (15) - Unrecoverable data corruption.
-            // Severe error requiring manual intervention. Never retry.
             Code::DataLoss => (ErrorKind::DestinationError, "BigQuery data loss"),
-
-            // Code::Ok (0) - Should never be an error
             Code::Ok => (ErrorKind::DestinationError, "BigQuery unexpected ok status"),
         },
 
-        // Concurrency and task errors
         BQError::SemaphorePermitError(_) => {
             (ErrorKind::DestinationError, "BigQuery semaphore permit error")
         }
@@ -648,6 +844,8 @@ async fn retryable_storage_write_error_detail(
 pub struct BigQueryClient {
     project_id: BigQueryProjectId,
     client: Client,
+    auth: Arc<dyn Authenticator>,
+    storage_write_client: BigQueryWriteClient<Channel>,
 }
 
 impl BigQueryClient {
@@ -663,14 +861,25 @@ impl BigQueryClient {
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
-
-        let client = ClientBuilder::new()
-            .with_storage_config(storage_config)
-            .build_from_service_account_key_file(sa_key_file)
+        let scopes = [BIG_QUERY_AUTH_URL];
+        let service_account_key =
+            gcp_bigquery_client::yup_oauth2::read_service_account_key(sa_key_file)
+                .await
+                .map_err(BQError::from)
+                .map_err(bq_error_to_etl_error)?;
+        let auth = BigQueryAuthenticator::from_service_account_key(service_account_key, &scopes)
             .await
             .map_err(bq_error_to_etl_error)?;
 
-        Ok(BigQueryClient { project_id, client })
+        let client = ClientBuilder::new()
+            .with_storage_config(storage_config)
+            .build_from_authenticator(auth.clone())
+            .await
+            .map_err(bq_error_to_etl_error)?;
+        let storage_write_client =
+            create_storage_grpc_client().await.map_err(bq_error_to_etl_error)?;
+
+        Ok(BigQueryClient { project_id, client, auth, storage_write_client })
     }
 
     /// Creates a new [`BigQueryClient`] from a service account key JSON string.
@@ -684,17 +893,23 @@ impl BigQueryClient {
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
+        let scopes = [BIG_QUERY_AUTH_URL];
 
         let sa_key = parse_service_account_key(sa_key)
             .map_err(BQError::from)
             .map_err(bq_error_to_etl_error)?;
-        let client = ClientBuilder::new()
-            .with_storage_config(storage_config)
-            .build_from_service_account_key(sa_key, false)
+        let auth = BigQueryAuthenticator::from_service_account_key(sa_key, &scopes)
             .await
             .map_err(bq_error_to_etl_error)?;
+        let client = ClientBuilder::new()
+            .with_storage_config(storage_config)
+            .build_from_authenticator(auth.clone())
+            .await
+            .map_err(bq_error_to_etl_error)?;
+        let storage_write_client =
+            create_storage_grpc_client().await.map_err(bq_error_to_etl_error)?;
 
-        Ok(BigQueryClient { project_id, client })
+        Ok(BigQueryClient { project_id, client, auth, storage_write_client })
     }
 
     /// Creates a new [`BigQueryClient`] using Application Default Credentials.
@@ -708,14 +923,20 @@ impl BigQueryClient {
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
-
-        let client = ClientBuilder::new()
-            .with_storage_config(storage_config)
-            .build_from_application_default_credentials()
+        let scopes = [BIG_QUERY_AUTH_URL];
+        let auth = BigQueryAuthenticator::from_application_default_credentials(&scopes)
             .await
             .map_err(bq_error_to_etl_error)?;
 
-        Ok(BigQueryClient { project_id, client })
+        let client = ClientBuilder::new()
+            .with_storage_config(storage_config)
+            .build_from_authenticator(auth.clone())
+            .await
+            .map_err(bq_error_to_etl_error)?;
+        let storage_write_client =
+            create_storage_grpc_client().await.map_err(bq_error_to_etl_error)?;
+
+        Ok(BigQueryClient { project_id, client, auth, storage_write_client })
     }
 
     /// Creates a new [`BigQueryClient`] using OAuth2 installed flow
@@ -731,14 +952,21 @@ impl BigQueryClient {
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
+        let scopes = [BIG_QUERY_AUTH_URL];
+        let auth =
+            BigQueryAuthenticator::from_installed_flow(secret, &scopes, persistent_file_path)
+                .await
+                .map_err(bq_error_to_etl_error)?;
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
-            .build_from_installed_flow_authenticator(secret, persistent_file_path)
+            .build_from_authenticator(auth.clone())
             .await
             .map_err(bq_error_to_etl_error)?;
+        let storage_write_client =
+            create_storage_grpc_client().await.map_err(bq_error_to_etl_error)?;
 
-        Ok(BigQueryClient { project_id, client })
+        Ok(BigQueryClient { project_id, client, auth, storage_write_client })
     }
 
     /// Returns the fully qualified BigQuery table name.
@@ -816,6 +1044,22 @@ impl BigQueryClient {
         Ok(true)
     }
 
+    /// Creates an append-only history table if it doesn't exist.
+    pub async fn create_append_only_table_if_missing(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<bool> {
+        if self.table_exists(dataset_id, table_id).await? {
+            return Ok(false);
+        }
+
+        self.create_append_only_table(dataset_id, table_id, replicated_table_schema).await?;
+
+        Ok(true)
+    }
+
     /// Creates a new table in the BigQuery dataset.
     ///
     /// Builds and executes a CREATE TABLE statement with the provided column
@@ -839,6 +1083,25 @@ impl BigQueryClient {
         info!(%full_table_name, "creating table in bigquery");
 
         let query = format!("create table {full_table_name} {columns_spec} {max_staleness_option}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Creates an append-only history table in BigQuery.
+    pub async fn create_append_only_table(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let columns_spec = create_append_only_columns_spec(replicated_table_schema)?;
+
+        info!(%full_table_name, "creating append-only table in bigquery");
+
+        let query = format!("create table {full_table_name} {columns_spec}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -1131,6 +1394,208 @@ impl BigQueryClient {
         }
     }
 
+    /// Creates an explicitly-created committed Storage Write stream.
+    pub(super) async fn create_committed_write_stream(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+    ) -> EtlResult<String> {
+        let parent =
+            format!("projects/{}/datasets/{dataset_id}/tables/{table_id}", self.project_id);
+        let request = CreateWriteStreamRequest {
+            parent: parent.clone(),
+            write_stream: Some(WriteStream {
+                name: String::new(),
+                r#type: write_stream::Type::Committed as i32,
+                create_time: None,
+                commit_time: None,
+                table_schema: None,
+                write_mode: write_stream::WriteMode::Insert as i32,
+                location: String::new(),
+            }),
+        };
+
+        let request = new_authorized_storage_request(self.auth.clone(), request)
+            .await
+            .map_err(bq_error_to_etl_error)?;
+        let mut grpc_client = self.storage_write_client.clone();
+        let write_stream = grpc_client
+            .create_write_stream(request)
+            .await
+            .map_err(|status| committed_stream_status_to_etl_error(status))?
+            .into_inner();
+
+        Ok(write_stream.name)
+    }
+
+    /// Appends rows to a committed stream using explicit offsets.
+    pub(super) async fn append_committed_stream_rows(
+        &self,
+        stream_name: &str,
+        table_descriptor: TableDescriptor,
+        rows: &[BigQueryTableRow],
+        start_offset: i64,
+        trace_id: String,
+    ) -> EtlResult<(usize, usize)> {
+        if rows.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let mut current_index = 0;
+        let mut current_offset = start_offset;
+        let mut total_bytes_sent = 0;
+        let mut total_bytes_received = 0;
+
+        while current_index < rows.len() {
+            let (encoded_rows, processed_count) = StorageApi::create_rows(
+                &table_descriptor,
+                &rows[current_index..],
+                MAX_BATCH_SIZE_BYTES,
+            );
+            if processed_count == 0 {
+                return Err(etl_error!(
+                    ErrorKind::DestinationError,
+                    "BigQuery committed stream row is too large",
+                    "A single encoded row exceeded the Storage Write API request size limit"
+                ));
+            }
+
+            let request = AppendRowsRequest {
+                write_stream: stream_name.to_owned(),
+                offset: Some(current_offset),
+                trace_id: trace_id.clone(),
+                missing_value_interpretations: HashMap::new(),
+                default_missing_value_interpretation:
+                    append_rows_request::MissingValueInterpretation::Unspecified as i32,
+                rows: Some(encoded_rows),
+            };
+            let request_bytes = request.encoded_len();
+
+            let response_bytes = retry_with_backoff(
+                COMMITTED_STREAM_RETRY_POLICY,
+                |err: &EtlError| {
+                    if err.kind() == ErrorKind::DestinationAtomicBatchRetryable {
+                        RetryDecision::Retry
+                    } else {
+                        RetryDecision::Stop
+                    }
+                },
+                storage_write_retry_delay_with_jitter,
+                |attempt| {
+                    warn!(
+                        retry_index = attempt.retry_index,
+                        max_retries = attempt.max_retries,
+                        sleep_ms = attempt.sleep_delay.as_millis(),
+                        error = %attempt.error,
+                        "retrying retryable bigquery committed stream append error"
+                    );
+                },
+                || {
+                    let request = request.clone();
+                    async move {
+                        self.append_committed_stream_request(stream_name, request, current_offset)
+                            .await
+                    }
+                },
+            )
+            .await
+            .map_err(|failure| failure.last_error)?;
+
+            total_bytes_sent += request_bytes;
+            total_bytes_received += response_bytes;
+            current_index += processed_count;
+            current_offset += processed_count as i64;
+        }
+
+        Ok((total_bytes_sent, total_bytes_received))
+    }
+
+    async fn append_committed_stream_request(
+        &self,
+        stream_name: &str,
+        request: AppendRowsRequest,
+        expected_offset: i64,
+    ) -> EtlResult<usize> {
+        let request =
+            new_authorized_storage_request(self.auth.clone(), tokio_stream::iter(vec![request]))
+                .await
+                .map_err(bq_error_to_etl_error)?;
+        let mut grpc_client = self.storage_write_client.clone();
+        let mut responses = grpc_client
+            .append_rows(request)
+            .await
+            .map_err(committed_stream_status_to_etl_error)?
+            .into_inner();
+
+        let response = responses
+            .message()
+            .await
+            .map_err(committed_stream_status_to_etl_error)?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::DestinationAtomicBatchRetryable,
+                    "BigQuery committed stream append returned no response",
+                    "Storage Write API closed the append stream before acknowledging the request"
+                )
+            })?;
+        let response_bytes = response.encoded_len();
+
+        if !response.row_errors.is_empty() {
+            return Err(row_error_to_etl_error(response.row_errors[0].clone()));
+        }
+
+        match response.response {
+            Some(append_rows_response::Response::AppendResult(result)) => {
+                if let Some(offset) = result.offset
+                    && offset != expected_offset
+                {
+                    return Err(etl_error!(
+                        ErrorKind::DestinationError,
+                        "BigQuery committed stream append returned an unexpected offset",
+                        format!(
+                            "Expected offset {expected_offset} for stream {stream_name}, got {offset}"
+                        )
+                    ));
+                }
+
+                Ok(response_bytes)
+            }
+            Some(append_rows_response::Response::Error(status))
+                if is_committed_stream_already_exists(&status) =>
+            {
+                Err(etl_error!(
+                    ErrorKind::DestinationError,
+                    "BigQuery committed stream append overlapped an existing offset",
+                    format!(
+                        "BigQuery reported ALREADY_EXISTS for stream {stream_name} at offset \
+                         {expected_offset}; refusing to treat the request as successful because \
+                         replay batch boundaries may not match the original append"
+                    )
+                ))
+            }
+            Some(append_rows_response::Response::Error(status))
+                if is_retryable_committed_stream_response_status(&status) =>
+            {
+                Err(etl_error!(
+                    ErrorKind::DestinationAtomicBatchRetryable,
+                    "BigQuery committed stream append returned a retryable error",
+                    format!(
+                        "BigQuery returned gRPC code {} for stream {stream_name} at offset {expected_offset}",
+                        status.code
+                    )
+                ))
+            }
+            Some(append_rows_response::Response::Error(status)) => {
+                Err(committed_stream_response_error_to_etl_error(&status))
+            }
+            None => Err(etl_error!(
+                ErrorKind::DestinationAtomicBatchRetryable,
+                "BigQuery committed stream append returned an empty response",
+                "Storage Write API did not include an append result or error"
+            )),
+        }
+    }
+
     /// Appends table batches to BigQuery using the concurrent Storage Write
     /// API.
     ///
@@ -1367,8 +1832,8 @@ impl BigQueryClient {
 
     /// Creates a batch append request for a specific table with validated rows.
     ///
-    /// Converts TableRow instances to BigQueryTableRow and creates a properly
-    /// configured [`BigQueryAppendRequest`] for efficient append retries.
+    /// Creates a properly configured [`BigQueryAppendRequest`] for efficient
+    /// append retries.
     pub(super) fn create_batch_append_request(
         &self,
         pipeline_id: PipelineId,

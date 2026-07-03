@@ -12,7 +12,10 @@ use etl_api::{
         sources::{CreateSourceRequest, CreateSourceResponse},
     },
 };
-use etl_config::{SerializableSecretString, shared::DuckLakeMaintenanceMode};
+use etl_config::{
+    SerializableSecretString,
+    shared::{BigQueryWriteMode, DuckLakeMaintenanceMode},
+};
 
 use crate::support::test_app::TestApp;
 
@@ -55,6 +58,7 @@ pub(crate) mod destinations {
             ),
             max_staleness_mins: Some(10),
             connection_pool_size: Some(1),
+            write_mode: BigQueryWriteMode::CurrentState,
         }
     }
 
@@ -66,6 +70,7 @@ pub(crate) mod destinations {
             service_account_key: SerializableSecretString::from("service-account-key".to_owned()),
             max_staleness_mins: None,
             connection_pool_size: Some(1),
+            write_mode: BigQueryWriteMode::CurrentState,
         }
     }
 

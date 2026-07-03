@@ -1,6 +1,9 @@
 use etl_config::{
     SerializableSecretString,
-    shared::{ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode, IcebergConfig},
+    shared::{
+        BigQueryWriteMode, ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode,
+        IcebergConfig,
+    },
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -44,6 +47,9 @@ pub enum FullApiDestinationConfig {
         #[schema(example = 8)]
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
+        #[schema(value_type = String, example = "append_only")]
+        #[serde(default)]
+        write_mode: BigQueryWriteMode,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -174,6 +180,11 @@ pub enum FullApiDestinationConfig {
 pub enum DestinationConfigUpdateError {
     #[error("Missing required secret field `{field}` for {destination} destination")]
     MissingRequiredSecret { destination: &'static str, field: &'static str },
+    #[error(
+        "Changing `write_mode` for an existing {destination} destination is not supported because \
+         destination tables were created with the stored write mode's layout"
+    )]
+    WriteModeChangeNotSupported { destination: &'static str },
 }
 
 /// Represents an update field where the API must distinguish an omitted field
@@ -277,6 +288,9 @@ pub enum UpdateApiDestinationConfig {
         #[schema(example = 8)]
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
+        #[schema(value_type = Option<String>, example = "append_only")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        write_mode: Option<BigQueryWriteMode>,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -422,16 +436,33 @@ impl UpdateApiDestinationConfig {
                     service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
+                    write_mode,
                 },
-                StoredDestinationConfig::BigQuery { service_account_key: stored_key, .. },
-            ) => Ok(StoredDestinationConfig::BigQuery {
-                project_id,
-                dataset_id,
-                service_account_key: service_account_key.unwrap_or(stored_key),
-                max_staleness_mins,
-                connection_pool_size: connection_pool_size
-                    .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
-            }),
+                StoredDestinationConfig::BigQuery {
+                    service_account_key: stored_key,
+                    write_mode: stored_write_mode,
+                    ..
+                },
+            ) => {
+                // Existing destination tables were created with the stored
+                // write mode's physical layout, so flipping the mode would
+                // write incompatible rows into them.
+                if write_mode.is_some_and(|write_mode| write_mode != stored_write_mode) {
+                    return Err(DestinationConfigUpdateError::WriteModeChangeNotSupported {
+                        destination: "BigQuery",
+                    });
+                }
+
+                Ok(StoredDestinationConfig::BigQuery {
+                    project_id,
+                    dataset_id,
+                    service_account_key: service_account_key.unwrap_or(stored_key),
+                    max_staleness_mins,
+                    connection_pool_size: connection_pool_size
+                        .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
+                    write_mode: stored_write_mode,
+                })
+            }
             (
                 Self::ClickHouse { url, user, password, database, engine },
                 StoredDestinationConfig::ClickHouse { password: stored_password, .. },
@@ -524,6 +555,7 @@ impl UpdateApiDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode,
             } => Ok(StoredDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
@@ -535,6 +567,7 @@ impl UpdateApiDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size: connection_pool_size
                     .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
+                write_mode: write_mode.unwrap_or_default(),
             }),
             Self::ClickHouse { url, user, password, database, engine } => {
                 Ok(StoredDestinationConfig::ClickHouse { url, user, password, database, engine })
@@ -609,12 +642,14 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size: Some(connection_pool_size),
+                write_mode,
             },
             StoredDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse { url, user, password, database, engine }
@@ -715,6 +750,7 @@ pub enum StoredDestinationConfig {
         service_account_key: SerializableSecretString,
         max_staleness_mins: Option<u16>,
         connection_pool_size: usize,
+        write_mode: BigQueryWriteMode,
     },
     ClickHouse {
         url: Url,
@@ -761,12 +797,14 @@ impl StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode,
             } => DestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key: service_account_key.into(),
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode,
             },
             Self::ClickHouse { url, user, password, database, engine } => {
                 DestinationConfig::ClickHouse {
@@ -874,6 +912,7 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
@@ -881,6 +920,7 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size: connection_pool_size
                     .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
+                write_mode,
             },
             FullApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse { url, user, password, database, engine }
@@ -982,12 +1022,14 @@ impl From<FullApiDestinationConfig> for UpdateApiDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key: Some(service_account_key),
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode: Some(write_mode),
             },
             FullApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse { url, user, password, database, engine }
@@ -1094,6 +1136,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode,
             } => {
                 let encrypted_service_account_key =
                     encrypt_text(service_account_key.expose_secret().to_owned(), encryption_key)?;
@@ -1104,6 +1147,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     service_account_key: encrypted_service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
+                    write_mode,
                 })
             }
             Self::ClickHouse { url, user, password, database, engine } => {
@@ -1304,6 +1348,8 @@ pub enum EncryptedStoredDestinationConfig {
         max_staleness_mins: Option<u16>,
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+        #[serde(default)]
+        write_mode: BigQueryWriteMode,
     },
     ClickHouse {
         url: Url,
@@ -1359,6 +1405,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 service_account_key: encrypted_service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode,
             } => {
                 let service_account_key = SerializableSecretString::from(decrypt_text(
                     encrypted_service_account_key,
@@ -1371,6 +1418,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
+                    write_mode,
                 })
             }
             Self::Iceberg { config } => match config {
@@ -1790,6 +1838,7 @@ mod tests {
             ),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            write_mode: BigQueryWriteMode::AppendOnly,
         };
 
         let key = EncryptionKeyring::from(EncryptionKey {
@@ -1816,6 +1865,7 @@ mod tests {
                     service_account_key: key1,
                     max_staleness_mins: staleness1,
                     connection_pool_size: connection_pool_size1,
+                    write_mode: write_mode1,
                 },
                 StoredDestinationConfig::BigQuery {
                     project_id: p2,
@@ -1823,12 +1873,14 @@ mod tests {
                     service_account_key: key2,
                     max_staleness_mins: staleness2,
                     connection_pool_size: connection_pool_size2,
+                    write_mode: write_mode2,
                 },
             ) => {
                 assert_eq!(p1, p2);
                 assert_eq!(d1, d2);
                 assert_eq!(staleness1, staleness2);
                 assert_eq!(connection_pool_size1, connection_pool_size2);
+                assert_eq!(write_mode1, write_mode2);
                 // Assert that service account key was encrypted and decrypted correctly
                 assert_eq!(key1.expose_secret(), key2.expose_secret());
             }
@@ -2172,6 +2224,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: None,
+            write_mode: BigQueryWriteMode::AppendOnly,
         };
 
         let stored: StoredDestinationConfig = full_config.clone().into();
@@ -2185,6 +2238,7 @@ mod tests {
                     service_account_key: p1_service_account_key,
                     max_staleness_mins: p1_max_staleness_mins,
                     connection_pool_size: p1_connection_pool_size,
+                    write_mode: p1_write_mode,
                 },
                 FullApiDestinationConfig::BigQuery {
                     project_id: p2_project_id,
@@ -2192,6 +2246,7 @@ mod tests {
                     service_account_key: p2_service_account_key,
                     max_staleness_mins: p2_max_staleness_mins,
                     connection_pool_size: p2_connection_pool_size,
+                    write_mode: p2_write_mode,
                 },
             ) => {
                 assert_eq!(p1_project_id, p2_project_id);
@@ -2207,6 +2262,29 @@ mod tests {
                     p2_connection_pool_size,
                     Some(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE)
                 );
+                assert_eq!(p1_write_mode, BigQueryWriteMode::AppendOnly);
+                assert_eq!(p2_write_mode, BigQueryWriteMode::AppendOnly);
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn stored_destination_config_into_etl_config_preserves_bigquery_write_mode() {
+        let config = StoredDestinationConfig::BigQuery {
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
+            max_staleness_mins: Some(15),
+            connection_pool_size: 8,
+            write_mode: BigQueryWriteMode::AppendOnly,
+        };
+
+        let etl_config = config.into_etl_config();
+
+        match etl_config {
+            DestinationConfig::BigQuery { write_mode, .. } => {
+                assert_eq!(write_mode, BigQueryWriteMode::AppendOnly);
             }
             _ => panic!("Config types don't match"),
         }
@@ -2220,6 +2298,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("existing-key".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            write_mode: BigQueryWriteMode::AppendOnly,
         };
         let update_config = UpdateApiDestinationConfig::BigQuery {
             project_id: "updated-project".to_owned(),
@@ -2227,6 +2306,7 @@ mod tests {
             service_account_key: None,
             max_staleness_mins: None,
             connection_pool_size: None,
+            write_mode: None,
         };
 
         let updated_config = update_config.merge_into_stored(stored_config).unwrap();
@@ -2238,12 +2318,14 @@ mod tests {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                write_mode,
             } => {
                 assert_eq!(project_id, "updated-project");
                 assert_eq!(dataset_id, "updated_dataset");
                 assert_eq!(service_account_key.expose_secret(), "existing-key");
                 assert_eq!(max_staleness_mins, None);
                 assert_eq!(connection_pool_size, DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE);
+                assert_eq!(write_mode, BigQueryWriteMode::AppendOnly);
             }
             _ => panic!("Config types don't match"),
         }
@@ -2257,6 +2339,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("existing-key".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            write_mode: BigQueryWriteMode::CurrentState,
         };
         let update_config = UpdateApiDestinationConfig::BigQuery {
             project_id: "updated-project".to_owned(),
@@ -2264,16 +2347,45 @@ mod tests {
             service_account_key: Some(SerializableSecretString::from("new-key".to_owned())),
             max_staleness_mins: None,
             connection_pool_size: None,
+            write_mode: Some(BigQueryWriteMode::CurrentState),
         };
 
         let updated_config = update_config.merge_into_stored(stored_config).unwrap();
 
         match updated_config {
-            StoredDestinationConfig::BigQuery { service_account_key, .. } => {
+            StoredDestinationConfig::BigQuery { service_account_key, write_mode, .. } => {
                 assert_eq!(service_account_key.expose_secret(), "new-key");
+                assert_eq!(write_mode, BigQueryWriteMode::CurrentState);
             }
             _ => panic!("Config types don't match"),
         }
+    }
+
+    #[test]
+    fn update_api_destination_config_rejects_bigquery_write_mode_change() {
+        let stored_config = StoredDestinationConfig::BigQuery {
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("existing-key".to_owned()),
+            max_staleness_mins: Some(15),
+            connection_pool_size: 8,
+            write_mode: BigQueryWriteMode::CurrentState,
+        };
+        let update_config = UpdateApiDestinationConfig::BigQuery {
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            service_account_key: None,
+            max_staleness_mins: Some(15),
+            connection_pool_size: None,
+            write_mode: Some(BigQueryWriteMode::AppendOnly),
+        };
+
+        let err = update_config.merge_into_stored(stored_config).unwrap_err();
+
+        assert!(matches!(
+            err,
+            DestinationConfigUpdateError::WriteModeChangeNotSupported { destination: "BigQuery" }
+        ));
     }
 
     #[test]
@@ -2437,6 +2549,7 @@ mod tests {
             service_account_key: None,
             max_staleness_mins: None,
             connection_pool_size: None,
+            write_mode: None,
         };
 
         let error = update_config.merge_into_stored(stored_config).unwrap_err();

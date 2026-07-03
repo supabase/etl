@@ -2,7 +2,7 @@ use etl_api::{
     configs::destination::FullApiDestinationConfig,
     validation::{FailureType, ValidationContext, validate_destination, validate_pipeline},
 };
-use etl_config::{Environment, SerializableSecretString};
+use etl_config::{Environment, SerializableSecretString, shared::BigQueryWriteMode};
 use etl_destinations::bigquery::test_utils::{
     setup_bigquery_database, setup_bigquery_database_without_dataset,
     skip_if_missing_bigquery_env_vars,
@@ -24,6 +24,7 @@ fn create_bigquery_config(
         service_account_key: SerializableSecretString::from(sa_key.to_owned()),
         max_staleness_mins: None,
         connection_pool_size: None,
+        write_mode: BigQueryWriteMode::CurrentState,
     }
 }
 
