@@ -2,8 +2,13 @@ use std::future::Future;
 
 use crate::{
     data::TableRow,
-    destination::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
-    error::EtlResult,
+    destination::{
+        DropTableForCopyResult, FinishTableCopyResult, StreamingDurabilityMode,
+        TableCopyDurabilityMode, TrackedEventsBatch, TrackedTableRowsBatch, WriteEventsResult,
+        WriteTableRowsResult,
+    },
+    error::{ErrorKind, EtlResult},
+    etl_error,
     event::Event,
     schema::ReplicatedTableSchema,
 };
@@ -19,7 +24,29 @@ use crate::{
 /// own execution model, such as inline writes, actors, queues, or spawned
 /// tasks.
 ///
-/// ETL is at-least-once, so destinations must tolerate duplicate writes. ETL
+/// ETL provides at-least-once delivery from the last durable checkpoint. After
+/// failures, it may replay streaming events or table-copy rows that were
+/// already submitted to the destination.
+///
+/// By default, a successful destination write is also the durable-completion
+/// signal: when [`Destination::write_events`] or
+/// [`Destination::write_table_rows`] completes, ETL may checkpoint or advance
+/// the submitted work.
+///
+/// Destinations that opt into deferred durability split acceptance from durable
+/// completion. For streaming, [`Destination::write_tracked_events`] may
+/// complete when the destination has accepted ownership of the tracked batch,
+/// but the destination must later report durable completion through the batch's
+/// durability reporter. For table copy,
+/// [`Destination::write_tracked_table_rows`] may complete on acceptance, but
+/// [`Destination::finish_table_copy`] must not complete until every accepted
+/// batch for the copy attempt is durable.
+///
+/// Implementations must make write replays safe through idempotent writes,
+/// durable offset or batch filtering, or by resetting destination state before
+/// retrying a table-copy attempt.
+///
+/// A destination must not report buffered but uncommitted data as durable. ETL
 /// may also call destination methods in parallel under some circumstances, so
 /// implementations must be safe for concurrent use.
 pub trait Destination {
@@ -48,6 +75,30 @@ pub trait Destination {
     /// implementation is a no-op.
     fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
+    }
+
+    /// Returns the destination's streaming durability mode.
+    ///
+    /// The default is immediate durability, which preserves the original ETL
+    /// contract: the async result from [`Destination::write_events`] is the
+    /// point where upstream may treat the batch as durable.
+    ///
+    /// Deferred destinations split write acceptance from durable completion and
+    /// must implement [`Destination::write_tracked_events`].
+    fn streaming_durability_mode(&self) -> StreamingDurabilityMode {
+        StreamingDurabilityMode::Immediate
+    }
+
+    /// Returns the destination's table-copy durability mode.
+    ///
+    /// The default is immediate durability, which preserves the original ETL
+    /// contract: each table-copy async result is both accepted and durable.
+    ///
+    /// Deferred destinations split batch acceptance from table-copy completion
+    /// and must implement [`Destination::write_tracked_table_rows`] plus
+    /// [`Destination::finish_table_copy`].
+    fn table_copy_durability_mode(&self) -> TableCopyDurabilityMode {
+        TableCopyDurabilityMode::Immediate
     }
 
     /// Drops destination objects before restarting a table copy.
@@ -100,6 +151,48 @@ pub trait Destination {
         async_result: WriteTableRowsResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
+    /// Writes table-copy rows with ETL-assigned tracking metadata.
+    ///
+    /// Immediate destinations do not need to override this method. The default
+    /// implementation delegates to [`Destination::write_table_rows`]. Deferred
+    /// table-copy destinations can override this method and treat the async
+    /// result as acceptance for the current copy attempt rather than durable
+    /// completion.
+    fn write_tracked_table_rows(
+        &self,
+        batch: TrackedTableRowsBatch,
+        async_result: WriteTableRowsResult<()>,
+    ) -> impl Future<Output = EtlResult<()>> + Send
+    where
+        Self: Sync,
+    {
+        async move {
+            self.write_table_rows(&batch.replicated_table_schema, batch.table_rows, async_result)
+                .await
+        }
+    }
+
+    /// Finishes a deferred table-copy attempt.
+    ///
+    /// ETL calls this method only when
+    /// [`Destination::table_copy_durability_mode`] returns
+    /// [`TableCopyDurabilityMode::Deferred`]. The async result must be
+    /// completed only after every accepted row for the current copy attempt is
+    /// durable. The default fails closed so a destination cannot opt into
+    /// deferred copy semantics without a completion barrier.
+    fn finish_table_copy(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        _async_result: FinishTableCopyResult<()>,
+    ) -> impl Future<Output = EtlResult<()>> + Send {
+        async {
+            Err(etl_error!(
+                ErrorKind::DestinationError,
+                "Deferred table-copy durability requested but no finish barrier was implemented"
+            ))
+        }
+    }
+
     /// Writes streaming replication events to the destination.
     ///
     /// This method handles real-time changes from the Postgres replication
@@ -151,4 +244,21 @@ pub trait Destination {
         events: Vec<Event>,
         async_result: WriteEventsResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
+
+    /// Writes streaming events with ETL-assigned tracking metadata.
+    ///
+    /// Immediate destinations do not need to override this method. The default
+    /// implementation delegates to [`Destination::write_events`]. Deferred
+    /// streaming destinations override this method so they can later report the
+    /// batch id through the reporter carried by [`TrackedEventsBatch`].
+    fn write_tracked_events(
+        &self,
+        batch: TrackedEventsBatch,
+        async_result: WriteEventsResult<()>,
+    ) -> impl Future<Output = EtlResult<()>> + Send
+    where
+        Self: Sync,
+    {
+        async move { self.write_events(batch.events, async_result).await }
+    }
 }

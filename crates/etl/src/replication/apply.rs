@@ -8,7 +8,7 @@
 //! cycle.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     pin::Pin,
     str::FromStr,
@@ -43,8 +43,10 @@ use crate::{
     bail,
     data::SizeHint,
     destination::{
-        ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
-        PendingWriteEventsResult, PipelineDestination, WriteEventsResult,
+        ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DeferredStreamingConfig,
+        DestinationBatchId, DestinationDurabilityEvent, DestinationDurabilityEvents,
+        DestinationDurabilityReporter, DispatchMetrics, PendingWriteEventsResult,
+        PipelineDestination, StreamingDurabilityMode, TrackedEventsBatch, WriteEventsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -617,6 +619,177 @@ impl ApplyLoopTasks {
     }
 }
 
+/// State kept for a streaming batch after it is dispatched to a deferred
+/// durability destination.
+///
+/// The state does not own the event payload. It tracks the ETL-assigned batch
+/// id, the commit boundary and metrics needed when the batch retires, and the
+/// two independent signals required before retirement: destination acceptance
+/// and destination durability.
+#[derive(Debug)]
+struct DeferredStreamingBatchState {
+    /// ETL-assigned batch id.
+    batch_id: DestinationBatchId,
+    /// Commit end LSN associated with the batch, if any.
+    commit_end_lsn: Option<PgLsn>,
+    /// Dispatch-time metrics recorded once the batch is retired as durable.
+    metrics: DispatchMetrics,
+    /// Estimated bytes held against deferred-durability backpressure.
+    estimated_bytes: usize,
+    /// Whether the destination accepted ownership of the batch.
+    accepted: bool,
+    /// Whether the destination has proven the batch durable.
+    durable: bool,
+}
+
+impl DeferredStreamingBatchState {
+    /// Creates a new deferred streaming batch state.
+    fn new(
+        batch_id: DestinationBatchId,
+        commit_end_lsn: Option<PgLsn>,
+        metrics: DispatchMetrics,
+        estimated_bytes: usize,
+    ) -> Self {
+        Self { batch_id, commit_end_lsn, metrics, estimated_bytes, accepted: false, durable: false }
+    }
+
+    /// Returns metadata used by existing progress/metrics handling.
+    fn metadata(&self) -> ApplyLoopAsyncResultMetadata {
+        ApplyLoopAsyncResultMetadata {
+            batch_id: Some(self.batch_id),
+            commit_end_lsn: self.commit_end_lsn,
+            metrics: self.metrics,
+        }
+    }
+}
+
+/// Bounded retirement window for deferred streaming batches.
+///
+/// The window contains dispatched streaming batch states that have not yet
+/// retired. Acceptance and durability may arrive out of order, but ETL retires
+/// only the contiguous front of the window so checkpoints and table-sync
+/// progress never advance past an older unresolved batch.
+#[derive(Debug)]
+struct DeferredStreamingRetirementWindow {
+    /// Destination-provided backpressure limits.
+    config: DeferredStreamingConfig,
+    /// Next ETL-assigned batch id.
+    next_batch_id: u64,
+    /// Streaming batch states that have been dispatched but not retired.
+    batch_states: VecDeque<DeferredStreamingBatchState>,
+    /// Estimated bytes across all unretired batch states.
+    unretired_bytes: usize,
+}
+
+impl DeferredStreamingRetirementWindow {
+    /// Creates a deferred streaming retirement window.
+    fn new(config: DeferredStreamingConfig) -> Self {
+        Self { config, next_batch_id: 0, batch_states: VecDeque::new(), unretired_bytes: 0 }
+    }
+
+    /// Returns whether there are unretired deferred batches.
+    fn has_unretired_batches(&self) -> bool {
+        !self.batch_states.is_empty()
+    }
+
+    /// Returns a new batch id.
+    fn next_batch_id(&mut self) -> DestinationBatchId {
+        let batch_id = DestinationBatchId::new(self.next_batch_id);
+        self.next_batch_id = self.next_batch_id.checked_add(1).unwrap_or_else(|| {
+            warn!(
+                current_batch_id = self.next_batch_id,
+                "deferred streaming batch id overflow detected; reusing last id"
+            );
+
+            self.next_batch_id
+        });
+
+        batch_id
+    }
+
+    /// Returns whether another batch with the provided size may be dispatched.
+    fn has_capacity_for(&self, estimated_bytes: usize) -> bool {
+        let max_batches = self.config.max_inflight_batches.get();
+        if self.batch_states.len() >= max_batches {
+            return false;
+        }
+
+        let max_bytes = self.config.max_inflight_bytes;
+        if max_bytes == 0 || self.batch_states.is_empty() {
+            return true;
+        }
+
+        self.unretired_bytes.saturating_add(estimated_bytes) <= max_bytes
+    }
+
+    /// Records a newly dispatched batch state.
+    fn push(&mut self, batch_state: DeferredStreamingBatchState) {
+        self.unretired_bytes = self.unretired_bytes.saturating_add(batch_state.estimated_bytes);
+        self.batch_states.push_back(batch_state);
+    }
+
+    /// Marks a dispatched batch as accepted by the destination.
+    fn mark_accepted(&mut self, batch_id: DestinationBatchId) -> EtlResult<()> {
+        let Some(batch_state) =
+            self.batch_states.iter_mut().find(|batch_state| batch_state.batch_id == batch_id)
+        else {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "Deferred streaming acceptance received for unknown batch",
+                format!("batch_id={}", batch_id.into_inner())
+            ));
+        };
+
+        batch_state.accepted = true;
+
+        Ok(())
+    }
+
+    /// Marks a dispatched batch as durable.
+    fn mark_durable(&mut self, batch_id: DestinationBatchId) -> EtlResult<()> {
+        let Some(batch_state) =
+            self.batch_states.iter_mut().find(|batch_state| batch_state.batch_id == batch_id)
+        else {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "Deferred streaming durability received for unknown batch",
+                format!("batch_id={}", batch_id.into_inner())
+            ));
+        };
+
+        batch_state.durable = true;
+
+        Ok(())
+    }
+
+    /// Removes and returns the next contiguous accepted and durable batch
+    /// state.
+    fn pop(&mut self) -> Option<DeferredStreamingBatchState> {
+        if !self
+            .batch_states
+            .front()
+            .is_some_and(|batch_state| batch_state.accepted && batch_state.durable)
+        {
+            return None;
+        }
+
+        let batch_state = self.batch_states.pop_front()?;
+        self.unretired_bytes = self.unretired_bytes.saturating_sub(batch_state.estimated_bytes);
+
+        Some(batch_state)
+    }
+}
+
+/// Reason the apply loop can resume a queued batch.
+#[derive(Debug, Clone, Copy)]
+enum ProcessingResumeMode {
+    /// A destination async result completed, the pending flush result can be
+    /// cleared.
+    FlushResultCompleted,
+    /// Deferred streaming retirement freed capacity for the queued batch.
+    DeferredStreamingCapacityAvailable,
+}
+
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
@@ -650,6 +823,8 @@ struct ApplyLoopState {
     keep_alive_deadline: Instant,
     /// Destination write result waiting to be applied to replication progress.
     pending_flush_result: Option<PendingWriteEventsResult<()>>,
+    /// Deferred streaming durability state, when enabled by the destination.
+    deferred_streaming: Option<DeferredStreamingRetirementWindow>,
     /// The strongest exit that this apply loop invocation should eventually
     /// return.
     ///
@@ -688,6 +863,7 @@ impl ApplyLoopState {
         keep_alive_deadline_duration: Duration,
         bootstrap_snapshot_id: SnapshotId,
         slot_name: String,
+        deferred_streaming_config: Option<DeferredStreamingConfig>,
     ) -> Self {
         Self {
             last_commit_end_lsn: None,
@@ -703,6 +879,8 @@ impl ApplyLoopState {
             flush_deadline: None,
             keep_alive_deadline: Instant::now() + keep_alive_deadline_duration,
             pending_flush_result: None,
+            deferred_streaming: deferred_streaming_config
+                .map(DeferredStreamingRetirementWindow::new),
             exit_intent: None,
             processing_paused: false,
             bootstrap_snapshot_id,
@@ -904,10 +1082,19 @@ impl ApplyLoopState {
         self.pending_flush_result.is_some()
     }
 
+    /// Returns `true` if the destination has unretired batches.
+    fn has_unretired_deferred_streaming_batches(&self) -> bool {
+        self.deferred_streaming
+            .as_ref()
+            .is_some_and(DeferredStreamingRetirementWindow::has_unretired_batches)
+    }
+
     /// Returns `true` if any buffered or in-flight destination batch work is
     /// still unresolved.
     fn has_unresolved_batch_work(&self) -> bool {
-        self.has_pending_batch() || self.has_pending_flush_result()
+        self.has_pending_batch()
+            || self.has_pending_flush_result()
+            || self.has_unretired_deferred_streaming_batches()
     }
 
     /// Records a new exit intent if one was produced.
@@ -934,21 +1121,52 @@ impl ApplyLoopState {
         !self.processing_paused && self.has_pending_batch()
     }
 
-    /// Marks the current pending batch as paused behind an in-flight flush.
+    /// Returns whether deferred streaming is active and blocks the queued
+    /// batch.
+    ///
+    /// Immediate streaming has no deferred window, so it is not blocking here.
+    fn deferred_streaming_blocks_pending_batch(&self) -> bool {
+        self.deferred_streaming
+            .as_ref()
+            .is_some_and(|window| !window.has_capacity_for(self.events_batch_bytes))
+    }
+
+    /// Returns whether deferred streaming is active and can dispatch the queued
+    /// batch.
+    ///
+    /// Immediate streaming has no deferred window, so it does not satisfy this
+    /// deferred-capacity predicate either.
+    fn deferred_streaming_has_capacity_for_pending_batch(&self) -> bool {
+        self.deferred_streaming
+            .as_ref()
+            .is_some_and(|window| window.has_capacity_for(self.events_batch_bytes))
+    }
+
+    /// Marks the current pending batch as paused behind an in-flight flush or
+    /// a full deferred streaming retirement window.
     fn pause_processing(&mut self) {
-        debug_assert!(self.has_pending_flush_result());
+        debug_assert!(
+            self.has_pending_flush_result() || self.deferred_streaming_blocks_pending_batch()
+        );
         debug_assert!(self.has_pending_batch());
 
         self.processing_paused = true;
     }
 
-    /// Resumes processing by clearing the existing pending flush result and
-    /// enabling processing.
-    fn resume_processing(&mut self) -> bool {
-        debug_assert!(self.has_pending_flush_result());
+    /// Resumes processing after the provided pause reason is cleared.
+    fn resume_processing(&mut self, mode: ProcessingResumeMode) -> bool {
+        match mode {
+            ProcessingResumeMode::FlushResultCompleted => {
+                debug_assert!(self.has_pending_flush_result());
+                self.pending_flush_result = None;
+            }
+            ProcessingResumeMode::DeferredStreamingCapacityAvailable => {
+                debug_assert!(!self.has_pending_flush_result());
+                debug_assert!(self.deferred_streaming_has_capacity_for_pending_batch());
+            }
+        }
 
         let prev_processing_paused = std::mem::replace(&mut self.processing_paused, false);
-        self.pending_flush_result = None;
 
         debug_assert!(!prev_processing_paused || self.has_pending_batch());
 
@@ -993,6 +1211,10 @@ pub(crate) struct ApplyLoop<S, D> {
     memory_monitor: MemoryMonitor,
     /// Cached dynamic batch budget used to decide flushes by bytes.
     cached_batch_budget: CachedBatchBudget,
+    /// Reporter cloned into deferred streaming batches for this apply loop.
+    deferred_durability_reporter: Option<DestinationDurabilityReporter>,
+    /// Receiver for deferred streaming durability events for this apply loop.
+    deferred_durability_events: Option<DestinationDurabilityEvents>,
     /// Maximum duration to wait before forcibly flushing a batch.
     max_batch_fill_duration: Duration,
     /// Deadline duration used before proactively sending a periodic status
@@ -1072,6 +1294,14 @@ where
             worker_type,
             replication_lag_refresh_interval,
         );
+        let (deferred_streaming_config, deferred_durability_reporter, deferred_durability_events) =
+            match destination.streaming_durability_mode() {
+                StreamingDurabilityMode::Immediate => (None, None, None),
+                StreamingDurabilityMode::Deferred(config) => {
+                    let (reporter, events) = DestinationDurabilityReporter::channel();
+                    (Some(config), Some(reporter), Some(events))
+                }
+            };
 
         let state = ApplyLoopState::new(
             replication_progress,
@@ -1079,6 +1309,7 @@ where
             keep_alive_deadline_duration,
             bootstrap_snapshot_id,
             slot_name,
+            deferred_streaming_config,
         );
 
         let mut apply_loop = Self {
@@ -1090,6 +1321,8 @@ where
             worker_context,
             memory_monitor,
             cached_batch_budget: batch_budget.cached(),
+            deferred_durability_reporter,
+            deferred_durability_events,
             max_batch_fill_duration: Duration::from_millis(config.batch.max_fill_ms),
             keep_alive_deadline_duration,
             tasks,
@@ -1229,13 +1462,20 @@ where
                     .await?;
             }
 
-            // PRIORITY 4: Handle batch flush timer expiry.
+            // PRIORITY 4: Handle deferred destination durability events.
+            // Deferred destinations advance durable progress only through this branch.
+            durability_event = Self::wait_for_durability_event(self.deferred_durability_events.as_mut()), if self.deferred_durability_events.is_some() => {
+                self.handle_durability_event(durability_event)
+                    .await?;
+            }
+
+            // PRIORITY 5: Handle batch flush timer expiry.
             // This prevents buffered work from waiting forever when traffic is low.
             _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
                 self.flush_batch("flush deadline reached").await?;
             }
 
-            // PRIORITY 5: Process incoming replication messages from PostgreSQL.
+            // PRIORITY 6: Process incoming replication messages from PostgreSQL.
             // New WAL messages are only accepted while the loop is still actively ingesting.
             maybe_message = events_stream.next(), if self.state.can_process_messages() => {
                 self.handle_stream_message(
@@ -1246,7 +1486,7 @@ where
                 .await?;
             }
 
-            // PRIORITY 6: Emit a periodic status update once the computed keep alive deadline
+            // PRIORITY 7: Emit a periodic status update once the computed keep alive deadline
             // expires. This intentionally resends the same effective flush LSN so PostgreSQL keeps
             // the standby connection open during long stalls, including cases where the loop is
             // paused behind an in-flight flush and therefore not making visible progress yet. This
@@ -1313,12 +1553,18 @@ where
                     .await?;
             }
 
-            // PRIORITY 3: Handle batch flush timer expiry.
+            // PRIORITY 3: Handle deferred destination durability events.
+            durability_event = Self::wait_for_durability_event(self.deferred_durability_events.as_mut()), if self.deferred_durability_events.is_some() => {
+                self.handle_durability_event(durability_event)
+                    .await?;
+            }
+
+            // PRIORITY 4: Handle batch flush timer expiry.
             _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
                 self.flush_batch("flush deadline reached during shutdown drain").await?;
             }
 
-            // PRIORITY 4: Emit a periodic status update while shutdown is draining.
+            // PRIORITY 5: Emit a periodic status update while shutdown is draining.
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
@@ -1683,13 +1929,125 @@ where
         }
     }
 
+    /// Waits for a deferred streaming durability event.
+    async fn wait_for_durability_event(
+        durability_events: Option<&mut DestinationDurabilityEvents>,
+    ) -> Option<DestinationDurabilityEvent> {
+        match durability_events {
+            Some(durability_events) => durability_events.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Records metrics and advances table-sync coordination for a durable
+    /// streaming batch.
+    async fn handle_durable_streaming_batch(
+        &mut self,
+        metadata: ApplyLoopAsyncResultMetadata,
+    ) -> EtlResult<()> {
+        counter!(
+            ETL_EVENTS_PROCESSED_TOTAL,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+            ACTION_LABEL => "table_streaming",
+        )
+        .increment(metadata.metrics.items_count as u64);
+
+        histogram!(
+            ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+            ACTION_LABEL => "table_streaming",
+        )
+        .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
+
+        // Process syncing tables at the last commit boundary included in this
+        // durable batch.
+        //
+        // A flushed batch can contain only part of a large transaction. In that
+        // case it has no commit `end_lsn`, so ETL cannot advance durable
+        // replication progress or table-sync state for it yet. Those updates
+        // are commit-boundary based and will run when a later durable batch
+        // includes the transaction's COMMIT message.
+        if let Some(commit_end_lsn) = metadata.commit_end_lsn {
+            self.process_syncing_tables_after_flush(commit_end_lsn).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Retires all contiguous deferred streaming batches that are both accepted
+    /// and durable.
+    async fn retire_deferred_streaming_batches(&mut self) -> EtlResult<()> {
+        while let Some(batch) =
+            self.state.deferred_streaming.as_mut().and_then(DeferredStreamingRetirementWindow::pop)
+        {
+            self.handle_durable_streaming_batch(batch.metadata()).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Handles a deferred streaming durability event.
+    async fn handle_durability_event(
+        &mut self,
+        durability_event: Option<DestinationDurabilityEvent>,
+    ) -> EtlResult<()> {
+        let Some(durability_event) = durability_event else {
+            if self.state.has_unretired_deferred_streaming_batches() {
+                return Err(etl_error!(
+                    ErrorKind::DestinationError,
+                    "Deferred streaming durability channel closed with unresolved batches"
+                ));
+            }
+
+            return Ok(());
+        };
+
+        match durability_event {
+            DestinationDurabilityEvent::Durable { batch_id } => {
+                let Some(deferred_streaming) = self.state.deferred_streaming.as_mut() else {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "Deferred streaming durability received while immediate mode is active",
+                        format!("batch_id={}", batch_id.into_inner())
+                    ));
+                };
+
+                deferred_streaming.mark_durable(batch_id)?;
+                self.retire_deferred_streaming_batches().await?;
+
+                if self.state.processing_paused
+                    && self.state.has_pending_batch()
+                    && !self.state.has_pending_flush_result()
+                    && self.state.deferred_streaming_has_capacity_for_pending_batch()
+                {
+                    self.state.resume_processing(
+                        ProcessingResumeMode::DeferredStreamingCapacityAvailable,
+                    );
+                    self.flush_batch("deferred durability event received").await?;
+                }
+
+                Ok(())
+            }
+            DestinationDurabilityEvent::Failed { batch_id, error } => {
+                error!(
+                    batch_id = batch_id.into_inner(),
+                    error = %error,
+                    "deferred streaming durability failed"
+                );
+
+                Err(error)
+            }
+        }
+    }
+
     /// Handles a completed batch flush result.
     async fn handle_flush_result(
         &mut self,
         flush_result: CompletedWriteEventsResult<()>,
     ) -> EtlResult<()> {
         // We clear the state up front because this flush is no longer in flight.
-        let processing_paused = self.state.resume_processing();
+        let processing_paused =
+            self.state.resume_processing(ProcessingResumeMode::FlushResultCompleted);
 
         // Explode the result into parts which are used for handling the flush result.
         let (metadata, result) = flush_result.into_parts();
@@ -1698,29 +2056,19 @@ where
         result?;
 
         if let Some(metadata) = metadata {
-            counter!(
-                ETL_EVENTS_PROCESSED_TOTAL,
-                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                ACTION_LABEL => "table_streaming",
-            )
-            .increment(metadata.metrics.items_count as u64);
+            if let Some(batch_id) = metadata.batch_id {
+                let Some(deferred_streaming) = self.state.deferred_streaming.as_mut() else {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "Deferred streaming acceptance received while immediate mode is active",
+                        format!("batch_id={}", batch_id.into_inner())
+                    ));
+                };
 
-            histogram!(
-                ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                ACTION_LABEL => "table_streaming",
-            )
-            .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
-
-            // We process the syncing tables with the last end lsn that the batch contains.
-            //
-            // Note that it could be that there is no end lsn for a specific batch, which
-            // could happen if we process a huge transaction, and we don't reach the
-            // commit before flushing. In that case, we don't process syncing
-            // tables, meaning that progress it not tracked, since it's not going to
-            // do anything because we can only track progress at commit boundaries.
-            if let Some(commit_end_lsn) = metadata.commit_end_lsn {
-                self.process_syncing_tables_after_flush(commit_end_lsn).await?;
+                deferred_streaming.mark_accepted(batch_id)?;
+                self.retire_deferred_streaming_batches().await?;
+            } else {
+                self.handle_durable_streaming_batch(metadata).await?;
             }
         }
 
@@ -1824,10 +2172,9 @@ where
 
     /// Flushes the current batch of events to the destination.
     ///
-    /// If a flush is already in flight, this pauses the loop and leaves the
-    /// current batch queued until the pending flush result has been
-    /// processed. The queued batch is then retried from
-    /// [`Self::handle_flush_result`] when that in-flight flush resolves.
+    /// If a flush is already in flight or deferred streaming has no dispatch
+    /// capacity, this pauses the loop and leaves the current batch queued until
+    /// dispatch can be retried.
     async fn flush_batch(&mut self, reason: &str) -> EtlResult<()> {
         // If the batch is empty, we don't need to do anything.
         if !self.state.has_pending_batch() {
@@ -1837,6 +2184,14 @@ where
         // A flush is already in flight. Pause processing until the result resolves, at
         // which point the loop will resume and dispatch this batch.
         if self.state.has_pending_flush_result() {
+            self.state.pause_processing();
+            return Ok(());
+        }
+
+        // Deferred streaming keeps accepted-but-unretired batches in a bounded
+        // window. If the queued batch would exceed that window, wait until
+        // durability events retire enough older batches.
+        if self.state.deferred_streaming_blocks_pending_batch() {
             self.state.pause_processing();
             return Ok(());
         }
@@ -1854,6 +2209,7 @@ where
         // Capture dispatch-time metrics; they are carried through the result channel
         // and recorded once the destination acknowledges the batch.
         let metadata = ApplyLoopAsyncResultMetadata {
+            batch_id: None,
             commit_end_lsn: self.state.last_commit_end_lsn.take(),
             metrics: DispatchMetrics {
                 items_count: events_batch_size,
@@ -1864,8 +2220,45 @@ where
         // Create the flush result channel: the sender is handed to the destination and
         // the pending receiver is stored on the loop state until the
         // destination signals completion.
-        let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
-        self.destination.write_events(events_batch, flush_result).await?;
+        let pending_flush_result =
+            if let Some(deferred_streaming) = self.state.deferred_streaming.as_mut() {
+                let batch_id = deferred_streaming.next_batch_id();
+                let metadata = ApplyLoopAsyncResultMetadata {
+                    batch_id: Some(batch_id),
+                    commit_end_lsn: metadata.commit_end_lsn,
+                    metrics: metadata.metrics,
+                };
+                let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
+                let Some(durability_reporter) = self.deferred_durability_reporter.clone() else {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "Deferred streaming mode is active without a durability reporter"
+                    ));
+                };
+                let batch_state = DeferredStreamingBatchState::new(
+                    batch_id,
+                    metadata.commit_end_lsn,
+                    metadata.metrics,
+                    events_batch_bytes,
+                );
+                let write_batch = TrackedEventsBatch::new(
+                    batch_id,
+                    durability_reporter,
+                    events_batch,
+                    events_batch_bytes,
+                );
+
+                deferred_streaming.push(batch_state);
+                self.destination.write_tracked_events(write_batch, flush_result).await?;
+
+                pending_flush_result
+            } else {
+                let metadata = ApplyLoopAsyncResultMetadata { batch_id: None, ..metadata };
+                let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
+                self.destination.write_events(events_batch, flush_result).await?;
+
+                pending_flush_result
+            };
         self.state.pending_flush_result = Some(pending_flush_result);
 
         // We reset the deadline for the batch, since we are now flushing a new batch.
@@ -3552,5 +3945,55 @@ async fn get_replicated_table_schema(
                 )
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use super::*;
+
+    fn deferred_config() -> DeferredStreamingConfig {
+        DeferredStreamingConfig::new(NonZeroUsize::new(8).expect("test limit should be nonzero"), 0)
+    }
+
+    fn dispatch_metrics() -> DispatchMetrics {
+        DispatchMetrics { items_count: 1, dispatched_at: Instant::now() }
+    }
+
+    #[test]
+    fn deferred_streaming_retirement_requires_contiguous_accepted_and_durable_prefix() {
+        // This is an upstream checkpoint-safety test, not a destination mock.
+        // It protects the invariant that an out-of-order durability event can
+        // be remembered, but cannot retire or advance progress past an older
+        // batch that is not yet both accepted and durable.
+        let mut state = DeferredStreamingRetirementWindow::new(deferred_config());
+        let first = state.next_batch_id();
+        let second = state.next_batch_id();
+
+        state.push(DeferredStreamingBatchState::new(
+            first,
+            Some(PgLsn::from(10)),
+            dispatch_metrics(),
+            10,
+        ));
+        state.push(DeferredStreamingBatchState::new(
+            second,
+            Some(PgLsn::from(20)),
+            dispatch_metrics(),
+            10,
+        ));
+
+        state.mark_accepted(first).unwrap();
+        state.mark_accepted(second).unwrap();
+        state.mark_durable(second).unwrap();
+
+        assert!(state.pop().is_none());
+
+        state.mark_durable(first).unwrap();
+        assert_eq!(state.pop().unwrap().batch_id, first);
+        assert_eq!(state.pop().unwrap().batch_id, second);
+        assert!(state.pop().is_none());
     }
 }

@@ -1,7 +1,10 @@
 use std::{
     collections::VecDeque,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -20,8 +23,11 @@ use tracing::{debug, info, warn};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
 use crate::{
-    data::TableRow,
-    destination::{Destination, WriteTableRowsResult},
+    data::{SizeHint, TableRow},
+    destination::{
+        Destination, FinishTableCopyResult, PendingWriteTableRowsResult, TableCopyBatchId,
+        TableCopyDurabilityMode, TrackedTableRowsBatch, WriteTableRowsResult,
+    },
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::{
@@ -89,6 +95,185 @@ enum CopyWorkerOutcome {
     Completed(CompletedCopyWorker),
     /// The worker observed shutdown before committing its transaction.
     Shutdown,
+}
+
+/// Allocates table-copy batch identifiers for one copy attempt.
+///
+/// A table copy may read from multiple CTID partitions concurrently, so copy
+/// batches are not produced by a single stream-local counter. The shared
+/// allocator gives every accepted batch in the attempt a unique diagnostic id
+/// without encoding source order or durability state.
+#[derive(Debug, Clone, Default)]
+struct TableCopyBatchIdAllocator {
+    /// Next table-copy batch id to hand out.
+    next_batch_id: Arc<AtomicU64>,
+}
+
+impl TableCopyBatchIdAllocator {
+    /// Returns the next attempt-local table-copy batch id.
+    fn next_batch_id(&self) -> EtlResult<TableCopyBatchId> {
+        let batch_id = self
+            .next_batch_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |batch_id| batch_id.checked_add(1))
+            .map_err(|current_batch_id| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "Deferred table-copy batch id overflowed",
+                    format!("current_batch_id={current_batch_id}")
+                )
+            })?;
+
+        Ok(TableCopyBatchId::new(batch_id))
+    }
+}
+
+/// State kept for a table-copy batch after it is dispatched to the destination.
+///
+/// Immediate table copy waits for this state before reading the next source
+/// batch. Deferred table copy queues these states so ETL can continue reading
+/// source rows after the destination accepts ownership of earlier batches.
+/// Until the async result completes, the state still counts against the
+/// per-stream acceptance window because the batch may still be buffered by the
+/// destination.
+#[derive(Debug)]
+struct PendingBatchState {
+    /// Destination async result.
+    pending_result: PendingWriteTableRowsResult<()>,
+    /// Approximate bytes held against deferred copy backpressure.
+    estimated_bytes: usize,
+    /// Instant at which the batch was handed to the destination.
+    dispatched_at: Instant,
+}
+
+impl PendingBatchState {
+    /// Waits for the destination async result and records send metrics.
+    async fn wait(self) -> EtlResult<()> {
+        self.pending_result.await.into_result()?;
+        record_table_copy_batch_metrics(self.dispatched_at);
+
+        #[cfg(feature = "failpoints")]
+        etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC_FP)?;
+
+        Ok(())
+    }
+}
+
+/// Per-stream window of table-copy batches waiting for async-result completion.
+///
+/// This window tracks state for copy batches dispatched to the destination but
+/// not yet accepted by their async results. It bounds how far one table-copy
+/// stream can run ahead of destination acceptance; durable completion for all
+/// accepted batches is still proven later by
+/// [`Destination::finish_table_copy`].
+#[derive(Debug)]
+struct PendingBatchWindow {
+    /// Destination-provided copy durability mode.
+    mode: TableCopyDurabilityMode,
+    /// State for dispatched batches waiting on async-result completion.
+    batch_states: VecDeque<PendingBatchState>,
+    /// Estimated bytes held by states in the window.
+    pending_bytes: usize,
+}
+
+impl PendingBatchWindow {
+    /// Creates a pending batch window for the destination mode.
+    fn new(mode: TableCopyDurabilityMode) -> Self {
+        Self { mode, batch_states: VecDeque::new(), pending_bytes: 0 }
+    }
+
+    /// Returns whether deferred table-copy behavior is enabled.
+    fn is_deferred(&self) -> bool {
+        matches!(self.mode, TableCopyDurabilityMode::Deferred(_))
+    }
+
+    /// Returns whether another batch with the provided size may be dispatched.
+    fn has_capacity_for(&self, estimated_bytes: usize) -> bool {
+        let TableCopyDurabilityMode::Deferred(config) = self.mode else {
+            return false;
+        };
+
+        let max_batches = config.max_inflight_batches.get();
+        if self.batch_states.len() >= max_batches {
+            return false;
+        }
+
+        let max_bytes = config.max_inflight_bytes;
+        if max_bytes == 0 || self.batch_states.is_empty() {
+            return true;
+        }
+
+        self.pending_bytes.saturating_add(estimated_bytes) <= max_bytes
+    }
+
+    /// Adds state for one dispatched batch.
+    fn push(&mut self, batch_state: PendingBatchState) {
+        self.pending_bytes = self.pending_bytes.saturating_add(batch_state.estimated_bytes);
+        self.batch_states.push_back(batch_state);
+    }
+
+    /// Removes the oldest pending batch state.
+    fn pop(&mut self) -> Option<PendingBatchState> {
+        let batch_state = self.batch_states.pop_front()?;
+        self.pending_bytes = self.pending_bytes.saturating_sub(batch_state.estimated_bytes);
+
+        Some(batch_state)
+    }
+
+    /// Returns whether the window has no pending batch states.
+    fn is_empty(&self) -> bool {
+        self.batch_states.is_empty()
+    }
+
+    /// Waits for the oldest pending batch state, if any.
+    async fn wait_for_one(&mut self) -> EtlResult<()> {
+        let Some(batch_state) = self.pop() else {
+            return Ok(());
+        };
+
+        batch_state.wait().await
+    }
+
+    /// Waits for every pending batch state.
+    async fn wait_for_all(&mut self) -> EtlResult<()> {
+        while !self.is_empty() {
+            self.wait_for_one().await?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Estimates the memory footprint of a copied row batch.
+fn estimate_table_rows_bytes(table_rows: &[TableRow]) -> usize {
+    table_rows.iter().fold(0_usize, |total, table_row| total.saturating_add(table_row.size_hint()))
+}
+
+/// Records table-copy send metrics after destination acceptance.
+fn record_table_copy_batch_metrics(dispatched_at: Instant) {
+    let send_duration_seconds = dispatched_at.elapsed().as_secs_f64();
+    histogram!(
+        ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+        WORKER_TYPE_LABEL => "table_sync",
+        ACTION_LABEL => "table_copy",
+    )
+    .record(send_duration_seconds);
+}
+
+/// Runs the destination finish barrier for deferred table copy.
+async fn finish_deferred_table_copy<D>(
+    destination: &D,
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> EtlResult<()>
+where
+    D: Destination + Clone + Send + Sync + 'static,
+{
+    if !matches!(destination.table_copy_durability_mode(), TableCopyDurabilityMode::Deferred(_)) {
+        return Ok(());
+    }
+
+    let (finish_result, pending_finish_result) = FinishTableCopyResult::new(());
+    destination.finish_table_copy(replicated_table_schema, finish_result).await?;
+    pending_finish_result.await.into_result()
 }
 
 /// Returns `numerator / denominator`, rounded up.
@@ -237,7 +422,7 @@ async fn stop_table_copy_lag_reporter(lag_reporter: &mut Option<JoinHandle<()>>)
 
 /// Copies a table through ctid work items, using worker child connections.
 #[expect(clippy::too_many_arguments)]
-pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
+pub(crate) async fn table_copy<D: Destination + Clone + Send + Sync + 'static>(
     replication_transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
@@ -273,7 +458,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
 /// Copies a table by assigning physical ctid ranges to child-connection
 /// workers.
 #[expect(clippy::too_many_arguments)]
-async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
+async fn worker_table_copy<D: Destination + Clone + Send + Sync + 'static>(
     replication_transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
@@ -314,6 +499,7 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     // CTID ranges for this table copy see a consistent source view.
     let snapshot_id = replication_transaction.export_snapshot().await?;
     let work_queue = Arc::new(Mutex::new(VecDeque::from(copy_partitions)));
+    let batch_id_allocator = TableCopyBatchIdAllocator::default();
     let publication_name = publication_name.map(str::to_owned);
     let mut join_set = JoinSet::new();
     let mut lag_reporter = Some(spawn_table_copy_lag_reporter(
@@ -342,6 +528,7 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
         // them avoids extra shared ownership machinery in the hot path.
         let snapshot_id = snapshot_id.clone();
         let work_queue = Arc::clone(&work_queue);
+        let batch_id_allocator = batch_id_allocator.clone();
         let replicated_table_schema = replicated_table_schema.clone();
         let publication_name = publication_name.clone();
         let batch_config = batch_config.clone();
@@ -356,6 +543,7 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
                 child_replication_client,
                 snapshot_id,
                 work_queue,
+                batch_id_allocator,
                 table_id,
                 replicated_table_schema,
                 publication_name,
@@ -410,6 +598,7 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     }
 
     stop_table_copy_lag_reporter(&mut lag_reporter).await;
+    finish_deferred_table_copy(&destination, &replicated_table_schema).await?;
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
     counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(total_rows);
@@ -515,6 +704,7 @@ async fn copy_worker<D>(
     mut child_replication_client: ChildPgReplicationClient,
     snapshot_id: String,
     work_queue: Arc<Mutex<VecDeque<CopyPartition>>>,
+    batch_id_allocator: TableCopyBatchIdAllocator,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<String>,
@@ -525,7 +715,7 @@ async fn copy_worker<D>(
     batch_budget: BatchBudgetController,
 ) -> EtlResult<CopyWorkerOutcome>
 where
-    D: Destination + Clone + Send + 'static,
+    D: Destination + Clone + Send + Sync + 'static,
 {
     let child_replication_transaction =
         child_replication_client.begin_transaction(&snapshot_id).await?;
@@ -553,6 +743,7 @@ where
             replicated_table_schema.clone(),
             publication_name.clone(),
             copy_partition,
+            batch_id_allocator.clone(),
             batch_config.clone(),
             shutdown_rx.clone(),
             destination.clone(),
@@ -577,6 +768,7 @@ async fn copy_partition_rows<D>(
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<String>,
     partition: CopyPartition,
+    batch_id_allocator: TableCopyBatchIdAllocator,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
     destination: D,
@@ -584,7 +776,7 @@ async fn copy_partition_rows<D>(
     batch_budget: BatchBudgetController,
 ) -> EtlResult<TableCopyResult>
 where
-    D: Destination + Clone + Send + 'static,
+    D: Destination + Clone + Send + Sync + 'static,
 {
     if is_shutdown_requested(&shutdown_rx) {
         return Ok(TableCopyResult::Shutdown);
@@ -629,6 +821,7 @@ where
         shutdown_rx,
         connection_updates_rx,
         replicated_table_schema,
+        batch_id_allocator,
         destination,
     )
     .await?
@@ -662,15 +855,26 @@ async fn copy_table_rows_from_stream<D, S>(
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     replicated_table_schema: ReplicatedTableSchema,
+    batch_id_allocator: TableCopyBatchIdAllocator,
     destination: D,
 ) -> EtlResult<ShutdownResult<u64, u64>>
 where
-    D: Destination + Clone + Send + 'static,
+    D: Destination + Clone + Send + Sync + 'static,
     S: Stream<Item = EtlResult<Vec<TableRow>>>,
 {
     let mut total_rows = 0;
+    let mut pending_batch_window =
+        PendingBatchWindow::new(destination.table_copy_durability_mode());
 
     loop {
+        // If the deferred window is full by batch count, wait before polling the source
+        // again. The next batch size is not known yet, so `0` checks only whether
+        // another batch may be admitted at all.
+        if pending_batch_window.is_deferred() && !pending_batch_window.has_capacity_for(0) {
+            pending_batch_window.wait_for_one().await?;
+            continue;
+        }
+
         tokio::select! {
             biased;
 
@@ -707,6 +911,10 @@ where
 
             maybe_batch = table_copy_stream.next() => {
                 let Some(table_rows) = maybe_batch else {
+                    if pending_batch_window.is_deferred() {
+                        pending_batch_window.wait_for_all().await?;
+                    }
+
                     return Ok(ShutdownResult::Ok(total_rows));
                 };
 
@@ -714,25 +922,41 @@ where
                 let batch_size = table_rows.len() as u64;
 
                 let before_sending = Instant::now();
-                let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
+                if pending_batch_window.is_deferred() {
+                    let estimated_bytes = estimate_table_rows_bytes(&table_rows);
+                    while !pending_batch_window.has_capacity_for(estimated_bytes) {
+                        pending_batch_window.wait_for_one().await?;
+                    }
 
-                destination
-                    .write_table_rows(&replicated_table_schema, table_rows, flush_result)
+                    let batch_id = batch_id_allocator.next_batch_id()?;
+                    let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
+                    let batch = TrackedTableRowsBatch::new(
+                        batch_id,
+                        replicated_table_schema.clone(),
+                        table_rows,
+                        estimated_bytes,
+                    );
+                    destination.write_tracked_table_rows(batch, flush_result).await?;
+                    pending_batch_window.push(PendingBatchState {
+                        pending_result: pending_flush_result,
+                        estimated_bytes,
+                        dispatched_at: before_sending,
+                    });
+                } else {
+                    let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
+                    destination
+                        .write_table_rows(&replicated_table_schema, table_rows, flush_result)
+                        .await?;
+                    PendingBatchState {
+                        pending_result: pending_flush_result,
+                        estimated_bytes: 0,
+                        dispatched_at: before_sending,
+                    }
+                    .wait()
                     .await?;
-                pending_flush_result.await.into_result()?;
+                }
 
                 total_rows += batch_size;
-
-                let send_duration_seconds = before_sending.elapsed().as_secs_f64();
-                histogram!(
-                    ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-                    WORKER_TYPE_LABEL => "table_sync",
-                    ACTION_LABEL => "table_copy",
-                )
-                .record(send_duration_seconds);
-
-                #[cfg(feature = "failpoints")]
-                etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC_FP)?;
             }
         }
     }
@@ -740,9 +964,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MAX_CTID_COPY_PARTITIONS, partitions_for_table_weight, target_ctid_partition_count,
-    };
+    use super::*;
 
     #[test]
     fn target_ctid_partition_count_matches_workers() {
@@ -783,5 +1005,15 @@ mod tests {
     #[test]
     fn partitions_for_table_weight_does_not_exceed_table_blocks() {
         assert_eq!(partitions_for_table_weight(1000, 1000, 3, 128), 3);
+    }
+
+    #[test]
+    fn table_copy_batch_id_allocator_is_shared_across_clones() {
+        let allocator = TableCopyBatchIdAllocator::default();
+        let cloned_allocator = allocator.clone();
+
+        assert_eq!(allocator.next_batch_id().unwrap().into_inner(), 0);
+        assert_eq!(cloned_allocator.next_batch_id().unwrap().into_inner(), 1);
+        assert_eq!(allocator.next_batch_id().unwrap().into_inner(), 2);
     }
 }

@@ -329,6 +329,7 @@ where
 
         let (wrapped_flush_result, pending_flush_result) =
             WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
+                batch_id: None,
                 commit_end_lsn: None,
                 metrics: DispatchMetrics {
                     items_count: events.len(),

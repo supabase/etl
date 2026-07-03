@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use etl_config::shared::{InvalidatedSlotBehavior, PipelineConfig};
 use etl_postgres::slots::EtlReplicationSlot;
@@ -221,8 +221,9 @@ where
             pipeline_id = self.pipeline_id,
             publication_name = self.config.publication_name
         );
-        let apply_worker =
-            self.guarded_run_apply_worker().instrument(apply_worker_span.or_current());
+        let apply_worker: Pin<Box<dyn Future<Output = EtlResult<()>> + Send>> =
+            Box::pin(self.guarded_run_apply_worker());
+        let apply_worker = apply_worker.instrument(apply_worker_span.or_current());
 
         let handle = tokio::spawn(apply_worker);
 

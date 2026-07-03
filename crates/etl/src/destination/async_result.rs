@@ -11,6 +11,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::warn;
 
 use crate::{
+    destination::durability::DestinationBatchId,
     error::{ErrorKind, EtlResult},
     etl_error,
 };
@@ -31,6 +32,13 @@ pub type WriteTableRowsResult<T = ()> = AsyncResult<T>;
 /// metadata and starting a fresh copy.
 pub type DropTableForCopyResult<T = ()> = AsyncResult<T>;
 
+/// Async completion handle used for a deferred table-copy finish barrier.
+///
+/// Immediate destinations do not need this hook. Deferred table-copy
+/// destinations complete this result only after every accepted copy batch for
+/// the current table-copy attempt is durably committed.
+pub type FinishTableCopyResult<T = ()> = AsyncResult<T>;
+
 /// Async completion handle used for
 /// [`crate::destination::Destination::write_events`].
 ///
@@ -44,6 +52,8 @@ pub(crate) type PendingWriteEventsResult<T = ()> =
 /// Completed async completion used for `Destination::write_events`.
 pub(crate) type CompletedWriteEventsResult<T = ()> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
+/// Pending async completion used for table-copy row writes.
+pub(crate) type PendingWriteTableRowsResult<T = ()> = PendingAsyncResult<T, ()>;
 
 /// Dispatch-time metrics carried through an asynchronous completion result.
 #[derive(Debug, Clone, Copy)]
@@ -57,6 +67,8 @@ pub(crate) struct DispatchMetrics {
 /// Metadata carried by apply-loop event write completions.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ApplyLoopAsyncResultMetadata {
+    /// Deferred destination batch id, if this completion is acceptance-only.
+    pub batch_id: Option<DestinationBatchId>,
     /// Commit end LSN associated with the dispatched batch, if any.
     ///
     /// After the destination acknowledges the batch, this becomes the durable
@@ -174,6 +186,7 @@ mod tests {
     #[tokio::test]
     async fn async_result_round_trips_success() {
         let metadata = ApplyLoopAsyncResultMetadata {
+            batch_id: None,
             commit_end_lsn: Some(PgLsn::from(42)),
             metrics: DispatchMetrics { items_count: 1, dispatched_at: Instant::now() },
         };
