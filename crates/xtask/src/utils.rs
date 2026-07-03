@@ -1,6 +1,7 @@
 use std::{
     io::{self, Write as _},
     path::PathBuf,
+    process::Command,
 };
 
 use anyhow::{Context, Result};
@@ -157,35 +158,18 @@ pub(crate) fn sccache_enabled(flag: bool) -> bool {
 /// compilation. When disabled, the command is returned unchanged so the default
 /// inner loop keeps incremental.
 pub(crate) fn maybe_with_sccache(cmd: Cmd<'_>, flag: bool) -> Cmd<'_> {
-    if !sccache_enabled(flag) {
-        println!(
-            "{YELLOW}⏭ sccache disabled for cargo builds. Set ETL_SCCACHE=1 or pass --sccache to \
-             enable.{RESET}"
-        );
-        flush_stdout();
+    let Some(env) = sccache_env(flag) else {
         return cmd;
+    };
+
+    env.apply_to_xshell(cmd)
+}
+
+/// Conditionally injects the sccache environment into a process command.
+pub(crate) fn maybe_configure_sccache(cmd: &mut Command, flag: bool) {
+    if let Some(env) = sccache_env(flag) {
+        env.apply_to_process(cmd);
     }
-
-    if !sccache_available() {
-        println!(
-            "{YELLOW}⚠️  sccache requested (--sccache / ETL_SCCACHE=1) but not found on PATH; \
-             continuing without it. Install it with `brew install sccache`.{RESET}"
-        );
-        flush_stdout();
-        return cmd;
-    }
-
-    println!("{CYAN}⚡ sccache enabled for cargo builds.{RESET}");
-    flush_stdout();
-
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-    let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
-
-    cmd.env("RUSTC_WRAPPER", "sccache")
-        .env("CC", format!("sccache {cc}"))
-        .env("CXX", format!("sccache {cxx}"))
-        .env("CARGO_INCREMENTAL", "0")
-        .env("SCCACHE_CACHE_SIZE", "20G")
 }
 
 /// Pushes a value unless it is already present.
@@ -200,7 +184,64 @@ fn flush_stdout() {
     let _ = io::stdout().flush();
 }
 
+/// Environment values needed to route builds through sccache.
+struct SccacheEnv {
+    /// C compiler invoked through sccache.
+    cc: String,
+    /// C++ compiler invoked through sccache.
+    cxx: String,
+}
+
+impl SccacheEnv {
+    /// Applies this sccache configuration to an xshell command.
+    fn apply_to_xshell(self, cmd: Cmd<'_>) -> Cmd<'_> {
+        cmd.env("RUSTC_WRAPPER", "sccache")
+            .env("CC", format!("sccache {}", self.cc))
+            .env("CXX", format!("sccache {}", self.cxx))
+            .env("CARGO_INCREMENTAL", "0")
+            .env("SCCACHE_CACHE_SIZE", "20G")
+    }
+
+    /// Applies this sccache configuration to a process command.
+    fn apply_to_process(&self, cmd: &mut Command) {
+        cmd.env("RUSTC_WRAPPER", "sccache");
+        cmd.env("CC", format!("sccache {}", self.cc));
+        cmd.env("CXX", format!("sccache {}", self.cxx));
+        cmd.env("CARGO_INCREMENTAL", "0");
+        cmd.env("SCCACHE_CACHE_SIZE", "20G");
+    }
+}
+
+/// Resolves the sccache environment requested for a cargo command.
+fn sccache_env(flag: bool) -> Option<SccacheEnv> {
+    if !sccache_enabled(flag) {
+        println!(
+            "{YELLOW}⏭ sccache disabled for cargo builds. Set ETL_SCCACHE=1 or pass --sccache to \
+             enable.{RESET}"
+        );
+        flush_stdout();
+        return None;
+    }
+
+    if !sccache_available() {
+        println!(
+            "{YELLOW}⚠️  sccache requested (--sccache / ETL_SCCACHE=1) but not found on PATH; \
+             continuing without it. Install it with `brew install sccache`.{RESET}"
+        );
+        flush_stdout();
+        return None;
+    }
+
+    println!("{CYAN}⚡ sccache enabled for cargo builds.{RESET}");
+    flush_stdout();
+
+    Some(SccacheEnv {
+        cc: std::env::var("CC").unwrap_or_else(|_| "cc".into()),
+        cxx: std::env::var("CXX").unwrap_or_else(|_| "c++".into()),
+    })
+}
+
 /// Returns whether the `sccache` binary is callable on the current PATH.
 fn sccache_available() -> bool {
-    std::process::Command::new("sccache").arg("--version").output().is_ok()
+    Command::new("sccache").arg("--version").output().is_ok()
 }

@@ -13,9 +13,7 @@ scripts are being removed over time as their logic moves into xtask.
 
 | Script                                | xtask command             |
 | ------------------------------------- | ------------------------- |
-| `bin/run-migrations.sh`               | `cargo x migrate`         |
 | `bin/deploy-local-replicator-orbstack.sh` | `cargo x deploy-local` |
-| `bin/test-clickhouse.sh`              | `cargo x test-clickhouse` |
 | `bin/vendor-duckdb-extensions.sh`     | `cargo x vendor-duckdb`   |
 
 ## Directory layout
