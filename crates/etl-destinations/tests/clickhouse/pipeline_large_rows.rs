@@ -25,7 +25,7 @@ use etl_destinations::clickhouse::test_utils::setup_clickhouse_database;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
-use crate::support::clickhouse::{current_state_query, install_crypto_provider};
+use crate::support::{clickhouse::current_state_query, crypto::install_crypto_provider};
 
 const KIB: usize = 1024;
 const MIB: usize = 1024 * 1024;

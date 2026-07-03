@@ -1,10 +1,15 @@
 //! Shared source database pool for out-of-band ETL queries.
 
-use std::{sync::LazyLock, time::Duration};
+use std::{str::FromStr, sync::LazyLock, time::Duration};
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use tokio_postgres::types::PgLsn;
 
-use crate::config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions};
+use crate::{
+    config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
+    error::{ErrorKind, EtlResult},
+    etl_error,
+};
 
 /// Maximum number of connections in the out-of-band pool.
 const MAX_POOL_CONNECTIONS: u32 = 1;
@@ -50,5 +55,27 @@ impl OutOfBandSourcePool {
     /// Returns the underlying SQLx pool.
     pub(crate) fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Queries the source database's current WAL LSN.
+    pub(crate) async fn get_current_wal_lsn(&self) -> EtlResult<PgLsn> {
+        let current_wal_lsn: String = sqlx::query_scalar("select pg_current_wal_lsn()::text")
+            .fetch_one(self.pool())
+            .await
+            .map_err(|error| {
+                etl_error!(
+                    ErrorKind::SourceConnectionFailed,
+                    "Source current LSN query failed",
+                    source: error
+                )
+            })?;
+
+        PgLsn::from_str(&current_wal_lsn).map_err(|_| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "Invalid source current LSN returned by Postgres",
+                current_wal_lsn
+            )
+        })
     }
 }

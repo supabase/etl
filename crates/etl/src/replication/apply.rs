@@ -74,7 +74,7 @@ use crate::{
         },
     },
     replication::{
-        SharedTableCache, WorkerType,
+        SharedTableCache, SharedTableState, WorkerType,
         state::{TableState, TableStateType},
     },
     runtime::{
@@ -595,7 +595,7 @@ impl ApplyLoopTasks {
         loop {
             interval.tick().await;
 
-            match Self::query_source_current_lsn(&out_of_band_source_pool).await {
+            match out_of_band_source_pool.get_current_wal_lsn().await {
                 Ok(source_current_lsn) => {
                     replication_lag_metrics.update_last_source_current_lsn(source_current_lsn);
                     replication_lag_metrics.emit_lag_metrics(worker_type);
@@ -608,30 +608,6 @@ impl ApplyLoopTasks {
                 }
             }
         }
-    }
-
-    /// Queries the current WAL LSN from the source database.
-    async fn query_source_current_lsn(
-        out_of_band_source_pool: &OutOfBandSourcePool,
-    ) -> EtlResult<PgLsn> {
-        let source_current_lsn: String = sqlx::query_scalar("select pg_current_wal_lsn()::text")
-            .fetch_one(out_of_band_source_pool.pool())
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceConnectionFailed,
-                    "Source current LSN query failed",
-                    source: err
-                )
-            })?;
-
-        PgLsn::from_str(&source_current_lsn).map_err(|_| {
-            etl_error!(
-                ErrorKind::InvalidState,
-                "Invalid source current LSN returned by Postgres",
-                source_current_lsn
-            )
-        })
     }
 
     /// Schedules schema cleanup again after the configured interval.
@@ -1963,7 +1939,6 @@ where
         start_lsn: PgLsn,
         message: LogicalReplicationMessage,
     ) -> EtlResult<HandleMessageResult> {
-        self.state.current_tx_events += 1;
         self.record_streaming_event_received();
 
         match &message {
@@ -1977,15 +1952,19 @@ where
                 self.handle_relation_message(start_lsn, relation_body).await
             }
             LogicalReplicationMessage::Insert(insert_body) => {
+                self.state.current_tx_events += 1;
                 self.handle_insert_message(start_lsn, insert_body).await
             }
             LogicalReplicationMessage::Update(update_body) => {
+                self.state.current_tx_events += 1;
                 self.handle_update_message(start_lsn, update_body).await
             }
             LogicalReplicationMessage::Delete(delete_body) => {
+                self.state.current_tx_events += 1;
                 self.handle_delete_message(start_lsn, delete_body).await
             }
             LogicalReplicationMessage::Truncate(truncate_body) => {
+                self.state.current_tx_events += 1;
                 self.handle_truncate_message(start_lsn, truncate_body).await
             }
             LogicalReplicationMessage::Origin(_) => {
@@ -2217,9 +2196,7 @@ where
 
             histogram!(ETL_TRANSACTION_DURATION_SECONDS).record(duration_seconds);
             counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
-            histogram!(ETL_TRANSACTION_SIZE).record((self.state.current_tx_events - 1) as f64);
-
-            debug_assert!(self.state.current_tx_events > 0);
+            histogram!(ETL_TRANSACTION_SIZE).record(self.state.current_tx_events as f64);
 
             self.state.current_tx_events = 0;
         }
@@ -3564,17 +3541,17 @@ async fn get_replicated_table_schema(
         );
     };
 
-    let Some(replicated_table_schema) = shared_table_state.replicated_table_schema().cloned()
-    else {
-        bail!(
-            ErrorKind::InvalidState,
-            "Waiting for relation state cannot decode row event",
-            format!(
-                "Table {} is waiting for a relation refresh before row events can be decoded",
-                table_id
-            )
-        );
-    };
-
-    Ok(replicated_table_schema)
+    match shared_table_state {
+        SharedTableState::Ready { replicated_table_schema } => Ok(replicated_table_schema),
+        SharedTableState::WaitingForRelation { .. } => {
+            bail!(
+                ErrorKind::InvalidState,
+                "Waiting for relation state cannot decode row event",
+                format!(
+                    "Table {} is waiting for a relation refresh before row events can be decoded",
+                    table_id
+                )
+            );
+        }
+    }
 }

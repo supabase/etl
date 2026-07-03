@@ -73,7 +73,7 @@ pub struct PipelineBuilder<S, D> {
     table_sync_copy: TableSyncCopyConfig,
     /// Behavior when the main replication slot is found to be invalidated.
     invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Maximum parallel connections per table during initial copy. Default: 2.
+    /// Maximum worker connections per table during initial copy.
     max_copy_connections_per_table: u16,
     /// The time between memory refreshes of the memory monitor. Default: 0.2.
     memory_refresh_interval_ms: u64,
@@ -128,7 +128,7 @@ where
             max_table_sync_workers: 1,
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
-            max_copy_connections_per_table: 2,
+            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
             memory_refresh_interval_ms: 100,
             memory_backpressure: MemoryBackpressureConfig {
                 activate_threshold: 0.95,

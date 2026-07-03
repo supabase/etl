@@ -18,7 +18,8 @@ use super::{
 use crate::{
     config::ApiConfig,
     configs::{
-        destination::FullApiDestinationConfig, encryption::EncryptionKeyring,
+        destination::{FullApiDestinationConfig, UpdateApiDestinationConfig},
+        encryption::EncryptionKeyring,
         pipeline::FullApiPipelineConfig,
     },
     data,
@@ -154,6 +155,14 @@ impl DestinationPipelineError {
 impl IntoResponse for DestinationPipelineError {
     fn into_response(self) -> Response {
         let status_code = match &self {
+            DestinationPipelineError::DestinationPipelinesDb(
+                DestinationPipelinesDbError::DestinationsDb(
+                    DestinationsDbError::DestinationConfigUpdate(_),
+                ),
+            )
+            | DestinationPipelineError::DestinationsDb(
+                DestinationsDbError::DestinationConfigUpdate(_),
+            ) => StatusCode::BAD_REQUEST,
             DestinationPipelineError::NoDefaultImageFound
             | DestinationPipelineError::DestinationPipelinesDb(_)
             | DestinationPipelineError::DestinationsDb(_)
@@ -217,7 +226,7 @@ pub struct UpdateDestinationPipelineRequest {
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub destination_name: String,
     #[schema(required = true)]
-    pub destination_config: FullApiDestinationConfig,
+    pub destination_config: UpdateApiDestinationConfig,
     #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]

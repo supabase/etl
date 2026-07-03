@@ -151,8 +151,12 @@ fn render_clickhouse_default_expression(
         DefaultExpression::TimestampLiteral(expression) => {
             matches!(typ, &Type::TIMESTAMP).then(|| format!("toDateTime64({expression}, 6, 'UTC')"))
         }
+        // `parseDateTime64BestEffort` (not `toDateTime64`) because Postgres renders
+        // `timestamptz` defaults with a UTC offset (for example
+        // `'2026-01-01 12:30:00+00'`), which `toDateTime64` string parsing rejects.
+        // The best-effort parser accepts the offset and normalizes to the timezone.
         DefaultExpression::TimestampTzLiteral(expression) => matches!(typ, &Type::TIMESTAMPTZ)
-            .then(|| format!("toDateTime64({expression}, 6, 'UTC')")),
+            .then(|| format!("parseDateTime64BestEffort({expression}, 6, 'UTC')")),
     }
 }
 
@@ -486,7 +490,12 @@ mod tests {
             (
                 Type::TIMESTAMPTZ,
                 "'2026-01-01 12:30:00'::timestamptz",
-                " DEFAULT toDateTime64('2026-01-01 12:30:00', 6, 'UTC')",
+                " DEFAULT parseDateTime64BestEffort('2026-01-01 12:30:00', 6, 'UTC')",
+            ),
+            (
+                Type::TIMESTAMPTZ,
+                "'2026-01-01 12:30:00+00'::timestamptz",
+                " DEFAULT parseDateTime64BestEffort('2026-01-01 12:30:00+00', 6, 'UTC')",
             ),
             (Type::NUMERIC, "42", " DEFAULT '42'"),
             (

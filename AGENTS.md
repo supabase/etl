@@ -110,6 +110,10 @@
   explicit integration boundary or the item is not re-exported.
 - After visibility changes, verify with `cargo rustc -p <crate> --all-features -- -W unreachable_pub` for the relevant target and then rerun the smallest relevant checks/tests.
 - Keep log message prose lowercase; SQL fragments, identifiers, and external product names may keep their required casing.
+- Prefer `From`/`TryFrom` numeric conversions over `as` casts when the trait
+  conversion exists or a value was explicitly range-checked. Use `as` for
+  intentionally lossy conversions or conversions that Rust does not expose via
+  `From`, such as `u64` to `f64` metric values.
 
 ## Error Handling And Panics
 - Use typed errors and `Result` for recoverable failures.
@@ -165,6 +169,18 @@
 - Every `unsafe` block should have a preceding `// SAFETY:` comment explaining why it is sound.
 - Prefer explicit ownership and borrowing over unnecessary cloning or interior mutability.
 - In async code, keep long-running background work behind named tasks or helpers.
+- Be intentional about Tokio task shutdown semantics. Dropping a
+  `JoinHandle` detaches the task; call `abort()` for best-effort background
+  tasks such as metrics reporters when they should stop immediately.
+- Dropping a Tokio `JoinSet` aborts all tasks in the set. Do not call
+  `abort_all()` before returning from a scope that owns the `JoinSet`; use
+  `abort_all()` only when the set is retained and tasks must be stopped while
+  the set remains alive.
+- Prefer graceful shutdown signaling and joining only when tasks own state that
+  must be completed or unwound deliberately, such as database transactions,
+  destination flushes, or retry-sensitive replication work.
+- Avoid elaborate shutdown channels for timer, polling, or telemetry tasks
+  whose state can be safely discarded.
 
 ## Documentation
 - Document all items, public and private, using concise stdlib-style prose.

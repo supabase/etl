@@ -85,14 +85,10 @@ jobs:
           tool: cargo-msrv
 
       - name: Check MSRV Sync
-        run: ./scripts/bin/check-msrv-sync.sh
+        run: cargo x msrv
 
       - name: Verify MSRV
-        run: |
-          cargo msrv verify \
-            --manifest-path crates/etl/Cargo.toml \
-            --output-format minimal \
-            -- cargo check --workspace --all-features --locked
+        run: cargo x msrv --verify
 
   check:
     name: Lint
@@ -122,7 +118,7 @@ jobs:
 
       - name: Run Cargo Fmt
         if: matrix.check == 'fmt'
-        run: ./scripts/bin/fmt-check.sh
+        run: cargo x fmt --check
 
       - name: Run Cargo Clippy
         if: matrix.check == 'clippy'
@@ -237,7 +233,7 @@ jobs:
       - name: Migrate Database
         run: |
           sudo apt-get install libpq-dev -y
-          ./scripts/bin/run-migrations.sh etl-api
+          cargo x migrate etl-api
 
       - name: Set up BigQuery Credentials
         # Conditional: fork PRs never receive secrets, BigQuery tests skipped gracefully.

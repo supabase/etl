@@ -801,6 +801,37 @@ mod tests {
     }
 
     #[test]
+    fn catalog_conninfo_from_postgres_ipv6_url_with_password_matches_expected_shape() {
+        let url = Url::parse(
+            "postgres://postgres:debug-password@[2406:da18:1d63:9b01:7f24:6b65:7aa:cac8]:5432/\
+             postgres?sslmode=prefer",
+        )
+        .unwrap();
+        let conninfo = catalog_conninfo_from_url(&url).unwrap();
+
+        assert_eq!(
+            conninfo,
+            "postgres:host='2406:da18:1d63:9b01:7f24:6b65:7aa:cac8' port='5432' dbname='postgres' \
+             user='postgres' password='debug-password' sslmode=prefer"
+        );
+    }
+
+    #[test]
+    fn sqlx_connect_options_from_postgres_ipv6_url_keeps_bracketed_host() {
+        let options = sqlx::postgres::PgConnectOptions::from_str(
+            "postgres://postgres:debug-password@[2406:da18:1d63:9b01:7f24:6b65:7aa:cac8]:5432/\
+             postgres?sslmode=prefer",
+        )
+        .unwrap();
+
+        assert_eq!(options.get_host(), "[2406:da18:1d63:9b01:7f24:6b65:7aa:cac8]");
+        assert_eq!(options.get_port(), 5432);
+        assert_eq!(options.get_database(), Some("postgres"));
+        assert_eq!(options.get_username(), "postgres");
+        assert!(matches!(options.get_ssl_mode(), sqlx::postgres::PgSslMode::Prefer));
+    }
+
+    #[test]
     fn catalog_conninfo_from_postgres_url_with_password_and_query_params_round_trip() {
         let url = Url::parse(
             "postgres://user:pa%27ss%5Cword@localhost:5433/mydb?sslmode=disable&\

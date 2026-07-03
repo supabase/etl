@@ -1,18 +1,6 @@
 #![allow(dead_code)]
 
-use std::sync::Once;
-
 use etl_config::shared::ClickHouseEngine;
-
-/// Installs the rustls default crypto provider once per process. Subsequent
-/// `install_default()` calls return `Err` (already installed); we discard
-/// that error so multiple test files can call this safely.
-pub(crate) fn install_crypto_provider() {
-    static INIT_CRYPTO: Once = Once::new();
-    INIT_CRYPTO.call_once(|| {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    });
-}
 
 /// A row read back from the ClickHouse `all_types_encoding` test table.
 ///
