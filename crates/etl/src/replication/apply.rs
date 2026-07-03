@@ -1976,7 +1976,6 @@ where
                 Ok(HandleMessageResult::default())
             }
             LogicalReplicationMessage::Message(message_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_message(start_lsn, message_body).await
             }
             _ => Ok(HandleMessageResult::default()),
