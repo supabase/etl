@@ -163,3 +163,35 @@ pub struct AppliedDestinationTableMetadata {
     /// The replication mask indicating which columns are replicated.
     pub replication_mask: ReplicationMask,
 }
+
+/// Durable Storage Write API stream position for an append-only destination
+/// table.
+///
+/// Destinations that use explicitly-created write streams need both the stream
+/// name and the next contiguous offset to retry appends without duplicating
+/// rows after an unknown write outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestinationWriteStreamState {
+    /// Destination-specific physical table identifier.
+    pub destination_table_id: String,
+    /// Fully-qualified Storage Write API stream name.
+    pub stream_name: String,
+    /// Next contiguous row offset to append.
+    pub next_offset: i64,
+}
+
+impl DestinationWriteStreamState {
+    /// Creates durable stream state for a destination table.
+    pub fn new(destination_table_id: String, stream_name: String, next_offset: i64) -> Self {
+        Self { destination_table_id, stream_name, next_offset }
+    }
+
+    /// Returns this stream state advanced by `row_count` rows.
+    pub fn advanced_by(&self, row_count: usize) -> Self {
+        Self {
+            destination_table_id: self.destination_table_id.clone(),
+            stream_name: self.stream_name.clone(),
+            next_offset: self.next_offset + row_count as i64,
+        }
+    }
+}
