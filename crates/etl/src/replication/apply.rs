@@ -1939,7 +1939,6 @@ where
         start_lsn: PgLsn,
         message: LogicalReplicationMessage,
     ) -> EtlResult<HandleMessageResult> {
-        self.state.current_tx_events += 1;
         self.record_streaming_event_received();
 
         match &message {
@@ -1953,15 +1952,19 @@ where
                 self.handle_relation_message(start_lsn, relation_body).await
             }
             LogicalReplicationMessage::Insert(insert_body) => {
+                self.state.current_tx_events += 1;
                 self.handle_insert_message(start_lsn, insert_body).await
             }
             LogicalReplicationMessage::Update(update_body) => {
+                self.state.current_tx_events += 1;
                 self.handle_update_message(start_lsn, update_body).await
             }
             LogicalReplicationMessage::Delete(delete_body) => {
+                self.state.current_tx_events += 1;
                 self.handle_delete_message(start_lsn, delete_body).await
             }
             LogicalReplicationMessage::Truncate(truncate_body) => {
+                self.state.current_tx_events += 1;
                 self.handle_truncate_message(start_lsn, truncate_body).await
             }
             LogicalReplicationMessage::Origin(_) => {
@@ -2193,9 +2196,7 @@ where
 
             histogram!(ETL_TRANSACTION_DURATION_SECONDS).record(duration_seconds);
             counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
-            histogram!(ETL_TRANSACTION_SIZE).record((self.state.current_tx_events - 1) as f64);
-
-            debug_assert!(self.state.current_tx_events > 0);
+            histogram!(ETL_TRANSACTION_SIZE).record(self.state.current_tx_events as f64);
 
             self.state.current_tx_events = 0;
         }
