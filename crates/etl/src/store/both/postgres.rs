@@ -545,6 +545,45 @@ impl StateStore for PostgresStore {
         })
     }
 
+    async fn replace_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        expected_stream_name: String,
+        state: DestinationWriteStreamState,
+    ) -> EtlResult<()> {
+        let rows_affected = pg_destination_write_stream::replace_destination_write_stream(
+            &self.pool,
+            self.pipeline_id as i64,
+            table_id,
+            &state.destination_table_id,
+            &expected_stream_name,
+            &state.stream_name,
+            state.next_offset,
+            state.last_sequence_number.as_deref(),
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Destination write stream state replacement failed",
+                source: err
+            )
+        })?;
+
+        if rows_affected == 0 {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "Destination write stream state changed before replacement",
+                format!(
+                    "Expected stream '{}' for destination table '{}'",
+                    expected_stream_name, state.destination_table_id
+                )
+            ));
+        }
+
+        Ok(())
+    }
+
     async fn delete_destination_write_stream_state(
         &self,
         table_id: TableId,

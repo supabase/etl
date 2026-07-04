@@ -157,6 +157,15 @@ pub trait StateStore {
         state: DestinationWriteStreamState,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
+    /// Replaces durable write stream state after a destination rotates to a new
+    /// stream for the same physical table.
+    fn replace_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        expected_stream_name: String,
+        state: DestinationWriteStreamState,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+
     /// Deletes durable write stream state for a physical destination table.
     fn delete_destination_write_stream_state(
         &self,

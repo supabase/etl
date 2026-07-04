@@ -422,6 +422,25 @@ impl StateStore for NotifyingStore {
         Ok(())
     }
 
+    async fn replace_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        expected_stream_name: String,
+        state: DestinationWriteStreamState,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+        let key = (table_id, state.destination_table_id.clone());
+        ensure_destination_write_stream_state_can_be_replaced(
+            inner.destination_write_stream_states.get(&key),
+            &expected_stream_name,
+            &state,
+        )?;
+        Arc::make_mut(&mut inner.destination_write_stream_states).insert(key, state);
+        inner.check_conditions();
+
+        Ok(())
+    }
+
     async fn delete_destination_write_stream_state(
         &self,
         table_id: TableId,
@@ -443,12 +462,39 @@ fn should_store_destination_write_stream_state(
     match current {
         None => true,
         Some(current) => {
-            current.next_offset < next.next_offset
-                || (current.next_offset == next.next_offset
-                    && current.stream_name == next.stream_name
-                    && current.last_sequence_number <= next.last_sequence_number)
+            current.stream_name == next.stream_name
+                && current.next_offset <= next.next_offset
+                && current.last_sequence_number <= next.last_sequence_number
         }
     }
+}
+
+fn ensure_destination_write_stream_state_can_be_replaced(
+    current: Option<&DestinationWriteStreamState>,
+    expected_stream_name: &str,
+    next: &DestinationWriteStreamState,
+) -> EtlResult<()> {
+    let Some(current) = current else {
+        return Ok(());
+    };
+
+    if current.stream_name != expected_stream_name {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "Destination write stream state changed before replacement",
+            format!("Expected stream '{}', found '{}'", expected_stream_name, current.stream_name)
+        ));
+    }
+
+    if current.last_sequence_number > next.last_sequence_number {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "Destination write stream sequence would move backwards",
+            "The replacement state has an older append-only sequence watermark"
+        ));
+    }
+
+    Ok(())
 }
 
 impl SchemaStore for NotifyingStore {

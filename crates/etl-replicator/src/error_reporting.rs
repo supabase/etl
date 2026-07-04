@@ -166,6 +166,17 @@ where
         self.inner.store_destination_write_stream_state(table_id, state).await
     }
 
+    async fn replace_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        expected_stream_name: String,
+        state: DestinationWriteStreamState,
+    ) -> EtlResult<()> {
+        self.inner
+            .replace_destination_write_stream_state(table_id, expected_stream_name, state)
+            .await
+    }
+
     async fn delete_destination_write_stream_state(
         &self,
         table_id: TableId,

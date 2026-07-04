@@ -1048,6 +1048,10 @@ where
             current_replication_mask.clone(),
         );
         let sequenced_bigquery_table_id = metadata.destination_table_id.parse()?;
+        let previous_stream_state = self
+            .state_store
+            .get_destination_write_stream_state(table_id, metadata.destination_table_id.clone())
+            .await?;
         let table_lock = self.append_only_table_lock(&sequenced_bigquery_table_id).await;
         let _guard = table_lock.lock().await;
 
@@ -1079,9 +1083,12 @@ where
 
         let bigquery_table_id = sequenced_bigquery_table_id.to_bigquery_table_id();
         self.recreate_view_for_table(&bigquery_table_id, &sequenced_bigquery_table_id).await?;
-        self.state_store
-            .delete_destination_write_stream_state(table_id, metadata.destination_table_id.clone())
-            .await?;
+        self.rotate_append_only_write_stream_state(
+            table_id,
+            &sequenced_bigquery_table_id,
+            previous_stream_state,
+        )
+        .await?;
         self.state_store
             .store_destination_table_metadata(table_id, updated_metadata.to_applied())
             .await?;
@@ -1636,6 +1643,34 @@ where
         self.state_store.store_destination_write_stream_state(table_id, state.clone()).await?;
 
         Ok(state)
+    }
+
+    async fn rotate_append_only_write_stream_state(
+        &self,
+        table_id: TableId,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+        previous_state: Option<DestinationWriteStreamState>,
+    ) -> EtlResult<()> {
+        let destination_table_id = sequenced_bigquery_table_id.to_string();
+        let stream_name = self
+            .client
+            .create_committed_write_stream(&self.dataset_id, &destination_table_id)
+            .await?;
+        let next_state = DestinationWriteStreamState::new(destination_table_id, stream_name, 0);
+
+        if let Some(previous_state) = previous_state {
+            let next_state =
+                next_state.with_last_sequence_number(previous_state.last_sequence_number.clone());
+            self.state_store
+                .replace_destination_write_stream_state(
+                    table_id,
+                    previous_state.stream_name,
+                    next_state,
+                )
+                .await
+        } else {
+            self.state_store.store_destination_write_stream_state(table_id, next_state).await
+        }
     }
 
     async fn append_append_only_rows_with_state(

@@ -72,14 +72,11 @@ pub async fn store_destination_write_stream(
             next_offset = excluded.next_offset,
             last_sequence_number = excluded.last_sequence_number,
             updated_at = now()
-        where etl.destination_write_streams.next_offset < excluded.next_offset
-            or (
-                etl.destination_write_streams.next_offset = excluded.next_offset
-                and etl.destination_write_streams.stream_name = excluded.stream_name
-                and (
-                    etl.destination_write_streams.last_sequence_number is null
-                    or excluded.last_sequence_number >= etl.destination_write_streams.last_sequence_number
-                )
+        where etl.destination_write_streams.stream_name = excluded.stream_name
+            and etl.destination_write_streams.next_offset <= excluded.next_offset
+            and (
+                etl.destination_write_streams.last_sequence_number is null
+                or excluded.last_sequence_number >= etl.destination_write_streams.last_sequence_number
             )
         "#,
     )
@@ -93,6 +90,48 @@ pub async fn store_destination_write_stream(
     .await?;
 
     Ok(())
+}
+
+/// Replaces write stream state when a destination rotates streams.
+pub async fn replace_destination_write_stream(
+    pool: &PgPool,
+    pipeline_id: i64,
+    table_id: TableId,
+    destination_table_id: &str,
+    expected_stream_name: &str,
+    stream_name: &str,
+    next_offset: i64,
+    last_sequence_number: Option<&str>,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        insert into etl.destination_write_streams
+            (pipeline_id, table_id, destination_table_id, stream_name, next_offset, last_sequence_number)
+        values ($1, $2, $3, $5, $6, $7)
+        on conflict (pipeline_id, table_id, destination_table_id)
+        do update set
+            stream_name = excluded.stream_name,
+            next_offset = excluded.next_offset,
+            last_sequence_number = excluded.last_sequence_number,
+            updated_at = now()
+        where etl.destination_write_streams.stream_name = $4
+            and (
+                etl.destination_write_streams.last_sequence_number is null
+                or excluded.last_sequence_number >= etl.destination_write_streams.last_sequence_number
+            )
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .bind(destination_table_id)
+    .bind(expected_stream_name)
+    .bind(stream_name)
+    .bind(next_offset)
+    .bind(last_sequence_number)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
 }
 
 /// Deletes write stream state for a single source table.

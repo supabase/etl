@@ -432,6 +432,10 @@ fn is_committed_stream_already_exists(status: &GoogleRpcStatus) -> bool {
     Code::from_i32(status.code) == Code::AlreadyExists
 }
 
+fn committed_stream_already_exists_is_success(attempt_count: u32) -> bool {
+    attempt_count > 1
+}
+
 /// Converts a committed-stream append response error into an ETL error.
 fn committed_stream_response_error_to_etl_error(status: &GoogleRpcStatus) -> EtlError {
     etl_error!(
@@ -1536,10 +1540,22 @@ impl BigQueryClient {
                     "retrying retryable bigquery committed stream append error"
                 );
             },
-            || {
-                let request = request.clone();
-                async move {
-                    self.append_committed_stream_request(stream_name, request, start_offset).await
+            {
+                let mut attempt_count = 0_u32;
+                move || {
+                    attempt_count = attempt_count.saturating_add(1);
+                    let already_exists_is_success =
+                        committed_stream_already_exists_is_success(attempt_count);
+                    let request = request.clone();
+                    async move {
+                        self.append_committed_stream_request(
+                            stream_name,
+                            request,
+                            start_offset,
+                            already_exists_is_success,
+                        )
+                        .await
+                    }
                 }
             },
         )
@@ -1554,6 +1570,7 @@ impl BigQueryClient {
         stream_name: &str,
         request: AppendRowsRequest,
         expected_offset: i64,
+        already_exists_is_success: bool,
     ) -> EtlResult<usize> {
         let _permit = self
             .committed_stream_append_permits
@@ -1614,6 +1631,15 @@ impl BigQueryClient {
             Some(append_rows_response::Response::Error(status))
                 if is_committed_stream_already_exists(&status) =>
             {
+                if already_exists_is_success {
+                    warn!(
+                        stream_name,
+                        expected_offset,
+                        "treating BigQuery committed stream ALREADY_EXISTS as success for retried append request"
+                    );
+                    return Ok(response_bytes);
+                }
+
                 Err(etl_error!(
                     ErrorKind::DestinationError,
                     "BigQuery committed stream append overlapped an existing offset",
@@ -1963,6 +1989,13 @@ mod tests {
     fn committed_stream_max_inflight_uses_connection_pool_size_as_proactive_limit() {
         assert_eq!(compute_committed_stream_max_inflight_requests(0), 1);
         assert_eq!(compute_committed_stream_max_inflight_requests(3), 3);
+    }
+
+    #[test]
+    fn committed_stream_already_exists_only_succeeds_on_retry_attempts() {
+        assert!(!committed_stream_already_exists_is_success(0));
+        assert!(!committed_stream_already_exists_is_success(1));
+        assert!(committed_stream_already_exists_is_success(2));
     }
 
     #[test]
