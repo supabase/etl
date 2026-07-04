@@ -415,7 +415,14 @@ async fn create_storage_grpc_client() -> Result<BigQueryWriteClient<Channel>, BQ
 fn is_retryable_committed_stream_status(status: &Status) -> bool {
     matches!(
         status.code(),
-        Code::Aborted | Code::Internal | Code::ResourceExhausted | Code::Unavailable
+        // BigQuery can briefly return INVALID_ARGUMENT for explicit committed
+        // stream appends created immediately after a table schema change while
+        // the Storage Write schema metadata catches up with the DDL.
+        Code::Aborted
+            | Code::Internal
+            | Code::InvalidArgument
+            | Code::ResourceExhausted
+            | Code::Unavailable
     )
 }
 
@@ -423,7 +430,13 @@ fn is_retryable_committed_stream_status(status: &Status) -> bool {
 fn is_retryable_committed_stream_response_status(status: &GoogleRpcStatus) -> bool {
     matches!(
         Code::from_i32(status.code),
-        Code::Aborted | Code::Internal | Code::ResourceExhausted | Code::Unavailable
+        // See `is_retryable_committed_stream_status` for why INVALID_ARGUMENT
+        // is retried on committed stream append responses.
+        Code::Aborted
+            | Code::Internal
+            | Code::InvalidArgument
+            | Code::ResourceExhausted
+            | Code::Unavailable
     )
 }
 
@@ -1996,6 +2009,18 @@ mod tests {
         assert!(!committed_stream_already_exists_is_success(0));
         assert!(!committed_stream_already_exists_is_success(1));
         assert!(committed_stream_already_exists_is_success(2));
+    }
+
+    #[test]
+    fn committed_stream_invalid_argument_is_retryable() {
+        assert!(is_retryable_committed_stream_status(&Status::invalid_argument(
+            "schema metadata is not ready"
+        )));
+        assert!(is_retryable_committed_stream_response_status(&GoogleRpcStatus {
+            code: Code::InvalidArgument as i32,
+            message: "schema metadata is not ready".to_owned(),
+            details: Vec::new(),
+        }));
     }
 
     #[test]
