@@ -509,6 +509,7 @@ impl StateStore for PostgresStore {
                     row.stream_name,
                     row.next_offset,
                 )
+                .with_last_sequence_number(row.last_sequence_number)
             })
         })
         .map_err(|err| {
@@ -532,6 +533,7 @@ impl StateStore for PostgresStore {
             &state.destination_table_id,
             &state.stream_name,
             state.next_offset,
+            state.last_sequence_number.as_deref(),
         )
         .await
         .map_err(|err| {

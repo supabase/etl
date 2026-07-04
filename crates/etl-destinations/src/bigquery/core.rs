@@ -34,9 +34,9 @@ use crate::{
     bigquery::{
         BigQueryDatasetId, BigQueryTableId,
         append_only::{
-            AppendOnlyChangeType, append_only_backfill_timestamp, append_only_copy_metadata,
-            append_only_delete_old_row, append_only_event_metadata, append_only_row,
-            append_only_schema_columns_to_add, append_only_update_rows,
+            AppendOnlyChangeType, AppendOnlyTableRow, append_only_backfill_timestamp,
+            append_only_copy_metadata, append_only_delete_old_row, append_only_event_metadata,
+            append_only_schema_columns_to_add, append_only_tracked_row, append_only_update_rows,
         },
         client::{BigQueryClient, BigQueryOperationType, create_append_trace_id},
         encoding::BigQueryTableRow,
@@ -817,7 +817,7 @@ where
                     source_timestamp,
                     copy_ordinal,
                 );
-                append_only_row(
+                append_only_tracked_row(
                     replicated_table_schema,
                     table_row,
                     AppendOnlyChangeType::Insert,
@@ -1460,8 +1460,10 @@ where
 
     /// Writes CDC events as append-only history rows.
     async fn write_append_only_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<BigQueryTableRow>)> =
-            HashMap::new();
+        let mut table_id_to_data: HashMap<
+            TableId,
+            (ReplicatedTableSchema, Vec<AppendOnlyTableRow>),
+        > = HashMap::new();
         let mut current_source_timestamp = self
             .inner
             .lock()
@@ -1486,7 +1488,7 @@ where
                         BIGQUERY_SEQUENCE_ORDINAL_FIRST,
                         current_source_timestamp,
                     );
-                    let row = append_only_row(
+                    let row = append_only_tracked_row(
                         &insert.replicated_table_schema,
                         insert.table_row,
                         AppendOnlyChangeType::Insert,
@@ -1522,7 +1524,7 @@ where
                         &delete.replicated_table_schema,
                         delete.old_table_row,
                     )?;
-                    let row = append_only_row(
+                    let row = append_only_tracked_row(
                         &delete.replicated_table_schema,
                         old_table_row,
                         AppendOnlyChangeType::Delete,
@@ -1556,7 +1558,7 @@ where
     /// Flushes accumulated append-only rows.
     async fn flush_append_only_rows(
         &self,
-        table_id_to_data: &mut HashMap<TableId, (ReplicatedTableSchema, Vec<BigQueryTableRow>)>,
+        table_id_to_data: &mut HashMap<TableId, (ReplicatedTableSchema, Vec<AppendOnlyTableRow>)>,
     ) -> EtlResult<()> {
         for (_, (replicated_table_schema, rows)) in std::mem::take(table_id_to_data) {
             let sequenced_bigquery_table_id =
@@ -1577,7 +1579,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         sequenced_bigquery_table_id: &SequencedBigQueryTableId,
-        rows: Vec<BigQueryTableRow>,
+        rows: Vec<AppendOnlyTableRow>,
     ) -> EtlResult<()> {
         if rows.is_empty() {
             return Ok(());
@@ -1640,12 +1642,18 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         sequenced_bigquery_table_id: &SequencedBigQueryTableId,
-        rows: Vec<BigQueryTableRow>,
+        rows: Vec<AppendOnlyTableRow>,
         stream_state: DestinationWriteStreamState,
     ) -> EtlResult<()> {
         let table_descriptor = append_only_table_descriptor(replicated_table_schema);
-        let target_batches = calculate_target_batches_for_table_copy(&rows)?;
-        let row_batches = split_table_rows(rows, target_batches);
+        let rows =
+            append_only_rows_after_sequence(rows, stream_state.last_sequence_number.as_deref());
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let target_batches = calculate_target_batches_for_append_only(&rows)?;
+        let row_batches = split_append_only_rows(rows, target_batches);
         let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
         let mut next_offset = stream_state.next_offset;
         let stream_name = stream_state.stream_name.clone();
@@ -1661,30 +1669,35 @@ where
                 &sequenced_bigquery_table_id_string,
                 batch_index,
             );
-            let _ = self
-                .client
-                .append_committed_stream_rows(
-                    &stream_name,
-                    table_descriptor.clone(),
-                    &rows,
-                    next_offset,
-                    trace_id,
-                )
-                .await?;
+            let (table_rows, sequence_numbers): (Vec<_>, Vec<_>) =
+                rows.into_iter().map(AppendOnlyTableRow::into_parts).unzip();
+            let mut current_index = 0;
+            while current_index < table_rows.len() {
+                let append_result = self
+                    .client
+                    .append_committed_stream_rows(
+                        &stream_name,
+                        table_descriptor.clone(),
+                        &table_rows[current_index..],
+                        next_offset,
+                        trace_id.clone(),
+                    )
+                    .await?;
+                let _ = (append_result.bytes_sent, append_result.bytes_received);
+                let appended_row_count = append_result.row_count;
+                let last_sequence_number =
+                    sequence_numbers[current_index + appended_row_count - 1].clone();
 
-            next_offset += rows.len() as i64;
+                next_offset += appended_row_count as i64;
+                self.state_store
+                    .store_destination_write_stream_state(
+                        replicated_table_schema.id(),
+                        stream_state.advanced_to(next_offset, last_sequence_number),
+                    )
+                    .await?;
+                current_index += appended_row_count;
+            }
         }
-
-        self.state_store
-            .store_destination_write_stream_state(
-                replicated_table_schema.id(),
-                DestinationWriteStreamState::new(
-                    sequenced_bigquery_table_id_string,
-                    stream_name,
-                    next_offset,
-                ),
-            )
-            .await?;
 
         Ok(())
     }
@@ -2366,6 +2379,26 @@ fn calculate_target_batches_for_table_copy(table_rows: &[BigQueryTableRow]) -> E
     Ok(target_batches)
 }
 
+fn calculate_target_batches_for_append_only(table_rows: &[AppendOnlyTableRow]) -> EtlResult<usize> {
+    let Some(encoded_row) = table_rows.first() else {
+        return Ok(0);
+    };
+    let total_rows = table_rows.len();
+    let estimated_row_size = encoded_row.row().encoded_len();
+    let rows_per_batch = MAX_BATCH_SIZE_BYTES.checked_div(estimated_row_size).unwrap_or(total_rows);
+    let target_batches = if rows_per_batch > 0 { total_rows.div_ceil(rows_per_batch) } else { 1 };
+
+    debug!(
+        total_rows,
+        estimated_row_size,
+        rows_per_batch,
+        target_batches,
+        "calculated target batches for append-only writes"
+    );
+
+    Ok(target_batches)
+}
+
 /// Splits table rows into optimal sub-batches for parallel execution.
 ///
 /// Calculates the optimal distribution of rows across batches to produce the
@@ -2409,6 +2442,53 @@ fn split_table_rows(
     batches
 }
 
+fn split_append_only_rows(
+    table_rows: Vec<AppendOnlyTableRow>,
+    target_batches: usize,
+) -> Vec<Vec<AppendOnlyTableRow>> {
+    let total_rows = table_rows.len();
+
+    if total_rows == 0 {
+        return vec![];
+    }
+
+    if total_rows <= 1 || target_batches == 1 || total_rows <= target_batches {
+        return vec![table_rows];
+    }
+
+    let optimal_rows_per_batch = total_rows.div_ceil(target_batches);
+
+    if optimal_rows_per_batch == 0 {
+        return vec![table_rows];
+    }
+
+    let num_sub_batches = total_rows.div_ceil(optimal_rows_per_batch);
+    let rows_per_sub_batch = total_rows / num_sub_batches;
+    let extra_rows = total_rows % num_sub_batches;
+
+    let mut batches = Vec::with_capacity(num_sub_batches);
+    let mut remaining = table_rows;
+    for i in 0..num_sub_batches {
+        let batch_size = rows_per_sub_batch + if i < extra_rows { 1 } else { 0 };
+        let rest = remaining.split_off(batch_size);
+        batches.push(remaining);
+        remaining = rest;
+    }
+
+    batches
+}
+
+fn append_only_rows_after_sequence(
+    rows: Vec<AppendOnlyTableRow>,
+    last_sequence_number: Option<&str>,
+) -> Vec<AppendOnlyTableRow> {
+    let Some(last_sequence_number) = last_sequence_number else {
+        return rows;
+    };
+
+    rows.into_iter().filter(|row| row.sequence_number() > last_sequence_number).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -2421,7 +2501,7 @@ mod tests {
     };
     use prost::Message;
 
-    use super::super::append_only::append_only_sequence_number;
+    use super::super::append_only::{append_only_row, append_only_sequence_number};
     use super::*;
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
@@ -3052,6 +3132,47 @@ mod tests {
     }
 
     #[test]
+    fn append_only_rows_after_sequence_skips_already_durable_rows() {
+        let rows = vec![
+            AppendOnlyTableRow::new(
+                BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+                "0000000000000001/0000000000000000/0000000000000000".to_owned(),
+            ),
+            AppendOnlyTableRow::new(
+                BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+                "0000000000000001/0000000000000000/0000000000000001".to_owned(),
+            ),
+            AppendOnlyTableRow::new(
+                BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+                "0000000000000002/0000000000000000/0000000000000000".to_owned(),
+            ),
+        ];
+
+        let result = append_only_rows_after_sequence(
+            rows,
+            Some("0000000000000001/0000000000000000/0000000000000001"),
+        );
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].sequence_number(),
+            "0000000000000002/0000000000000000/0000000000000000"
+        );
+    }
+
+    #[test]
+    fn append_only_rows_after_sequence_keeps_all_rows_without_watermark() {
+        let rows = vec![AppendOnlyTableRow::new(
+            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+            "0000000000000001/0000000000000000/0000000000000000".to_owned(),
+        )];
+
+        let result = append_only_rows_after_sequence(rows, None);
+
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
     fn calculate_target_batches_empty_rows() {
         let rows: Vec<BigQueryTableRow> = vec![];
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
@@ -3260,7 +3381,7 @@ mod tests {
 
         assert_eq!(rows.len(), 2);
         assert_eq!(
-            rows[0].debug_cells(),
+            rows[0].row().debug_cells(),
             vec![
                 (1, CellNonOptional::I32(1)),
                 (2, CellNonOptional::String("before".to_owned())),
@@ -3289,7 +3410,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            rows[1].debug_cells(),
+            rows[1].row().debug_cells(),
             vec![
                 (1, CellNonOptional::I32(2)),
                 (2, CellNonOptional::String("after".to_owned())),
@@ -3339,7 +3460,7 @@ mod tests {
 
         assert_eq!(rows.len(), 2);
         assert_eq!(
-            rows[0].debug_cells(),
+            rows[0].row().debug_cells(),
             vec![
                 (1, CellNonOptional::I32(1)),
                 (2, CellNonOptional::Null),
@@ -3368,7 +3489,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            rows[1].debug_cells(),
+            rows[1].row().debug_cells(),
             vec![
                 (1, CellNonOptional::I32(2)),
                 (2, CellNonOptional::String("after".to_owned())),

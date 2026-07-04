@@ -15,6 +15,8 @@ pub struct StoredDestinationWriteStreamRow {
     pub stream_name: String,
     /// Next contiguous row offset to append.
     pub next_offset: i64,
+    /// Last append-only sequence number durably appended to this stream.
+    pub last_sequence_number: Option<String>,
 }
 
 /// Gets write stream state for a physical destination table.
@@ -26,7 +28,7 @@ pub async fn get_destination_write_stream(
 ) -> Result<Option<StoredDestinationWriteStreamRow>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        select table_id, destination_table_id, stream_name, next_offset
+        select table_id, destination_table_id, stream_name, next_offset, last_sequence_number
         from etl.destination_write_streams
         where pipeline_id = $1 and table_id = $2 and destination_table_id = $3
         "#,
@@ -44,6 +46,7 @@ pub async fn get_destination_write_stream(
             destination_table_id: row.get("destination_table_id"),
             stream_name: row.get("stream_name"),
             next_offset: row.get("next_offset"),
+            last_sequence_number: row.get("last_sequence_number"),
         }
     }))
 }
@@ -56,21 +59,27 @@ pub async fn store_destination_write_stream(
     destination_table_id: &str,
     stream_name: &str,
     next_offset: i64,
+    last_sequence_number: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         insert into etl.destination_write_streams
-            (pipeline_id, table_id, destination_table_id, stream_name, next_offset)
-        values ($1, $2, $3, $4, $5)
+            (pipeline_id, table_id, destination_table_id, stream_name, next_offset, last_sequence_number)
+        values ($1, $2, $3, $4, $5, $6)
         on conflict (pipeline_id, table_id, destination_table_id)
         do update set
             stream_name = excluded.stream_name,
             next_offset = excluded.next_offset,
+            last_sequence_number = excluded.last_sequence_number,
             updated_at = now()
         where etl.destination_write_streams.next_offset < excluded.next_offset
             or (
                 etl.destination_write_streams.next_offset = excluded.next_offset
                 and etl.destination_write_streams.stream_name = excluded.stream_name
+                and (
+                    etl.destination_write_streams.last_sequence_number is null
+                    or excluded.last_sequence_number >= etl.destination_write_streams.last_sequence_number
+                )
             )
         "#,
     )
@@ -79,6 +88,7 @@ pub async fn store_destination_write_stream(
     .bind(destination_table_id)
     .bind(stream_name)
     .bind(next_offset)
+    .bind(last_sequence_number)
     .execute(pool)
     .await?;
 

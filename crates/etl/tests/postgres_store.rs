@@ -296,7 +296,10 @@ async fn state_store_destination_write_stream_state_persists_and_clears() {
         .expect("stream state should be stored");
     assert_eq!(loaded, stream_state);
 
-    let advanced = stream_state.advanced_by(3);
+    let advanced = stream_state.advanced_to(
+        stream_state.next_offset + 3,
+        "0000000000000002/0000000000000000/0000000000000000".to_owned(),
+    );
     store.store_destination_write_stream_state(table_id, advanced.clone()).await.unwrap();
     assert_eq!(
         store
@@ -376,7 +379,10 @@ where
         "projects/p/datasets/d/tables/dest_table_0001/streams/s1".to_owned(),
         42,
     );
-    let advanced = stream_state.advanced_by(3);
+    let advanced = stream_state.advanced_to(
+        stream_state.next_offset + 3,
+        "0000000000000002/0000000000000000/0000000000000000".to_owned(),
+    );
 
     store.store_destination_write_stream_state(table_id, advanced.clone()).await.unwrap();
     store.store_destination_write_stream_state(table_id, stream_state).await.unwrap();
@@ -388,10 +394,50 @@ where
         Some(advanced.clone())
     );
 
-    let same_offset_different_stream = DestinationWriteStreamState::new(
+    let same_offset_lower_sequence = DestinationWriteStreamState::new(
         advanced.destination_table_id.clone(),
-        "projects/p/datasets/d/tables/dest_table_0001/streams/same_offset_stale".to_owned(),
+        advanced.stream_name.clone(),
         advanced.next_offset,
+    )
+    .with_last_sequence_number(Some(
+        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
+    ));
+    store
+        .store_destination_write_stream_state(table_id, same_offset_lower_sequence)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_destination_write_stream_state(table_id, advanced.destination_table_id.clone())
+            .await
+            .unwrap(),
+        Some(advanced.clone())
+    );
+
+    let same_offset_higher_sequence = DestinationWriteStreamState::new(
+        advanced.destination_table_id.clone(),
+        advanced.stream_name.clone(),
+        advanced.next_offset,
+    )
+    .with_last_sequence_number(Some(
+        "0000000000000003/0000000000000000/0000000000000000".to_owned(),
+    ));
+    store
+        .store_destination_write_stream_state(table_id, same_offset_higher_sequence.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_destination_write_stream_state(table_id, advanced.destination_table_id.clone())
+            .await
+            .unwrap(),
+        Some(same_offset_higher_sequence.clone())
+    );
+
+    let same_offset_different_stream = DestinationWriteStreamState::new(
+        same_offset_higher_sequence.destination_table_id.clone(),
+        "projects/p/datasets/d/tables/dest_table_0001/streams/same_offset_stale".to_owned(),
+        same_offset_higher_sequence.next_offset,
     );
     store
         .store_destination_write_stream_state(table_id, same_offset_different_stream)
@@ -402,7 +448,7 @@ where
             .get_destination_write_stream_state(table_id, advanced.destination_table_id.clone())
             .await
             .unwrap(),
-        Some(advanced)
+        Some(same_offset_higher_sequence)
     );
 }
 

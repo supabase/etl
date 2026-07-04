@@ -178,12 +178,30 @@ pub struct DestinationWriteStreamState {
     pub stream_name: String,
     /// Next contiguous row offset to append.
     pub next_offset: i64,
+    /// Last append-only sequence number durably appended to this stream.
+    pub last_sequence_number: Option<String>,
 }
 
 impl DestinationWriteStreamState {
     /// Creates durable stream state for a destination table.
     pub fn new(destination_table_id: String, stream_name: String, next_offset: i64) -> Self {
-        Self { destination_table_id, stream_name, next_offset }
+        Self { destination_table_id, stream_name, next_offset, last_sequence_number: None }
+    }
+
+    /// Creates durable stream state including the last appended sequence number.
+    pub fn new_with_last_sequence_number(
+        destination_table_id: String,
+        stream_name: String,
+        next_offset: i64,
+        last_sequence_number: Option<String>,
+    ) -> Self {
+        Self { destination_table_id, stream_name, next_offset, last_sequence_number }
+    }
+
+    /// Sets the last appended sequence number on this stream state.
+    pub fn with_last_sequence_number(mut self, last_sequence_number: Option<String>) -> Self {
+        self.last_sequence_number = last_sequence_number;
+        self
     }
 
     /// Returns this stream state advanced by `row_count` rows.
@@ -192,6 +210,17 @@ impl DestinationWriteStreamState {
             destination_table_id: self.destination_table_id.clone(),
             stream_name: self.stream_name.clone(),
             next_offset: self.next_offset + row_count as i64,
+            last_sequence_number: self.last_sequence_number.clone(),
+        }
+    }
+
+    /// Returns this stream state advanced to an explicit offset and sequence.
+    pub fn advanced_to(&self, next_offset: i64, last_sequence_number: String) -> Self {
+        Self {
+            destination_table_id: self.destination_table_id.clone(),
+            stream_name: self.stream_name.clone(),
+            next_offset,
+            last_sequence_number: Some(last_sequence_number),
         }
     }
 }

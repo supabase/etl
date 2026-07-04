@@ -55,6 +55,30 @@ pub(super) struct AppendOnlyMetadata {
     pub(super) sort_keys: Vec<String>,
 }
 
+/// Append-only row paired with its durable replay sequence number.
+pub(super) struct AppendOnlyTableRow {
+    row: BigQueryTableRow,
+    sequence_number: String,
+}
+
+impl AppendOnlyTableRow {
+    pub(super) fn new(row: BigQueryTableRow, sequence_number: String) -> Self {
+        Self { row, sequence_number }
+    }
+
+    pub(super) fn row(&self) -> &BigQueryTableRow {
+        &self.row
+    }
+
+    pub(super) fn sequence_number(&self) -> &str {
+        &self.sequence_number
+    }
+
+    pub(super) fn into_parts(self) -> (BigQueryTableRow, String) {
+        (self.row, self.sequence_number)
+    }
+}
+
 /// Builds an append-only sequence number for copied rows.
 pub(super) fn append_only_copy_sequence_number(row_index: u64) -> String {
     format!("0000000000000000/0000000000000000/{row_index:016x}")
@@ -229,7 +253,7 @@ pub(super) fn append_only_update_rows(
     updated_table_row: UpdatedTableRow,
     sequence_key: EventSequenceKey,
     source_timestamp: i64,
-) -> EtlResult<Vec<BigQueryTableRow>> {
+) -> EtlResult<Vec<AppendOnlyTableRow>> {
     let new_table_row = bigquery_update_new_row(replicated_table_schema, updated_table_row)?;
     // Postgres sends a key-only old image when the replica identity key
     // changed, so expand it to record the old key's removal in the history.
@@ -243,7 +267,7 @@ pub(super) fn append_only_update_rows(
     let mut rows = Vec::with_capacity(2);
 
     if let Some(old_table_row) = old_table_row {
-        rows.push(append_only_row(
+        rows.push(append_only_tracked_row(
             replicated_table_schema,
             old_table_row,
             AppendOnlyChangeType::UpdateDelete,
@@ -253,7 +277,7 @@ pub(super) fn append_only_update_rows(
                 source_timestamp,
             ),
         )?);
-        rows.push(append_only_row(
+        rows.push(append_only_tracked_row(
             replicated_table_schema,
             new_table_row,
             AppendOnlyChangeType::UpdateInsert,
@@ -264,7 +288,7 @@ pub(super) fn append_only_update_rows(
             ),
         )?);
     } else {
-        rows.push(append_only_row(
+        rows.push(append_only_tracked_row(
             replicated_table_schema,
             new_table_row,
             AppendOnlyChangeType::UpdateInsert,
@@ -363,6 +387,18 @@ pub(super) fn append_only_row(
     tagged_cells.extend(append_only_metadata_tagged_cells(column_count, change_type, metadata));
 
     BigQueryTableRow::try_from_tagged_cells(tagged_cells)
+}
+
+/// Builds an append-only row and keeps its sequence number next to it.
+pub(super) fn append_only_tracked_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    table_row: TableRow,
+    change_type: AppendOnlyChangeType,
+    metadata: AppendOnlyMetadata,
+) -> EtlResult<AppendOnlyTableRow> {
+    let sequence_number = metadata.change_sequence_number.clone();
+    let row = append_only_row(replicated_table_schema, table_row, change_type, metadata)?;
+    Ok(AppendOnlyTableRow::new(row, sequence_number))
 }
 
 /// Builds flat append-only metadata cells using descriptor field numbers after

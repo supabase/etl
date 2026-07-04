@@ -45,7 +45,10 @@ use metrics::counter;
 use prost::Message;
 use rand::random;
 use serde::Deserialize;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::{
+    sync::Semaphore,
+    time::{Duration, Instant, sleep},
+};
 use tonic::{
     Code, Request, Status,
     codec::CompressionEncoding,
@@ -122,6 +125,13 @@ const COMMITTED_STREAM_RETRY_POLICY: RetryPolicy = RetryPolicy {
     initial_delay: Duration::from_secs(1),
     max_delay: Duration::from_secs(30),
 };
+
+/// Result of one committed-stream append request.
+pub(super) struct CommittedStreamAppendResult {
+    pub(super) row_count: usize,
+    pub(super) bytes_sent: usize,
+    pub(super) bytes_received: usize,
+}
 /// BigQuery project identifier.
 pub type BigQueryProjectId = String;
 /// BigQuery dataset identifier.
@@ -463,6 +473,10 @@ fn compute_max_inflight_requests(connection_pool_size: usize) -> usize {
         .checked_mul(MAX_INFLIGHT_REQUESTS_PER_CONNECTION)
         .unwrap_or(MAX_SAFE_INFLIGHT_REQUESTS)
         .min(MAX_SAFE_INFLIGHT_REQUESTS)
+}
+
+fn compute_committed_stream_max_inflight_requests(connection_pool_size: usize) -> usize {
+    connection_pool_size.clamp(1, MAX_SAFE_INFLIGHT_REQUESTS)
 }
 
 /// Adds equal jitter to a retry delay.
@@ -846,6 +860,7 @@ pub struct BigQueryClient {
     client: Client,
     auth: Arc<dyn Authenticator>,
     storage_write_client: BigQueryWriteClient<Channel>,
+    committed_stream_append_permits: Arc<Semaphore>,
 }
 
 impl BigQueryClient {
@@ -878,8 +893,17 @@ impl BigQueryClient {
             .map_err(bq_error_to_etl_error)?;
         let storage_write_client =
             create_storage_grpc_client().await.map_err(bq_error_to_etl_error)?;
+        let committed_stream_append_permits = Arc::new(Semaphore::new(
+            compute_committed_stream_max_inflight_requests(connection_pool_size),
+        ));
 
-        Ok(BigQueryClient { project_id, client, auth, storage_write_client })
+        Ok(BigQueryClient {
+            project_id,
+            client,
+            auth,
+            storage_write_client,
+            committed_stream_append_permits,
+        })
     }
 
     /// Creates a new [`BigQueryClient`] from a service account key JSON string.
@@ -908,8 +932,17 @@ impl BigQueryClient {
             .map_err(bq_error_to_etl_error)?;
         let storage_write_client =
             create_storage_grpc_client().await.map_err(bq_error_to_etl_error)?;
+        let committed_stream_append_permits = Arc::new(Semaphore::new(
+            compute_committed_stream_max_inflight_requests(connection_pool_size),
+        ));
 
-        Ok(BigQueryClient { project_id, client, auth, storage_write_client })
+        Ok(BigQueryClient {
+            project_id,
+            client,
+            auth,
+            storage_write_client,
+            committed_stream_append_permits,
+        })
     }
 
     /// Creates a new [`BigQueryClient`] using Application Default Credentials.
@@ -935,8 +968,17 @@ impl BigQueryClient {
             .map_err(bq_error_to_etl_error)?;
         let storage_write_client =
             create_storage_grpc_client().await.map_err(bq_error_to_etl_error)?;
+        let committed_stream_append_permits = Arc::new(Semaphore::new(
+            compute_committed_stream_max_inflight_requests(connection_pool_size),
+        ));
 
-        Ok(BigQueryClient { project_id, client, auth, storage_write_client })
+        Ok(BigQueryClient {
+            project_id,
+            client,
+            auth,
+            storage_write_client,
+            committed_stream_append_permits,
+        })
     }
 
     /// Creates a new [`BigQueryClient`] using OAuth2 installed flow
@@ -965,8 +1007,17 @@ impl BigQueryClient {
             .map_err(bq_error_to_etl_error)?;
         let storage_write_client =
             create_storage_grpc_client().await.map_err(bq_error_to_etl_error)?;
+        let committed_stream_append_permits = Arc::new(Semaphore::new(
+            compute_committed_stream_max_inflight_requests(connection_pool_size),
+        ));
 
-        Ok(BigQueryClient { project_id, client, auth, storage_write_client })
+        Ok(BigQueryClient {
+            project_id,
+            client,
+            auth,
+            storage_write_client,
+            committed_stream_append_permits,
+        })
     }
 
     /// Returns the fully qualified BigQuery table name.
@@ -1436,78 +1487,66 @@ impl BigQueryClient {
         rows: &[BigQueryTableRow],
         start_offset: i64,
         trace_id: String,
-    ) -> EtlResult<(usize, usize)> {
+    ) -> EtlResult<CommittedStreamAppendResult> {
         if rows.is_empty() {
-            return Ok((0, 0));
+            return Ok(CommittedStreamAppendResult {
+                row_count: 0,
+                bytes_sent: 0,
+                bytes_received: 0,
+            });
         }
 
-        let mut current_index = 0;
-        let mut current_offset = start_offset;
-        let mut total_bytes_sent = 0;
-        let mut total_bytes_received = 0;
-
-        while current_index < rows.len() {
-            let (encoded_rows, processed_count) = StorageApi::create_rows(
-                &table_descriptor,
-                &rows[current_index..],
-                MAX_BATCH_SIZE_BYTES,
-            );
-            if processed_count == 0 {
-                return Err(etl_error!(
-                    ErrorKind::DestinationError,
-                    "BigQuery committed stream row is too large",
-                    "A single encoded row exceeded the Storage Write API request size limit"
-                ));
-            }
-
-            let request = AppendRowsRequest {
-                write_stream: stream_name.to_owned(),
-                offset: Some(current_offset),
-                trace_id: trace_id.clone(),
-                missing_value_interpretations: HashMap::new(),
-                default_missing_value_interpretation:
-                    append_rows_request::MissingValueInterpretation::Unspecified as i32,
-                rows: Some(encoded_rows),
-            };
-            let request_bytes = request.encoded_len();
-
-            let response_bytes = retry_with_backoff(
-                COMMITTED_STREAM_RETRY_POLICY,
-                |err: &EtlError| {
-                    if err.kind() == ErrorKind::DestinationAtomicBatchRetryable {
-                        RetryDecision::Retry
-                    } else {
-                        RetryDecision::Stop
-                    }
-                },
-                storage_write_retry_delay_with_jitter,
-                |attempt| {
-                    warn!(
-                        retry_index = attempt.retry_index,
-                        max_retries = attempt.max_retries,
-                        sleep_ms = attempt.sleep_delay.as_millis(),
-                        error = %attempt.error,
-                        "retrying retryable bigquery committed stream append error"
-                    );
-                },
-                || {
-                    let request = request.clone();
-                    async move {
-                        self.append_committed_stream_request(stream_name, request, current_offset)
-                            .await
-                    }
-                },
-            )
-            .await
-            .map_err(|failure| failure.last_error)?;
-
-            total_bytes_sent += request_bytes;
-            total_bytes_received += response_bytes;
-            current_index += processed_count;
-            current_offset += processed_count as i64;
+        let (encoded_rows, row_count) =
+            StorageApi::create_rows(&table_descriptor, rows, MAX_BATCH_SIZE_BYTES);
+        if row_count == 0 {
+            return Err(etl_error!(
+                ErrorKind::DestinationError,
+                "BigQuery committed stream row is too large",
+                "A single encoded row exceeded the Storage Write API request size limit"
+            ));
         }
 
-        Ok((total_bytes_sent, total_bytes_received))
+        let request = AppendRowsRequest {
+            write_stream: stream_name.to_owned(),
+            offset: Some(start_offset),
+            trace_id,
+            missing_value_interpretations: HashMap::new(),
+            default_missing_value_interpretation:
+                append_rows_request::MissingValueInterpretation::Unspecified as i32,
+            rows: Some(encoded_rows),
+        };
+        let bytes_sent = request.encoded_len();
+
+        let bytes_received = retry_with_backoff(
+            COMMITTED_STREAM_RETRY_POLICY,
+            |err: &EtlError| {
+                if err.kind() == ErrorKind::DestinationAtomicBatchRetryable {
+                    RetryDecision::Retry
+                } else {
+                    RetryDecision::Stop
+                }
+            },
+            storage_write_retry_delay_with_jitter,
+            |attempt| {
+                warn!(
+                    retry_index = attempt.retry_index,
+                    max_retries = attempt.max_retries,
+                    sleep_ms = attempt.sleep_delay.as_millis(),
+                    error = %attempt.error,
+                    "retrying retryable bigquery committed stream append error"
+                );
+            },
+            || {
+                let request = request.clone();
+                async move {
+                    self.append_committed_stream_request(stream_name, request, start_offset).await
+                }
+            },
+        )
+        .await
+        .map_err(|failure| failure.last_error)?;
+
+        Ok(CommittedStreamAppendResult { row_count, bytes_sent, bytes_received })
     }
 
     async fn append_committed_stream_request(
@@ -1516,6 +1555,18 @@ impl BigQueryClient {
         request: AppendRowsRequest,
         expected_offset: i64,
     ) -> EtlResult<usize> {
+        let _permit = self
+            .committed_stream_append_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                etl_error!(
+                    ErrorKind::DestinationError,
+                    "BigQuery committed stream append limiter closed",
+                    "The committed stream append limiter was closed before a permit could be acquired"
+                )
+            })?;
         let request =
             new_authorized_storage_request(self.auth.clone(), tokio_stream::iter(vec![request]))
                 .await
@@ -1906,6 +1957,12 @@ mod tests {
                 append_rows_response::AppendResult { offset: None },
             )),
         }
+    }
+
+    #[test]
+    fn committed_stream_max_inflight_uses_connection_pool_size_as_proactive_limit() {
+        assert_eq!(compute_committed_stream_max_inflight_requests(0), 1);
+        assert_eq!(compute_committed_stream_max_inflight_requests(3), 3);
     }
 
     #[test]

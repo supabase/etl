@@ -445,7 +445,8 @@ fn should_store_destination_write_stream_state(
         Some(current) => {
             current.next_offset < next.next_offset
                 || (current.next_offset == next.next_offset
-                    && current.stream_name == next.stream_name)
+                    && current.stream_name == next.stream_name
+                    && current.last_sequence_number <= next.last_sequence_number)
         }
     }
 }
