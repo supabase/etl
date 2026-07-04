@@ -218,7 +218,7 @@ fn append_only_metadata_column_specs() -> Vec<String> {
         format!("`{APPEND_ONLY_SOURCE_TIMESTAMP_COLUMN}` int64 not null"),
         format!("`{APPEND_ONLY_CHANGE_SEQUENCE_NUMBER_COLUMN}` string not null"),
         format!("`{APPEND_ONLY_CHANGE_TYPE_COLUMN}` string not null"),
-        format!("`{APPEND_ONLY_SORT_KEYS_COLUMN}` array<string> not null"),
+        format!("`{APPEND_ONLY_SORT_KEYS_COLUMN}` array<string>"),
     ]
 }
 
@@ -760,7 +760,7 @@ mod tests {
             spec,
             "(`id` int64,`name` string,`_etl_uuid` string not null,`_etl_source_timestamp` int64 \
              not null,`_etl_change_sequence_number` string not null,`_etl_change_type` string not \
-             null,`_etl_sort_keys` array<string> not null)"
+             null,`_etl_sort_keys` array<string>)"
         );
         assert!(!spec.contains("primary key"));
     }
