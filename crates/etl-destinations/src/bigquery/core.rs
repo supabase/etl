@@ -2576,6 +2576,19 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    fn replicated_schema_without_primary_key() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+            ],
+        ));
+
+        ReplicatedTableSchema::all(table_schema)
+    }
+
     #[test]
     fn table_name_to_bigquery_table_id_no_underscores() {
         let table_name = TableName::new("schema".to_owned(), "table".to_owned());
@@ -2845,15 +2858,39 @@ mod tests {
         assert_eq!(metadata.uuid, changed_non_key_metadata.uuid);
         assert_eq!(metadata.change_sequence_number, same_metadata.change_sequence_number);
         assert_ne!(metadata.uuid, different_metadata.uuid);
-        assert_ne!(metadata.uuid, same_row_different_copy_ordinal.uuid);
+        assert_eq!(metadata.uuid, same_row_different_copy_ordinal.uuid);
         assert_eq!(metadata.source_timestamp, source_timestamp);
+        assert!(metadata.change_sequence_number.starts_with("0000000000000000/0000000000000000/"));
         assert_eq!(
             metadata.sort_keys,
             vec![
                 "0000000000000000".to_owned(),
-                "0000000000000000/0000000000000000/0000000000000000".to_owned(),
+                metadata.change_sequence_number.clone(),
                 metadata.uuid.clone(),
             ]
+        );
+    }
+
+    #[test]
+    fn append_only_copy_metadata_preserves_duplicate_rows_without_primary_key() {
+        let replicated_table_schema = replicated_schema_without_primary_key();
+        let source_timestamp = 42;
+        let table_row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+        let same_table_row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+
+        let metadata =
+            append_only_copy_metadata(&replicated_table_schema, &table_row, source_timestamp, 0);
+        let same_row_different_copy_ordinal = append_only_copy_metadata(
+            &replicated_table_schema,
+            &same_table_row,
+            source_timestamp,
+            1,
+        );
+
+        assert_ne!(metadata.uuid, same_row_different_copy_ordinal.uuid);
+        assert_ne!(
+            metadata.change_sequence_number,
+            same_row_different_copy_ordinal.change_sequence_number
         );
     }
 

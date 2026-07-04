@@ -84,6 +84,10 @@ pub(super) fn append_only_copy_sequence_number(row_index: u64) -> String {
     format!("0000000000000000/0000000000000000/{row_index:016x}")
 }
 
+fn append_only_copy_stable_sequence_number(row_hash: &str) -> String {
+    format!("0000000000000000/0000000000000000/{row_hash}")
+}
+
 /// Returns a process-local timestamp for initial-copy metadata in Postgres
 /// timestamp wire format.
 pub(super) fn append_only_backfill_timestamp() -> EtlResult<i64> {
@@ -136,7 +140,11 @@ pub(super) fn append_only_copy_metadata(
     row_index: u64,
 ) -> AppendOnlyMetadata {
     let row_hash = append_only_copy_row_hash(replicated_table_schema, table_row);
-    let sequence_number = append_only_copy_sequence_number(row_index);
+    let sequence_number = if append_only_copy_uses_primary_key_identity(replicated_table_schema) {
+        append_only_copy_stable_sequence_number(&row_hash)
+    } else {
+        append_only_copy_sequence_number(row_index)
+    };
     let uuid = format!("copy/{sequence_number}/{row_hash}");
     AppendOnlyMetadata {
         uuid: uuid.clone(),
@@ -188,8 +196,8 @@ fn append_only_copy_row_hash(
         replicated_table_schema.inner().snapshot_id
     );
 
-    let use_primary_key_identity = replicated_table_schema.all_primary_key_columns_replicated()
-        && replicated_table_schema.primary_key_column_schemas().len() > 0;
+    let use_primary_key_identity =
+        append_only_copy_uses_primary_key_identity(replicated_table_schema);
     let _ = write!(&mut identity, "identity=primary_key:{use_primary_key_identity};");
 
     for (column_schema, cell) in replicated_table_schema.column_schemas().zip(table_row.values()) {
@@ -212,6 +220,13 @@ fn append_only_copy_row_hash(
         let _ = write!(&mut hash, "{byte:02x}");
     }
     hash
+}
+
+fn append_only_copy_uses_primary_key_identity(
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> bool {
+    replicated_table_schema.all_primary_key_columns_replicated()
+        && replicated_table_schema.primary_key_column_schemas().len() > 0
 }
 
 /// Produces a length-prefixed representation to avoid simple delimiter
