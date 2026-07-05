@@ -419,9 +419,12 @@ fn is_retryable_committed_stream_status(status: &Status) -> bool {
         // stream appends created immediately after a table schema change while
         // the Storage Write schema metadata catches up with the DDL.
         Code::Aborted
+            | Code::Cancelled
+            | Code::DeadlineExceeded
             | Code::Internal
             | Code::InvalidArgument
             | Code::ResourceExhausted
+            | Code::Unknown
             | Code::Unavailable
     )
 }
@@ -433,9 +436,12 @@ fn is_retryable_committed_stream_response_status(status: &GoogleRpcStatus) -> bo
         // See `is_retryable_committed_stream_status` for why INVALID_ARGUMENT
         // is retried on committed stream append responses.
         Code::Aborted
+            | Code::Cancelled
+            | Code::DeadlineExceeded
             | Code::Internal
             | Code::InvalidArgument
             | Code::ResourceExhausted
+            | Code::Unknown
             | Code::Unavailable
     )
 }
@@ -2019,6 +2025,38 @@ mod tests {
         assert!(is_retryable_committed_stream_response_status(&GoogleRpcStatus {
             code: Code::InvalidArgument as i32,
             message: "schema metadata is not ready".to_owned(),
+            details: Vec::new(),
+        }));
+    }
+
+    #[test]
+    fn committed_stream_cancelled_is_retryable() {
+        assert!(is_retryable_committed_stream_status(&Status::cancelled(
+            "append operation was cancelled"
+        )));
+        assert!(is_retryable_committed_stream_response_status(&GoogleRpcStatus {
+            code: Code::Cancelled as i32,
+            message: "append operation was cancelled".to_owned(),
+            details: Vec::new(),
+        }));
+    }
+
+    #[test]
+    fn committed_stream_transport_uncertainty_is_retryable() {
+        assert!(is_retryable_committed_stream_status(&Status::deadline_exceeded(
+            "append deadline exceeded"
+        )));
+        assert!(is_retryable_committed_stream_status(&Status::unknown(
+            "append acknowledgement was lost"
+        )));
+        assert!(is_retryable_committed_stream_response_status(&GoogleRpcStatus {
+            code: Code::DeadlineExceeded as i32,
+            message: "append deadline exceeded".to_owned(),
+            details: Vec::new(),
+        }));
+        assert!(is_retryable_committed_stream_response_status(&GoogleRpcStatus {
+            code: Code::Unknown as i32,
+            message: "append acknowledgement was lost".to_owned(),
             details: Vec::new(),
         }));
     }
