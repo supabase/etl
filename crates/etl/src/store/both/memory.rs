@@ -282,8 +282,9 @@ fn should_store_destination_write_stream_state(
         None => true,
         Some(current) => {
             current.stream_name == next.stream_name
-                && current.next_offset <= next.next_offset
-                && current.last_sequence_number <= next.last_sequence_number
+                && (current.next_offset < next.next_offset
+                    || (current.next_offset == next.next_offset
+                        && current.last_sequence_number <= next.last_sequence_number))
         }
     }
 }
@@ -417,5 +418,35 @@ impl TableStateLifecycleStore for MemoryStore {
                 Ok(affected_table_count)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream_state(next_offset: i64, last_sequence_number: &str) -> DestinationWriteStreamState {
+        DestinationWriteStreamState::new_with_last_sequence_number(
+            "destination_table".to_owned(),
+            "stream".to_owned(),
+            next_offset,
+            Some(last_sequence_number.to_owned()),
+        )
+    }
+
+    #[test]
+    fn write_stream_state_advances_when_offset_increases_even_if_sequence_sorts_lower() {
+        let current = stream_state(10, "ffffffff");
+        let next = stream_state(20, "00000000");
+
+        assert!(should_store_destination_write_stream_state(Some(&current), &next));
+    }
+
+    #[test]
+    fn write_stream_state_rejects_same_offset_when_sequence_sorts_lower() {
+        let current = stream_state(10, "ffffffff");
+        let next = stream_state(10, "00000000");
+
+        assert!(!should_store_destination_write_stream_state(Some(&current), &next));
     }
 }

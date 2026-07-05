@@ -73,10 +73,15 @@ pub async fn store_destination_write_stream(
             last_sequence_number = excluded.last_sequence_number,
             updated_at = now()
         where etl.destination_write_streams.stream_name = excluded.stream_name
-            and etl.destination_write_streams.next_offset <= excluded.next_offset
             and (
-                etl.destination_write_streams.last_sequence_number is null
-                or excluded.last_sequence_number >= etl.destination_write_streams.last_sequence_number
+                etl.destination_write_streams.next_offset < excluded.next_offset
+                or (
+                    etl.destination_write_streams.next_offset = excluded.next_offset
+                    and (
+                        etl.destination_write_streams.last_sequence_number is null
+                        or excluded.last_sequence_number >= etl.destination_write_streams.last_sequence_number
+                    )
+                )
             )
         "#,
     )

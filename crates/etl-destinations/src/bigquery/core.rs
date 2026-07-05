@@ -857,6 +857,13 @@ where
         self.write_table_rows(replicated_table_schema, table_rows).await
     }
 
+    /// Writes streaming replication events through the destination write path in
+    /// tests.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_events_for_tests(&self, events: Vec<Event>) -> EtlResult<()> {
+        self.write_events(events).await
+    }
+
     /// Handles a schema change event (Relation) by computing the diff and
     /// applying changes.
     ///
@@ -2521,7 +2528,23 @@ fn append_only_rows_after_sequence(
         return rows;
     };
 
+    if is_append_only_copy_sequence_number(last_sequence_number) {
+        if let Some(last_sequence_index) =
+            rows.iter().position(|row| row.sequence_number() == last_sequence_number)
+        {
+            return rows.into_iter().skip(last_sequence_index + 1).collect();
+        }
+
+        if rows.iter().all(|row| is_append_only_copy_sequence_number(row.sequence_number())) {
+            return rows;
+        }
+    }
+
     rows.into_iter().filter(|row| row.sequence_number() > last_sequence_number).collect()
+}
+
+fn is_append_only_copy_sequence_number(sequence_number: &str) -> bool {
+    sequence_number.starts_with("0000000000000000/0000000000000000/")
 }
 
 #[cfg(test)]
@@ -3229,6 +3252,56 @@ mod tests {
         assert_eq!(
             result[0].sequence_number(),
             "0000000000000002/0000000000000000/0000000000000000"
+        );
+    }
+
+    #[test]
+    fn append_only_copy_rows_after_sequence_keeps_new_copy_chunk() {
+        let rows = vec![
+            AppendOnlyTableRow::new(
+                BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+                "0000000000000000/0000000000000000/0000000000000001".to_owned(),
+            ),
+            AppendOnlyTableRow::new(
+                BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+                "0000000000000000/0000000000000000/1111111111111111".to_owned(),
+            ),
+        ];
+
+        let result = append_only_rows_after_sequence(
+            rows,
+            Some("0000000000000000/0000000000000000/ffffffffffffffff"),
+        );
+
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn append_only_copy_rows_after_sequence_skips_replayed_copy_prefix() {
+        let rows = vec![
+            AppendOnlyTableRow::new(
+                BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+                "0000000000000000/0000000000000000/aaaaaaaaaaaaaaaa".to_owned(),
+            ),
+            AppendOnlyTableRow::new(
+                BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+                "0000000000000000/0000000000000000/ffffffffffffffff".to_owned(),
+            ),
+            AppendOnlyTableRow::new(
+                BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+                "0000000000000000/0000000000000000/0000000000000001".to_owned(),
+            ),
+        ];
+
+        let result = append_only_rows_after_sequence(
+            rows,
+            Some("0000000000000000/0000000000000000/ffffffffffffffff"),
+        );
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].sequence_number(),
+            "0000000000000000/0000000000000000/0000000000000001"
         );
     }
 
