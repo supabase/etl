@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use etl::{
     data::{ArrayCell, Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow},
     error::EtlError,
@@ -14,30 +12,25 @@ use crate::bigquery::validation::validate_cell_for_bigquery;
 const UNVALIDATED_NULL_ARRAY_ELEMENT: &str =
     "array cell contains a NULL element that validate_cell_for_bigquery should have rejected";
 
-/// Protocol buffer wrapper for a BigQuery table row.
-///
-/// Wraps a vector of [`Cell`] values and implements the [`prost::Message`]
-/// trait to enable Protocol Buffer serialization for BigQuery streaming
-/// inserts.
+/// Protocol buffer wrapper for a BigQuery table row, holding its Protocol
+/// Buffer encoding rather than the source cells.
 ///
 /// Formatting cells such as dates, numerics, UUIDs, and JSON into their
 /// Protocol Buffer string representation is comparatively expensive, and
 /// [`prost::Message::encoded_len`] and [`prost::Message::encode_raw`] are
 /// each invoked at least once per row by callers that budget a batch by
-/// length before encoding it. `encoded` caches the fully encoded row the
-/// first time either method runs, so that formatting happens exactly once
-/// per row regardless of how many times it is measured or written.
+/// length before encoding it. Encoding once up front, at row-construction
+/// time, and keeping only the resulting bytes means formatting happens
+/// exactly once per row and the source cells don't have to be kept alive
+/// alongside their encoding.
 #[derive(Debug)]
-pub(super) struct BigQueryTableRow {
-    cells: Vec<(u32, Cell)>,
-    encoded: OnceLock<Vec<u8>>,
-}
+pub(super) struct BigQueryTableRow(Vec<u8>);
 
 impl TryFrom<TableRow> for BigQueryTableRow {
     type Error = EtlError;
 
     /// Converts a [`TableRow`] to a [`BigQueryTableRow`] by validating every
-    /// cell for BigQuery compatibility.
+    /// cell for BigQuery compatibility and encoding the row.
     ///
     /// Returns an error if any cell, including array elements, is outside
     /// BigQuery's supported bounds. This fails fast rather than clamping, so
@@ -50,17 +43,12 @@ impl TryFrom<TableRow> for BigQueryTableRow {
 }
 
 impl BigQueryTableRow {
-    /// Builds a row from already-tagged, validated cells.
-    fn new(cells: Vec<(u32, Cell)>) -> Self {
-        Self { cells, encoded: OnceLock::new() }
-    }
-
-    /// Converts tagged cells into a BigQuery row while preserving sparse field
-    /// positions.
+    /// Validates tagged cells for BigQuery compatibility and encodes them
+    /// into a row, preserving sparse field positions.
     pub(super) fn try_from_tagged_cells(
         tagged_cells: impl IntoIterator<Item = (usize, Cell)>,
     ) -> Result<Self, EtlError> {
-        let mut validated_cells = Vec::new();
+        let mut buf = Vec::new();
 
         for (index, cell) in tagged_cells {
             validate_cell_for_bigquery(&cell).map_err(|err| {
@@ -75,40 +63,21 @@ impl BigQueryTableRow {
                 )
             })?;
 
-            validated_cells.push((index as u32, cell));
+            cell_encode_prost(&cell, index as u32, &mut buf);
         }
 
-        Ok(BigQueryTableRow::new(validated_cells))
-    }
-
-    /// Returns the tagged cells for assertions in tests.
-    #[cfg(test)]
-    pub(super) fn debug_cells(&self) -> &[(u32, Cell)] {
-        &self.cells
-    }
-
-    /// Returns this row's Protocol Buffer encoding, computing and caching it
-    /// on the first call.
-    fn encoded_bytes(&self) -> &[u8] {
-        self.encoded.get_or_init(|| {
-            let mut buf = Vec::new();
-            for (tag, cell) in &self.cells {
-                cell_encode_prost(cell, *tag, &mut buf);
-            }
-            
-            buf
-        })
+        Ok(BigQueryTableRow(buf))
     }
 }
 
 impl prost::Message for BigQueryTableRow {
-    /// Writes the table row's cached Protocol Buffer encoding into the
-    /// provided buffer.
+    /// Writes the table row's Protocol Buffer encoding into the provided
+    /// buffer.
     fn encode_raw(&self, buf: &mut impl bytes::BufMut)
     where
         Self: Sized,
     {
-        buf.put_slice(self.encoded_bytes());
+        buf.put_slice(&self.0);
     }
 
     /// Merges a field from a Protocol Buffer message into this table row.
@@ -128,19 +97,14 @@ impl prost::Message for BigQueryTableRow {
         unimplemented!("merge_field not implemented yet");
     }
 
-    /// Returns the length of the table row's cached Protocol Buffer encoding.
+    /// Returns the length of the table row's Protocol Buffer encoding.
     fn encoded_len(&self) -> usize {
-        self.encoded_bytes().len()
+        self.0.len()
     }
 
-    /// Clears all cell values in the table row and invalidates the cached
-    /// encoding.
+    /// Clears the table row's encoded bytes.
     fn clear(&mut self) {
-        for (_, cell) in &mut self.cells {
-            cell.clear();
-        }
-
-        self.encoded = OnceLock::new();
+        self.0.clear();
     }
 }
 
@@ -482,7 +446,9 @@ mod tests {
         let timestamptz = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
         let expected_micros = timestamptz.timestamp_micros();
 
-        let row = BigQueryTableRow::new(vec![(1, Cell::TimestampTz(timestamptz))]);
+        let row =
+            BigQueryTableRow::try_from_tagged_cells(vec![(1, Cell::TimestampTz(timestamptz))])
+                .unwrap();
         let mut actual = Vec::new();
         row.encode(&mut actual).unwrap();
 
@@ -492,10 +458,11 @@ mod tests {
         assert_eq!(actual, expected);
         assert_eq!(row.encoded_len(), expected.len());
 
-        let array_row = BigQueryTableRow::new(vec![(
+        let array_row = BigQueryTableRow::try_from_tagged_cells(vec![(
             1,
             Cell::Array(etl::data::ArrayCell::TimestampTz(vec![Some(timestamptz)])),
-        )]);
+        )])
+        .unwrap();
         let mut actual_array = Vec::new();
         array_row.encode(&mut actual_array).unwrap();
 
