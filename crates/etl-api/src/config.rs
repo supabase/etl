@@ -3,7 +3,7 @@ use std::fmt;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::{
     Config,
-    shared::{PgConnectionConfig, SentryConfig},
+    shared::{PgConnectionConfig, SentryConfig, TlsConfig},
 };
 use serde::{
     Deserialize, Deserializer,
@@ -75,16 +75,17 @@ pub struct ReplicatorResourcesConfig {
 /// Configuration for source database connections and behavior.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SourceConfig {
-    /// Whether TLS is enabled for source database connections.
+    /// TLS configuration for source database connections, mirroring
+    /// `database.tls`'s shape so both connections are configured the same
+    /// way.
     ///
-    /// When `true`, the API fetches trusted root certificates from Kubernetes
-    /// and uses them to establish TLS connections to source databases. This
-    /// applies both to direct API connections (e.g., listing tables, managing
-    /// publications) and to replicator pods deployed in Kubernetes.
-    ///
-    /// Defaults to `true`.
-    #[serde(default = "default_source_tls_enabled")]
-    pub tls_enabled: bool,
+    /// When `enabled` is `true`, the API uses `trusted_root_certs` to
+    /// establish TLS connections to source databases. This applies both to
+    /// direct API connections (e.g., listing tables, managing publications)
+    /// and to replicator pods deployed in Kubernetes, which receive the same
+    /// resolved value embedded in their generated configuration.
+    #[serde(default = "default_source_tls")]
+    pub tls: TlsConfig,
     /// Optional trusted username for source profile validation.
     ///
     /// When provided, ETL validates that source connections use this role and
@@ -96,12 +97,16 @@ pub struct SourceConfig {
 
 impl Default for SourceConfig {
     fn default() -> Self {
-        Self { tls_enabled: default_source_tls_enabled(), trusted_username: None }
+        Self { tls: default_source_tls(), trusted_username: None }
     }
 }
 
-const fn default_source_tls_enabled() -> bool {
-    true
+/// Returns the default source TLS configuration: enabled, with no certs set.
+///
+/// Defaults to enabled (unlike [`TlsConfig::disabled`]) because source
+/// connections should require TLS unless explicitly turned off.
+fn default_source_tls() -> TlsConfig {
+    TlsConfig { enabled: true, trusted_root_certs: String::new() }
 }
 
 impl Config for ApiConfig {

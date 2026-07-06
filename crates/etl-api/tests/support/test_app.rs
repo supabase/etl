@@ -13,7 +13,7 @@ use etl_api::{
         SourceConfig,
     },
     configs::encryption,
-    k8s::{K8sClient, TrustedRootCertsCache},
+    k8s::{K8sClient, SourceTlsConfig},
     routes::{
         destinations::{CreateDestinationRequest, UpdateDestinationRequest},
         destinations_pipelines::{
@@ -30,8 +30,14 @@ use etl_api::{
     },
     startup::run,
 };
-use etl_config::{Environment, shared::PgConnectionConfig};
-use etl_postgres::{sqlx::test_utils::drop_pg_database, test_utils::test_tls_enabled_from_env};
+use etl_config::{
+    Environment,
+    shared::{PgConnectionConfig, TlsConfig},
+};
+use etl_postgres::{
+    sqlx::test_utils::drop_pg_database,
+    test_utils::{test_tls_enabled_from_env, test_tls_root_certs_from_env},
+};
 use reqwest::{IntoUrl, RequestBuilder};
 use tokio::{runtime::Handle, time::sleep};
 
@@ -538,21 +544,13 @@ pub(crate) async fn spawn_test_app_with_k8s_state(
     k8s_state: MockK8sState,
 ) -> TestApp {
     let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient::new(k8s_state.clone()));
-    let trusted_root_certs_cache = TrustedRootCertsCache::new(Arc::clone(&k8s_client));
 
-    spawn_test_app_with_services(
-        trusted_source_username,
-        Some(k8s_client),
-        Some(trusted_root_certs_cache),
-        k8s_state,
-    )
-    .await
+    spawn_test_app_with_services(trusted_source_username, Some(k8s_client), k8s_state).await
 }
 
 async fn spawn_test_app_with_services(
     trusted_source_username: Option<String>,
     k8s_client: Option<Arc<dyn K8sClient>>,
-    trusted_root_certs_cache: Option<TrustedRootCertsCache>,
     k8s_state: MockK8sState,
 ) -> TestApp {
     Environment::Dev.set();
@@ -590,10 +588,16 @@ async fn spawn_test_app_with_services(
         supabase_api_url: None,
         configcat_sdk_key: None,
         source: SourceConfig {
-            tls_enabled: test_tls_enabled_from_env(),
+            tls: TlsConfig {
+                enabled: test_tls_enabled_from_env(),
+                trusted_root_certs: test_tls_root_certs_from_env().unwrap_or_default(),
+            },
             trusted_username: trusted_source_username,
         },
     };
+
+    let source_tls_config = SourceTlsConfig::new(config.source.tls.clone())
+        .expect("failed to resolve source tls config");
 
     let server = run(
         config.clone(),
@@ -601,7 +605,7 @@ async fn spawn_test_app_with_services(
         api_db_pool,
         encryption_keyring,
         k8s_client,
-        trusted_root_certs_cache,
+        source_tls_config,
         None,
     )
     .expect("failed to bind address");

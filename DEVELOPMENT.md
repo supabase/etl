@@ -361,7 +361,6 @@ The etl-api expects these resources to exist before it can deploy replicators:
 
 1. **Namespace**: `etl-data-plane` - Where all replicator pods and related resources are created
 2. **ServiceAccount**: `etl-replicator` - Used by replicator pods created by the etl-api
-3. **ConfigMap**: `trusted-root-certs-config` - Provides trusted root certificates for TLS connections
 
 These are defined in `scripts/k8s/local/` and should be applied before running the API:
 

@@ -590,7 +590,6 @@ mod tests {
 
     use async_trait::async_trait;
     use etl_config::{SerializableSecretString, shared::ClickHouseEngine};
-    use k8s_openapi::api::core::v1::ConfigMap;
 
     use super::*;
     use crate::{
@@ -750,10 +749,6 @@ mod tests {
         async fn delete_snowflake_secret(&self, prefix: &str) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("delete-snowflake:{prefix}"));
             Ok(())
-        }
-
-        async fn get_config_map(&self, _config_map_name: &str) -> Result<ConfigMap, K8sError> {
-            Ok(ConfigMap::default())
         }
 
         async fn create_or_update_replicator_config_map(
