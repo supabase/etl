@@ -1,7 +1,7 @@
 mod client;
 mod core;
 mod encoding;
-pub mod initial_copy;
+pub(crate) mod initial_copy;
 mod metrics;
 mod schema;
 mod sql;

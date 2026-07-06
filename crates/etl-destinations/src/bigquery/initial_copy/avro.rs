@@ -28,27 +28,46 @@ const BIGQUERY_BIGNUMERIC_SCALE: usize = 38;
 const UNIX_EPOCH_DATE: &str = "1970-01-01";
 /// Unix epoch timestamp for Avro local timestamp logical values.
 const UNIX_EPOCH_TIMESTAMP: &str = "1970-01-01 00:00:00";
+/// BigQuery Avro SQL type annotation for native JSON columns.
+const BIGQUERY_JSON_SQL_TYPE: &str = "JSON";
+/// Uncompressed Avro block size used by the snapshot stream encoder.
+///
+/// `apache_avro`'s built-in default block size is 16000 bytes, which forces a
+/// Snappy compression call and a block sync marker every ~16 KiB of encoded
+/// data. That caps Snappy's compression ratio on repetitive relational data
+/// and adds per-block overhead. PeerDB's BigQuery Avro sync uses a 64 MiB OCF
+/// block (`ocf.WithBlockSize(1 << 26)`) for the same reason, but that value is
+/// held per open writer slot (one per initial-copy Postgres copy connection),
+/// so worst-case resident memory from this buffer alone is approximately
+/// `AVRO_WRITER_BLOCK_SIZE_BYTES * max_table_sync_workers *
+/// max_copy_connections_per_table`. At the pipeline's default parallelism
+/// (4 * 4 = 16 slots), 64 MiB would cost over 1 GiB worst case, which is not
+/// safe on memory-constrained (for example 500 MiB) replicator deployments.
+/// 4 MiB keeps that worst case at 64 MiB while still capturing most of the
+/// compression benefit. The GCS upload chunk buffer follows the same
+/// reasoning.
+const AVRO_WRITER_BLOCK_SIZE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Mapping from one source column to one Avro field.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct AvroColumnMapping {
+pub(crate) struct AvroColumnMapping {
     /// Source column name from the replicated schema.
-    pub source_column_name: String,
+    pub(crate) source_column_name: String,
     /// Avro-safe field name used in the object container file.
-    pub avro_field_name: String,
+    pub(crate) avro_field_name: String,
     /// Whether the source column is nullable.
-    pub nullable: bool,
+    pub(crate) nullable: bool,
     /// Source Postgres type used by the destination dialect.
-    pub source_type: Type,
+    pub(crate) source_type: Type,
 }
 
 /// Parsed Avro schema plus field mapping metadata.
 #[derive(Debug, Clone)]
-pub struct AvroSchemaDefinition {
+pub(crate) struct AvroSchemaDefinition {
     /// Parsed Avro schema used by [`apache_avro::Writer`].
-    pub schema: Schema,
+    pub(crate) schema: Schema,
     /// Source-to-Avro field mapping in replicated column order.
-    pub column_mappings: Vec<AvroColumnMapping>,
+    pub(crate) column_mappings: Vec<AvroColumnMapping>,
     /// Destination-specific encoding behavior.
     dialect: AvroSchemaDialect,
 }
@@ -56,7 +75,7 @@ pub struct AvroSchemaDefinition {
 impl AvroSchemaDefinition {
     /// Creates a BigQuery Avro schema definition from a replicated table
     /// schema.
-    pub fn for_bigquery(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<Self> {
+    pub(crate) fn for_bigquery(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<Self> {
         let record_name = avro_name(&format!(
             "{}_{}",
             replicated_table_schema.name().schema,
@@ -104,7 +123,7 @@ impl AvroSchemaDefinition {
 }
 
 /// Streaming Avro object-container encoder for snapshot batches.
-pub struct AvroSnapshotStreamEncoder<'a, W: Write> {
+pub(crate) struct AvroSnapshotStreamEncoder<'a, W: Write> {
     schema_definition: &'a AvroSchemaDefinition,
     writer: Writer<'a, W>,
     row_count: u64,
@@ -113,17 +132,19 @@ pub struct AvroSnapshotStreamEncoder<'a, W: Write> {
 
 impl<'a, W: Write> AvroSnapshotStreamEncoder<'a, W> {
     /// Creates a new streaming Avro encoder.
-    pub fn new(schema_definition: &'a AvroSchemaDefinition, writer: W) -> Self {
-        Self {
-            schema_definition,
-            writer: Writer::with_codec(&schema_definition.schema, writer, Codec::Snappy),
-            row_count: 0,
-            estimated_bytes: 0,
-        }
+    pub(crate) fn new(schema_definition: &'a AvroSchemaDefinition, writer: W) -> Self {
+        let writer = Writer::builder()
+            .schema(&schema_definition.schema)
+            .writer(writer)
+            .codec(Codec::Snappy)
+            .block_size(AVRO_WRITER_BLOCK_SIZE_BYTES)
+            .build();
+
+        Self { schema_definition, writer, row_count: 0, estimated_bytes: 0 }
     }
 
     /// Writes one batch of rows to the underlying writer.
-    pub fn write_batch(&mut self, batch: SnapshotBatch) -> EtlResult<()> {
+    pub(crate) fn write_batch(&mut self, batch: SnapshotBatch) -> EtlResult<()> {
         for row in batch.rows {
             self.estimated_bytes = self.estimated_bytes.saturating_add(row.size_hint());
             // Keep only one encoded row alive at a time. `append_value_ref`
@@ -145,17 +166,17 @@ impl<'a, W: Write> AvroSnapshotStreamEncoder<'a, W> {
     }
 
     /// Returns the number of rows written so far.
-    pub fn row_count(&self) -> u64 {
+    pub(crate) fn row_count(&self) -> u64 {
         self.row_count
     }
 
     /// Returns the current estimated source byte count.
-    pub fn estimated_bytes(&self) -> usize {
+    pub(crate) fn estimated_bytes(&self) -> usize {
         self.estimated_bytes
     }
 
     /// Finishes the Avro file and returns the underlying writer.
-    pub fn finish(self) -> EtlResult<(W, u64, usize)> {
+    pub(crate) fn finish(self) -> EtlResult<(W, u64, usize)> {
         let row_count = self.row_count;
         let estimated_bytes = self.estimated_bytes;
         let writer = self.writer.into_inner().map_err(|err| {
@@ -238,7 +259,7 @@ fn avro_array_item_type_for_bigquery(typ: &Type) -> EtlResult<JsonValue> {
         &Type::TIMESTAMP_ARRAY => local_timestamp_micros_schema_json(),
         &Type::TIMESTAMPTZ_ARRAY => timestamp_micros_schema_json(),
         &Type::BYTEA_ARRAY => json!("bytes"),
-        &Type::JSON_ARRAY | &Type::JSONB_ARRAY => json!("string"),
+        &Type::JSON_ARRAY | &Type::JSONB_ARRAY => json_schema_json(),
         _ => json!("string"),
     })
 }
@@ -255,9 +276,17 @@ fn avro_scalar_type_for_bigquery(typ: &Type) -> JsonValue {
         &Type::TIMESTAMP => local_timestamp_micros_schema_json(),
         &Type::TIMESTAMPTZ => timestamp_micros_schema_json(),
         &Type::BYTEA => json!("bytes"),
-        &Type::JSON | &Type::JSONB => json!("string"),
+        &Type::JSON | &Type::JSONB => json_schema_json(),
         _ => json!("string"),
     }
+}
+
+/// Returns the Avro string schema annotated as a BigQuery JSON column.
+fn json_schema_json() -> JsonValue {
+    json!({
+        "type": "string",
+        "sqlType": BIGQUERY_JSON_SQL_TYPE,
+    })
 }
 
 /// Returns the Avro decimal schema used for BigQuery BIGNUMERIC.
@@ -721,6 +750,24 @@ mod tests {
         assert!(parsed_schema.contains("LocalTimestampMicros"));
         assert!(parsed_schema.contains("precision: 76"));
         assert!(parsed_schema.contains("scale: 38"));
+    }
+
+    #[test]
+    fn schema_definition_annotates_json_for_direct_bigquery_loads() {
+        assert_eq!(
+            avro_scalar_type_for_bigquery(&Type::JSONB),
+            json!({
+                "type": "string",
+                "sqlType": "JSON",
+            })
+        );
+        assert_eq!(
+            avro_array_item_type_for_bigquery(&Type::JSONB_ARRAY).unwrap(),
+            json!({
+                "type": "string",
+                "sqlType": "JSON",
+            })
+        );
     }
 
     #[test]

@@ -4,6 +4,8 @@ use url::Url;
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
+use super::{ValidationError, validators::validate_gcs_bucket_name};
+
 const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
@@ -214,6 +216,15 @@ impl DestinationConfig {
             DestinationConfig::Ducklake { .. } => DestinationKind::Ducklake,
             DestinationConfig::Snowflake { .. } => DestinationKind::Snowflake,
         }
+    }
+
+    /// Validates destination-specific configuration values.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if let DestinationConfig::BigQuery { gcs_staging_bucket: Some(bucket), .. } = self {
+            validate_gcs_bucket_name(bucket)?;
+        }
+
+        Ok(())
     }
 }
 

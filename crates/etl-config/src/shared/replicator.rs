@@ -40,6 +40,7 @@ impl ReplicatorConfig {
     ///
     /// Performs comprehensive validation of all configuration components.
     pub fn validate(&self) -> Result<(), ValidationError> {
+        self.destination.validate()?;
         self.pipeline.validate()
     }
 

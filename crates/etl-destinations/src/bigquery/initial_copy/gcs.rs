@@ -1,13 +1,6 @@
 //! GCS upload support for BigQuery initial-copy staging files.
 
-use std::{
-    fmt,
-    future::Future,
-    io::{SeekFrom, Write},
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{fmt, future::Future, io::Write, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use etl::{
@@ -17,26 +10,22 @@ use etl::{
 use gcp_bigquery_client::yup_oauth2::{
     ApplicationDefaultCredentialsAuthenticator, ApplicationDefaultCredentialsFlowOpts,
     AuthorizedUserAuthenticator, InstalledFlowAuthenticator, InstalledFlowReturnMethod,
-    ServiceAccountAuthenticator, authenticator::ApplicationDefaultCredentialsTypes,
-    authorized_user::AuthorizedUserSecret, parse_application_secret, parse_service_account_key,
-    read_service_account_key,
+    ServiceAccountAuthenticator,
+    authenticator::{ApplicationDefaultCredentialsTypes, DefaultAuthenticator},
+    authorized_user::AuthorizedUserSecret,
+    parse_application_secret, parse_service_account_key, read_service_account_key,
 };
 use reqwest::{
     Body, Client, StatusCode,
     header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION, RANGE},
 };
 use serde::{Deserialize, Serialize};
-use tokio::{
-    fs,
-    io::{AsyncReadExt, AsyncSeekExt},
-    runtime::Handle,
-};
+use tokio::{fs, runtime::Handle, sync::OnceCell};
 use tracing::warn;
 
 use crate::{
     bigquery::initial_copy::{
-        GcsDeleteRequest, GcsObjectMetadata, GcsStreamingUploadRequest, GcsUploadRequest,
-        GcsUploader, UploadBody, gcs_uri,
+        GcsDeleteRequest, GcsObjectMetadata, GcsStreamingUploadRequest, GcsUploader, gcs_uri,
     },
     retry::{RetryAttempt, RetryDecision, RetryPolicy, retry_with_backoff},
 };
@@ -56,42 +45,56 @@ const GCS_REQUEST_RETRY_POLICY: RetryPolicy = RetryPolicy {
 /// Chunk size used for resumable GCS uploads.
 ///
 /// GCS requires non-final chunks to be multiples of 256 KiB and recommends at
-/// least 8 MiB. Keeping this at the recommended lower bound caps per-slot
-/// upload buffering while still allowing concurrent slots to keep bytes in
-/// flight.
+/// least 8 MiB; this uses exactly that recommended minimum. This buffer is
+/// held per open writer slot (one per initial-copy Postgres copy connection),
+/// so worst-case resident memory from this buffer alone is approximately
+/// `GCS_RESUMABLE_UPLOAD_CHUNK_SIZE * max_table_sync_workers *
+/// max_copy_connections_per_table`. At the pipeline's default parallelism
+/// (4 * 4 = 16 slots), this costs 16 * 8 MiB = 128 MiB worst case, which is
+/// safe on memory-constrained (for example 500 MiB) replicator deployments.
+/// The Avro writer's block-size buffer follows the same reasoning.
 const GCS_RESUMABLE_UPLOAD_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 
 /// Uploads BigQuery initial-copy staging files to GCS.
 #[derive(Clone)]
-pub struct GoogleCloudStorageUploader {
+pub(crate) struct GoogleCloudStorageUploader {
     client: Client,
     auth: GcsAuth,
 }
 
 impl GoogleCloudStorageUploader {
     /// Creates an uploader from a service-account key file path.
-    pub fn new_with_key_path(sa_key_file: impl Into<String>) -> Self {
-        Self::new(GcsAuth::ServiceAccountKeyPath(Arc::from(sa_key_file.into())))
+    pub(crate) fn new_with_key_path(sa_key_file: impl Into<String>) -> Self {
+        Self::new(GcsAuth::ServiceAccountKeyPath {
+            path: Arc::from(sa_key_file.into()),
+            authenticator: Arc::new(OnceCell::new()),
+        })
     }
 
     /// Creates an uploader from a service-account key JSON string.
-    pub fn new_with_key(sa_key: impl Into<String>) -> Self {
-        Self::new(GcsAuth::ServiceAccountKey(Arc::from(sa_key.into())))
+    pub(crate) fn new_with_key(sa_key: impl Into<String>) -> Self {
+        Self::new(GcsAuth::ServiceAccountKey {
+            key: Arc::from(sa_key.into()),
+            authenticator: Arc::new(OnceCell::new()),
+        })
     }
 
     /// Creates an uploader using Application Default Credentials.
-    pub fn new_with_adc() -> Self {
-        Self::new(GcsAuth::ApplicationDefaultCredentials)
+    pub(crate) fn new_with_adc() -> Self {
+        Self::new(GcsAuth::ApplicationDefaultCredentials {
+            authenticator: Arc::new(OnceCell::new()),
+        })
     }
 
     /// Creates an uploader using OAuth2 installed-flow credentials.
-    pub fn new_with_flow_authenticator(
+    pub(crate) fn new_with_flow_authenticator(
         secret: impl Into<Vec<u8>>,
         persistent_file_path: impl Into<PathBuf>,
     ) -> Self {
         Self::new(GcsAuth::InstalledFlow {
             secret: Arc::from(secret.into()),
             persistent_file_path: Arc::new(persistent_file_path.into()),
+            authenticator: Arc::new(OnceCell::new()),
         })
     }
 
@@ -102,13 +105,6 @@ impl GoogleCloudStorageUploader {
 }
 
 impl GcsUploader for GoogleCloudStorageUploader {
-    fn upload_object(
-        &self,
-        request: GcsUploadRequest,
-    ) -> impl Future<Output = EtlResult<GcsObjectMetadata>> + Send {
-        self.upload_object_inner(request)
-    }
-
     fn delete_object(
         &self,
         request: GcsDeleteRequest,
@@ -118,38 +114,6 @@ impl GcsUploader for GoogleCloudStorageUploader {
 }
 
 impl GoogleCloudStorageUploader {
-    /// Uploads one object after request validation.
-    async fn upload_object_inner(&self, request: GcsUploadRequest) -> EtlResult<GcsObjectMetadata> {
-        validate_upload_request(&request)?;
-
-        let GcsUploadRequest { bucket, object_name, content_type, body } = request;
-        let body = PreparedUploadBody::new(body).await?;
-        let size_bytes = body.size_bytes();
-        let session_url = self
-            .start_resumable_upload_session(&bucket, &object_name, &content_type, Some(size_bytes))
-            .await?;
-        let response = self
-            .upload_resumable_body(
-                &bucket,
-                &object_name,
-                &body,
-                size_bytes,
-                &session_url,
-                &self.auth,
-            )
-            .await?;
-        let bucket = response.bucket.unwrap_or(bucket);
-        let object_name = response.name.unwrap_or(object_name);
-        let uri = gcs_uri(&bucket, &object_name);
-
-        Ok(GcsObjectMetadata {
-            bucket,
-            object_name,
-            uri,
-            size_bytes: response.size.and_then(|size| size.parse().ok()).or(Some(size_bytes)),
-        })
-    }
-
     /// Starts one resumable upload session for an object.
     async fn start_resumable_upload_session(
         &self,
@@ -249,77 +213,6 @@ impl GoogleCloudStorageUploader {
             request.object_name,
             session_url,
         ))
-    }
-
-    /// Uploads a prepared body through a resumable upload session.
-    async fn upload_resumable_body(
-        &self,
-        bucket: &str,
-        object_name: &str,
-        body: &PreparedUploadBody,
-        size_bytes: u64,
-        session_url: &str,
-        auth: &GcsAuth,
-    ) -> EtlResult<GcsObjectResponse> {
-        let mut offset = 0_u64;
-
-        loop {
-            let remaining = size_bytes.saturating_sub(offset);
-            let chunk_size = remaining.min(GCS_RESUMABLE_UPLOAD_CHUNK_SIZE);
-            let bytes = body.chunk(offset, chunk_size).await.map_err(|error| {
-                etl_error!(
-                    ErrorKind::DestinationIoError,
-                    "Failed to read GCS upload chunk",
-                    format!("GCS object: gs://{bucket}/{object_name}"),
-                    source: error
-                )
-            })?;
-
-            let step = retry_with_backoff(
-                GCS_REQUEST_RETRY_POLICY,
-                gcs_request_retry_decision,
-                |delay| delay,
-                log_gcs_request_retry,
-                || {
-                    let auth = auth.clone();
-                    let bytes = bytes.clone();
-                    let session_url = session_url.to_owned();
-
-                    async move {
-                        let token =
-                            auth.access_token().await.map_err(GcsRequestAttemptError::Auth)?;
-                        upload_resumable_chunk_with_status_check(
-                            &self.client,
-                            &session_url,
-                            &token,
-                            offset,
-                            Some(size_bytes),
-                            bytes,
-                        )
-                        .await
-                    }
-                },
-            )
-            .await
-            .map_err(|failure| gcs_attempt_error(failure.last_error, bucket, object_name))?;
-
-            match step {
-                GcsResumableUploadStep::Done(response) => return Ok(response),
-                GcsResumableUploadStep::Incomplete { next_offset } => {
-                    if next_offset <= offset && chunk_size > 0 {
-                        return Err(etl_error!(
-                            ErrorKind::DestinationQueryFailed,
-                            "GCS resumable upload did not advance",
-                            format!(
-                                "GCS object: gs://{}/{}; offset: {}; next offset: {}.",
-                                bucket, object_name, offset, next_offset
-                            )
-                        ));
-                    }
-                    offset = next_offset;
-                }
-            }
-        }
     }
 
     /// Deletes one staged object after request validation.
@@ -439,13 +332,14 @@ impl GcsStreamingUploadWriter {
         })
     }
 
-    /// Uploads full non-final chunks when buffered data reaches the chunk size.
+    /// Uploads full non-final chunks while retaining the possible final chunk.
     fn flush_ready_chunks(&mut self) -> std::io::Result<()> {
         let chunk_size = GCS_RESUMABLE_UPLOAD_CHUNK_SIZE as usize;
 
-        while self.buffer.len() >= chunk_size {
-            // Non-final GCS chunks must stay exactly chunk-sized. Keep any
-            // extra bytes in `self.buffer` for the next resumable request.
+        while self.buffer.len() > chunk_size {
+            // Keep one full chunk buffered until either more bytes arrive or
+            // finish provides the total size. This lets exact chunk-multiple
+            // objects commit their last chunk as the final resumable request.
             let tail = self.buffer.split_off(chunk_size);
             let chunk = std::mem::replace(&mut self.buffer, tail);
             self.upload_chunk(Bytes::from(chunk), None)?;
@@ -476,21 +370,36 @@ impl GcsStreamingUploadWriter {
         let mut offset = self.offset;
 
         while !bytes.is_empty() {
-            let token = self
-                .runtime
-                .block_on(self.auth.access_token())
-                .map_err(|err| self.io_error(GcsRequestAttemptError::Auth(err)))?;
+            let client = self.client.clone();
+            let auth = self.auth.clone();
+            let session_url = self.session_url.clone();
             let step = self
                 .runtime
-                .block_on(upload_resumable_chunk_with_status_check(
-                    &self.client,
-                    &self.session_url,
-                    &token,
-                    offset,
-                    total_size,
-                    bytes.clone(),
+                .block_on(retry_with_backoff(
+                    GCS_REQUEST_RETRY_POLICY,
+                    gcs_request_retry_decision,
+                    |delay| delay,
+                    log_gcs_request_retry,
+                    || {
+                        let client = client.clone();
+                        let auth = auth.clone();
+                        let session_url = session_url.clone();
+                        let bytes = bytes.clone();
+
+                        async move {
+                            upload_resumable_chunk_with_status_check(
+                                &client,
+                                &session_url,
+                                &auth,
+                                offset,
+                                total_size,
+                                bytes,
+                            )
+                            .await
+                        }
+                    },
                 ))
-                .map_err(|err| self.io_error(err))?;
+                .map_err(|failure| self.io_error(failure.last_error))?;
 
             match step {
                 GcsResumableUploadStep::Done(response) => {
@@ -609,121 +518,107 @@ enum GcsResumableUploadStep {
     },
 }
 
-/// Upload body prepared for one or more HTTP attempts.
-#[derive(Clone)]
-enum PreparedUploadBody {
-    /// In-memory request bytes.
-    Bytes(Bytes),
-    /// Local file path reopened for each retry.
-    File {
-        /// Path to the staged file.
-        path: PathBuf,
-        /// File size in bytes.
-        size_bytes: u64,
-    },
-}
-
-impl PreparedUploadBody {
-    /// Prepares an upload body and records its byte size.
-    async fn new(body: UploadBody) -> EtlResult<Self> {
-        match body {
-            UploadBody::Bytes(bytes) => Ok(Self::Bytes(Bytes::from(bytes))),
-            UploadBody::File(path) => {
-                let metadata = fs::metadata(&path).await.map_err(|err| {
-                    etl_error!(
-                        ErrorKind::DestinationIoError,
-                        "Failed to stat GCS upload file",
-                        format!("Upload file path: {}", display_path(&path)),
-                        source: err
-                    )
-                })?;
-
-                Ok(Self::File { path, size_bytes: metadata.len() })
-            }
-        }
-    }
-
-    /// Returns the body size in bytes.
-    fn size_bytes(&self) -> u64 {
-        match self {
-            Self::Bytes(bytes) => bytes.len() as u64,
-            Self::File { size_bytes, .. } => *size_bytes,
-        }
-    }
-
-    /// Reads a chunk from the prepared body.
-    async fn chunk(&self, offset: u64, size: u64) -> Result<Bytes, std::io::Error> {
-        match self {
-            Self::Bytes(bytes) => {
-                let start = offset.min(bytes.len() as u64) as usize;
-                let end = offset.saturating_add(size).min(bytes.len() as u64) as usize;
-                Ok(bytes.slice(start..end))
-            }
-            Self::File { path, .. } => {
-                let mut file = fs::File::open(path).await?;
-                file.seek(SeekFrom::Start(offset)).await?;
-                let mut buffer = vec![0_u8; size as usize];
-                file.read_exact(&mut buffer).await?;
-                Ok(Bytes::from(buffer))
-            }
-        }
-    }
-}
-
 /// Authentication source for GCS upload requests.
 #[derive(Clone)]
 enum GcsAuth {
     /// Service-account JSON stored on disk.
-    ServiceAccountKeyPath(Arc<str>),
+    ServiceAccountKeyPath {
+        /// Service-account key path.
+        path: Arc<str>,
+        /// Cached yup authenticator.
+        authenticator: Arc<OnceCell<DefaultAuthenticator>>,
+    },
     /// Service-account JSON provided in memory.
-    ServiceAccountKey(Arc<str>),
+    ServiceAccountKey {
+        /// Service-account key JSON.
+        key: Arc<str>,
+        /// Cached yup authenticator.
+        authenticator: Arc<OnceCell<DefaultAuthenticator>>,
+    },
     /// Environment Application Default Credentials.
-    ApplicationDefaultCredentials,
+    ApplicationDefaultCredentials {
+        /// Cached yup authenticator.
+        authenticator: Arc<OnceCell<DefaultAuthenticator>>,
+    },
     /// OAuth2 installed-flow credentials.
     InstalledFlow {
         /// Client secret JSON bytes.
         secret: Arc<[u8]>,
         /// Token persistence path.
         persistent_file_path: Arc<PathBuf>,
+        /// Cached yup authenticator.
+        authenticator: Arc<OnceCell<DefaultAuthenticator>>,
     },
 }
 
 impl GcsAuth {
     /// Returns an access token for GCS.
     async fn access_token(&self) -> EtlResult<String> {
+        let auth = self.authenticator().await?;
+        token_from_auth(auth.token(&[GCS_READ_WRITE_SCOPE]).await.map_err(gcs_auth_error)?)
+    }
+
+    /// Returns the cached authenticator for this auth source.
+    async fn authenticator(&self) -> EtlResult<&DefaultAuthenticator> {
         match self {
-            Self::ServiceAccountKeyPath(path) => {
-                let key = read_service_account_key(path.as_ref()).await.map_err(gcs_auth_error)?;
-                let auth = ServiceAccountAuthenticator::builder(key)
-                    .build()
+            Self::ServiceAccountKeyPath { path, authenticator } => {
+                authenticator
+                    .get_or_try_init(|| {
+                        let path = Arc::clone(path);
+
+                        async move {
+                            let key = read_service_account_key(path.as_ref())
+                                .await
+                                .map_err(gcs_auth_error)?;
+                            ServiceAccountAuthenticator::builder(key)
+                                .build()
+                                .await
+                                .map_err(gcs_auth_error)
+                        }
+                    })
                     .await
-                    .map_err(gcs_auth_error)?;
-
-                token_from_auth(auth.token(&[GCS_READ_WRITE_SCOPE]).await.map_err(gcs_auth_error)?)
             }
-            Self::ServiceAccountKey(sa_key) => {
-                let key = parse_service_account_key(sa_key.as_bytes()).map_err(gcs_auth_error)?;
-                let auth = ServiceAccountAuthenticator::builder(key)
-                    .build()
+            Self::ServiceAccountKey { key, authenticator } => {
+                authenticator
+                    .get_or_try_init(|| {
+                        let key = Arc::clone(key);
+
+                        async move {
+                            let key = parse_service_account_key(key.as_bytes())
+                                .map_err(gcs_auth_error)?;
+                            ServiceAccountAuthenticator::builder(key)
+                                .build()
+                                .await
+                                .map_err(gcs_auth_error)
+                        }
+                    })
                     .await
-                    .map_err(gcs_auth_error)?;
-
-                token_from_auth(auth.token(&[GCS_READ_WRITE_SCOPE]).await.map_err(gcs_auth_error)?)
             }
-            Self::ApplicationDefaultCredentials => application_default_credentials_token().await,
-            Self::InstalledFlow { secret, persistent_file_path } => {
-                let app_secret =
-                    parse_application_secret(secret.as_ref()).map_err(gcs_auth_error)?;
-                let auth = InstalledFlowAuthenticator::builder(
-                    app_secret,
-                    InstalledFlowReturnMethod::HTTPRedirect,
-                )
-                .persist_tokens_to_disk(persistent_file_path.as_ref().clone())
-                .build()
-                .await
-                .map_err(gcs_auth_error)?;
+            Self::ApplicationDefaultCredentials { authenticator } => {
+                authenticator
+                    .get_or_try_init(build_application_default_credentials_authenticator)
+                    .await
+            }
+            Self::InstalledFlow { secret, persistent_file_path, authenticator } => {
+                authenticator
+                    .get_or_try_init(|| {
+                        let secret = Arc::clone(secret);
+                        let persistent_file_path = Arc::clone(persistent_file_path);
 
-                token_from_auth(auth.token(&[GCS_READ_WRITE_SCOPE]).await.map_err(gcs_auth_error)?)
+                        async move {
+                            let app_secret = parse_application_secret(secret.as_ref())
+                                .map_err(gcs_auth_error)?;
+                            InstalledFlowAuthenticator::builder(
+                                app_secret,
+                                InstalledFlowReturnMethod::HTTPRedirect,
+                            )
+                            .persist_tokens_to_disk(persistent_file_path.as_ref().clone())
+                            .build()
+                            .await
+                            .map_err(gcs_auth_error)
+                        }
+                    })
+                    .await
             }
         }
     }
@@ -737,24 +632,22 @@ fn token_from_auth(token: gcp_bigquery_client::yup_oauth2::AccessToken) -> EtlRe
         .ok_or_else(|| etl_error!(ErrorKind::DestinationAuthenticationError, "GCS token missing"))
 }
 
-/// Returns a GCS access token using ADC.
-async fn application_default_credentials_token() -> EtlResult<String> {
-    if let Some(token) = authorized_user_adc_token().await? {
-        return Ok(token);
+/// Builds a GCS authenticator using ADC.
+async fn build_application_default_credentials_authenticator() -> EtlResult<DefaultAuthenticator> {
+    if let Some(auth) = authorized_user_adc_authenticator().await? {
+        return Ok(auth);
     }
 
     let opts = ApplicationDefaultCredentialsFlowOpts::default();
-    let auth = match ApplicationDefaultCredentialsAuthenticator::builder(opts).await {
+    match ApplicationDefaultCredentialsAuthenticator::builder(opts).await {
         ApplicationDefaultCredentialsTypes::InstanceMetadata(auth) => auth.build().await,
         ApplicationDefaultCredentialsTypes::ServiceAccount(auth) => auth.build().await,
     }
-    .map_err(gcs_auth_error)?;
-
-    token_from_auth(auth.token(&[GCS_READ_WRITE_SCOPE]).await.map_err(gcs_auth_error)?)
+    .map_err(gcs_auth_error)
 }
 
-/// Returns a token for authorized-user ADC credentials when present.
-async fn authorized_user_adc_token() -> EtlResult<Option<String>> {
+/// Returns an authenticator for authorized-user ADC credentials when present.
+async fn authorized_user_adc_authenticator() -> EtlResult<Option<DefaultAuthenticator>> {
     let Some(path) = adc_credential_path() else {
         return Ok(None);
     };
@@ -775,7 +668,7 @@ async fn authorized_user_adc_token() -> EtlResult<Option<String>> {
     let auth =
         AuthorizedUserAuthenticator::builder(secret).build().await.map_err(gcs_auth_error)?;
 
-    token_from_auth(auth.token(&[GCS_READ_WRITE_SCOPE]).await.map_err(gcs_auth_error)?).map(Some)
+    Ok(Some(auth))
 }
 
 /// Returns the ADC credential path, matching `gcloud` defaults.
@@ -801,21 +694,6 @@ fn default_adc_path() -> Option<PathBuf> {
             PathBuf::from(home).join(".config/gcloud/application_default_credentials.json")
         })
     }
-}
-
-/// Validates a GCS upload request before sending it.
-fn validate_upload_request(request: &GcsUploadRequest) -> EtlResult<()> {
-    validate_object_location(&request.bucket, &request.object_name)?;
-
-    if request.content_type.is_empty() {
-        return Err(etl_error!(
-            ErrorKind::InvalidData,
-            "GCS upload content type is invalid",
-            "Content type must be non-empty."
-        ));
-    }
-
-    Ok(())
 }
 
 /// Validates a GCS bucket/object pair before sending object requests.
@@ -942,17 +820,19 @@ async fn resumable_upload_step_from_response(
 async fn upload_resumable_chunk_with_status_check(
     client: &Client,
     session_url: &str,
-    token: &str,
+    auth: &GcsAuth,
     offset: u64,
     size_bytes: Option<u64>,
     bytes: Bytes,
 ) -> Result<GcsResumableUploadStep, GcsRequestAttemptError> {
     let content_range = resumable_content_range(offset, bytes.len() as u64, size_bytes);
+    let token = auth.access_token().await.map_err(GcsRequestAttemptError::Auth)?;
 
-    match upload_resumable_chunk(client, session_url, token, bytes, &content_range).await {
+    match upload_resumable_chunk(client, session_url, &token, bytes, &content_range).await {
         Ok(step) => Ok(step),
         Err(error) if should_check_resumable_upload_status(&error) => {
-            match check_resumable_upload_status(client, session_url, token, size_bytes).await {
+            let token = auth.access_token().await.map_err(GcsRequestAttemptError::Auth)?;
+            match check_resumable_upload_status(client, session_url, &token, size_bytes).await {
                 Ok(GcsResumableUploadStep::Done(response)) => {
                     Ok(GcsResumableUploadStep::Done(response))
                 }
@@ -1124,11 +1004,6 @@ fn gcs_status_error(status: StatusCode, bucket: &str, object_name: &str) -> etl:
     )
 }
 
-/// Returns a displayable path string without borrowing a temporary.
-fn display_path(path: &Path) -> String {
-    path.display().to_string()
-}
-
 /// Minimal object metadata sent when starting a resumable upload session.
 #[derive(Debug, Serialize)]
 struct GcsObjectUploadMetadata<'a> {
@@ -1157,44 +1032,31 @@ struct CredentialType {
 
 #[cfg(test)]
 mod tests {
+    use std::{io::Write, sync::Arc};
+
     use etl::error::ErrorKind;
-    use reqwest::StatusCode;
+    use reqwest::{Client, StatusCode};
+    use tokio::{runtime::Handle, sync::OnceCell};
 
     use super::{
-        GcsRequestAttemptError, encode_uri_path_part, gcs_request_retry_decision, gcs_status_error,
+        GCS_RESUMABLE_UPLOAD_CHUNK_SIZE, GcsAuth, GcsRequestAttemptError, GcsStreamingUploadWriter,
+        encode_uri_path_part, gcs_request_retry_decision, gcs_status_error,
         is_retryable_gcs_status, resumable_content_range, resumable_next_offset,
         resumable_status_content_range, should_check_resumable_upload_status,
-        validate_upload_request,
+        validate_object_location,
     };
-    use crate::{
-        bigquery::initial_copy::{GcsUploadRequest, UploadBody},
-        retry::RetryDecision,
-    };
+    use crate::retry::RetryDecision;
 
     #[test]
-    fn validate_upload_request_rejects_invalid_bucket() {
-        let request = GcsUploadRequest {
-            bucket: "bad/bucket".to_owned(),
-            object_name: "object.avro".to_owned(),
-            content_type: "application/avro".to_owned(),
-            body: UploadBody::Bytes(Vec::new()),
-        };
-
-        let err = validate_upload_request(&request).unwrap_err();
+    fn validate_object_location_rejects_invalid_bucket() {
+        let err = validate_object_location("bad/bucket", "object.avro").unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
     #[test]
-    fn validate_upload_request_rejects_absolute_object_name() {
-        let request = GcsUploadRequest {
-            bucket: "bucket".to_owned(),
-            object_name: "/object.avro".to_owned(),
-            content_type: "application/avro".to_owned(),
-            body: UploadBody::Bytes(Vec::new()),
-        };
-
-        let err = validate_upload_request(&request).unwrap_err();
+    fn validate_object_location_rejects_absolute_object_name() {
+        let err = validate_object_location("bucket", "/object.avro").unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
@@ -1241,6 +1103,26 @@ mod tests {
         assert!(should_check_resumable_upload_status(&retryable_status));
         assert!(!should_check_resumable_upload_status(&permanent_status));
         assert!(!should_check_resumable_upload_status(&protocol_error));
+    }
+
+    #[tokio::test]
+    async fn streaming_writer_keeps_exact_chunk_for_final_upload() {
+        let auth =
+            GcsAuth::ApplicationDefaultCredentials { authenticator: Arc::new(OnceCell::new()) };
+        let mut writer = GcsStreamingUploadWriter::new(
+            Client::new(),
+            Handle::current(),
+            auth,
+            "bucket".to_owned(),
+            "object.avro".to_owned(),
+            "http://127.0.0.1/upload".to_owned(),
+        );
+        let bytes = vec![0_u8; GCS_RESUMABLE_UPLOAD_CHUNK_SIZE as usize];
+
+        writer.write_all(&bytes).unwrap();
+
+        assert_eq!(writer.offset, 0);
+        assert_eq!(writer.buffer.len(), GCS_RESUMABLE_UPLOAD_CHUNK_SIZE as usize);
     }
 
     #[test]

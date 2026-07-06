@@ -23,4 +23,6 @@ pub use pipeline::{
 pub use replicator::{ReplicatorConfig, ReplicatorConfigWithoutSecrets};
 pub use sentry::SentryConfig;
 pub use supabase::{SupabaseConfig, SupabaseConfigWithoutSecrets};
-pub use validators::{validate_snowflake_account_id, validate_supabase_project_ref};
+pub use validators::{
+    validate_gcs_bucket_name, validate_snowflake_account_id, validate_supabase_project_ref,
+};

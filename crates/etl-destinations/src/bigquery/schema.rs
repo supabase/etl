@@ -5,7 +5,12 @@ use etl::{
         parse_default_expression,
     },
 };
-use gcp_bigquery_client::storage::{ColumnMode, ColumnType, FieldDescriptor, TableDescriptor};
+use gcp_bigquery_client::{
+    model::{
+        field_type::FieldType, table_field_schema::TableFieldSchema, table_schema::TableSchema,
+    },
+    storage::{ColumnMode, ColumnType, FieldDescriptor, TableDescriptor},
+};
 use tracing::warn;
 
 use crate::bigquery::sql::quote_identifier;
@@ -190,6 +195,74 @@ pub(super) fn create_columns_spec(
     }
 
     Ok(format!("({column_spec})"))
+}
+
+/// Converts a replicated table schema to a BigQuery REST table schema.
+pub(crate) fn replicated_schema_to_bigquery_table_schema(
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> TableSchema {
+    let fields = replicated_table_schema
+        .column_schemas()
+        .map(column_schema_to_bigquery_table_field_schema)
+        .collect();
+
+    TableSchema::new(fields)
+}
+
+/// Converts a replicated column schema to a BigQuery REST table field schema.
+fn column_schema_to_bigquery_table_field_schema(column_schema: &ColumnSchema) -> TableFieldSchema {
+    let mut field_schema = TableFieldSchema::new(
+        &column_schema.name,
+        postgres_to_bigquery_field_type(&column_schema.typ),
+    );
+
+    field_schema.mode = Some(
+        if is_array_type(&column_schema.typ) {
+            "REPEATED"
+        } else if column_schema.nullable {
+            "NULLABLE"
+        } else {
+            "REQUIRED"
+        }
+        .to_owned(),
+    );
+
+    field_schema
+}
+
+/// Converts a Postgres data type to a BigQuery REST table field type.
+fn postgres_to_bigquery_field_type(typ: &Type) -> FieldType {
+    if is_array_type(typ) {
+        return match typ {
+            &Type::BOOL_ARRAY => FieldType::Bool,
+            &Type::INT2_ARRAY | &Type::INT4_ARRAY | &Type::INT8_ARRAY | &Type::OID_ARRAY => {
+                FieldType::Int64
+            }
+            &Type::FLOAT4_ARRAY | &Type::FLOAT8_ARRAY => FieldType::Float64,
+            &Type::NUMERIC_ARRAY => FieldType::Bignumeric,
+            &Type::DATE_ARRAY => FieldType::Date,
+            &Type::TIME_ARRAY => FieldType::Time,
+            &Type::TIMESTAMP_ARRAY => FieldType::Datetime,
+            &Type::TIMESTAMPTZ_ARRAY => FieldType::Timestamp,
+            &Type::JSON_ARRAY | &Type::JSONB_ARRAY => FieldType::Json,
+            &Type::BYTEA_ARRAY => FieldType::Bytes,
+            _ => FieldType::String,
+        };
+    }
+
+    match typ {
+        &Type::BOOL => FieldType::Bool,
+        &Type::INT2 | &Type::INT4 | &Type::INT8 | &Type::OID => FieldType::Int64,
+        &Type::FLOAT4 | &Type::FLOAT8 => FieldType::Float64,
+        &Type::NUMERIC => FieldType::Bignumeric,
+        &Type::DATE => FieldType::Date,
+        &Type::TIME => FieldType::Time,
+        &Type::TIMESTAMP => FieldType::Datetime,
+        &Type::TIMESTAMPTZ => FieldType::Timestamp,
+        &Type::JSON | &Type::JSONB => FieldType::Json,
+        &Type::BYTEA => FieldType::Bytes,
+        _ => FieldType::String,
+    }
 }
 
 /// Converts Postgres data types to BigQuery equivalent types.
@@ -403,6 +476,32 @@ mod tests {
         assert_eq!(postgres_to_bigquery_type(&Type::INTERVAL_ARRAY), "array<string>");
         assert_eq!(postgres_to_bigquery_type(&Type::INET_ARRAY), "array<string>");
         assert_eq!(postgres_to_bigquery_type(&Type::INT4_RANGE_ARRAY), "array<string>");
+    }
+
+    #[test]
+    fn replicated_schema_to_bigquery_table_schema_maps_direct_load_types() {
+        let columns = vec![
+            test_column("id", Type::INT8, 1, false, Some(1)),
+            test_column("payload", Type::JSONB, 2, true, None),
+            test_column("amounts", Type::NUMERIC_ARRAY, 3, true, None),
+            test_column("seen_at", Type::TIMESTAMPTZ, 4, false, None),
+        ];
+        let schema = test_replicated_schema(columns);
+
+        let table_schema = replicated_schema_to_bigquery_table_schema(&schema);
+        let schema_json = serde_json::to_value(table_schema).unwrap();
+
+        assert_eq!(
+            schema_json,
+            serde_json::json!({
+                "fields": [
+                    {"mode": "REQUIRED", "name": "id", "type": "INT64"},
+                    {"mode": "NULLABLE", "name": "payload", "type": "JSON"},
+                    {"mode": "REPEATED", "name": "amounts", "type": "BIGNUMERIC"},
+                    {"mode": "REQUIRED", "name": "seen_at", "type": "TIMESTAMP"}
+                ]
+            })
+        );
     }
 
     #[test]

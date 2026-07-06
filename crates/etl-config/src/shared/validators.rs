@@ -68,6 +68,23 @@ pub fn validate_supabase_project_ref(project_ref: &str) -> Result<(), Validation
     }
 }
 
+/// Validates a Google Cloud Storage bucket name used for staging.
+///
+/// This validates the field as a bucket name only. Object prefixes such as
+/// `bucket/path` or `gs://bucket/path` are intentionally rejected because ETL
+/// owns the object prefix layout.
+pub fn validate_gcs_bucket_name(bucket: &str) -> Result<(), ValidationError> {
+    if bucket.is_empty() || bucket.starts_with("gs://") || bucket.contains('/') {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "gcs_staging_bucket".to_owned(),
+            constraint: "must be a non-empty GCS bucket name without a gs:// scheme or object path"
+                .to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +177,23 @@ mod tests {
         for (input, expected) in cases {
             let result = validate_supabase_project_ref(input);
             assert_eq!(result.is_ok(), *expected, "project_ref {input:?}");
+        }
+    }
+
+    #[test]
+    fn gcs_bucket_name_rejects_paths() {
+        let cases: &[(&str, bool)] = &[
+            ("supabase-etl", true),
+            ("bucket.with.dots", true),
+            ("", false),
+            ("supabase-etl/initial-copy", false),
+            ("gs://supabase-etl", false),
+            ("gs://supabase-etl/initial-copy", false),
+        ];
+
+        for (input, expected) in cases {
+            let result = validate_gcs_bucket_name(input);
+            assert_eq!(result.is_ok(), *expected, "gcs bucket {input:?}");
         }
     }
 }

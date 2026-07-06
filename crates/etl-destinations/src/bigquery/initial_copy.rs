@@ -1,9 +1,7 @@
 //! BigQuery initial-copy load-job primitives.
 
 pub(crate) mod avro;
-pub mod gcs;
-
-use std::future::Future;
+pub(crate) mod gcs;
 
 use etl::{
     data::TableRow,
@@ -12,99 +10,66 @@ use etl::{
     pipeline::PipelineId,
     schema::TableName,
 };
+use gcp_bigquery_client::model::table_schema::TableSchema as BigQueryTableSchema;
 use rand::random;
 
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 
-/// Fixed GCS prefix used until the destination exposes staging configuration.
-pub const DEFAULT_GCS_PREFIX: &str = "supabase-etl/initial-copy";
-/// Fixed staging table prefix used for snapshot load jobs.
-pub const DEFAULT_STAGING_TABLE_PREFIX: &str = "_snapshot_";
+/// Fixed GCS object prefix used for BigQuery initial-copy staging files.
+pub(crate) const DEFAULT_GCS_PREFIX: &str = "supabase-etl/initial-copy";
 /// Fixed Avro logical type behavior for BigQuery load jobs.
-pub const DEFAULT_USE_AVRO_LOGICAL_TYPES: bool = true;
+pub(crate) const DEFAULT_USE_AVRO_LOGICAL_TYPES: bool = true;
 /// Fixed decimal target type preference for BigQuery load jobs.
-pub const DEFAULT_DECIMAL_TARGET_TYPES: &[&str] = &["NUMERIC", "BIGNUMERIC", "STRING"];
+pub(crate) const DEFAULT_DECIMAL_TARGET_TYPES: &[&str] = &["BIGNUMERIC"];
 /// Fixed BigQuery load-job create disposition.
-pub const DEFAULT_CREATE_DISPOSITION: &str = "CREATE_IF_NEEDED";
-/// Fixed BigQuery load-job write disposition for staging tables.
-pub const DEFAULT_WRITE_DISPOSITION: &str = "WRITE_TRUNCATE";
+pub(crate) const DEFAULT_CREATE_DISPOSITION: &str = "CREATE_NEVER";
+/// Fixed BigQuery load-job write disposition for destination tables.
+pub(crate) const DEFAULT_WRITE_DISPOSITION: &str = "WRITE_APPEND";
 /// Avro file extension used in staged object names.
 const AVRO_FILE_EXTENSION: &str = "avro";
-/// Parquet file extension used in staged object names.
-const PARQUET_FILE_EXTENSION: &str = "parquet";
 /// Avro upload content type used for staged files.
 const AVRO_CONTENT_TYPE: &str = "application/avro";
-/// Parquet upload content type used for staged files.
-const PARQUET_CONTENT_TYPE: &str = "application/vnd.apache.parquet";
 /// BigQuery load-job source format for Avro.
 const BIGQUERY_AVRO_SOURCE_FORMAT: &str = "AVRO";
-/// BigQuery load-job source format for Parquet.
-const BIGQUERY_PARQUET_SOURCE_FORMAT: &str = "PARQUET";
 
 /// Snapshot file format for BigQuery initial-copy files.
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
-pub enum SnapshotFormat {
+pub(crate) enum SnapshotFormat {
     /// Avro object container files.
     #[default]
     Avro,
-    /// Parquet files.
-    Parquet,
 }
 
 impl SnapshotFormat {
     /// Returns the file extension used in object names.
-    pub fn file_extension(self) -> &'static str {
+    pub(crate) fn file_extension(self) -> &'static str {
         match self {
             Self::Avro => AVRO_FILE_EXTENSION,
-            Self::Parquet => PARQUET_FILE_EXTENSION,
         }
     }
 
     /// Returns the upload content type used for staged files.
-    pub fn content_type(self) -> &'static str {
+    pub(crate) fn content_type(self) -> &'static str {
         match self {
             Self::Avro => AVRO_CONTENT_TYPE,
-            Self::Parquet => PARQUET_CONTENT_TYPE,
         }
     }
 }
 
-/// Upload body produced by a BigQuery initial-copy encoder.
-#[derive(Clone)]
-pub enum UploadBody {
-    /// In-memory bytes for small files, tests, and mocks.
-    Bytes(Vec<u8>),
-    /// Local file path for bounded temp-file based uploads.
-    File(std::path::PathBuf),
-}
-
 /// One batch of initial-copy rows passed to a file encoder.
-pub struct SnapshotBatch {
+pub(crate) struct SnapshotBatch {
     /// Rows in source table column order.
     pub rows: Vec<TableRow>,
 }
 
 /// Generates an opaque run id for one BigQuery initial-copy attempt.
-pub fn generate_random_run_id() -> String {
+pub(crate) fn generate_random_run_id() -> String {
     format!("{:016x}", random::<u64>())
-}
-
-/// Request body for uploading one staged snapshot object to GCS.
-#[derive(Clone)]
-pub struct GcsUploadRequest {
-    /// GCS bucket name.
-    pub bucket: String,
-    /// Object name within the bucket.
-    pub object_name: String,
-    /// MIME content type for the upload.
-    pub content_type: String,
-    /// Encoded snapshot bytes or a local file reference.
-    pub body: UploadBody,
 }
 
 /// Request body for streaming one staged snapshot object to GCS.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct GcsStreamingUploadRequest {
+pub(crate) struct GcsStreamingUploadRequest {
     /// GCS bucket name.
     pub bucket: String,
     /// Object name within the bucket.
@@ -115,7 +80,7 @@ pub struct GcsStreamingUploadRequest {
 
 /// Metadata returned after uploading a staged snapshot object.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct GcsObjectMetadata {
+pub(crate) struct GcsObjectMetadata {
     /// GCS bucket name.
     pub bucket: String,
     /// Object name within the bucket.
@@ -128,7 +93,7 @@ pub struct GcsObjectMetadata {
 
 /// Request body for deleting one staged snapshot object from GCS.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct GcsDeleteRequest {
+pub(crate) struct GcsDeleteRequest {
     /// GCS bucket name.
     pub bucket: String,
     /// Object name within the bucket.
@@ -136,30 +101,24 @@ pub struct GcsDeleteRequest {
 }
 
 /// Uploads staged snapshot files to GCS.
-pub trait GcsUploader {
-    /// Uploads one object and returns metadata for the stored object.
-    fn upload_object(
-        &self,
-        request: GcsUploadRequest,
-    ) -> impl Future<Output = EtlResult<GcsObjectMetadata>> + Send;
-
+pub(crate) trait GcsUploader {
     /// Deletes one staged object.
     fn delete_object(
         &self,
         request: GcsDeleteRequest,
-    ) -> impl Future<Output = EtlResult<()>> + Send;
+    ) -> impl std::future::Future<Output = EtlResult<()>> + Send;
 }
 
 /// BigQuery load-job request for staged initial-copy files.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BigQueryLoadJobRequest {
+#[derive(Debug, Clone)]
+pub(crate) struct BigQueryLoadJobRequest {
     /// Deterministic job id.
     pub job_id: String,
     /// Optional BigQuery job location.
     pub location: Option<String>,
-    /// Dataset containing the destination staging table.
+    /// Dataset containing the destination table.
     pub dataset_id: BigQueryDatasetId,
-    /// Destination staging table id.
+    /// Destination table id.
     pub destination_table_id: BigQueryTableId,
     /// Source GCS URIs.
     pub source_uris: Vec<String>,
@@ -173,11 +132,13 @@ pub struct BigQueryLoadJobRequest {
     pub use_avro_logical_types: bool,
     /// Decimal target type preference.
     pub decimal_target_types: Vec<String>,
+    /// Optional destination table schema for direct load jobs.
+    pub destination_schema: Option<BigQueryTableSchema>,
 }
 
 impl BigQueryLoadJobRequest {
     /// Creates a load-job request with fixed initial-copy defaults.
-    pub fn new(
+    pub(crate) fn new(
         job_id: String,
         dataset_id: BigQueryDatasetId,
         destination_table_id: BigQueryTableId,
@@ -209,21 +170,27 @@ impl BigQueryLoadJobRequest {
                 .iter()
                 .map(|typ| (*typ).to_owned())
                 .collect(),
+            destination_schema: None,
         })
+    }
+
+    /// Sets the destination schema to send with the load job.
+    pub(crate) fn with_destination_schema(mut self, schema: BigQueryTableSchema) -> Self {
+        self.destination_schema = Some(schema);
+        self
     }
 }
 
 /// Returns the BigQuery load-job source format for a snapshot file format.
-pub fn bigquery_source_format(format: SnapshotFormat) -> &'static str {
+pub(crate) fn bigquery_source_format(format: SnapshotFormat) -> &'static str {
     match format {
         SnapshotFormat::Avro => BIGQUERY_AVRO_SOURCE_FORMAT,
-        SnapshotFormat::Parquet => BIGQUERY_PARQUET_SOURCE_FORMAT,
     }
 }
 
 /// Reference to a submitted BigQuery load job.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BigQueryLoadJobRef {
+pub(crate) struct BigQueryLoadJobRef {
     /// BigQuery project id.
     pub project_id: String,
     /// BigQuery job id.
@@ -234,7 +201,7 @@ pub struct BigQueryLoadJobRef {
 
 /// Status for a BigQuery load job.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BigQueryLoadJobStatus {
+pub(crate) struct BigQueryLoadJobStatus {
     /// BigQuery job state.
     pub state: Option<String>,
     /// Terminal error result, if BigQuery marked the job as failed.
@@ -245,12 +212,12 @@ pub struct BigQueryLoadJobStatus {
 
 impl BigQueryLoadJobStatus {
     /// Returns whether BigQuery reports the job as done.
-    pub fn done(&self) -> bool {
+    pub(crate) fn done(&self) -> bool {
         self.state.as_deref() == Some("DONE")
     }
 
     /// Converts a terminal status into success or a destination error.
-    pub fn ensure_done_success(&self) -> EtlResult<()> {
+    pub(crate) fn ensure_done_success(&self) -> EtlResult<()> {
         if !self.done() {
             return Err(etl_error!(
                 ErrorKind::DestinationQueryFailed,
@@ -277,23 +244,8 @@ impl BigQueryLoadJobStatus {
     }
 }
 
-/// Submits and reads BigQuery load jobs.
-pub trait BigQueryJobClient {
-    /// Inserts a BigQuery load job.
-    fn insert_load_job(
-        &self,
-        request: BigQueryLoadJobRequest,
-    ) -> impl Future<Output = EtlResult<BigQueryLoadJobRef>> + Send;
-
-    /// Reads the current BigQuery load-job status.
-    fn get_load_job(
-        &self,
-        job_ref: &BigQueryLoadJobRef,
-    ) -> impl Future<Output = EtlResult<BigQueryLoadJobStatus>> + Send;
-}
-
 /// Builds a deterministic GCS object name for one staged snapshot file.
-pub fn gcs_object_name(
+pub(crate) fn gcs_object_name(
     prefix: &str,
     connection_id: PipelineId,
     table_name: &TableName,
@@ -315,22 +267,12 @@ pub fn gcs_object_name(
 }
 
 /// Builds a canonical `gs://` URI.
-pub fn gcs_uri(bucket: &str, object_name: &str) -> String {
+pub(crate) fn gcs_uri(bucket: &str, object_name: &str) -> String {
     format!("gs://{}/{}", bucket.trim_matches('/'), object_name.trim_start_matches('/'))
 }
 
-/// Builds a deterministic staging table id.
-pub fn staging_table_id(base_table_id: &str, run_id: &str) -> BigQueryTableId {
-    format!(
-        "{}{}_{}",
-        DEFAULT_STAGING_TABLE_PREFIX,
-        sanitize_bigquery_table_id_component(base_table_id),
-        sanitize_bigquery_table_id_component(run_id)
-    )
-}
-
 /// Builds a deterministic BigQuery load-job id.
-pub fn load_job_id(
+pub(crate) fn load_job_id(
     connection_id: PipelineId,
     table_name: &TableName,
     run_id: &str,
@@ -391,11 +333,6 @@ fn validate_gcs_load_uri(source_uri: &str) -> EtlResult<()> {
     Ok(())
 }
 
-/// Replaces characters that are invalid in BigQuery table ids.
-fn sanitize_bigquery_table_id_component(identifier: &str) -> String {
-    sanitize_bigquery_identifier_component(identifier, |ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
 /// Replaces characters that are invalid in BigQuery job ids.
 fn sanitize_bigquery_job_id_component(identifier: &str) -> String {
     sanitize_bigquery_identifier_component(identifier, |ch| {
@@ -421,34 +358,11 @@ fn sanitize_bigquery_identifier_component(
     if sanitized.is_empty() { "_".to_owned() } else { sanitized }
 }
 
-impl BigQueryJobClient for crate::bigquery::BigQueryClient {
-    fn insert_load_job(
-        &self,
-        request: BigQueryLoadJobRequest,
-    ) -> impl Future<Output = EtlResult<BigQueryLoadJobRef>> + Send {
-        crate::bigquery::BigQueryClient::insert_load_job(self, request)
-    }
-
-    fn get_load_job(
-        &self,
-        job_ref: &BigQueryLoadJobRef,
-    ) -> impl Future<Output = EtlResult<BigQueryLoadJobStatus>> + Send {
-        crate::bigquery::BigQueryClient::get_load_job(self, job_ref)
-    }
-}
-
 impl GcsUploader for crate::bigquery::BigQueryClient {
-    fn upload_object(
-        &self,
-        request: GcsUploadRequest,
-    ) -> impl Future<Output = EtlResult<GcsObjectMetadata>> + Send {
-        self.upload_gcs_object(request)
-    }
-
     fn delete_object(
         &self,
         request: GcsDeleteRequest,
-    ) -> impl Future<Output = EtlResult<()>> + Send {
+    ) -> impl std::future::Future<Output = EtlResult<()>> + Send {
         self.delete_gcs_object(request)
     }
 }
@@ -460,7 +374,7 @@ mod tests {
     use super::{
         BigQueryLoadJobRequest, BigQueryLoadJobStatus, DEFAULT_DECIMAL_TARGET_TYPES,
         DEFAULT_GCS_PREFIX, bigquery_source_format, gcs_object_name, gcs_uri,
-        generate_random_run_id, load_job_id, staging_table_id,
+        generate_random_run_id, load_job_id,
     };
     use crate::bigquery::initial_copy::SnapshotFormat;
 
@@ -497,14 +411,6 @@ mod tests {
     }
 
     #[test]
-    fn staging_table_id_uses_fixed_prefix() {
-        assert_eq!(
-            staging_table_id("public_users_0", "run:2026-06-29"),
-            "_snapshot_public_users_0_run_2026_06_29"
-        );
-    }
-
-    #[test]
     fn generate_random_run_id_uses_hex_component() {
         let run_id = generate_random_run_id();
 
@@ -515,7 +421,6 @@ mod tests {
     #[test]
     fn bigquery_source_format_maps_snapshot_formats() {
         assert_eq!(bigquery_source_format(SnapshotFormat::Avro), "AVRO");
-        assert_eq!(bigquery_source_format(SnapshotFormat::Parquet), "PARQUET");
     }
 
     #[test]
@@ -530,8 +435,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.location, None);
-        assert_eq!(request.create_disposition, "CREATE_IF_NEEDED");
-        assert_eq!(request.write_disposition, "WRITE_TRUNCATE");
+        assert_eq!(request.create_disposition, "CREATE_NEVER");
+        assert_eq!(request.write_disposition, "WRITE_APPEND");
         assert!(request.use_avro_logical_types);
         assert_eq!(
             request.decimal_target_types,

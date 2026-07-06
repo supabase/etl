@@ -76,6 +76,22 @@ async fn validate_bigquery_invalid_credentials() {
 }
 
 #[tokio::test]
+async fn validate_bigquery_rejects_gcs_staging_bucket_path() {
+    let ctx = create_validation_context();
+    let mut config = create_bigquery_config("fake-project", "fake-dataset", "{}");
+    let FullApiDestinationConfig::BigQuery { gcs_staging_bucket, .. } = &mut config else {
+        unreachable!("expected BigQuery config");
+    };
+    *gcs_staging_bucket = Some("supabase-etl/initial-copy".to_owned());
+
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
+
+    assert!(!failures.is_empty(), "Expected validation failure");
+    assert_eq!(failures[0].name, "BigQuery GCS Staging Bucket Invalid");
+    assert_eq!(failures[0].failure_type, FailureType::Critical);
+}
+
+#[tokio::test]
 async fn validate_pipeline_includes_source_validation() {
     let (ctx, _pool, config) = create_validation_context_with_source().await;
     let environment = Environment::load().expect("Failed to load environment");

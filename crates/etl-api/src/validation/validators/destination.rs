@@ -176,7 +176,11 @@ mod bigquery {
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
         let FullApiDestinationConfig::BigQuery {
-            project_id, dataset_id, service_account_key, ..
+            project_id,
+            dataset_id,
+            gcs_staging_bucket,
+            service_account_key,
+            ..
         } = config
         else {
             unreachable!("Destination config should match BigQuery.");
@@ -185,6 +189,7 @@ mod bigquery {
         BigQueryValidator::new(
             project_id.clone(),
             dataset_id.clone(),
+            gcs_staging_bucket.clone(),
             service_account_key.expose_secret().to_owned(),
         )
         .validate(ctx)

@@ -42,8 +42,7 @@ use crate::{
         encoding::BigQueryTableRow,
         initial_copy::{
             BigQueryLoadJobRef, BigQueryLoadJobRequest, BigQueryLoadJobStatus, GcsDeleteRequest,
-            GcsObjectMetadata, GcsStreamingUploadRequest, GcsUploadRequest, GcsUploader,
-            bigquery_source_format,
+            GcsStreamingUploadRequest, GcsUploader, bigquery_source_format,
             gcs::{GcsStreamingUploadWriter, GoogleCloudStorageUploader},
         },
         metrics::{
@@ -310,6 +309,12 @@ fn is_transient_query_error(error: &BQError) -> RetryDecision {
         }
         _ => RetryDecision::Stop,
     }
+}
+
+/// Returns whether BigQuery reports that a deterministic job id already
+/// exists.
+fn is_bigquery_job_already_exists(error: &BQError) -> bool {
+    matches!(error, BQError::ResponseError { error } if error.error.code == 409)
 }
 
 /// Logs a transient BigQuery query retry.
@@ -767,21 +772,6 @@ impl BigQueryClient {
         self.gcs_uploader.as_ref()
     }
 
-    /// Uploads one object to GCS using the configured initial-copy uploader.
-    pub(crate) async fn upload_gcs_object(
-        &self,
-        request: GcsUploadRequest,
-    ) -> EtlResult<GcsObjectMetadata> {
-        let Some(uploader) = self.gcs_uploader() else {
-            return Err(etl_error!(
-                ErrorKind::ConfigError,
-                "BigQuery GCS uploader is not configured"
-            ));
-        };
-
-        uploader.upload_object(request).await
-    }
-
     /// Starts one streaming upload to GCS using the configured uploader.
     pub(crate) async fn start_gcs_streaming_upload(
         &self,
@@ -1043,36 +1033,10 @@ impl BigQueryClient {
     }
 
     /// Inserts a BigQuery load job for staged initial-copy files.
-    pub async fn insert_load_job(
+    pub(crate) async fn insert_load_job(
         &self,
         request: BigQueryLoadJobRequest,
     ) -> EtlResult<BigQueryLoadJobRef> {
-        let job = Job {
-            configuration: Some(JobConfiguration {
-                load: Some(JobConfigurationLoad {
-                    create_disposition: Some(request.create_disposition.clone()),
-                    decimal_target_types: Some(request.decimal_target_types.clone()),
-                    destination_table: Some(TableReference::new(
-                        &self.project_id,
-                        &request.dataset_id,
-                        &request.destination_table_id,
-                    )),
-                    source_format: Some(bigquery_source_format(request.source_format).to_owned()),
-                    source_uris: Some(request.source_uris.clone()),
-                    use_avro_logical_types: Some(request.use_avro_logical_types),
-                    write_disposition: Some(request.write_disposition.clone()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            job_reference: Some(JobReference {
-                job_id: Some(request.job_id.clone()),
-                location: request.location.clone(),
-                project_id: Some(self.project_id.clone()),
-            }),
-            ..Default::default()
-        };
-
         info!(
             job_id = %request.job_id,
             location = request.location.as_deref().unwrap_or("inferred"),
@@ -1083,8 +1047,32 @@ impl BigQueryClient {
             "inserting bigquery initial-copy load job"
         );
 
-        let job =
-            self.client.job().insert(&self.project_id, job).await.map_err(bq_error_to_etl_error)?;
+        let job = match retry_with_backoff(
+            QUERY_RETRY_POLICY,
+            is_transient_query_error,
+            |delay| delay,
+            log_query_retry,
+            || {
+                let job = load_job_from_request(&self.project_id, &request);
+                async move { self.client.job().insert(&self.project_id, job).await }
+            },
+        )
+        .await
+        {
+            Ok(job) => job,
+            Err(failure) => {
+                let error = failure.last_error;
+                if is_bigquery_job_already_exists(&error) {
+                    return Ok(BigQueryLoadJobRef {
+                        project_id: self.project_id.clone(),
+                        job_id: request.job_id,
+                        location: request.location,
+                    });
+                }
+
+                return Err(bq_error_to_etl_error(error));
+            }
+        };
 
         let job_reference = job.job_reference.ok_or_else(|| {
             etl_error!(
@@ -1101,16 +1089,24 @@ impl BigQueryClient {
     }
 
     /// Reads the current status for a BigQuery initial-copy load job.
-    pub async fn get_load_job(
+    pub(crate) async fn get_load_job(
         &self,
         job_ref: &BigQueryLoadJobRef,
     ) -> EtlResult<BigQueryLoadJobStatus> {
-        let job = self
-            .client
-            .job()
-            .get_job(&job_ref.project_id, &job_ref.job_id, job_ref.location.as_deref())
-            .await
-            .map_err(bq_error_to_etl_error)?;
+        let job = retry_with_backoff(
+            QUERY_RETRY_POLICY,
+            is_transient_query_error,
+            |delay| delay,
+            log_query_retry,
+            || async move {
+                self.client
+                    .job()
+                    .get_job(&job_ref.project_id, &job_ref.job_id, job_ref.location.as_deref())
+                    .await
+            },
+        )
+        .await
+        .map_err(|failure| bq_error_to_etl_error(failure.last_error))?;
 
         Ok(load_job_status_from_job_status(job.status))
     }
@@ -1564,6 +1560,40 @@ impl fmt::Debug for BigQueryClient {
     }
 }
 
+/// Builds a BigQuery REST load job request from destination initial-copy
+/// metadata.
+fn load_job_from_request(project_id: &str, request: &BigQueryLoadJobRequest) -> Job {
+    let decimal_target_types =
+        request.destination_schema.is_none().then(|| request.decimal_target_types.clone());
+
+    Job {
+        configuration: Some(JobConfiguration {
+            load: Some(JobConfigurationLoad {
+                create_disposition: Some(request.create_disposition.clone()),
+                decimal_target_types,
+                destination_table: Some(TableReference::new(
+                    project_id,
+                    &request.dataset_id,
+                    &request.destination_table_id,
+                )),
+                source_format: Some(bigquery_source_format(request.source_format).to_owned()),
+                source_uris: Some(request.source_uris.clone()),
+                schema: request.destination_schema.clone(),
+                use_avro_logical_types: Some(request.use_avro_logical_types),
+                write_disposition: Some(request.write_disposition.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        job_reference: Some(JobReference {
+            job_id: Some(request.job_id.clone()),
+            location: request.location.clone(),
+            project_id: Some(project_id.to_owned()),
+        }),
+        ..Default::default()
+    }
+}
+
 /// Converts BigQuery REST job status into the destination load-job status.
 fn load_job_status_from_job_status(status: Option<JobStatus>) -> BigQueryLoadJobStatus {
     let Some(status) = status else {
@@ -1586,6 +1616,7 @@ mod tests {
     use gcp_bigquery_client::{
         error::{NestedResponseError, ResponseError},
         google::cloud::bigquery::storage::v1::{AppendRowsResponse, append_rows_response},
+        model::{table_field_schema::TableFieldSchema, table_schema::TableSchema},
     };
 
     use super::*;
@@ -1599,6 +1630,41 @@ mod tests {
                 append_rows_response::AppendResult { offset: None },
             )),
         }
+    }
+
+    /// Creates a load job request for client request-shape tests.
+    fn test_load_job_request() -> BigQueryLoadJobRequest {
+        BigQueryLoadJobRequest::new(
+            "job".to_owned(),
+            "dataset".to_owned(),
+            "table".to_owned(),
+            vec!["gs://bucket/object.avro".to_owned()],
+            crate::bigquery::initial_copy::SnapshotFormat::Avro,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn load_job_from_request_keeps_decimal_targets_without_explicit_schema() {
+        let request = test_load_job_request();
+
+        let job = load_job_from_request("project", &request);
+        let load = job.configuration.unwrap().load.unwrap();
+
+        assert_eq!(load.decimal_target_types, Some(vec!["BIGNUMERIC".to_owned()]));
+        assert!(load.schema.is_none());
+    }
+
+    #[test]
+    fn load_job_from_request_omits_decimal_targets_with_explicit_schema() {
+        let schema = TableSchema::new(vec![TableFieldSchema::json("payload")]);
+        let request = test_load_job_request().with_destination_schema(schema);
+
+        let job = load_job_from_request("project", &request);
+        let load = job.configuration.unwrap().load.unwrap();
+
+        assert!(load.decimal_target_types.is_none());
+        assert!(load.schema.is_some());
     }
 
     #[test]

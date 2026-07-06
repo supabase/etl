@@ -6,6 +6,7 @@
 use std::{fmt, future::Future, path::Path, str::FromStr, time::Duration};
 
 use etl::{pipeline::PipelineId, schema::TableName, store::DestinationStore};
+use etl_config::shared::validate_gcs_bucket_name;
 use gcp_bigquery_client::{
     Client,
     client_builder::ClientBuilder,
@@ -181,8 +182,16 @@ pub fn get_sa_key_path() -> String {
 /// Panics if the `TESTS_BIGQUERY_GCS_STAGING_BUCKET` environment variable is
 /// not set.
 pub fn get_gcs_staging_bucket() -> String {
-    std::env::var(BIGQUERY_GCS_STAGING_BUCKET_ENV)
-        .unwrap_or_else(|_| panic!("{BIGQUERY_GCS_STAGING_BUCKET_ENV} must be set"))
+    let bucket = std::env::var(BIGQUERY_GCS_STAGING_BUCKET_ENV)
+        .unwrap_or_else(|_| panic!("{BIGQUERY_GCS_STAGING_BUCKET_ENV} must be set"));
+    validate_gcs_bucket_name(&bucket).unwrap_or_else(|error| {
+        panic!(
+            "{BIGQUERY_GCS_STAGING_BUCKET_ENV} must be a bucket name only, for example \
+             `supabase-etl`: {error}"
+        )
+    });
+
+    bucket
 }
 
 /// Generates a unique dataset ID for test isolation.
