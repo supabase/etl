@@ -14,9 +14,7 @@ use etl::{
 };
 use sha2::{Digest, Sha256};
 
-use super::core::{
-    bigquery_delete_old_row, bigquery_update_new_row, ensure_bigquery_key_image_matches_primary_key,
-};
+use super::core::{bigquery_delete_old_row, bigquery_update_new_row};
 use crate::bigquery::encoding::BigQueryTableRow;
 
 const BIGQUERY_SEQUENCE_ORDINAL_FIRST: u64 = 0;
@@ -330,23 +328,26 @@ pub(super) fn append_only_delete_old_row(
     }
 }
 
-/// Expands a dense primary-key row into a sparse table row.
+/// Expands a dense replica-identity key row into a sparse table row.
 fn key_row_to_sparse_table_row(
     replicated_table_schema: &ReplicatedTableSchema,
     key_row: TableRow,
 ) -> EtlResult<TableRow> {
-    ensure_bigquery_key_image_matches_primary_key(replicated_table_schema)?;
-
     let mut key_values = key_row.into_values().into_iter();
+    let mut identity_column_schemas = replicated_table_schema.identity_column_schemas().peekable();
     let mut values = Vec::with_capacity(replicated_table_schema.column_schemas().len());
     for column_schema in replicated_table_schema.column_schemas() {
-        if column_schema.primary_key() {
+        if identity_column_schemas
+            .peek()
+            .is_some_and(|identity_column_schema| identity_column_schema.name == column_schema.name)
+        {
+            identity_column_schemas.next();
             let Some(value) = key_values.next() else {
                 bail!(
                     ErrorKind::InvalidState,
                     "Append-only key image shape is inconsistent",
                     format!(
-                        "Table '{}' key image ended before all primary key values",
+                        "Table '{}' key image ended before all replica identity values",
                         replicated_table_schema.name()
                     )
                 );
@@ -362,7 +363,7 @@ fn key_row_to_sparse_table_row(
             ErrorKind::InvalidState,
             "Append-only key image has leftover values",
             format!(
-                "Table '{}' key image contained more values than its primary key",
+                "Table '{}' key image contained more values than its replica identity",
                 replicated_table_schema.name()
             )
         );

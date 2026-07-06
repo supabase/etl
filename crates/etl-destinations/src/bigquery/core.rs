@@ -18,7 +18,8 @@ use etl::{
     event::{Event, EventSequenceKey},
     pipeline::PipelineId,
     schema::{
-        ColumnModification, IdentityType, ReplicatedTableSchema, SchemaDiff, TableId, TableName,
+        ColumnModification, ColumnSchema, IdentityType, ReplicatedTableSchema, SchemaDiff, TableId,
+        TableName,
     },
     store::DestinationStore,
 };
@@ -42,8 +43,10 @@ use crate::{
         encoding::BigQueryTableRow,
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
         schema::{
-            append_only_table_descriptor, column_schemas_to_table_descriptor,
-            supports_column_default,
+            APPEND_ONLY_CHANGE_SEQUENCE_NUMBER_COLUMN, APPEND_ONLY_CHANGE_TYPE_COLUMN,
+            APPEND_ONLY_SORT_KEYS_COLUMN, APPEND_ONLY_SOURCE_TIMESTAMP_COLUMN,
+            APPEND_ONLY_UUID_COLUMN, append_only_table_descriptor,
+            column_schemas_to_table_descriptor, supports_column_default,
         },
     },
     table_name::try_stringify_table_name,
@@ -484,10 +487,21 @@ where
         // created, the inserts will fail because the table will be missing and
         // won't be created.
         if !inner.created_tables.contains(&sequenced_bigquery_table_id) {
+            let destination_table_id = sequenced_bigquery_table_id.to_string();
+            let table_exists =
+                self.client.table_exists(&self.dataset_id, &destination_table_id).await?;
+            if table_exists {
+                self.validate_existing_table_write_mode(
+                    &sequenced_bigquery_table_id,
+                    BigQueryWriteMode::CurrentState,
+                )
+                .await?;
+            }
+
             // Create metadata with applying status. For new tables, this is the initial
             // insert. For existing tables, this updates the status.
             let metadata = DestinationTableMetadata::new_applying(
-                sequenced_bigquery_table_id.to_string(),
+                destination_table_id.clone(),
                 snapshot_id,
                 replication_mask.clone(),
             );
@@ -495,14 +509,22 @@ where
             // Store or update metadata before creating the table.
             self.state_store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
-            self.client
+            let table_was_created = self
+                .client
                 .create_table_if_missing(
                     &self.dataset_id,
-                    &sequenced_bigquery_table_id.to_string(),
+                    &destination_table_id,
                     replicated_table_schema,
                     self.max_staleness_mins,
                 )
                 .await?;
+            if !table_was_created && !table_exists {
+                self.validate_existing_table_write_mode(
+                    &sequenced_bigquery_table_id,
+                    BigQueryWriteMode::CurrentState,
+                )
+                .await?;
+            }
 
             // Mark as applied after successful table creation.
             self.state_store
@@ -561,20 +583,39 @@ where
         };
 
         if !inner.created_tables.contains(&sequenced_bigquery_table_id) {
+            let destination_table_id = sequenced_bigquery_table_id.to_string();
+            let table_exists =
+                self.client.table_exists(&self.dataset_id, &destination_table_id).await?;
+            if table_exists {
+                self.validate_existing_table_write_mode(
+                    &sequenced_bigquery_table_id,
+                    BigQueryWriteMode::AppendOnly,
+                )
+                .await?;
+            }
+
             let metadata = DestinationTableMetadata::new_applying(
-                sequenced_bigquery_table_id.to_string(),
+                destination_table_id.clone(),
                 snapshot_id,
                 replication_mask,
             );
             self.state_store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
-            self.client
+            let table_was_created = self
+                .client
                 .create_append_only_table_if_missing(
                     &self.dataset_id,
-                    &sequenced_bigquery_table_id.to_string(),
+                    &destination_table_id,
                     replicated_table_schema,
                 )
                 .await?;
+            if !table_was_created && !table_exists {
+                self.validate_existing_table_write_mode(
+                    &sequenced_bigquery_table_id,
+                    BigQueryWriteMode::AppendOnly,
+                )
+                .await?;
+            }
 
             self.state_store
                 .store_destination_table_metadata(table_id, metadata.to_applied())
@@ -590,6 +631,18 @@ where
         .await?;
 
         Ok(sequenced_bigquery_table_id)
+    }
+
+    async fn validate_existing_table_write_mode(
+        &self,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+        expected_write_mode: BigQueryWriteMode,
+    ) -> EtlResult<()> {
+        let destination_table_id = sequenced_bigquery_table_id.to_string();
+        let column_names =
+            self.client.list_table_column_names(&self.dataset_id, &destination_table_id).await?;
+
+        ensure_existing_table_write_mode(&destination_table_id, &column_names, expected_write_mode)
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
@@ -1261,7 +1314,14 @@ where
             return Ok(());
         }
 
-        for column in append_only_schema_columns_to_add(diff) {
+        let existing_column_names = self
+            .client
+            .list_table_column_names(&self.dataset_id, &sequenced_bigquery_table_id.to_string())
+            .await?;
+
+        for column in
+            append_only_schema_columns_to_add_for_existing_columns(diff, &existing_column_names)
+        {
             self.client
                 .add_column(&self.dataset_id, &sequenced_bigquery_table_id.to_string(), column)
                 .await?;
@@ -1965,6 +2025,59 @@ fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema
     }
 
     Ok(())
+}
+
+fn append_only_metadata_column_names() -> [&'static str; 5] {
+    [
+        APPEND_ONLY_UUID_COLUMN,
+        APPEND_ONLY_SOURCE_TIMESTAMP_COLUMN,
+        APPEND_ONLY_CHANGE_SEQUENCE_NUMBER_COLUMN,
+        APPEND_ONLY_CHANGE_TYPE_COLUMN,
+        APPEND_ONLY_SORT_KEYS_COLUMN,
+    ]
+}
+
+fn table_has_append_only_metadata_columns(column_names: &HashSet<String>) -> bool {
+    append_only_metadata_column_names()
+        .into_iter()
+        .all(|column_name| column_names.contains(column_name))
+}
+
+fn ensure_existing_table_write_mode(
+    destination_table_id: &str,
+    column_names: &HashSet<String>,
+    expected_write_mode: BigQueryWriteMode,
+) -> EtlResult<()> {
+    let existing_write_mode = if table_has_append_only_metadata_columns(column_names) {
+        BigQueryWriteMode::AppendOnly
+    } else {
+        BigQueryWriteMode::CurrentState
+    };
+
+    if existing_write_mode != expected_write_mode {
+        bail!(
+            ErrorKind::InvalidState,
+            "BigQuery write mode changed for existing destination table",
+            format!(
+                "Table '{destination_table_id}' was created for {:?} writes but the destination \
+                 is configured for {:?} writes. Recreate or reset the destination table before \
+                 changing BigQuery write mode.",
+                existing_write_mode, expected_write_mode
+            )
+        );
+    }
+
+    Ok(())
+}
+
+fn append_only_schema_columns_to_add_for_existing_columns<'a>(
+    diff: &'a SchemaDiff,
+    existing_column_names: &HashSet<String>,
+) -> Vec<&'a ColumnSchema> {
+    append_only_schema_columns_to_add(diff)
+        .into_iter()
+        .filter(|column| !existing_column_names.contains(&column.name))
+        .collect()
 }
 
 impl<S> Destination for BigQueryDestination<S>
@@ -2965,6 +3078,72 @@ mod tests {
     }
 
     #[test]
+    fn append_only_schema_columns_to_add_for_existing_columns_skips_preserved_column_names() {
+        let added_column = ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true);
+        let new_name_column = ColumnSchema::new("display_name".to_owned(), Type::TEXT, -1, 3, true);
+        let diff = SchemaDiff {
+            columns_to_add: vec![added_column],
+            columns_to_remove: vec![],
+            columns_to_change: vec![etl::schema::ColumnChange {
+                ordinal_position: 3,
+                old_column: ColumnSchema::new(
+                    "old_display_name".to_owned(),
+                    Type::TEXT,
+                    -1,
+                    3,
+                    true,
+                ),
+                new_column: new_name_column,
+                modifications: vec![ColumnModification::Rename {
+                    old_name: "old_display_name".to_owned(),
+                    new_name: "display_name".to_owned(),
+                }],
+            }],
+        };
+        let existing_columns = std::collections::HashSet::from(["name".to_owned()]);
+
+        let columns =
+            append_only_schema_columns_to_add_for_existing_columns(&diff, &existing_columns)
+                .into_iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>();
+
+        assert_eq!(columns, vec!["display_name"]);
+    }
+
+    #[test]
+    fn ensure_existing_table_write_mode_rejects_current_state_config_for_append_only_table() {
+        let column_names = std::collections::HashSet::from(
+            append_only_metadata_column_names().map(std::string::ToString::to_string),
+        );
+
+        let error = ensure_existing_table_write_mode(
+            "public_users_0",
+            &column_names,
+            BigQueryWriteMode::CurrentState,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        assert!(error.to_string().contains("BigQuery write mode changed"));
+    }
+
+    #[test]
+    fn ensure_existing_table_write_mode_rejects_append_only_config_for_current_state_table() {
+        let column_names = std::collections::HashSet::from(["id".to_owned(), "name".to_owned()]);
+
+        let error = ensure_existing_table_write_mode(
+            "public_users_0",
+            &column_names,
+            BigQueryWriteMode::AppendOnly,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        assert!(error.to_string().contains("BigQuery write mode changed"));
+    }
+
+    #[test]
     fn validate_bigquery_table_shape_accepts_alternative_identity() {
         let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
 
@@ -3703,6 +3882,19 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn append_only_delete_key_row_uses_replica_identity_columns() {
+        let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
+
+        let old_table_row = append_only_delete_old_row(
+            &replicated_table_schema,
+            Some(OldTableRow::Key(TableRow::new(vec![Cell::String("alice".to_owned())]))),
+        )
+        .unwrap();
+
+        assert_eq!(old_table_row.values(), &[Cell::Null, Cell::String("alice".to_owned())]);
     }
 
     #[test]

@@ -79,6 +79,20 @@ pub(super) fn quote_information_schema_tables_path(
     Ok(format!("`{project_id}.{dataset_id}.INFORMATION_SCHEMA.TABLES`"))
 }
 
+/// Quotes the BigQuery `INFORMATION_SCHEMA.COLUMNS` path for a dataset.
+///
+/// The fixed `INFORMATION_SCHEMA.COLUMNS` suffix is intentionally not escaped
+/// as user input.
+pub(super) fn quote_information_schema_columns_path(
+    project_id: &BigQueryProjectId,
+    dataset_id: &BigQueryDatasetId,
+) -> EtlResult<String> {
+    let project_id = escape_identifier(project_id, "BigQuery project id")?;
+    let dataset_id = escape_identifier(dataset_id, "BigQuery dataset id")?;
+
+    Ok(format!("`{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS`"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

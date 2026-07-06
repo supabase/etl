@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use etl::{
@@ -66,7 +71,10 @@ use crate::{
             create_append_only_columns_spec, create_columns_spec, default_expression_sql,
             postgres_to_bigquery_type,
         },
-        sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
+        sql::{
+            quote_identifier, quote_information_schema_columns_path,
+            quote_information_schema_tables_path, quote_table_path,
+        },
     },
     retry::{RetryDecision, RetryPolicy, retry_with_backoff},
 };
@@ -1309,6 +1317,47 @@ impl BigQueryClient {
         }
 
         Ok(table_ids)
+    }
+
+    /// Lists column names for a physical BigQuery table.
+    pub async fn list_table_column_names(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+    ) -> EtlResult<HashSet<String>> {
+        info!(%dataset_id, %table_id, "listing table columns from bigquery");
+
+        let information_schema_columns =
+            quote_information_schema_columns_path(&self.project_id, dataset_id)?;
+        let query = format!(
+            "select column_name from {information_schema_columns} where table_name = @table_name"
+        );
+        let mut request = QueryRequest::new(query);
+        request.parameter_mode = Some("NAMED".to_owned());
+        request.query_parameters = Some(vec![QueryParameter {
+            name: Some("table_name".to_owned()),
+            parameter_type: Some(QueryParameterType {
+                r#type: "STRING".to_owned(),
+                ..Default::default()
+            }),
+            parameter_value: Some(QueryParameterValue {
+                value: Some(table_id.clone()),
+                ..Default::default()
+            }),
+        }]);
+
+        let mut result_set = self.query(request).await?;
+        let mut column_names = HashSet::new();
+
+        while result_set.next_row() {
+            if let Some(column_name) =
+                result_set.get_string_by_name("column_name").map_err(bq_error_to_etl_error)?
+            {
+                column_names.insert(column_name);
+            }
+        }
+
+        Ok(column_names)
     }
 
     /// Adds a column to an existing BigQuery table.
