@@ -302,7 +302,11 @@ impl BigQueryDatabase {
             .await
             {
                 Ok(response) => response.rows,
-                Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+                // A freshly created or replaced view can transiently 404 before
+                // BigQuery's metadata propagates. Treat that the same as an
+                // empty result and keep retrying within the same budget,
+                // rather than giving up immediately.
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => None,
                 Err(err) => panic!("Failed to query BigQuery table: {err:?}"),
             };
 
@@ -344,7 +348,12 @@ impl BigQueryDatabase {
             .await
             {
                 Ok(response) => response.rows,
-                Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+                // This query targets `INFORMATION_SCHEMA.COLUMNS`, which always
+                // exists, so a 404 here isn't expected from table/view
+                // propagation lag the way it is in `query_table`. Retry it
+                // anyway for consistency with that function and in case the
+                // dataset itself is momentarily unavailable.
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => None,
                 Err(err) => panic!("Failed to query BigQuery table schema: {err:?}"),
             };
 
