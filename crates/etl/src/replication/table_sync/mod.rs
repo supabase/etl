@@ -228,7 +228,6 @@ where
 
             // We are ready to start copying table data, and we update the state
             // accordingly.
-            info!(table_id = table_id.0, "starting data copy");
             {
                 let mut inner = table_sync_worker_state.lock().await;
                 inner.set_and_store(TableState::DataSync, &store).await?;
@@ -349,8 +348,6 @@ where
                     .write_table_rows(&replicated_table_schema, vec![], flush_result)
                     .await?;
                 pending_flush_result.await.into_result()?;
-
-                info!(table_id = table_id.0, "writing empty table rows for empty table");
             }
 
             info!(

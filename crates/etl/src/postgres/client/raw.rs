@@ -17,7 +17,7 @@ use tokio_postgres::{
     Client, Config, Connection, IsolationLevel, NoTls, SimpleQueryMessage, Socket, Transaction,
     config::ReplicationMode, error::SqlState, tls::MakeTlsConnect, types::PgLsn,
 };
-use tracing::{Instrument, error, info, warn};
+use tracing::{Instrument, debug, error, info, warn};
 
 use super::{
     child::ChildPgReplicationClient,
@@ -461,14 +461,8 @@ impl PgReplicationClient {
         slot_name: &str,
     ) -> EtlResult<GetOrCreateSlotResult> {
         match self.get_slot(slot_name).await {
-            Ok(slot) => {
-                info!(slot_name, "using existing replication slot");
-
-                Ok(GetOrCreateSlotResult::GetSlot(slot))
-            }
+            Ok(slot) => Ok(GetOrCreateSlotResult::GetSlot(slot)),
             Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
-                info!(slot_name, "creating new replication slot");
-
                 let create_result = self.create_slot(slot_name).await?;
 
                 Ok(GetOrCreateSlotResult::CreateSlot(create_result))
@@ -651,7 +645,7 @@ impl PgReplicationClient {
     /// Deletes a replication slot, optionally failing when the slot does not
     /// exist.
     async fn delete_slot_internal(&self, slot_name: &str, fail_if_missing: bool) -> EtlResult<()> {
-        info!(slot_name, "deleting replication slot");
+        debug!(slot_name, "deleting replication slot");
 
         // Do not convert the query or the options to lowercase, see comment in
         // `create_slot_internal`.
@@ -679,8 +673,6 @@ impl PgReplicationClient {
             Err(err) => {
                 if let Some(&SqlState::UNDEFINED_OBJECT) = err.code() {
                     if fail_if_missing {
-                        warn!(slot_name, "attempted to delete non-existent replication slot");
-
                         bail!(
                             ErrorKind::ReplicationSlotNotFound,
                             "Replication slot not found",

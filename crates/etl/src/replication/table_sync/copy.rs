@@ -415,8 +415,6 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(total_rows);
     histogram!(ETL_TABLE_COPY_DURATION_SECONDS).record(total_duration_secs);
 
-    info!(table_id = table_id.0, total_rows, total_duration_secs, "completed table copy");
-
     Ok(TableCopyResult::Completed { total_rows, total_duration_secs })
 }
 
