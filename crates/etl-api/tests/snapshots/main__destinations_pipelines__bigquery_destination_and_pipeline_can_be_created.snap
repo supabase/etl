@@ -5,6 +5,7 @@ expression: response.config
 BigQuery {
     project_id: "project-id",
     dataset_id: "dataset-id",
+    gcs_staging_bucket: None,
     service_account_key: SerializableSecretString(
         SecretBox<str>([REDACTED]),
     ),
