@@ -15,7 +15,7 @@ pub async fn validate_source_config(
         return Ok(vec![]);
     }
 
-    let ctx = ValidationContext::build_from_source(source_config, api_config, source_tls_config)
-        .await?;
+    let ctx =
+        ValidationContext::build_from_source(source_config, api_config, source_tls_config).await?;
     validation::validate_source(&ctx).await
 }
