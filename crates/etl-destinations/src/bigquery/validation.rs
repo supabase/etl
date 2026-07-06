@@ -137,6 +137,7 @@ fn validate_array_cell_for_bigquery(array_cell: &ArrayCell) -> EtlResult<()> {
                 )
             );
         }
+
         Ok(())
     }
 
@@ -154,6 +155,7 @@ fn validate_array_cell_for_bigquery(array_cell: &ArrayCell) -> EtlResult<()> {
                 )
             })?;
         }
+
         Ok(())
     }
 
