@@ -1850,7 +1850,7 @@ mod tests {
     use std::sync::Arc;
 
     use etl::{
-        data::CellNonOptional,
+        data::Cell,
         schema::{ColumnSchema, IdentityMask, PgLsn, TableId, TableSchema, Type},
     };
     use prost::Message;
@@ -2506,9 +2506,9 @@ mod tests {
         assert_eq!(
             row.debug_cells(),
             vec![
-                (1, CellNonOptional::I32(42)),
-                (4, CellNonOptional::String("DELETE".to_owned())),
-                (5, CellNonOptional::String("lsn:1".to_owned())),
+                (1, Cell::I32(42)),
+                (4, Cell::String("DELETE".to_owned())),
+                (5, Cell::String("lsn:1".to_owned())),
             ]
         );
     }
@@ -2530,11 +2530,11 @@ mod tests {
         assert_eq!(
             rows[0].debug_cells(),
             vec![
-                (1, CellNonOptional::I32(1)),
-                (3, CellNonOptional::String("DELETE".to_owned())),
+                (1, Cell::I32(1)),
+                (3, Cell::String("DELETE".to_owned())),
                 (
                     4,
-                    CellNonOptional::String(
+                    Cell::String(
                         "0000000000000001/0000000000000000/0000000000000000".to_owned(),
                     ),
                 ),
@@ -2543,12 +2543,12 @@ mod tests {
         assert_eq!(
             rows[1].debug_cells(),
             vec![
-                (1, CellNonOptional::I32(2)),
-                (2, CellNonOptional::String("updated".to_owned())),
-                (3, CellNonOptional::String("UPSERT".to_owned())),
+                (1, Cell::I32(2)),
+                (2, Cell::String("updated".to_owned())),
+                (3, Cell::String("UPSERT".to_owned())),
                 (
                     4,
-                    CellNonOptional::String(
+                    Cell::String(
                         "0000000000000001/0000000000000000/0000000000000001".to_owned(),
                     ),
                 ),
@@ -2573,12 +2573,12 @@ mod tests {
         assert_eq!(
             rows[0].debug_cells(),
             vec![
-                (1, CellNonOptional::I32(1)),
-                (2, CellNonOptional::String("updated".to_owned())),
-                (3, CellNonOptional::String("UPSERT".to_owned())),
+                (1, Cell::I32(1)),
+                (2, Cell::String("updated".to_owned())),
+                (3, Cell::String("UPSERT".to_owned())),
                 (
                     4,
-                    CellNonOptional::String(
+                    Cell::String(
                         "0000000000000001/0000000000000000/0000000000000000".to_owned(),
                     ),
                 ),
@@ -2606,11 +2606,11 @@ mod tests {
         assert_eq!(
             rows[0].debug_cells(),
             vec![
-                (1, CellNonOptional::I32(1)),
-                (3, CellNonOptional::String("DELETE".to_owned())),
+                (1, Cell::I32(1)),
+                (3, Cell::String("DELETE".to_owned())),
                 (
                     4,
-                    CellNonOptional::String(
+                    Cell::String(
                         "0000000000000001/0000000000000000/0000000000000000".to_owned(),
                     ),
                 ),
@@ -2619,12 +2619,12 @@ mod tests {
         assert_eq!(
             rows[1].debug_cells(),
             vec![
-                (1, CellNonOptional::I32(2)),
-                (2, CellNonOptional::String("updated".to_owned())),
-                (3, CellNonOptional::String("UPSERT".to_owned())),
+                (1, Cell::I32(2)),
+                (2, Cell::String("updated".to_owned())),
+                (3, Cell::String("UPSERT".to_owned())),
                 (
                     4,
-                    CellNonOptional::String(
+                    Cell::String(
                         "0000000000000001/0000000000000000/0000000000000001".to_owned(),
                     ),
                 ),

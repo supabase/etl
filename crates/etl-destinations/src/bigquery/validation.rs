@@ -1,6 +1,6 @@
 use etl::{
     bail,
-    data::{ArrayCellNonOptional, CellNonOptional, PgNumeric},
+    data::{ArrayCell, Cell, PgNumeric},
     error::{ErrorKind, EtlResult},
     etl_error,
 };
@@ -93,76 +93,94 @@ fn is_json_integer_literal(number: &str) -> bool {
 /// Destination-domain checks that BigQuery rejects with row errors are
 /// intentionally delegated to BigQuery to avoid duplicating destination logic
 /// in the append hot path.
-pub(super) fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()> {
+pub(super) fn validate_cell_for_bigquery(cell: &Cell) -> EtlResult<()> {
     match cell {
-        CellNonOptional::Null => Ok(()),
-        CellNonOptional::Bool(_) => Ok(()),
-        CellNonOptional::String(_) => Ok(()),
-        CellNonOptional::I16(_) => Ok(()),
-        CellNonOptional::I32(_) => Ok(()),
-        CellNonOptional::U32(_) => Ok(()),
-        CellNonOptional::I64(_) => Ok(()),
-        CellNonOptional::F32(_) => Ok(()),
-        CellNonOptional::F64(_) => Ok(()),
-        CellNonOptional::Numeric(numeric) => validate_numeric_for_bigquery(numeric),
-        CellNonOptional::Date(_) => Ok(()),
-        CellNonOptional::Time(_) => Ok(()),
-        CellNonOptional::TimeTz(_) => Ok(()),
-        CellNonOptional::Timestamp(_) => Ok(()),
-        CellNonOptional::TimestampTz(_) => Ok(()),
-        CellNonOptional::Uuid(_) => Ok(()),
-        CellNonOptional::Json(json) => validate_json_for_bigquery(json),
-        CellNonOptional::Bytes(_) => Ok(()),
-        CellNonOptional::Array(array) => validate_array_cell_for_bigquery(array),
+        Cell::Null => Ok(()),
+        Cell::Bool(_) => Ok(()),
+        Cell::String(_) => Ok(()),
+        Cell::I16(_) => Ok(()),
+        Cell::I32(_) => Ok(()),
+        Cell::U32(_) => Ok(()),
+        Cell::I64(_) => Ok(()),
+        Cell::F32(_) => Ok(()),
+        Cell::F64(_) => Ok(()),
+        Cell::Numeric(numeric) => validate_numeric_for_bigquery(numeric),
+        Cell::Date(_) => Ok(()),
+        Cell::Time(_) => Ok(()),
+        Cell::TimeTz(_) => Ok(()),
+        Cell::Timestamp(_) => Ok(()),
+        Cell::TimestampTz(_) => Ok(()),
+        Cell::Uuid(_) => Ok(()),
+        Cell::Json(json) => validate_json_for_bigquery(json),
+        Cell::Bytes(_) => Ok(()),
+        Cell::Array(array) => validate_array_cell_for_bigquery(array),
     }
 }
 
-/// Validates that an [`ArrayCellNonOptional`] contains values within BigQuery's
-/// supported ranges.
+/// Validates that an [`ArrayCell`] has no NULL elements and contains values
+/// within BigQuery's supported ranges.
 ///
-/// Returns an error if any array element is outside BigQuery's supported range
-/// for its type.
-fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> EtlResult<()> {
+/// BigQuery does not support NULL values within `REPEATED` fields, so this
+/// rejects any array containing one. Remaining elements are validated the same
+/// way as scalar cells.
+fn validate_array_cell_for_bigquery(array_cell: &ArrayCell) -> EtlResult<()> {
+    fn reject_nulls<T>(elements: &[Option<T>]) -> EtlResult<()> {
+        let null_count = elements.iter().filter(|v| v.is_none()).count();
+        if null_count > 0 {
+            bail!(
+                ErrorKind::NullValuesNotSupportedInArrayInDestination,
+                "NULL values in arrays not supported in this destination",
+                format!(
+                    "Array contains {null_count} NULL values across {} elements, which are not \
+                     supported in this destination",
+                    elements.len()
+                )
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_elements<T>(
+        elements: &[Option<T>],
+        validate: impl Fn(&T) -> EtlResult<()>,
+    ) -> EtlResult<()> {
+        for (index, element) in elements.iter().enumerate() {
+            let Some(element) = element else { continue };
+            validate(element).map_err(|err| {
+                etl_error!(
+                    err.kind(),
+                    "Array element validation failed",
+                    format!("Element at index {}: {}", index, err)
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     match array_cell {
-        ArrayCellNonOptional::Bool(_) => Ok(()),
-        ArrayCellNonOptional::String(_) => Ok(()),
-        ArrayCellNonOptional::I16(_) => Ok(()),
-        ArrayCellNonOptional::I32(_) => Ok(()),
-        ArrayCellNonOptional::U32(_) => Ok(()),
-        ArrayCellNonOptional::I64(_) => Ok(()),
-        ArrayCellNonOptional::F32(_) => Ok(()),
-        ArrayCellNonOptional::F64(_) => Ok(()),
-        ArrayCellNonOptional::Numeric(numerics) => {
-            for (index, numeric) in numerics.iter().enumerate() {
-                validate_numeric_for_bigquery(numeric).map_err(|err| {
-                    etl_error!(
-                        err.kind(),
-                        "Array element validation failed",
-                        format!("Element at index {}: {}", index, err)
-                    )
-                })?;
-            }
-            Ok(())
+        ArrayCell::Bool(vec) => reject_nulls(vec),
+        ArrayCell::String(vec) => reject_nulls(vec),
+        ArrayCell::I16(vec) => reject_nulls(vec),
+        ArrayCell::I32(vec) => reject_nulls(vec),
+        ArrayCell::U32(vec) => reject_nulls(vec),
+        ArrayCell::I64(vec) => reject_nulls(vec),
+        ArrayCell::F32(vec) => reject_nulls(vec),
+        ArrayCell::F64(vec) => reject_nulls(vec),
+        ArrayCell::Numeric(vec) => {
+            reject_nulls(vec)?;
+            validate_elements(vec, validate_numeric_for_bigquery)
         }
-        ArrayCellNonOptional::Date(_) => Ok(()),
-        ArrayCellNonOptional::Time(_) => Ok(()),
-        ArrayCellNonOptional::TimeTz(_) => Ok(()),
-        ArrayCellNonOptional::Timestamp(_) => Ok(()),
-        ArrayCellNonOptional::TimestampTz(_) => Ok(()),
-        ArrayCellNonOptional::Uuid(_) => Ok(()),
-        ArrayCellNonOptional::Json(values) => {
-            for (index, value) in values.iter().enumerate() {
-                validate_json_for_bigquery(value).map_err(|err| {
-                    etl_error!(
-                        err.kind(),
-                        "Array element validation failed",
-                        format!("Element at index {}: {}", index, err)
-                    )
-                })?;
-            }
-            Ok(())
+        ArrayCell::Date(vec) => reject_nulls(vec),
+        ArrayCell::Time(vec) => reject_nulls(vec),
+        ArrayCell::TimeTz(vec) => reject_nulls(vec),
+        ArrayCell::Timestamp(vec) => reject_nulls(vec),
+        ArrayCell::TimestampTz(vec) => reject_nulls(vec),
+        ArrayCell::Uuid(vec) => reject_nulls(vec),
+        ArrayCell::Json(vec) => {
+            reject_nulls(vec)?;
+            validate_elements(vec, validate_json_for_bigquery)
         }
-        ArrayCellNonOptional::Bytes(_) => Ok(()),
+        ArrayCell::Bytes(vec) => reject_nulls(vec),
     }
 }
 
@@ -214,7 +232,7 @@ mod tests {
     #[test]
     fn validate_cell_for_bigquery_delegates_json_domain_validation() {
         let json = serde_json::from_str(r#"{"value":1e309}"#).unwrap();
-        let cell = CellNonOptional::Json(json);
+        let cell = Cell::Json(json);
         let result = validate_cell_for_bigquery(&cell);
         assert!(result.is_ok());
     }
@@ -227,7 +245,7 @@ mod tests {
             r#"{"value":922337203685477580701}"#,
         ] {
             let json = serde_json::from_str(value).unwrap();
-            let cell = CellNonOptional::Json(json);
+            let cell = Cell::Json(json);
             let result = validate_cell_for_bigquery(&cell);
             assert!(result.is_err(), "{value}");
             assert_eq!(result.unwrap_err().kind(), ErrorKind::UnsupportedValueInDestination);
@@ -242,17 +260,40 @@ mod tests {
             r#"{"value":1.7976931348623157e308}"#,
         ] {
             let json = serde_json::from_str(value).unwrap();
-            let cell = CellNonOptional::Json(json);
+            let cell = Cell::Json(json);
             assert!(validate_cell_for_bigquery(&cell).is_ok(), "{value}");
         }
     }
 
     #[test]
+    fn validate_array_cell_rejects_null_elements() {
+        let array_cell =
+            ArrayCell::String(vec![Some("test".to_owned()), None, Some("hello".to_owned())]);
+
+        let result = validate_array_cell_for_bigquery(&array_cell);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NullValuesNotSupportedInArrayInDestination);
+        assert!(
+            error.to_string().contains("NULL values in arrays not supported in this destination")
+        );
+        assert!(!error.to_string().contains("test"));
+        assert!(!error.to_string().contains("hello"));
+    }
+
+    #[test]
+    fn validate_array_cell_accepts_elements_without_nulls() {
+        let array_cell = ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
+        assert!(validate_array_cell_for_bigquery(&array_cell).is_ok());
+    }
+
+    #[test]
     fn validate_array_cell_with_numeric_rounding_risk() {
-        let array_cell = ArrayCellNonOptional::Numeric(vec![
-            PgNumeric::from_str("123.456").unwrap(),
-            PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
-            PgNumeric::from_str("789.012").unwrap(),
+        let array_cell = ArrayCell::Numeric(vec![
+            Some(PgNumeric::from_str("123.456").unwrap()),
+            Some(PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap()),
+            Some(PgNumeric::from_str("789.012").unwrap()),
         ]);
 
         let result = validate_array_cell_for_bigquery(&array_cell);
@@ -264,9 +305,9 @@ mod tests {
 
     #[test]
     fn validate_array_cell_with_json_integer_rounding_risk() {
-        let array_cell = ArrayCellNonOptional::Json(vec![
-            serde_json::from_str(r#"{"value":123}"#).unwrap(),
-            serde_json::from_str(r#"{"value":18446744073709551616}"#).unwrap(),
+        let array_cell = ArrayCell::Json(vec![
+            Some(serde_json::from_str(r#"{"value":123}"#).unwrap()),
+            Some(serde_json::from_str(r#"{"value":18446744073709551616}"#).unwrap()),
         ]);
 
         let result = validate_array_cell_for_bigquery(&array_cell);
