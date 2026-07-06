@@ -128,10 +128,10 @@ mod bigquery {
         .await?
         .with_initial_copy_parallelism(replicator_config.pipeline.max_copy_connections_per_table);
 
-        if let Some(gcs_staging_bucket) = gcs_staging_bucket {
-            destination =
-                destination.with_gcs_initial_copy_staging_bucket(gcs_staging_bucket.clone());
-        }
+        let gcs_staging_bucket = gcs_staging_bucket
+            .clone()
+            .unwrap_or_else(|| "etl-staging-test".to_owned());
+        destination = destination.with_gcs_initial_copy_staging_bucket(gcs_staging_bucket);
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
         pipeline::start(pipeline).await
