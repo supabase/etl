@@ -124,6 +124,7 @@ pub(super) fn validate_cell_for_bigquery(cell: &Cell) -> EtlResult<()> {
 /// rejects any array containing one. Remaining elements are validated the same
 /// way as scalar cells.
 fn validate_array_cell_for_bigquery(array_cell: &ArrayCell) -> EtlResult<()> {
+    /// Rejects `elements` if any element is NULL.
     fn reject_nulls<T>(elements: &[Option<T>]) -> EtlResult<()> {
         let null_count = elements.iter().filter(|v| v.is_none()).count();
         if null_count > 0 {
@@ -141,6 +142,8 @@ fn validate_array_cell_for_bigquery(array_cell: &ArrayCell) -> EtlResult<()> {
         Ok(())
     }
 
+    /// Runs `validate` over each non-NULL element, tagging any failure with
+    /// its index.
     fn validate_elements<T>(
         elements: &[Option<T>],
         validate: impl Fn(&T) -> EtlResult<()>,

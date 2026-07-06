@@ -113,9 +113,10 @@ impl prost::Message for BigQueryTableRow {
 /// timestamps and numeric types use their native encoding. Null cells produce
 /// no encoded output.
 ///
-/// Callers must validate the cell with [`validate_cell_for_bigquery`] first;
-/// this panics if an array cell contains a NULL element, since BigQuery does
-/// not support NULL values within `REPEATED` fields.
+/// # Panics
+///
+/// Panics if `cell` contains an array with a NULL element; callers must
+/// validate the cell with [`validate_cell_for_bigquery`] first.
 fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) {
     match cell {
         Cell::Null => {}
@@ -194,7 +195,14 @@ fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) {
 /// directly from their `Option` slots rather than through an intermediate
 /// non-nullable collection, so string- and byte-typed elements are encoded
 /// without an extra clone.
+///
+/// # Panics
+///
+/// Panics if `array_cell` contains a NULL element; callers must validate the
+/// cell with [`validate_cell_for_bigquery`] first.
 fn array_cell_encode_prost(array_cell: &ArrayCell, tag: u32, buf: &mut impl bytes::BufMut) {
+    /// Returns the element, panicking if it is a NULL that validation should
+    /// have already rejected.
     fn unwrap<T>(value: &Option<T>) -> &T {
         value.as_ref().expect(UNVALIDATED_NULL_ARRAY_ELEMENT)
     }
