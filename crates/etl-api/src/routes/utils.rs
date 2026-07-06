@@ -10,9 +10,7 @@ pub fn validation_error_status_code(error: &ValidationError) -> StatusCode {
     match error {
         ValidationError::Database { source } => source_database_error_status_code(source),
         ValidationError::BigQuery(_) | ValidationError::Iceberg(_) => StatusCode::BAD_GATEWAY,
-        ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_) => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+        ValidationError::Environment(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -36,9 +34,7 @@ pub fn validation_error_message(error: &ValidationError) -> &'static str {
         ValidationError::Database { source } => source_database_validation_error_message(source),
         ValidationError::BigQuery(_) => "Could not connect to BigQuery",
         ValidationError::Iceberg(_) => "Could not connect to the Iceberg endpoint",
-        ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_) => {
-            "Internal server error"
-        }
+        ValidationError::Environment(_) => "Internal server error",
     }
 }
 

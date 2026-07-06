@@ -26,7 +26,7 @@ use crate::{
         sources::SourcesDbError,
     },
     k8s::{
-        K8sClient, TrustedRootCertsCache,
+        K8sClient, SourceTlsConfig,
         core::{K8sCoreError, first_active_pipeline_id},
     },
     routes::{
@@ -439,7 +439,7 @@ pub(crate) async fn validate_destination(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     request: Json<ValidateDestinationRequest>,
 ) -> Result<impl IntoResponse, DestinationError> {
@@ -461,7 +461,7 @@ pub(crate) async fn validate_destination(
             ValidationContext::build_from_source(
                 source.config,
                 api_config.as_ref(),
-                trusted_root_certs_cache.as_ref(),
+                source_tls_config.as_ref(),
             )
             .await?
         }

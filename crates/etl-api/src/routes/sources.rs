@@ -23,7 +23,7 @@ use crate::{
         sources::{SourcesDbError, source_exists},
     },
     k8s::{
-        K8sClient, TrustedRootCertsCache,
+        K8sClient, SourceTlsConfig,
         core::{K8sCoreError, first_active_pipeline_id},
     },
     routes::{
@@ -100,10 +100,10 @@ impl IntoResponse for SourceError {
 async fn validate_source_config(
     source_config: StoredSourceConfig,
     api_config: &ApiConfig,
-    trusted_root_certs_cache: &TrustedRootCertsCache,
+    source_tls_config: &SourceTlsConfig,
 ) -> Result<(), SourceError> {
     let failures =
-        common::validate_source_config(source_config, api_config, trusted_root_certs_cache).await?;
+        common::validate_source_config(source_config, api_config, source_tls_config).await?;
 
     if !failures.is_empty() {
         return Err(SourceError::ValidationFailed(utils::format_validation_failures(failures)));
@@ -203,7 +203,7 @@ pub(crate) async fn create_source(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     source: Json<CreateSourceRequest>,
 ) -> Result<impl IntoResponse, SourceError> {
@@ -213,7 +213,7 @@ pub(crate) async fn create_source(
     validate_source_config(
         source.config.clone().into(),
         api_config.as_ref(),
-        trusted_root_certs_cache.as_ref(),
+        source_tls_config.as_ref(),
     )
     .await?;
 
@@ -253,7 +253,7 @@ pub(crate) async fn create_source(
 pub(crate) async fn validate_source(
     headers: HeaderMap,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     request: Json<ValidateSourceRequest>,
 ) -> Result<impl IntoResponse, SourceError> {
     let _tenant_id = extract_tenant_id(&headers)?;
@@ -262,7 +262,7 @@ pub(crate) async fn validate_source(
     let failures = common::validate_source_config(
         request.config.into(),
         api_config.as_ref(),
-        trusted_root_certs_cache.as_ref(),
+        source_tls_config.as_ref(),
     )
     .await?;
     let response = ValidateSourceResponse {
@@ -337,7 +337,7 @@ pub(crate) async fn update_source(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     source_id: Path<i64>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     source: Json<UpdateSourceRequest>,
@@ -349,7 +349,7 @@ pub(crate) async fn update_source(
     validate_source_config(
         source.config.clone().into(),
         api_config.as_ref(),
-        trusted_root_certs_cache.as_ref(),
+        source_tls_config.as_ref(),
     )
     .await?;
 

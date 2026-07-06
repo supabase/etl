@@ -22,7 +22,7 @@ use crate::{
         source::StoredSourceConfig,
     },
     data::source_database,
-    k8s::{TrustedRootCertsCache, TrustedRootCertsError},
+    k8s::SourceTlsConfig,
     validation::validators::{DestinationValidator, PipelineValidator, SourceValidator},
 };
 
@@ -48,10 +48,9 @@ impl ValidationContext {
     pub async fn build_from_source(
         source_config: StoredSourceConfig,
         api_config: &ApiConfig,
-        trusted_root_certs_cache: &TrustedRootCertsCache,
+        source_tls_config: &SourceTlsConfig,
     ) -> Result<Self, ValidationError> {
-        let tls_config =
-            trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+        let tls_config = source_tls_config.get_tls_config();
         let source_pool =
             source_database::connect(&source_config.into_connection_config(tls_config)).await?;
         let environment = Environment::load()?;
@@ -142,10 +141,6 @@ pub enum ValidationError {
         #[from]
         source: sqlx::Error,
     },
-
-    /// Failed to load trusted root certs for source connections.
-    #[error(transparent)]
-    TrustedRootCerts(#[from] TrustedRootCertsError),
 
     /// Failed to load the application environment.
     #[error("Failed to load environment: {0}")]

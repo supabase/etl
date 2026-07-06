@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use etl_config::Environment;
 use etl_maintenance::DuckLakeMaintenancePolicy;
-use k8s_openapi::api::core::v1::ConfigMap;
 use thiserror::Error;
 
 use crate::configs::{
@@ -272,9 +271,6 @@ pub trait K8sClient: Send + Sync {
     ///
     /// Does nothing if the secret does not exist.
     async fn delete_snowflake_secret(&self, prefix: &str) -> Result<(), K8sError>;
-
-    /// Retrieves a [`ConfigMap`] by name from the data-plane namespace.
-    async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError>;
 
     /// Creates or updates the replicator configuration [`ConfigMap`].
     ///

@@ -13,11 +13,11 @@
 //! See `base` for errors, pod phase mapping, and the client trait.
 
 mod base;
-pub mod cache;
 pub mod core;
 pub mod http;
 mod maintenance;
+pub mod source_tls;
 
 pub use base::*;
-pub use cache::{TrustedRootCertsCache, TrustedRootCertsError};
 pub use maintenance::{KubernetesMaintenanceMaterializer, ducklake_maintenance_policy_from_config};
+pub use source_tls::{SourceTlsConfig, SourceTlsConfigError};

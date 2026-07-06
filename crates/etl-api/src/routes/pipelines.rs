@@ -38,8 +38,7 @@ use crate::{
     },
     feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant},
     k8s::{
-        DestinationType, K8sClient, K8sError, PodStatus, TrustedRootCertsCache,
-        TrustedRootCertsError,
+        DestinationType, K8sClient, K8sError, PodStatus, SourceTlsConfig,
         core::{
             create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
             delete_pipeline_resources_in_k8s, is_replicator_active,
@@ -139,9 +138,6 @@ pub enum PipelineError {
     MissingEnvironment,
 
     #[error(transparent)]
-    TrustedRootCerts(#[from] TrustedRootCertsError),
-
-    #[error(transparent)]
     Validation(#[from] ValidationError),
 
     #[error("Invalid pipeline request: {0}")]
@@ -198,13 +194,12 @@ impl PipelineError {
             | PipelineError::InvalidConfig(_)
             | PipelineError::MaintenanceMaterialization(_)
             | PipelineError::K8s(_)
-            | PipelineError::TrustedRootCerts(_)
             | PipelineError::MissingEnvironment
             | PipelineError::MissingTableState
             | PipelineError::InvalidTableState(_)
-            | PipelineError::Validation(
-                ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
-            ) => "Internal server error".to_owned(),
+            | PipelineError::Validation(ValidationError::Environment(_)) => {
+                "Internal server error".to_owned()
+            }
             PipelineError::SourceDatabase(_)
             | PipelineError::SourcePipelineState(_)
             | PipelineError::TableLookup(_) => {
@@ -233,7 +228,6 @@ impl IntoResponse for PipelineError {
             | PipelineError::ImagesDb(_)
             | PipelineError::K8s(_)
             | PipelineError::MaintenanceMaterialization(_)
-            | PipelineError::TrustedRootCerts(_)
             | PipelineError::Database(_)
             | PipelineError::InvalidTableState(_)
             | PipelineError::MissingEnvironment
@@ -750,7 +744,7 @@ pub(crate) async fn read_pipeline(
 pub(crate) async fn update_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
@@ -794,7 +788,7 @@ pub(crate) async fn update_pipeline(
         return Ok(StatusCode::OK);
     }
 
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     create_or_update_pipeline_resources_in_k8s(
         k8s_client.as_ref(),
         tenant_id,
@@ -837,10 +831,9 @@ pub(crate) async fn update_pipeline(
 pub(crate) async fn delete_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     pipeline_id: Path<i64>,
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -853,7 +846,7 @@ pub(crate) async fn delete_pipeline(
         return Err(PipelineError::ActivePipeline(pipeline.id));
     }
 
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source = data::sources::read_source_connection(
         &pool,
         tenant_id,
@@ -964,7 +957,7 @@ pub(crate) async fn start_pipeline(
     Extension(pool): Extension<PgPool>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     pipeline_id: Path<i64>,
 ) -> Result<impl IntoResponse, PipelineError> {
@@ -975,7 +968,7 @@ pub(crate) async fn start_pipeline(
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
 
     // We update the pipeline in K8s.
     create_or_update_pipeline_resources_in_k8s(
@@ -1195,9 +1188,8 @@ pub(crate) async fn get_pipeline_status(
 pub(crate) async fn get_pipeline_replication_status(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     pipeline_id: Path<i64>,
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -1219,7 +1211,7 @@ pub(crate) async fn get_pipeline_replication_status(
     txn.commit().await?;
 
     // Connect to the source database to read the necessary state
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source_pool = source_database::connect(&source.config.into_connection_config(tls_config))
         .await
         .map_err(PipelineError::SourceDatabase)?;
@@ -1300,9 +1292,8 @@ pub(crate) async fn get_pipeline_replication_status(
 pub(crate) async fn rollback_tables(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     pipeline_id: Path<i64>,
     rollback_request: Json<RollbackTablesRequest>,
 ) -> Result<impl IntoResponse, PipelineError> {
@@ -1326,7 +1317,7 @@ pub(crate) async fn rollback_tables(
     txn.commit().await?;
 
     // Connect to the source database to perform rollback
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source_pool = source_database::connect(&source.config.into_connection_config(tls_config))
         .await
         .map_err(PipelineError::SourceDatabase)?;
@@ -1456,7 +1447,7 @@ pub(crate) async fn update_pipeline_version(
     Extension(pool): Extension<PgPool>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     pipeline_id: Path<i64>,
     update_request: Json<UpdatePipelineVersionRequest>,
@@ -1517,7 +1508,7 @@ pub(crate) async fn update_pipeline_version(
         return Ok(StatusCode::OK);
     }
 
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
 
     create_or_update_pipeline_resources_in_k8s(
         k8s_client.as_ref(),
@@ -1561,7 +1552,7 @@ pub(crate) async fn validate_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     request: Json<ValidatePipelineRequest>,
 ) -> Result<impl IntoResponse, PipelineError> {
@@ -1576,7 +1567,7 @@ pub(crate) async fn validate_pipeline(
     let ctx = ValidationContext::build_from_source(
         source.config,
         api_config.as_ref(),
-        trusted_root_certs_cache.as_ref(),
+        source_tls_config.as_ref(),
     )
     .await?;
 

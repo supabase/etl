@@ -17,7 +17,7 @@ use crate::{
         source::{FullApiSourceConfig, StoredSourceConfig},
     },
     data::{self, tenants::TenantsDbError, tenants_sources::TenantSourceDbError},
-    k8s::TrustedRootCertsCache,
+    k8s::SourceTlsConfig,
     routes::{
         ErrorMessage, IntoInner, TenantIdError, common, error_response_with_internal_error, utils,
         validate_tenant_id,
@@ -87,10 +87,10 @@ impl IntoResponse for TenantSourceError {
 async fn validate_source_config(
     source_config: StoredSourceConfig,
     api_config: &ApiConfig,
-    trusted_root_certs_cache: &TrustedRootCertsCache,
+    source_tls_config: &SourceTlsConfig,
 ) -> Result<(), TenantSourceError> {
     let failures =
-        common::validate_source_config(source_config, api_config, trusted_root_certs_cache).await?;
+        common::validate_source_config(source_config, api_config, source_tls_config).await?;
 
     if !failures.is_empty() {
         return Err(TenantSourceError::ValidationFailed(utils::format_validation_failures(
@@ -145,7 +145,7 @@ pub struct CreateTenantSourceResponse {
 pub(crate) async fn create_tenant_and_source(
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     tenant_and_source: Json<CreateTenantSourceRequest>,
 ) -> Result<impl IntoResponse, TenantSourceError> {
@@ -157,7 +157,7 @@ pub(crate) async fn create_tenant_and_source(
     validate_source_config(
         tenant_and_source.source_config.clone().into(),
         api_config.as_ref(),
-        trusted_root_certs_cache.as_ref(),
+        source_tls_config.as_ref(),
     )
     .await?;
 

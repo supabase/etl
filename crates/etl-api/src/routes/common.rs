@@ -1,7 +1,7 @@
 use crate::{
     config::ApiConfig,
     configs::source::StoredSourceConfig,
-    k8s::TrustedRootCertsCache,
+    k8s::SourceTlsConfig,
     validation::{self, ValidationContext, ValidationError, ValidationFailure},
 };
 
@@ -9,14 +9,13 @@ use crate::{
 pub async fn validate_source_config(
     source_config: StoredSourceConfig,
     api_config: &ApiConfig,
-    trusted_root_certs_cache: &TrustedRootCertsCache,
+    source_tls_config: &SourceTlsConfig,
 ) -> Result<Vec<ValidationFailure>, ValidationError> {
     if api_config.source.trusted_username.is_none() {
         return Ok(vec![]);
     }
 
-    let ctx =
-        ValidationContext::build_from_source(source_config, api_config, trusted_root_certs_cache)
-            .await?;
+    let ctx = ValidationContext::build_from_source(source_config, api_config, source_tls_config)
+        .await?;
     validation::validate_source(&ctx).await
 }
