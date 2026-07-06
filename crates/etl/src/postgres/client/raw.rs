@@ -17,7 +17,7 @@ use tokio_postgres::{
     Client, Config, Connection, IsolationLevel, NoTls, SimpleQueryMessage, Socket, Transaction,
     config::ReplicationMode, error::SqlState, tls::MakeTlsConnect, types::PgLsn,
 };
-use tracing::{Instrument, debug, error, info, warn};
+use tracing::{Instrument, debug, error, info};
 
 use super::{
     child::ChildPgReplicationClient,

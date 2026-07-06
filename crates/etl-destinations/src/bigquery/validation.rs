@@ -151,7 +151,8 @@ fn validate_array_cell_for_bigquery(array_cell: &ArrayCell) -> EtlResult<()> {
                 etl_error!(
                     err.kind(),
                     "Array element validation failed",
-                    format!("Element at index {}: {}", index, err)
+                    format!("Element at index {index}"),
+                    source: err
                 )
             })?;
         }

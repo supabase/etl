@@ -26,22 +26,6 @@ const UNVALIDATED_NULL_ARRAY_ELEMENT: &str =
 #[derive(Debug)]
 pub(super) struct BigQueryTableRow(Vec<u8>);
 
-impl TryFrom<TableRow> for BigQueryTableRow {
-    type Error = EtlError;
-
-    /// Converts a [`TableRow`] to a [`BigQueryTableRow`] by validating every
-    /// cell for BigQuery compatibility and encoding the row.
-    ///
-    /// Returns an error if any cell, including array elements, is outside
-    /// BigQuery's supported bounds. This fails fast rather than clamping, so
-    /// users are aware when their data doesn't fit BigQuery's constraints.
-    fn try_from(value: TableRow) -> Result<Self, Self::Error> {
-        BigQueryTableRow::try_from_tagged_cells(
-            value.into_values().into_iter().enumerate().map(|(index, cell)| (index + 1, cell)),
-        )
-    }
-}
-
 impl BigQueryTableRow {
     /// Validates tagged cells for BigQuery compatibility and encodes them
     /// into a row, preserving sparse field positions.
@@ -55,11 +39,8 @@ impl BigQueryTableRow {
                 etl_error!(
                     err.kind(),
                     "Cell validation failed for BigQuery compatibility",
-                    format!(
-                        "Cell at index {} failed validation: {}",
-                        index - 1,
-                        err.detail().unwrap_or("validation error")
-                    )
+                    format!("Cell at index {} failed validation", index - 1),
+                    source: err
                 )
             })?;
 
@@ -67,6 +48,22 @@ impl BigQueryTableRow {
         }
 
         Ok(BigQueryTableRow(buf))
+    }
+}
+
+impl TryFrom<TableRow> for BigQueryTableRow {
+    type Error = EtlError;
+
+    /// Converts a [`TableRow`] to a [`BigQueryTableRow`] by validating every
+    /// cell for BigQuery compatibility and encoding the row.
+    ///
+    /// Returns an error if any cell, including array elements, is outside
+    /// BigQuery's supported bounds. This fails fast rather than clamping, so
+    /// users are aware when their data doesn't fit BigQuery's constraints.
+    fn try_from(value: TableRow) -> Result<Self, Self::Error> {
+        BigQueryTableRow::try_from_tagged_cells(
+            value.into_values().into_iter().enumerate().map(|(index, cell)| (index + 1, cell)),
+        )
     }
 }
 
@@ -390,7 +387,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("Cell at index 0"));
-        assert!(err.detail().unwrap().contains("Element at index 1"));
+        assert!(err.to_string().contains("Element at index 1"));
     }
 
     #[test]
@@ -421,8 +418,9 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
-        assert!(err.detail().unwrap().contains("Cell at index 0")); // Should fail on first cell
-        assert!(err.detail().unwrap().contains("would be rounded by BigQuery"));
+        // Should fail on first cell.
+        assert!(err.detail().unwrap().contains("Cell at index 0"));
+        assert!(err.to_string().contains("would be rounded by BigQuery"));
     }
 
     #[test]
@@ -484,6 +482,6 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
-        assert!(err.detail().unwrap().contains("would be rounded by BigQuery"));
+        assert!(err.to_string().contains("would be rounded by BigQuery"));
     }
 }
