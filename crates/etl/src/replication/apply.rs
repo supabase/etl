@@ -43,8 +43,8 @@ use crate::{
     bail,
     data::SizeHint,
     destination::{
-        ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
-        PendingWriteEventsResult, PipelineDestination, WriteEventsResult,
+        ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DestinationWriteStatus,
+        DispatchMetrics, PendingWriteEventsResult, PipelineDestination, WriteEventsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -620,8 +620,13 @@ impl ApplyLoopTasks {
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
-    /// The highest LSN received from the [`end_lsn`] field of a [`Commit`]
-    /// message.
+    /// The highest commit end LSN that should be attached to the next
+    /// destination write.
+    ///
+    /// This usually comes from the [`end_lsn`] field of a [`Commit`] message.
+    /// If a destination accepts a write without making it durable, the write's
+    /// commit end LSN is re-attached here so a later durable write can advance
+    /// through it.
     last_commit_end_lsn: Option<PgLsn>,
     /// The LSN of the commit WAL entry of the transaction that is currently
     /// being processed.
@@ -649,7 +654,7 @@ struct ApplyLoopState {
     /// The deadline for the next proactive keep alive status update.
     keep_alive_deadline: Instant,
     /// Destination write result waiting to be applied to replication progress.
-    pending_flush_result: Option<PendingWriteEventsResult<()>>,
+    pending_flush_result: Option<PendingWriteEventsResult>,
     /// The strongest exit that this apply loop invocation should eventually
     /// return.
     ///
@@ -813,8 +818,21 @@ impl ApplyLoopState {
     }
 
     /// Returns `true` if the apply loop is totally idle.
+    ///
+    /// A carried commit end LSN from an accepted-but-not-durable write keeps
+    /// the loop non-idle for status updates. This is conservative: PostgreSQL
+    /// feedback keeps reporting the last durable flush LSN until a later
+    /// durable write proves the carried LSN safe.
+    ///
+    /// If no later batch arrives, durability for the accepted write is
+    /// intentionally deferred until the next batch instead of being
+    /// acknowledged through a separate side channel. This may increase the
+    /// replay window while the stream is idle, but it preserves the single
+    /// pending-result apply-loop model.
     fn is_idle(&self) -> bool {
-        !self.handling_transaction() && !self.has_unresolved_batch_work()
+        !self.handling_transaction()
+            && !self.has_unresolved_batch_work()
+            && self.last_commit_end_lsn.is_none()
     }
 
     /// Returns the effective flush LSN to report to PostgreSQL and use for
@@ -1287,6 +1305,11 @@ where
     /// coordination before waiting. After the selected branch runs, it checks
     /// again for idle table-sync work. Once buffered or in-flight destination
     /// work is resolved, it sends the final shutdown status update and exits.
+    ///
+    /// A write that already resolved as [`DestinationWriteStatus::Accepted`] is
+    /// no longer pending work. If no later write makes it durable, the final
+    /// status update stays at the last durable flush LSN and replay handles it
+    /// after restart.
     async fn run_draining_shutdown_iteration(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -1426,8 +1449,10 @@ where
     /// Shutdown stops new message intake immediately. If there is already
     /// buffered or in-flight destination work, the loop first drains that work
     /// so the best durable position can advance before sending the final
-    /// shutdown status update. Otherwise, it sends that update immediately and
-    /// exits the loop.
+    /// shutdown status update. A write that has already completed as
+    /// [`DestinationWriteStatus::Accepted`] is not waited on again; without a
+    /// later durable write, the final status update remains at the last durable
+    /// flush LSN. Otherwise, the loop sends that update immediately and exits.
     ///
     /// Note: the shutdown system is best-effort. Graceful shutdown may not
     /// complete if we are blocked on non-interruptible code. It is the
@@ -1675,8 +1700,8 @@ where
 
     /// Waits for the pending flush result, if any.
     async fn wait_for_flush_result(
-        pending_flush_result: Option<&mut PendingWriteEventsResult<()>>,
-    ) -> CompletedWriteEventsResult<()> {
+        pending_flush_result: Option<&mut PendingWriteEventsResult>,
+    ) -> CompletedWriteEventsResult {
         match pending_flush_result {
             Some(flush_result) => flush_result.await,
             None => std::future::pending().await,
@@ -1686,7 +1711,7 @@ where
     /// Handles a completed batch flush result.
     async fn handle_flush_result(
         &mut self,
-        flush_result: CompletedWriteEventsResult<()>,
+        flush_result: CompletedWriteEventsResult,
     ) -> EtlResult<()> {
         // We clear the state up front because this flush is no longer in flight.
         let processing_paused = self.state.resume_processing();
@@ -1695,7 +1720,7 @@ where
         let (metadata, result) = flush_result.into_parts();
 
         // If there was an error in the flushing, we return it immediately.
-        result?;
+        let status = result?;
 
         if let Some(metadata) = metadata {
             counter!(
@@ -1712,15 +1737,22 @@ where
             )
             .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
 
-            // We process the syncing tables with the last end lsn that the batch contains.
-            //
-            // Note that it could be that there is no end lsn for a specific batch, which
-            // could happen if we process a huge transaction, and we don't reach the
-            // commit before flushing. In that case, we don't process syncing
-            // tables, meaning that progress it not tracked, since it's not going to
-            // do anything because we can only track progress at commit boundaries.
-            if let Some(commit_end_lsn) = metadata.commit_end_lsn {
-                self.process_syncing_tables_after_flush(commit_end_lsn).await?;
+            match status {
+                DestinationWriteStatus::Accepted => {
+                    self.state.update_last_commit_end_lsn(metadata.commit_end_lsn);
+                }
+                DestinationWriteStatus::Durable => {
+                    // We process the syncing tables with the last end lsn that the batch contains.
+                    //
+                    // Note that it could be that there is no end lsn for a specific batch, which
+                    // could happen if we process a huge transaction, and we don't reach the
+                    // commit before flushing. In that case, we don't process syncing
+                    // tables, meaning that progress it not tracked, since it's not going to
+                    // do anything because we can only track progress at commit boundaries.
+                    if let Some(commit_end_lsn) = metadata.commit_end_lsn {
+                        self.process_syncing_tables_after_flush(commit_end_lsn).await?;
+                    }
+                }
             }
         }
 
