@@ -10,6 +10,27 @@ use crate::{
     schema::ColumnSchema,
 };
 
+/// Below this length, a plain byte-by-byte scan outperforms `memchr3`: for
+/// short slices, `memchr3`'s setup cost (splatting each needle byte into a
+/// SIMD register and checking length preconditions) is not repaid by scanning
+/// fewer bytes. Chosen empirically: fields with a delimiter, newline, or
+/// backslash roughly every 5 bytes or more see a net speedup from routing
+/// through `memchr3` at this threshold; only pathological fields with one of
+/// those bytes every 1-2 bytes, which Postgres COPY output does not produce,
+/// are slower than scanning byte by byte throughout.
+const MEMCHR_MIN_LEN: usize = 32;
+
+/// Returns the offset of the next tab, newline, or backslash in `haystack`,
+/// using a vectorized search for longer haystacks and a plain scan for short
+/// ones where that search's setup cost would dominate.
+fn find_next_special(haystack: &[u8]) -> Option<usize> {
+    if haystack.len() < MEMCHR_MIN_LEN {
+        return haystack.iter().position(|&b| matches!(b, b'\t' | b'\n' | b'\\'));
+    }
+
+    memchr::memchr3(b'\t', b'\n', b'\\', haystack)
+}
+
 /// Converts raw Postgres COPY format data into a typed table row.
 ///
 /// This method parses the text format data produced by Postgres's COPY command
@@ -30,71 +51,114 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
     let mut values = Vec::with_capacity(column_schemas.len());
 
     let row_str = str::from_utf8(row)?;
-    let mut chars = row_str.chars();
-    let mut val_str = String::with_capacity(10);
-    let mut in_escape = false;
+    let bytes = row_str.as_bytes();
+    let mut pos = 0;
+    let mut val_str = String::new();
     let mut row_terminated = false;
     let mut done = false;
 
     // Main parsing loop - continues until all characters are processed
     while !done {
-        // Inner loop parses a single field value until tab, newline, or end of input
+        // Byte offset of the start of the literal run not yet appended to `val_str`.
+        // Postgres COPY text format only ever backslash-escapes ASCII bytes (the
+        // delimiter, backslash itself, newline, and carriage return), so scanning
+        // for those bytes and bulk-appending everything in between never splits a
+        // multibyte UTF-8 character: an ASCII byte can never appear as part of a
+        // multibyte sequence, so `literal_start` and `pos` always land on a valid
+        // char boundary.
+        let mut literal_start = pos;
+
+        // Inner loop parses a single field value until tab, newline, or end of input.
+        // `memchr3` scans for the next occurrence of any of the three bytes using
+        // vectorized comparisons across many bytes at once, rather than checking
+        // one byte at a time, so long literal runs (the common case for large
+        // `text`/`bytea` payloads) are skipped over in bulk. Fields with escapes
+        // packed only a few bytes apart would otherwise pay `memchr3`'s per-call
+        // setup cost far more often than a plain byte scan would, so
+        // `find_next_special` only calls into it once the remaining slice is long
+        // enough for that cost to pay off.
         loop {
-            match chars.next() {
-                Some(c) => match c {
-                    // Handle escaped characters - previous character was backslash
-                    c if in_escape => {
-                        // Special case: \N when escaped becomes literal \N (not NULL)
-                        if c == 'N' {
-                            val_str.push('\\');
-                            val_str.push(c);
-                        }
-                        // Standard Postgres escape sequences
-                        else if c == 'b' {
-                            val_str.push(8 as char); // backspace
-                        } else if c == 'f' {
-                            val_str.push(12 as char); // form feed
-                        } else if c == 'n' {
-                            val_str.push('\n'); // newline
-                        } else if c == 'r' {
-                            val_str.push('\r'); // carriage return
-                        } else if c == 't' {
-                            val_str.push('\t'); // tab
-                        } else if c == 'v' {
-                            val_str.push(11 as char); // vertical tab
-                        }
-                        // Any other character: strip backslash, keep character
-                        else {
-                            val_str.push(c);
-                        }
+            let Some(offset) = find_next_special(&bytes[pos..]) else {
+                // No delimiter, terminator, or escape anywhere in the rest of the
+                // row. A properly terminated row always has an unescaped newline
+                // remaining at this point, so this means the row is incomplete.
+                if bytes.len() > literal_start {
+                    val_str.push_str(&row_str[literal_start..]);
+                }
 
-                        in_escape = false;
-                    }
-                    // Field separator - end current field parsing
-                    '\t' => {
-                        break;
-                    }
-                    // Row terminator - end current field and mark row complete
-                    '\n' => {
-                        row_terminated = true;
-                        break;
-                    }
-                    // Escape character - next character will be escaped
-                    '\\' => in_escape = true,
-                    // Regular character - add to current field value
-                    c => {
-                        val_str.push(c);
-                    }
-                },
-                // End of input reached
-                None => {
-                    // Validate that row was properly terminated with newline
-                    if !row_terminated {
-                        bail!(ErrorKind::ConversionError, "Row data not properly terminated");
-                    }
-                    done = true;
+                if !row_terminated {
+                    bail!(ErrorKind::ConversionError, "Row data not properly terminated");
+                }
+                done = true;
 
+                break;
+            };
+            let special_pos = pos + offset;
+
+            // Escapes packed only a byte or two apart (or consecutive delimiters,
+            // like an empty field) make this run empty most of the time; skip the
+            // slice and its UTF-8 boundary check rather than appending nothing.
+            if special_pos > literal_start {
+                val_str.push_str(&row_str[literal_start..special_pos]);
+            }
+
+            match bytes[special_pos] {
+                // Field separator - end current field parsing
+                b'\t' => {
+                    pos = special_pos + 1;
                     break;
+                }
+                // Row terminator - end current field and mark row complete
+                b'\n' => {
+                    pos = special_pos + 1;
+                    row_terminated = true;
+                    break;
+                }
+                // Escape character - decode the following character and keep scanning
+                // this same field.
+                _ => {
+                    pos = special_pos + 1;
+
+                    match bytes.get(pos) {
+                        // Postgres COPY TO only ever escapes ASCII bytes (the
+                        // delimiter, backslash, newline, and carriage return), so
+                        // this fast path handles every real escape without going
+                        // through the pricier `chars()` decode below.
+                        Some(&escaped) if escaped.is_ascii() => {
+                            match escaped {
+                                // Special case: \N when escaped becomes literal \N (not NULL)
+                                b'N' => val_str.push_str("\\N"),
+                                // Standard Postgres escape sequences
+                                b'b' => val_str.push(8 as char), // backspace
+                                b'f' => val_str.push(12 as char), // form feed
+                                b'n' => val_str.push('\n'),
+                                b'r' => val_str.push('\r'),
+                                b't' => val_str.push('\t'),
+                                b'v' => val_str.push(11 as char), // vertical tab
+                                // Any other byte: strip backslash, keep the byte
+                                other => val_str.push(other as char),
+                            }
+                            pos += 1;
+                        }
+                        // A non-ASCII byte following a backslash. Postgres never
+                        // actually emits this, but decode it correctly rather than
+                        // reading only its first byte, which would corrupt the value.
+                        Some(_) => {
+                            let escaped = row_str[pos..]
+                                .chars()
+                                .next()
+                                .expect("validated UTF-8 has a char at a valid boundary");
+                            val_str.push(escaped);
+                            pos += escaped.len_utf8();
+                        }
+                        // Trailing backslash with no following byte at all. The row
+                        // cannot be validly terminated after this, so the missing
+                        // terminator check below will reject it; keep the dangling
+                        // backslash out of the value rather than guessing its meaning.
+                        None => {}
+                    }
+
+                    literal_start = pos;
                 }
             }
         }
@@ -279,6 +343,19 @@ mod tests {
     fn try_from_not_terminated() {
         let column_schemas = create_single_column_schema("value", Type::INT4);
         let row_data = b"42"; // Missing newline
+
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, column_schemas.iter());
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::ConversionError));
+        assert!(err.to_string().contains("Row data not properly terminated"));
+    }
+
+    #[test]
+    fn try_from_trailing_backslash_with_no_terminator() {
+        let column_schemas = create_single_column_schema("value", Type::TEXT);
+        let row_data = b"text\\"; // Dangling escape byte, no following character at all
 
         let result = parse_table_row_from_postgres_copy_bytes(row_data, column_schemas.iter());
 
