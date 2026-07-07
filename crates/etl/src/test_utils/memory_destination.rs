@@ -7,7 +7,7 @@ use crate::{
     data::TableRow,
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
-        DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
+        DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -192,7 +192,7 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         let mut table_schemas = HashMap::new();
         for event in &events {
@@ -239,7 +239,7 @@ where
         info!(event_count = events.len(), "writing events");
         inner.events.extend(events);
 
-        async_result.send(Ok(()));
+        async_result.send(Ok(DestinationWriteStatus::Durable));
 
         Ok(())
     }

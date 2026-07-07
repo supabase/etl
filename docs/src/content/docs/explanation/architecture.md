@@ -85,7 +85,7 @@ pub trait Destination {
     fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
     fn drop_table_for_copy(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: DropTableForCopyResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
