@@ -43,7 +43,7 @@ pub enum DestinationWriteStatus {
 /// durability behavior. It currently contains only streaming write limits, but
 /// can grow copy-specific durability settings without adding more methods to
 /// [`crate::destination::Destination`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DurabilityConfig {
     /// Streaming write backpressure limits.
     pub streaming_write_limits: StreamingWriteLimits,
@@ -53,12 +53,6 @@ impl DurabilityConfig {
     /// Creates a durability configuration.
     pub fn new(streaming_write_limits: StreamingWriteLimits) -> Self {
         Self { streaming_write_limits }
-    }
-}
-
-impl Default for DurabilityConfig {
-    fn default() -> Self {
-        Self { streaming_write_limits: StreamingWriteLimits::single() }
     }
 }
 
