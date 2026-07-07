@@ -823,6 +823,12 @@ impl ApplyLoopState {
     /// the loop non-idle for status updates. This is conservative: PostgreSQL
     /// feedback keeps reporting the last durable flush LSN until a later
     /// durable write proves the carried LSN safe.
+    ///
+    /// If no later batch arrives, durability for the accepted write is
+    /// intentionally deferred until the next batch instead of being
+    /// acknowledged through a separate side channel. This may increase the
+    /// replay window while the stream is idle, but it preserves the single
+    /// pending-result apply-loop model.
     fn is_idle(&self) -> bool {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
