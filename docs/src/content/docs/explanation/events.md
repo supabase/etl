@@ -289,7 +289,7 @@ Handle this by either:
 - Ignoring Begin/Commit if transaction markers are not required
 
 ```rust
-async fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult<()>) -> EtlResult<()> {
+async fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult) -> EtlResult<()> {
     let result = async {
         for event in events {
             match event {
@@ -307,7 +307,7 @@ async fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult
     }
     .await;
 
-    async_result.send(result);
+    async_result.send(result.map(|_| etl::destination::DestinationWriteStatus::Durable));
     Ok(())
 }
 ```

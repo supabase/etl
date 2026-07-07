@@ -1959,6 +1959,7 @@ dependencies = [
  "etl-telemetry",
  "fail",
  "futures",
+ "memchr",
  "metrics",
  "pg_escape",
  "pin-project-lite",
@@ -2507,7 +2508,7 @@ dependencies = [
 [[package]]
 name = "gcp-bigquery-client"
 version = "0.28.0"
-source = "git+https://github.com/iambriccardo/gcp-bigquery-client?rev=c4fc59e338ca181d29b0dd53cac786fbe8513633#c4fc59e338ca181d29b0dd53cac786fbe8513633"
+source = "git+https://github.com/iambriccardo/gcp-bigquery-client?rev=f5458eb9e67f7f8748675565c8b15d710f1eacc7#f5458eb9e67f7f8748675565c8b15d710f1eacc7"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3774,9 +3775,9 @@ dependencies = [
 
 [[package]]
 name = "memchr"
-version = "2.8.0"
+version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "metrics"

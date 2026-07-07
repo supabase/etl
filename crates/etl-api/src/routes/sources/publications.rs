@@ -12,7 +12,6 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::{
-    config::ApiConfig,
     configs::encryption::EncryptionKeyring,
     data::{
         self,
@@ -21,7 +20,7 @@ use crate::{
         sources::SourcesDbError,
         tables::Table,
     },
-    k8s::{TrustedRootCertsCache, TrustedRootCertsError},
+    k8s::SourceTlsConfig,
     routes::{
         ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
         extract_tenant_id, utils,
@@ -47,18 +46,13 @@ pub(crate) enum PublicationError {
 
     #[error("Database connection error: {0}")]
     Database(#[from] sqlx::Error),
-
-    #[error(transparent)]
-    TrustedRootCerts(#[from] TrustedRootCertsError),
 }
 
 impl PublicationError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            PublicationError::SourcesDb(_) | PublicationError::TrustedRootCerts(_) => {
-                "Internal server error".to_owned()
-            }
+            PublicationError::SourcesDb(_) => "Internal server error".to_owned(),
             PublicationError::PublicationsDb(PublicationsDbError::Database(_))
             | PublicationError::Database(_) => {
                 utils::source_database_query_error_message().to_owned()
@@ -72,9 +66,7 @@ impl PublicationError {
 impl IntoResponse for PublicationError {
     fn into_response(self) -> Response {
         let status_code = match &self {
-            PublicationError::SourcesDb(_) | PublicationError::TrustedRootCerts(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            PublicationError::SourcesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PublicationError::PublicationsDb(PublicationsDbError::Database(error))
             | PublicationError::Database(error) => utils::source_database_error_status_code(error),
             PublicationError::SourceNotFound(_) | PublicationError::PublicationNotFound(_) => {
@@ -131,9 +123,8 @@ pub struct ReadPublicationsResponse {
 pub(crate) async fn create_publication(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     source_id: Path<i64>,
     publication: Json<CreatePublicationRequest>,
 ) -> Result<impl IntoResponse, PublicationError> {
@@ -145,7 +136,7 @@ pub(crate) async fn create_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source_pool =
         source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     let publication = publication.0;
@@ -179,9 +170,8 @@ pub(crate) async fn create_publication(
 pub(crate) async fn read_publication(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     source_id_and_pub_name: Path<(i64, String)>,
 ) -> Result<impl IntoResponse, PublicationError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -192,7 +182,7 @@ pub(crate) async fn read_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source_pool =
         source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     let publications = data::publications::read_publication(&publication_name, &source_pool)
@@ -227,9 +217,8 @@ pub(crate) async fn read_publication(
 pub(crate) async fn update_publication(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     source_id_and_pub_name: Path<(i64, String)>,
     publication: Json<UpdatePublicationRequest>,
 ) -> Result<impl IntoResponse, PublicationError> {
@@ -241,7 +230,7 @@ pub(crate) async fn update_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source_pool =
         source_database::connect(&source_config.into_connection_config(tls_config)).await?;
 
@@ -280,9 +269,8 @@ pub(crate) async fn update_publication(
 pub(crate) async fn delete_publication(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     source_id_and_pub_name: Path<(i64, String)>,
 ) -> Result<impl IntoResponse, PublicationError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -293,7 +281,7 @@ pub(crate) async fn delete_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source_pool =
         source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     data::publications::drop_publication(&publication_name, &source_pool).await?;
@@ -324,9 +312,8 @@ pub(crate) async fn delete_publication(
 pub(crate) async fn read_all_publications(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     source_id: Path<i64>,
 ) -> Result<impl IntoResponse, PublicationError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -337,7 +324,7 @@ pub(crate) async fn read_all_publications(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source_pool =
         source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     let publications = data::publications::read_all_publications(&source_pool).await?;
@@ -371,9 +358,8 @@ pub(crate) async fn read_all_publications(
 pub(crate) async fn add_tables_to_publication(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     source_id_and_pub_name: Path<(i64, String)>,
     publication: Json<UpdatePublicationRequest>,
 ) -> Result<impl IntoResponse, PublicationError> {
@@ -383,7 +369,7 @@ pub(crate) async fn add_tables_to_publication(
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source_pool =
         source_database::connect(&source_config.into_connection_config(tls_config)).await?;
 
@@ -423,9 +409,8 @@ pub(crate) async fn add_tables_to_publication(
 pub(crate) async fn drop_tables_from_publication(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     source_id_and_pub_name: Path<(i64, String)>,
     publication: Json<UpdatePublicationRequest>,
 ) -> Result<impl IntoResponse, PublicationError> {
@@ -435,7 +420,7 @@ pub(crate) async fn drop_tables_from_publication(
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source_pool =
         source_database::connect(&source_config.into_connection_config(tls_config)).await?;
 
@@ -475,9 +460,8 @@ pub(crate) async fn drop_tables_from_publication(
 pub(crate) async fn set_publication_tables(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     source_id_and_pub_name: Path<(i64, String)>,
     publication: Json<UpdatePublicationRequest>,
 ) -> Result<impl IntoResponse, PublicationError> {
@@ -487,7 +471,7 @@ pub(crate) async fn set_publication_tables(
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source_pool =
         source_database::connect(&source_config.into_connection_config(tls_config)).await?;
 

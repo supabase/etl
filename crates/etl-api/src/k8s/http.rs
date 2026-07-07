@@ -20,7 +20,7 @@ use kube::{
 };
 use serde_json::json;
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     config::K8sConfig,
@@ -100,10 +100,6 @@ const SUPABASE_API_KEY_SECRET_NAME: &str = "supabase-api-key";
 const CONFIGCAT_SDK_KEY: &str = "replicator-configcat-sdk-key";
 /// EmptyDir volume name used to share logs.
 const LOGS_VOLUME_NAME: &str = "logs";
-/// ConfigMap name providing trusted root certificates.
-pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
-/// Key inside the trusted root certificates ConfigMap.
-pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 /// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 /// Label used to identify DuckLake maintenance resources.
@@ -276,10 +272,9 @@ impl HttpK8sClient {
     ///
     /// This only checks resources owned outside per-pipeline reconciliation. It
     /// does not create or mutate cluster resources.
-    pub async fn preflight(&self, source_tls_enabled: bool) -> Result<(), K8sPreflightError> {
+    pub async fn preflight(&self) -> Result<(), K8sPreflightError> {
         self.ensure_data_plane_namespace().await?;
         self.ensure_replicator_service_account().await?;
-        self.ensure_trusted_root_certs_config_map(source_tls_enabled).await?;
 
         Ok(())
     }
@@ -303,31 +298,6 @@ impl HttpK8sClient {
                 Err(K8sPreflightError::MissingReplicatorServiceAccount)
             }
             Err(source) => Err(K8sPreflightError::ReplicatorServiceAccountCheck { source }),
-        }
-    }
-
-    /// Ensures trusted root certificates are available when source TLS needs
-    /// them.
-    async fn ensure_trusted_root_certs_config_map(
-        &self,
-        source_tls_enabled: bool,
-    ) -> Result<(), K8sPreflightError> {
-        match self.config_maps_api.get(TRUSTED_ROOT_CERT_CONFIG_MAP_NAME).await {
-            Ok(config_map) if trusted_root_certs_config_map_is_valid(&config_map) => Ok(()),
-            Ok(_) => handle_trusted_root_certs_preflight_failure(
-                source_tls_enabled,
-                K8sPreflightError::InvalidTrustedRootCertsConfigMap,
-            ),
-            Err(kube::Error::Api(err)) if err.code == 404 => {
-                handle_trusted_root_certs_preflight_failure(
-                    source_tls_enabled,
-                    K8sPreflightError::MissingTrustedRootCertsConfigMap,
-                )
-            }
-            Err(source) => handle_trusted_root_certs_preflight_failure(
-                source_tls_enabled,
-                K8sPreflightError::TrustedRootCertsConfigMapCheck { source },
-            ),
         }
     }
 
@@ -426,54 +396,6 @@ pub enum K8sPreflightError {
         #[source]
         source: kube::Error,
     },
-    /// The trusted root certificates ConfigMap is missing.
-    #[error(
-        "Kubernetes ConfigMap `trusted-root-certs-config` is missing in namespace \
-         `etl-data-plane`. Create it with key `trusted_root_certs` or disable source TLS."
-    )]
-    MissingTrustedRootCertsConfigMap,
-    /// The trusted root certificates ConfigMap is present but unusable.
-    #[error(
-        "Kubernetes ConfigMap `trusted-root-certs-config` in namespace `etl-data-plane` must \
-         contain non-empty key `trusted_root_certs` or source TLS must be disabled."
-    )]
-    InvalidTrustedRootCertsConfigMap,
-    /// Checking the trusted root certificates ConfigMap failed.
-    #[error(
-        "Failed to check Kubernetes ConfigMap `trusted-root-certs-config` in namespace \
-         `etl-data-plane`"
-    )]
-    TrustedRootCertsConfigMapCheck {
-        /// Kubernetes API error.
-        #[source]
-        source: kube::Error,
-    },
-}
-
-/// Returns whether the trusted root certificates ConfigMap has usable content.
-fn trusted_root_certs_config_map_is_valid(config_map: &ConfigMap) -> bool {
-    config_map
-        .data
-        .as_ref()
-        .and_then(|data| data.get(TRUSTED_ROOT_CERT_KEY_NAME))
-        .is_some_and(|certs| !certs.trim().is_empty())
-}
-
-/// Handles a trusted cert preflight failure according to source TLS settings.
-fn handle_trusted_root_certs_preflight_failure(
-    source_tls_enabled: bool,
-    error: K8sPreflightError,
-) -> Result<(), K8sPreflightError> {
-    if source_tls_enabled {
-        Err(error)
-    } else {
-        warn!(
-            error = %error,
-            "source tls is disabled; ignoring trusted root certificates preflight failure"
-        );
-
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -718,19 +640,6 @@ impl K8sClient for HttpK8sClient {
         )?;
 
         Ok(())
-    }
-
-    async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
-        debug!("getting config map");
-
-        let config_map = match self.config_maps_api.get(config_map_name).await {
-            Ok(config_map) => config_map,
-            Err(e) => {
-                return Err(e.into());
-            }
-        };
-
-        Ok(config_map)
     }
 
     async fn create_or_update_replicator_config_map(
@@ -1896,49 +1805,6 @@ mod tests {
         container_environment
             .iter()
             .any(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
-    }
-
-    fn trusted_root_certs_preflight_error() -> K8sPreflightError {
-        K8sPreflightError::MissingTrustedRootCertsConfigMap
-    }
-
-    #[test]
-    fn trusted_root_certs_config_map_validates_non_empty_key() {
-        let mut data = BTreeMap::new();
-        data.insert(TRUSTED_ROOT_CERT_KEY_NAME.to_owned(), "root-cert".to_owned());
-        let config_map = ConfigMap { data: Some(data), ..ConfigMap::default() };
-
-        assert!(trusted_root_certs_config_map_is_valid(&config_map));
-    }
-
-    #[test]
-    fn trusted_root_certs_config_map_rejects_missing_or_empty_key() {
-        assert!(!trusted_root_certs_config_map_is_valid(&ConfigMap::default()));
-
-        let mut data = BTreeMap::new();
-        data.insert(TRUSTED_ROOT_CERT_KEY_NAME.to_owned(), "   ".to_owned());
-        let config_map = ConfigMap { data: Some(data), ..ConfigMap::default() };
-
-        assert!(!trusted_root_certs_config_map_is_valid(&config_map));
-    }
-
-    #[test]
-    fn trusted_root_certs_preflight_failure_warns_when_source_tls_is_disabled() {
-        let result = handle_trusted_root_certs_preflight_failure(
-            false,
-            trusted_root_certs_preflight_error(),
-        );
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn trusted_root_certs_preflight_failure_errors_when_source_tls_is_enabled() {
-        let error =
-            handle_trusted_root_certs_preflight_failure(true, trusted_root_certs_preflight_error())
-                .expect_err("source tls requires trusted root certs");
-
-        assert!(error.to_string().contains(TRUSTED_ROOT_CERT_CONFIG_MAP_NAME));
     }
 
     fn collect_kubernetes_label_values(

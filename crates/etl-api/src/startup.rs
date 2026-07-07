@@ -27,7 +27,7 @@ use crate::{
     data::publications::Publication,
     feature_flags::{FeatureFlagsClient, init_feature_flags},
     http_metrics::record_http_metrics,
-    k8s::{K8sClient, K8sError, TrustedRootCertsCache, http::HttpK8sClient},
+    k8s::{K8sClient, K8sError, SourceTlsConfig, http::HttpK8sClient},
     routes::{
         destinations::{
             CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
@@ -142,10 +142,7 @@ impl Application {
         let k8s_client = match kube_client_result {
             Some(client) => match HttpK8sClient::new(client, config.k8s.clone()) {
                 Ok(client) => {
-                    client
-                        .preflight(config.source.tls_enabled)
-                        .await
-                        .context("Checking Kubernetes prerequisites")?;
+                    client.preflight().await.context("Checking Kubernetes prerequisites")?;
                     Some(Arc::new(client) as Arc<dyn K8sClient>)
                 }
                 Err(e) => {
@@ -162,7 +159,8 @@ impl Application {
             }
         };
 
-        let trusted_root_certs_cache = k8s_client.clone().map(TrustedRootCertsCache::new);
+        let source_tls_config = SourceTlsConfig::new(config.source.tls.clone())
+            .context("Resolving source TLS configuration")?;
 
         let server = run(
             config,
@@ -170,7 +168,7 @@ impl Application {
             connection_pool,
             encryption_keyring,
             k8s_client,
-            trusted_root_certs_cache,
+            source_tls_config,
             feature_flags_client,
         )?;
 
@@ -265,22 +263,22 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 
 /// Creates and configures the HTTP server with all routes and middleware.
 ///
-/// Sets up authentication, tracing, Swagger UI, and all API endpoints.
-/// The Kubernetes client and trusted root certs cache are optional to support
-/// testing scenarios.
+/// Sets up authentication, tracing, Swagger UI, and all API endpoints. The
+/// Kubernetes client is optional to support testing scenarios; the source TLS
+/// configuration is always resolved (it does not depend on Kubernetes).
 pub fn run(
     config: ApiConfig,
     listener: TcpListener,
     connection_pool: PgPool,
     encryption_keyring: encryption::EncryptionKeyring,
     k8s_client: Option<Arc<dyn K8sClient>>,
-    trusted_root_certs_cache: Option<TrustedRootCertsCache>,
+    source_tls_config: SourceTlsConfig,
     feature_flags_client: Option<FeatureFlagsClient>,
 ) -> Result<Server, anyhow::Error> {
     let prometheus_handle = init_metrics_handle()?;
     let config = Arc::new(config);
     let encryption_keyring = Arc::new(encryption_keyring);
-    let trusted_root_certs_cache = trusted_root_certs_cache.map(Arc::new);
+    let source_tls_config = Arc::new(source_tls_config);
 
     #[derive(OpenApi)]
     #[openapi(
@@ -499,11 +497,7 @@ pub fn run(
     let app =
         if let Some(k8s_client) = k8s_client { app.layer(Extension(k8s_client)) } else { app };
 
-    let app = if let Some(trusted_root_certs_cache) = trusted_root_certs_cache {
-        app.layer(Extension(trusted_root_certs_cache))
-    } else {
-        app
-    };
+    let app = app.layer(Extension(source_tls_config));
 
     let app = if let Some(feature_flags_client) = feature_flags_client {
         app.layer(Extension(feature_flags_client))

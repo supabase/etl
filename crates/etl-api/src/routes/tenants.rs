@@ -13,7 +13,6 @@ use tracing::warn;
 use utoipa::ToSchema;
 
 use crate::{
-    config::ApiConfig,
     configs::encryption::EncryptionKeyring,
     data,
     data::{
@@ -26,7 +25,7 @@ use crate::{
         tenants::TenantsDbError,
     },
     k8s::{
-        K8sClient, TrustedRootCertsCache, TrustedRootCertsError,
+        K8sClient, SourceTlsConfig,
         core::{K8sCoreError, first_active_pipeline_id},
     },
     routes::{
@@ -59,9 +58,6 @@ pub enum TenantError {
     SourcePipelineState(PipelinesDbError),
 
     #[error(transparent)]
-    TrustedRootCerts(#[from] TrustedRootCertsError),
-
-    #[error(transparent)]
     K8sCore(#[from] K8sCoreError),
 
     #[error("The pipeline with id {0} is active; stop it before deleting it")]
@@ -79,7 +75,6 @@ impl TenantError {
             | TenantError::SourcesDb(_)
             | TenantError::PipelinesDb(_)
             | TenantError::Database(_)
-            | TenantError::TrustedRootCerts(_)
             | TenantError::K8sCore(_) => "Internal server error".to_owned(),
             TenantError::SourceDatabase(_) | TenantError::SourcePipelineState(_) => {
                 utils::source_database_query_error_message().to_owned()
@@ -111,7 +106,6 @@ impl IntoResponse for TenantError {
             | TenantError::SourcesDb(_)
             | TenantError::PipelinesDb(_)
             | TenantError::Database(_)
-            | TenantError::TrustedRootCerts(_)
             | TenantError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
             TenantError::SourceDatabase(error) => utils::source_database_error_status_code(error),
             TenantError::SourcePipelineState(error) => match error {
@@ -329,11 +323,10 @@ pub(crate) async fn update_tenant(
 )]
 pub(crate) async fn delete_tenant(
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     tenant_id: Path<String>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
 ) -> Result<impl IntoResponse, TenantError> {
     let tenant_id = tenant_id.into_inner();
     validate_tenant_id(&tenant_id)?;
@@ -349,7 +342,7 @@ pub(crate) async fn delete_tenant(
 
     let sources =
         data::sources::read_all_source_connections(&pool, &tenant_id, &encryption_key).await?;
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let mut pipelines_by_source = std::collections::BTreeMap::new();
     for pipeline in pipelines {
         pipelines_by_source.entry(pipeline.source_id).or_insert_with(Vec::new).push(pipeline);

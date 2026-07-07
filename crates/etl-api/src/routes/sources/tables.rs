@@ -12,14 +12,13 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::{
-    config::ApiConfig,
     configs::encryption::EncryptionKeyring,
     data::{
         self, source_database,
         sources::SourcesDbError,
         tables::{Table, TablesDbError},
     },
-    k8s::{TrustedRootCertsCache, TrustedRootCertsError},
+    k8s::SourceTlsConfig,
     routes::{
         ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
         extract_tenant_id, utils,
@@ -42,18 +41,13 @@ pub(crate) enum TableError {
 
     #[error("Database connection error: {0}")]
     Database(#[from] sqlx::Error),
-
-    #[error(transparent)]
-    TrustedRootCerts(#[from] TrustedRootCertsError),
 }
 
 impl TableError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            TableError::SourcesDb(_) | TableError::TrustedRootCerts(_) => {
-                "Internal server error".to_owned()
-            }
+            TableError::SourcesDb(_) => "Internal server error".to_owned(),
             TableError::TablesDb(TablesDbError::Database(_)) | TableError::Database(_) => {
                 utils::source_database_query_error_message().to_owned()
             }
@@ -72,9 +66,7 @@ pub struct ReadTablesResponse {
 impl IntoResponse for TableError {
     fn into_response(self) -> Response {
         let status_code = match &self {
-            TableError::SourcesDb(_) | TableError::TrustedRootCerts(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            TableError::SourcesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             TableError::TablesDb(TablesDbError::Database(error)) | TableError::Database(error) => {
                 utils::source_database_error_status_code(error)
             }
@@ -109,9 +101,8 @@ impl IntoResponse for TableError {
 pub(crate) async fn read_table_names(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     source_id: Path<i64>,
 ) -> Result<impl IntoResponse, TableError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -122,7 +113,7 @@ pub(crate) async fn read_table_names(
         .map(|s| s.config)
         .ok_or(TableError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source_pool =
         source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     let tables = data::tables::get_tables(&source_pool).await?;

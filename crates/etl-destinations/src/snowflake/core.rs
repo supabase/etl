@@ -4,8 +4,8 @@ use etl::{
     bail,
     data::{OldTableRow, TableRow, UpdatedTableRow},
     destination::{
-        DestinationTableMetadata, DestinationTableSchemaStatus, DropTableForCopyResult, TaskSet,
-        WriteEventsResult, WriteTableRowsResult,
+        DestinationTableMetadata, DestinationTableSchemaStatus, DestinationWriteStatus,
+        DropTableForCopyResult, TaskSet, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -495,7 +495,7 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
 
@@ -503,7 +503,7 @@ where
         self.tasks
             .spawn(async move {
                 let result = destination.process_events(events).await;
-                async_result.send(result);
+                async_result.send(result.map(|_| DestinationWriteStatus::Durable));
             })
             .await;
 

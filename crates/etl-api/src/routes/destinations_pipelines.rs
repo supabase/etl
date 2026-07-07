@@ -16,7 +16,6 @@ use super::{
     utils,
 };
 use crate::{
-    config::ApiConfig,
     configs::{
         destination::{FullApiDestinationConfig, UpdateApiDestinationConfig},
         encryption::EncryptionKeyring,
@@ -38,7 +37,7 @@ use crate::{
     },
     feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant},
     k8s::{
-        K8sClient, TrustedRootCertsCache, TrustedRootCertsError,
+        K8sClient, SourceTlsConfig,
         core::{K8sCoreError, is_replicator_active},
     },
     validation::ValidationError,
@@ -95,9 +94,6 @@ pub(crate) enum DestinationPipelineError {
     SourcePipelineState(PipelinesDbError),
 
     #[error(transparent)]
-    TrustedRootCerts(#[from] TrustedRootCertsError),
-
-    #[error(transparent)]
     Validation(#[from] ValidationError),
 
     #[error(transparent)]
@@ -137,7 +133,6 @@ impl DestinationPipelineError {
             | DestinationPipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | DestinationPipelineError::Database(_)
             | DestinationPipelineError::NoDefaultImageFound
-            | DestinationPipelineError::TrustedRootCerts(_)
             | DestinationPipelineError::K8sCore(_) => "Internal server error".to_owned(),
             DestinationPipelineError::SourceDatabase(_)
             | DestinationPipelineError::SourcePipelineState(_) => {
@@ -170,8 +165,7 @@ impl IntoResponse for DestinationPipelineError {
             | DestinationPipelineError::SourcesDb(_)
             | DestinationPipelineError::PipelinesDb(_)
             | DestinationPipelineError::Database(_)
-            | DestinationPipelineError::K8sCore(_)
-            | DestinationPipelineError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | DestinationPipelineError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationPipelineError::SourceDatabase(error) => {
                 utils::source_database_error_status_code(error)
             }
@@ -434,10 +428,9 @@ pub(crate) async fn update_destination_and_pipeline(
 pub(crate) async fn delete_destination_and_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
-    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
 ) -> Result<impl IntoResponse, DestinationPipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -458,7 +451,7 @@ pub(crate) async fn delete_destination_and_pipeline(
         return Err(DestinationPipelineError::ActivePipeline(pipeline.id));
     }
 
-    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let tls_config = source_tls_config.get_tls_config();
     let source = data::sources::read_source_connection(
         &pool,
         tenant_id,
