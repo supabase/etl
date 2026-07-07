@@ -1851,7 +1851,7 @@ mod tests {
     use std::sync::Arc;
 
     use etl::{
-        data::CellNonOptional,
+        data::Cell,
         schema::{ColumnSchema, IdentityMask, PgLsn, TableId, TableSchema, Type},
     };
     use prost::Message;
@@ -1876,6 +1876,12 @@ mod tests {
         };
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    /// Encodes tagged cells the same way [`BigQueryTableRow`] does, for
+    /// comparison against a row produced by the code under test.
+    fn expected_row_bytes(tagged_cells: Vec<(usize, Cell)>) -> Vec<u8> {
+        BigQueryTableRow::try_from_tagged_cells(tagged_cells).unwrap().encode_to_vec()
     }
 
     fn replicated_schema_with_partial_primary_key() -> ReplicatedTableSchema {
@@ -2505,12 +2511,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            row.debug_cells(),
-            vec![
-                (1, CellNonOptional::I32(42)),
-                (4, CellNonOptional::String("DELETE".to_owned())),
-                (5, CellNonOptional::String("lsn:1".to_owned())),
-            ]
+            row.encode_to_vec(),
+            expected_row_bytes(vec![
+                (1, Cell::I32(42)),
+                (4, Cell::String("DELETE".to_owned())),
+                (5, Cell::String("lsn:1".to_owned())),
+            ])
         );
     }
 
@@ -2529,31 +2535,21 @@ mod tests {
 
         assert_eq!(rows.len(), 2);
         assert_eq!(
-            rows[0].debug_cells(),
-            vec![
-                (1, CellNonOptional::I32(1)),
-                (3, CellNonOptional::String("DELETE".to_owned())),
-                (
-                    4,
-                    CellNonOptional::String(
-                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
-                    ),
-                ),
-            ]
+            rows[0].encode_to_vec(),
+            expected_row_bytes(vec![
+                (1, Cell::I32(1)),
+                (3, Cell::String("DELETE".to_owned())),
+                (4, Cell::String("0000000000000001/0000000000000000/0000000000000000".to_owned(),),),
+            ])
         );
         assert_eq!(
-            rows[1].debug_cells(),
-            vec![
-                (1, CellNonOptional::I32(2)),
-                (2, CellNonOptional::String("updated".to_owned())),
-                (3, CellNonOptional::String("UPSERT".to_owned())),
-                (
-                    4,
-                    CellNonOptional::String(
-                        "0000000000000001/0000000000000000/0000000000000001".to_owned(),
-                    ),
-                ),
-            ]
+            rows[1].encode_to_vec(),
+            expected_row_bytes(vec![
+                (1, Cell::I32(2)),
+                (2, Cell::String("updated".to_owned())),
+                (3, Cell::String("UPSERT".to_owned())),
+                (4, Cell::String("0000000000000001/0000000000000000/0000000000000001".to_owned(),),),
+            ])
         );
     }
 
@@ -2572,18 +2568,13 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(
-            rows[0].debug_cells(),
-            vec![
-                (1, CellNonOptional::I32(1)),
-                (2, CellNonOptional::String("updated".to_owned())),
-                (3, CellNonOptional::String("UPSERT".to_owned())),
-                (
-                    4,
-                    CellNonOptional::String(
-                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
-                    ),
-                ),
-            ]
+            rows[0].encode_to_vec(),
+            expected_row_bytes(vec![
+                (1, Cell::I32(1)),
+                (2, Cell::String("updated".to_owned())),
+                (3, Cell::String("UPSERT".to_owned())),
+                (4, Cell::String("0000000000000001/0000000000000000/0000000000000000".to_owned(),),),
+            ])
         );
     }
 
@@ -2605,31 +2596,21 @@ mod tests {
 
         assert_eq!(rows.len(), 2);
         assert_eq!(
-            rows[0].debug_cells(),
-            vec![
-                (1, CellNonOptional::I32(1)),
-                (3, CellNonOptional::String("DELETE".to_owned())),
-                (
-                    4,
-                    CellNonOptional::String(
-                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
-                    ),
-                ),
-            ]
+            rows[0].encode_to_vec(),
+            expected_row_bytes(vec![
+                (1, Cell::I32(1)),
+                (3, Cell::String("DELETE".to_owned())),
+                (4, Cell::String("0000000000000001/0000000000000000/0000000000000000".to_owned(),),),
+            ])
         );
         assert_eq!(
-            rows[1].debug_cells(),
-            vec![
-                (1, CellNonOptional::I32(2)),
-                (2, CellNonOptional::String("updated".to_owned())),
-                (3, CellNonOptional::String("UPSERT".to_owned())),
-                (
-                    4,
-                    CellNonOptional::String(
-                        "0000000000000001/0000000000000000/0000000000000001".to_owned(),
-                    ),
-                ),
-            ]
+            rows[1].encode_to_vec(),
+            expected_row_bytes(vec![
+                (1, Cell::I32(2)),
+                (2, Cell::String("updated".to_owned())),
+                (3, Cell::String("UPSERT".to_owned())),
+                (4, Cell::String("0000000000000001/0000000000000000/0000000000000001".to_owned(),),),
+            ])
         );
     }
 
