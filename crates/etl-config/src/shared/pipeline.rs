@@ -307,6 +307,19 @@ pub struct PipelineConfig {
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
+    /// Whether [`Pipeline::start`] should run the source migrations that
+    /// install the schema helper functions and the `ddl_command_end` event
+    /// trigger.
+    ///
+    /// Defaults to `true`, preserving the existing behavior. Set to `false`
+    /// when the replication role is intentionally de-elevated and lacks the
+    /// superuser privilege required to `CREATE EVENT TRIGGER`; in that case
+    /// the source objects must be installed out-of-band by an admin (see
+    /// the source migrations under `crates/etl/migrations/source`).
+    /// Pipelines that do not rely on DDL-change propagation can safely run
+    /// with this disabled.
+    #[serde(default = "default_run_source_migrations")]
+    pub run_source_migrations: bool,
 }
 
 impl PipelineConfig {
@@ -412,6 +425,10 @@ fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
     Some(MemoryBackpressureConfig::default())
 }
 
+const fn default_run_source_migrations() -> bool {
+    true
+}
+
 /// Same as [`PipelineConfig`] but without secrets. This type
 /// implements [`Serialize`] because it does not contains secrets
 /// so is safe to serialize.
@@ -475,6 +492,10 @@ pub struct PipelineConfigWithoutSecrets {
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
+    /// Whether [`Pipeline::start`] should run the source migrations. See the
+    /// field of the same name on [`PipelineConfig`].
+    #[serde(default = "default_run_source_migrations")]
+    pub run_source_migrations: bool,
 }
 
 impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
@@ -494,6 +515,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: value.table_sync_copy,
             invalidated_slot_behavior: value.invalidated_slot_behavior,
+            run_source_migrations: value.run_source_migrations,
         }
     }
 }
@@ -546,6 +568,58 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_config_deserializes_missing_run_source_migrations_as_true() {
+        let json = r#"{
+            "id": 1,
+            "publication_name": "publication",
+            "pg_connection": {
+                "host": "localhost",
+                "hostaddr": null,
+                "port": 5432,
+                "name": "postgres",
+                "username": "postgres",
+                "password": null,
+                "tls": {
+                    "trusted_root_certs": "",
+                    "enabled": false
+                }
+            }
+        }"#;
+
+        let config: PipelineConfig = serde_json::from_str(json).unwrap();
+
+        assert!(config.run_source_migrations);
+    }
+
+    #[test]
+    fn pipeline_config_deserializes_run_source_migrations_false() {
+        let json = r#"{
+            "id": 1,
+            "publication_name": "publication",
+            "pg_connection": {
+                "host": "localhost",
+                "hostaddr": null,
+                "port": 5432,
+                "name": "postgres",
+                "username": "postgres",
+                "password": null,
+                "tls": {
+                    "trusted_root_certs": "",
+                    "enabled": false
+                }
+            },
+            "run_source_migrations": false
+        }"#;
+
+        let config: PipelineConfig = serde_json::from_str(json).unwrap();
+
+        assert!(!config.run_source_migrations);
+
+        let without_secrets = PipelineConfigWithoutSecrets::from(config);
+        assert!(!without_secrets.run_source_migrations);
+    }
+
+    #[test]
     fn table_sync_copy_serialization_skip_all() {
         let selection = TableSyncCopyConfig::SkipAllTables;
         let json = serde_json::to_string(&selection).unwrap();
@@ -591,6 +665,7 @@ mod tests {
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+            run_source_migrations: true,
         };
 
         assert_eq!(config.store_pg_connection().host, "replica.local");
@@ -615,6 +690,7 @@ mod tests {
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+            run_source_migrations: true,
         };
 
         assert_eq!(config.store_pg_connection().host, "primary.local");
