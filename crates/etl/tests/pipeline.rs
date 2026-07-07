@@ -7,10 +7,11 @@ use etl::{
         WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
+    etl_error,
     event::{Event, EventType, InsertEvent},
     pipeline::PipelineId,
     schema::{ColumnSchema, ReplicatedTableSchema, TableId},
-    store::{SchemaStore, TableState, TableStateType},
+    store::{SchemaStore, StateStore, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
@@ -41,7 +42,7 @@ use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::random;
 use tokio::{
-    sync::{Mutex, Notify},
+    sync::{Mutex, Notify, watch},
     time::sleep,
 };
 use tokio_postgres::types::{PgLsn, Type};
@@ -228,6 +229,162 @@ async fn pipeline_shutdown_calls_destination_shutdown() {
 
     // Verify that shutdown was called on the destination.
     assert!(destination.shutdown_called().await);
+}
+
+/// How [`StalledCopyDestination`] handles table-copy writes.
+#[derive(Clone, Copy)]
+enum CopyWriteBehavior {
+    /// Parks the write, then fails it once the release signal fires.
+    BlockThenFail,
+    /// Accepts the write but never completes its [`WriteTableRowsResult`].
+    NeverCompleteFlush,
+}
+
+/// Destination that stalls table-copy writes so tests can interleave pipeline
+/// shutdown with an in-flight copy.
+#[derive(Clone)]
+struct StalledCopyDestination {
+    behavior: CopyWriteBehavior,
+    write_entered: Arc<Notify>,
+    release_rx: watch::Receiver<bool>,
+    held_flush_results: Arc<std::sync::Mutex<Vec<WriteTableRowsResult>>>,
+}
+
+impl StalledCopyDestination {
+    /// Creates the destination together with the sender that releases parked
+    /// writes.
+    fn new(behavior: CopyWriteBehavior) -> (Self, watch::Sender<bool>) {
+        let (release_tx, release_rx) = watch::channel(false);
+
+        let destination = Self {
+            behavior,
+            write_entered: Arc::new(Notify::new()),
+            release_rx,
+            held_flush_results: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+
+        (destination, release_tx)
+    }
+
+    /// Waits until a table-copy write reached the destination.
+    async fn wait_for_copy_write(&self) {
+        self.write_entered.notified().await;
+    }
+}
+
+impl Destination for StalledCopyDestination {
+    fn name() -> &'static str {
+        "stalled_copy"
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        async_result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(()));
+
+        Ok(())
+    }
+
+    async fn write_table_rows(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        _table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        self.write_entered.notify_one();
+
+        match self.behavior {
+            CopyWriteBehavior::BlockThenFail => {
+                let mut release_rx = self.release_rx.clone();
+                release_rx
+                    .wait_for(|released| *released)
+                    .await
+                    .expect("release channel should stay open");
+
+                Err(etl_error!(ErrorKind::DestinationError, "Copy write failed"))
+            }
+            CopyWriteBehavior::NeverCompleteFlush => {
+                // Keep the flush result alive without completing it, so the
+                // copy loop stays blocked on the pending flush.
+                self.held_flush_results.lock().unwrap().push(async_result);
+
+                Ok(())
+            }
+        }
+    }
+
+    async fn write_events(
+        &self,
+        _events: Vec<Event>,
+        async_result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(DestinationWriteStatus::Durable));
+
+        Ok(())
+    }
+}
+
+/// Verifies that a table-copy write blocked on shutdown neither hangs the
+/// pipeline nor persists an `Errored` table state.
+///
+/// Covers both ways a stalled copy write can behave once shutdown starts:
+/// [`CopyWriteBehavior::BlockThenFail`] fails the write after shutdown was
+/// signaled (must not persist the error), and
+/// [`CopyWriteBehavior::NeverCompleteFlush`] never completes the flush at all
+/// (must not hang shutdown).
+async fn assert_shutdown_during_stalled_copy_leaves_table_retryable(behavior: CopyWriteBehavior) {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=10).await;
+
+    let store = NotifyingStore::new();
+    let (destination, release_tx) = StalledCopyDestination::new(behavior);
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+
+    // Park the copy write first, then signal shutdown, so any write failure
+    // surfaces only while shutdown is already in progress. Releasing is a
+    // no-op for `NeverCompleteFlush`, which never reads from the channel.
+    destination.wait_for_copy_write().await;
+    pipeline.shutdown();
+    release_tx.send(true).unwrap();
+
+    pipeline.wait().await.unwrap();
+
+    // Neither a shutdown-induced write failure nor an abandoned flush wait
+    // may persist an errored state; the table must restart the copy on the
+    // next run.
+    let table_state =
+        store.get_table_state(database_schema.users_schema().id).await.unwrap().unwrap();
+    assert!(matches!(table_state, TableState::DataSync));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_worker_error_during_shutdown_is_not_persisted() {
+    assert_shutdown_during_stalled_copy_leaves_table_retryable(CopyWriteBehavior::BlockThenFail)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_shutdown_interrupts_pending_flush_wait() {
+    assert_shutdown_during_stalled_copy_leaves_table_retryable(
+        CopyWriteBehavior::NeverCompleteFlush,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
