@@ -11,10 +11,35 @@ use tokio_postgres::types::PgLsn;
 use tracing::warn;
 
 use crate::{
-    destination::durability::DestinationWriteStatus,
     error::{ErrorKind, EtlResult},
     etl_error,
 };
+
+/// Status reported by a streaming destination write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationWriteStatus {
+    /// The destination accepted ownership of the write, but ETL must not
+    /// advance durable replication progress for it yet.
+    ///
+    /// Completing a result as `Accepted` consumes that result. After that
+    /// point, ETL cannot wait on the same result for a later durability signal.
+    /// ETL carries the write's commit end LSN into the next streaming write and
+    /// advances durable progress only when a later cumulative
+    /// [`DestinationWriteStatus::Durable`] result proves it durable.
+    ///
+    /// If no later streaming write is dispatched before shutdown, ETL exits
+    /// without acknowledging the accepted write as durable. Restart then
+    /// replays from the last durable checkpoint.
+    Accepted,
+    /// This write and all earlier accepted writes in the same ordered
+    /// apply-loop stream are durable according to the destination contract.
+    ///
+    /// The cumulative meaning is required for deferred destinations. When the
+    /// apply loop observes this status, it may advance durable progress through
+    /// the greatest commit end LSN carried by this write or by earlier accepted
+    /// writes that were attached to this write.
+    Durable,
+}
 
 /// Async completion handle used for
 /// [`crate::destination::Destination::write_table_rows`].
@@ -64,7 +89,7 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// result returns [`DestinationWriteStatus::Durable`]. For deferred
     /// destinations, the apply loop carries this LSN across
     /// [`DestinationWriteStatus::Accepted`] results and advances only when a
-    /// later cumulative durable result retires the accepted prefix.
+    /// later cumulative durable result covers the carried LSN.
     pub commit_end_lsn: Option<PgLsn>,
     /// Dispatch-time metrics for the batch.
     pub metrics: DispatchMetrics,

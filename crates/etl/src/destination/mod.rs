@@ -11,17 +11,17 @@
 mod async_result;
 mod base;
 mod capabilities;
-mod durability;
 mod metadata;
 
 pub(crate) use async_result::{
     ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
     PendingWriteEventsResult,
 };
-pub use async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult};
+pub use async_result::{
+    DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
+};
 pub use base::Destination;
 pub use capabilities::PipelineDestination;
-pub use durability::{DestinationWriteStatus, DurabilityConfig, StreamingWriteLimits};
 pub use metadata::{
     AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
 };
