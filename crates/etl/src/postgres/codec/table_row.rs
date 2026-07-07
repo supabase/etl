@@ -57,7 +57,7 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
     let mut row_terminated = false;
     let mut done = false;
 
-    // Main parsing loop - continues until all characters are processed
+    // Main parsing loop - continues until the whole row has been consumed.
     while !done {
         // Byte offset of the start of the literal run not yet appended to `val_str`.
         // Postgres COPY text format only ever backslash-escapes ASCII bytes (the
@@ -89,6 +89,7 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
                 if !row_terminated {
                     bail!(ErrorKind::ConversionError, "Row data not properly terminated");
                 }
+
                 done = true;
 
                 break;
@@ -103,12 +104,12 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
             }
 
             match bytes[special_pos] {
-                // Field separator - end current field parsing
+                // Field separator - end current field parsing.
                 b'\t' => {
                     pos = special_pos + 1;
                     break;
                 }
-                // Row terminator - end current field and mark row complete
+                // Row terminator - end current field and mark row complete.
                 b'\n' => {
                     pos = special_pos + 1;
                     row_terminated = true;
@@ -163,57 +164,60 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
             }
         }
 
-        // Process the parsed field value if we're not done with the entire row
-        if !done {
-            // Get the next column schema - error if we have more fields than expected
-            let Some(column_schema) = column_schemas.next() else {
-                let actual_column_count = values.len() + 1;
-                bail!(
-                    ErrorKind::ConversionError,
-                    "Postgres COPY row contains more columns than the table schema",
-                    format!(
-                        "The table schema expects {} replicated columns, but the COPY row \
-                         contains at least {}. The first extra field is at position {}.",
-                        expected_column_count, actual_column_count, actual_column_count
-                    )
-                );
-            };
-
-            // Convert the parsed string value to appropriate Cell type
-            let value = if val_str == "\\N" {
-                // Postgres NULL marker: \N represents a NULL value
-                // We preserve this as Cell::Null rather than converting to a typed null
-                // so that downstream code can handle null semantics appropriately
-                Cell::Null
-            } else {
-                // Convert non-null field value to appropriate Cell type based on column schema
-                // This delegates to TextFormatConverter which handles Postgres text format
-                // parsing for all supported data types (integers, floats, strings, booleans,
-                // etc.)
-                match parse_cell_from_postgres_text(&column_schema.typ, &val_str) {
-                    Ok(value) => value,
-                    Err(e) => {
-                        // Avoid logging source row values, which may contain customer data.
-                        error!(
-                            column_name = %column_schema.name,
-                            column_type = %column_schema.typ,
-                            value_length = val_str.len(),
-                            "error parsing column from postgres text",
-                        );
-                        return Err(e);
-                    }
-                }
-            };
-
-            // Add the converted value to the row and prepare for next field
-            values.push(value);
-            val_str.clear(); // Reset string buffer for next field
+        if done {
+            break;
         }
+
+        // Get the next column schema - error if we have more fields than expected.
+        let Some(column_schema) = column_schemas.next() else {
+            let actual_column_count = values.len() + 1;
+            bail!(
+                ErrorKind::ConversionError,
+                "Postgres COPY row contains more columns than the table schema",
+                format!(
+                    "The table schema expects {} replicated columns, but the COPY row contains at \
+                     least {}. The first extra field is at position {}.",
+                    expected_column_count, actual_column_count, actual_column_count
+                )
+            );
+        };
+
+        // Convert the parsed string value to appropriate Cell type.
+        let value = if val_str == "\\N" {
+            // Postgres NULL marker: \N represents a NULL value
+            // We preserve this as Cell::Null rather than converting to a typed null
+            // so that downstream code can handle null semantics appropriately.
+            Cell::Null
+        } else {
+            // Convert non-null field value to the appropriate Cell type based on the
+            // column's Postgres type, covering all supported data types (integers,
+            // floats, strings, booleans, etc.).
+            match parse_cell_from_postgres_text(&column_schema.typ, &val_str) {
+                Ok(value) => value,
+                Err(e) => {
+                    error!(
+                        column_name = %column_schema.name,
+                        column_type = %column_schema.typ,
+                        value_length = val_str.len(),
+                        "error parsing column from postgres text",
+                    );
+
+                    return Err(e);
+                }
+            }
+        };
+
+        // Add the converted value to the row.
+        values.push(value);
+
+        // Reset the buffer for the next field.
+        val_str.clear();
     }
 
-    // Validate that all expected columns were present in the row
+    // Validate that all expected columns were present in the row.
+    //
     // If there are still columns left in the schema iterator, it means the row
-    // had fewer fields than expected, which is an error
+    // had fewer fields than expected, which is an error.
     if let Some(missing_column_schema) = column_schemas.next() {
         let actual_column_count = values.len();
         bail!(
