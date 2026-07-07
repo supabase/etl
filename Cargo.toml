@@ -87,7 +87,7 @@ etl-postgres = { path = "crates/etl-postgres", default-features = false }
 etl-telemetry = { path = "crates/etl-telemetry", default-features = false }
 fail = { version = "0.5.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
-gcp-bigquery-client = { git = "https://github.com/iambriccardo/gcp-bigquery-client", rev = "0167ee6764dee013055dc6106970788cf3597cbb", default-features = false }
+gcp-bigquery-client = { git = "https://github.com/iambriccardo/gcp-bigquery-client", rev = "f5458eb9e67f7f8748675565c8b15d710f1eacc7", default-features = false }
 hex = { version = "0.4", default-features = false }
 humantime = { version = "2.3.0", default-features = false }
 iceberg = { version = "0.8.0", default-features = false }
