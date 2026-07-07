@@ -76,7 +76,10 @@ use etl::{
         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
     data::TableRow,
-    destination::{Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+    destination::{
+        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult,
+        WriteTableRowsResult,
+    },
     error::EtlResult,
     event::Event,
     pipeline::Pipeline,
@@ -117,10 +120,10 @@ impl Destination for LoggingDestination {
     async fn write_events(
         &self,
         events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         println!("received {} streaming events", events.len());
-        async_result.send(Ok(()));
+        async_result.send(Ok(DestinationWriteStatus::Durable));
         Ok(())
     }
 }

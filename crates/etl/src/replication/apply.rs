@@ -1299,6 +1299,11 @@ where
     /// coordination before waiting. After the selected branch runs, it checks
     /// again for idle table-sync work. Once buffered or in-flight destination
     /// work is resolved, it sends the final shutdown status update and exits.
+    ///
+    /// A write that already resolved as [`DestinationWriteStatus::Accepted`] is
+    /// no longer pending work. If no later write makes it durable, the final
+    /// status update stays at the last durable flush LSN and replay handles it
+    /// after restart.
     async fn run_draining_shutdown_iteration(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -1438,8 +1443,10 @@ where
     /// Shutdown stops new message intake immediately. If there is already
     /// buffered or in-flight destination work, the loop first drains that work
     /// so the best durable position can advance before sending the final
-    /// shutdown status update. Otherwise, it sends that update immediately and
-    /// exits the loop.
+    /// shutdown status update. A write that has already completed as
+    /// [`DestinationWriteStatus::Accepted`] is not waited on again; without a
+    /// later durable write, the final status update remains at the last durable
+    /// flush LSN. Otherwise, the loop sends that update immediately and exits.
     ///
     /// Note: the shutdown system is best-effort. Graceful shutdown may not
     /// complete if we are blocked on non-interruptible code. It is the
