@@ -4,7 +4,7 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
-        DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
+        DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -1476,10 +1476,10 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         let result = self.write_events_inner(events).await;
-        async_result.send(result);
+        async_result.send(result.map(|_| DestinationWriteStatus::Durable));
         Ok(())
     }
 }

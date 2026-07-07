@@ -11,6 +11,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::warn;
 
 use crate::{
+    destination::durability::DestinationWriteStatus,
     error::{ErrorKind, EtlResult},
     etl_error,
 };
@@ -37,12 +38,12 @@ pub type DropTableForCopyResult<T = ()> = AsyncResult<T>;
 /// This is the path where asynchronous completion changes ETL behavior the
 /// most: once dispatch succeeds, the apply loop may continue other work while
 /// the destination finishes the batch.
-pub type WriteEventsResult<T = ()> = AsyncResult<T>;
+pub type WriteEventsResult<T = DestinationWriteStatus> = AsyncResult<T>;
 /// Pending async completion used for `Destination::write_events`.
-pub(crate) type PendingWriteEventsResult<T = ()> =
+pub(crate) type PendingWriteEventsResult<T = DestinationWriteStatus> =
     PendingAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 /// Completed async completion used for `Destination::write_events`.
-pub(crate) type CompletedWriteEventsResult<T = ()> =
+pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 
 /// Dispatch-time metrics carried through an asynchronous completion result.
@@ -59,9 +60,11 @@ pub(crate) struct DispatchMetrics {
 pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Commit end LSN associated with the dispatched batch, if any.
     ///
-    /// After the destination acknowledges the batch, this becomes the durable
-    /// progress boundary that status updates report as both `flush_lsn` and
-    /// `apply_lsn`.
+    /// For immediate destinations this becomes durable progress when the write
+    /// result returns [`DestinationWriteStatus::Durable`]. For deferred
+    /// destinations, the apply loop carries this LSN across
+    /// [`DestinationWriteStatus::Accepted`] results and advances only when a
+    /// later cumulative durable result retires the accepted prefix.
     pub commit_end_lsn: Option<PgLsn>,
     /// Dispatch-time metrics for the batch.
     pub metrics: DispatchMetrics,

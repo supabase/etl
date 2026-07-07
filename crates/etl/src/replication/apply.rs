@@ -8,7 +8,7 @@
 //! cycle.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     pin::Pin,
     str::FromStr,
@@ -43,8 +43,9 @@ use crate::{
     bail,
     data::SizeHint,
     destination::{
-        ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
-        PendingWriteEventsResult, PipelineDestination, WriteEventsResult,
+        ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DestinationWriteStatus,
+        DispatchMetrics, PendingWriteEventsResult, PipelineDestination, StreamingWriteLimits,
+        WriteEventsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -617,6 +618,150 @@ impl ApplyLoopTasks {
     }
 }
 
+/// A streaming write result that has been dispatched but not yet processed by
+/// the apply loop.
+#[derive(Debug)]
+struct PendingStreamingWrite {
+    /// Destination async result for the write.
+    pending_result: PendingWriteEventsResult,
+    /// Approximate bytes held against streaming write backpressure.
+    estimated_bytes: usize,
+}
+
+/// Ordered streaming write backpressure and deferred-progress state.
+///
+/// The window counts both pending results and accepted-but-not-durable writes
+/// against the configured in-flight limits until a cumulative
+/// [`DestinationWriteStatus::Durable`] result retires them. This prevents a
+/// deferred destination from accepting unbounded not-yet-durable work while
+/// preserving source-order checkpointing.
+///
+/// The window always waits for results in dispatch order. A destination can
+/// defer older writes by returning [`DestinationWriteStatus::Accepted`], but a
+/// later [`DestinationWriteStatus::Durable`] result is cumulative and retires
+/// all earlier accepted writes together with the durable tail write. Until that
+/// happens, accepted writes continue to consume both count and byte capacity.
+#[derive(Debug)]
+struct StreamingWriteWindow {
+    /// Destination-provided streaming write limits.
+    limits: StreamingWriteLimits,
+    /// Results dispatched to the destination but not yet processed in source
+    /// order by the apply loop.
+    pending_writes: VecDeque<PendingStreamingWrite>,
+    /// Estimated bytes across [`Self::pending_writes`].
+    pending_bytes: usize,
+    /// Greatest commit end LSN carried by accepted-but-not-durable writes.
+    deferred_commit_end_lsn: Option<PgLsn>,
+    /// Number of accepted writes waiting for a later cumulative durable result.
+    deferred_writes: usize,
+    /// Estimated bytes across accepted writes waiting for a later cumulative
+    /// durable result.
+    deferred_bytes: usize,
+}
+
+impl StreamingWriteWindow {
+    /// Creates a streaming write window with destination-provided limits.
+    fn new(limits: StreamingWriteLimits) -> Self {
+        Self {
+            limits,
+            pending_writes: VecDeque::new(),
+            pending_bytes: 0,
+            deferred_commit_end_lsn: None,
+            deferred_writes: 0,
+            deferred_bytes: 0,
+        }
+    }
+
+    /// Returns whether a dispatched streaming write result is waiting for
+    /// ordered handling.
+    fn has_pending_writes(&self) -> bool {
+        !self.pending_writes.is_empty()
+    }
+
+    /// Returns whether accepted-but-not-durable writes are waiting for a later
+    /// cumulative durable result.
+    fn has_deferred_writes(&self) -> bool {
+        self.deferred_writes > 0
+    }
+
+    /// Returns whether any dispatched streaming write has not yet retired as
+    /// durable.
+    fn has_unretired_writes(&self) -> bool {
+        self.has_pending_writes() || self.has_deferred_writes()
+    }
+
+    /// Returns whether accepted-but-not-durable writes have no pending result
+    /// that can later report cumulative durability.
+    fn has_stranded_deferred_writes(&self) -> bool {
+        self.has_deferred_writes() && !self.has_pending_writes()
+    }
+
+    /// Returns whether the queued batch can be dispatched without exceeding
+    /// configured in-flight limits.
+    ///
+    /// One write is always allowed through an empty window, even if it exceeds
+    /// the byte limit, so a single oversized batch cannot deadlock streaming.
+    fn has_capacity_for(&self, estimated_bytes: usize) -> bool {
+        let inflight_writes = self.pending_writes.len().saturating_add(self.deferred_writes);
+        if inflight_writes >= self.limits.max_inflight_writes.get() {
+            return false;
+        }
+
+        let max_bytes = self.limits.max_inflight_bytes;
+        if max_bytes == 0 || inflight_writes == 0 {
+            return true;
+        }
+
+        self.pending_bytes.saturating_add(self.deferred_bytes).saturating_add(estimated_bytes)
+            <= max_bytes
+    }
+
+    /// Records a newly dispatched streaming write.
+    fn push(&mut self, pending_result: PendingWriteEventsResult, estimated_bytes: usize) {
+        self.pending_bytes = self.pending_bytes.saturating_add(estimated_bytes);
+        self.pending_writes.push_back(PendingStreamingWrite { pending_result, estimated_bytes });
+    }
+
+    /// Returns the front pending write result.
+    fn front_result_mut(&mut self) -> Option<&mut PendingWriteEventsResult> {
+        self.pending_writes.front_mut().map(|pending_write| &mut pending_write.pending_result)
+    }
+
+    /// Removes the front pending write after its result has completed.
+    fn pop_front(&mut self) -> Option<PendingStreamingWrite> {
+        let pending_write = self.pending_writes.pop_front()?;
+        self.pending_bytes = self.pending_bytes.saturating_sub(pending_write.estimated_bytes);
+
+        Some(pending_write)
+    }
+
+    /// Marks the completed front write as accepted but not durable.
+    fn defer(&mut self, metadata: ApplyLoopAsyncResultMetadata, estimated_bytes: usize) {
+        self.deferred_commit_end_lsn =
+            max_commit_end_lsn(self.deferred_commit_end_lsn, metadata.commit_end_lsn);
+        self.deferred_writes = self.deferred_writes.saturating_add(1);
+        self.deferred_bytes = self.deferred_bytes.saturating_add(estimated_bytes);
+    }
+
+    /// Retires accepted-but-not-durable writes after a cumulative durable
+    /// result proves them durable.
+    fn retire_deferred_writes(&mut self) -> Option<PgLsn> {
+        self.deferred_writes = 0;
+        self.deferred_bytes = 0;
+        self.deferred_commit_end_lsn.take()
+    }
+}
+
+/// Returns the greatest commit end LSN present in either input.
+fn max_commit_end_lsn(left: Option<PgLsn>, right: Option<PgLsn>) -> Option<PgLsn> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
@@ -648,20 +793,21 @@ struct ApplyLoopState {
     flush_deadline: Option<Instant>,
     /// The deadline for the next proactive keep alive status update.
     keep_alive_deadline: Instant,
-    /// Destination write result waiting to be applied to replication progress.
-    pending_flush_result: Option<PendingWriteEventsResult<()>>,
+    /// Streaming writes dispatched to the destination but not yet retired as
+    /// durable.
+    streaming_write_window: StreamingWriteWindow,
     /// The strongest exit that this apply loop invocation should eventually
     /// return.
     ///
     /// Once set, the loop stops ingesting new replication messages and instead
-    /// drains any in-flight flushes and shutdown barriers before returning
-    /// the final result.
+    /// drains any in-flight destination writes and shutdown barriers before
+    /// returning the final result.
     exit_intent: Option<ExitIntent>,
-    /// Set to `true` when a flush was deferred because another flush result was
-    /// still in flight.
+    /// Set to `true` when a flush was deferred because the streaming write
+    /// window did not have capacity for another batch.
     ///
     /// While this is set, the loop stops both deadline-driven flush attempts
-    /// and new message intake until the in-flight flush resolves and the
+    /// and new message intake until streaming write capacity opens and the
     /// queued batch can be retried.
     processing_paused: bool,
     /// Fallback snapshot used before a table has established shared protocol
@@ -686,6 +832,7 @@ impl ApplyLoopState {
         replication_progress: ReplicationProgress,
         replication_lag_metrics: ReplicationLagMetrics,
         keep_alive_deadline_duration: Duration,
+        streaming_write_limits: StreamingWriteLimits,
         bootstrap_snapshot_id: SnapshotId,
         slot_name: String,
     ) -> Self {
@@ -702,7 +849,7 @@ impl ApplyLoopState {
             draining_for_shutdown: false,
             flush_deadline: None,
             keep_alive_deadline: Instant::now() + keep_alive_deadline_duration,
-            pending_flush_result: None,
+            streaming_write_window: StreamingWriteWindow::new(streaming_write_limits),
             exit_intent: None,
             processing_paused: false,
             bootstrap_snapshot_id,
@@ -748,8 +895,8 @@ impl ApplyLoopState {
     /// Sets the batch flush deadline, if not already set.
     ///
     /// The deadline stays armed until a flush is actually dispatched. If a
-    /// flush attempt is deferred because another flush is still in flight,
-    /// the deadline is intentionally preserved.
+    /// flush attempt is deferred because the streaming write window has no
+    /// capacity, the deadline is intentionally preserved.
     fn set_flush_deadline_if_needed(&mut self, max_batch_fill_duration: Duration) {
         if self.flush_deadline.is_some() {
             return;
@@ -898,16 +1045,22 @@ impl ApplyLoopState {
         !self.events_batch.is_empty()
     }
 
-    /// Returns `true` if there is a batch flush in flight whose result has not
-    /// yet resolved.
-    fn has_pending_flush_result(&self) -> bool {
-        self.pending_flush_result.is_some()
+    /// Returns `true` if there is a streaming write result waiting for ordered
+    /// handling.
+    fn has_pending_streaming_write_result(&self) -> bool {
+        self.streaming_write_window.has_pending_writes()
+    }
+
+    /// Returns `true` if streaming writes have been accepted but not retired as
+    /// durable.
+    fn has_deferred_streaming_writes(&self) -> bool {
+        self.streaming_write_window.has_deferred_writes()
     }
 
     /// Returns `true` if any buffered or in-flight destination batch work is
     /// still unresolved.
     fn has_unresolved_batch_work(&self) -> bool {
-        self.has_pending_batch() || self.has_pending_flush_result()
+        self.has_pending_batch() || self.streaming_write_window.has_unretired_writes()
     }
 
     /// Records a new exit intent if one was produced.
@@ -934,25 +1087,27 @@ impl ApplyLoopState {
         !self.processing_paused && self.has_pending_batch()
     }
 
-    /// Marks the current pending batch as paused behind an in-flight flush.
+    /// Returns whether the current pending batch would exceed streaming write
+    /// capacity.
+    fn streaming_write_window_blocks_pending_batch(&self) -> bool {
+        !self.streaming_write_window.has_capacity_for(self.events_batch_bytes)
+    }
+
+    /// Marks the current pending batch as paused behind an in-flight streaming
+    /// window.
     fn pause_processing(&mut self) {
-        debug_assert!(self.has_pending_flush_result());
+        debug_assert!(self.streaming_write_window_blocks_pending_batch());
         debug_assert!(self.has_pending_batch());
 
         self.processing_paused = true;
     }
 
-    /// Resumes processing by clearing the existing pending flush result and
-    /// enabling processing.
-    fn resume_processing(&mut self) -> bool {
-        debug_assert!(self.has_pending_flush_result());
+    /// Resumes processing after streaming write capacity becomes available.
+    fn resume_processing(&mut self) {
+        debug_assert!(self.streaming_write_window.has_capacity_for(self.events_batch_bytes));
+        debug_assert!(self.processing_paused);
 
-        let prev_processing_paused = std::mem::replace(&mut self.processing_paused, false);
-        self.pending_flush_result = None;
-
-        debug_assert!(!prev_processing_paused || self.has_pending_batch());
-
-        prev_processing_paused
+        self.processing_paused = false;
     }
 
     /// Returns the final result requested by this loop, if any.
@@ -1061,6 +1216,7 @@ where
 
         let replication_progress = ReplicationProgress::new(start_lsn);
         let replication_lag_metrics = ReplicationLagMetrics::new(start_lsn);
+        let streaming_write_limits = destination.durability_config().streaming_write_limits;
 
         let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
 
@@ -1077,6 +1233,7 @@ where
             replication_progress,
             replication_lag_metrics,
             keep_alive_deadline_duration,
+            streaming_write_limits,
             bootstrap_snapshot_id,
             slot_name,
         );
@@ -1170,7 +1327,7 @@ where
     /// After that preflight, this keeps the priority order explicit:
     /// 1. Shutdown requests.
     /// 2. PostgreSQL connection lifecycle updates.
-    /// 3. Pending destination flush results.
+    /// 3. Pending destination streaming write results.
     /// 4. Batch flush deadline expiry.
     /// 5. Incoming replication messages.
     /// 6. Periodic heartbeats once the computed keep alive deadline expires.
@@ -1182,10 +1339,11 @@ where
     /// without waiting for the full server timeout. This timeout branch is
     /// therefore a last-resort mechanism, not the primary source of
     /// progress. It matters when the loop is healthy but effectively stuck
-    /// on in-flight work, such as waiting for an older batch to flush before a
-    /// queued batch can be dispatched, or when keep alives are temporarily not
-    /// reaching the loop because the stream is backpressured or the source
-    /// is not sending them promptly.
+    /// on in-flight work, such as waiting for older destination writes to
+    /// resolve or retire enough write-window capacity before a queued batch can
+    /// be dispatched, or when keep alives are temporarily not reaching the loop
+    /// because the stream is backpressured or the source is not sending them
+    /// promptly.
     ///
     /// Each branch performs its work and then relies on
     /// [`Self::try_finish_active_iteration`] to decide whether the loop may
@@ -1222,10 +1380,11 @@ where
                 Self::handle_connection_update(changed, connection_updates_rx)?;
             }
 
-            // PRIORITY 3: Handle the pending destination write result.
-            // Finishing an in-flight flush may advance progress and unblock a queued batch.
-            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
-                self.handle_flush_result(apply_result)
+            // PRIORITY 3: Handle the oldest pending destination write result.
+            // Results are processed in dispatch order so durable progress never advances past an
+            // older unresolved write.
+            apply_result = Self::wait_for_streaming_write_result(self.state.streaming_write_window.front_result_mut()), if self.state.has_pending_streaming_write_result() => {
+                self.handle_streaming_write_result(apply_result)
                     .await?;
             }
 
@@ -1249,9 +1408,9 @@ where
             // PRIORITY 6: Emit a periodic status update once the computed keep alive deadline
             // expires. This intentionally resends the same effective flush LSN so PostgreSQL keeps
             // the standby connection open during long stalls, including cases where the loop is
-            // paused behind an in-flight flush and therefore not making visible progress yet. This
-            // is only a fallback path: most status updates should still be triggered by incoming
-            // PostgreSQL primary keep alive messages during normal operation.
+            // paused behind the destination write window and therefore not making visible progress
+            // yet. This is only a fallback path: most status updates should still be triggered by
+            // incoming PostgreSQL primary keep alive messages during normal operation.
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
@@ -1279,7 +1438,7 @@ where
     ///
     /// Priority order:
     /// 1. PostgreSQL connection lifecycle updates.
-    /// 2. Pending destination flush results.
+    /// 2. Pending destination streaming write results.
     /// 3. Batch flush deadline expiry.
     /// 4. Periodic keep alive status updates.
     ///
@@ -1292,6 +1451,8 @@ where
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
+        self.ensure_deferred_streaming_progress_has_tail()?;
+
         // If we are done with unresolved work, we can finish the shutdown.
         if !self.state.has_unresolved_batch_work() {
             self.send_shutdown_flush_status_update(events_stream.as_mut()).await?;
@@ -1307,9 +1468,9 @@ where
                 Self::handle_connection_update(changed, connection_updates_rx)?;
             }
 
-            // PRIORITY 2: Handle the pending destination write result.
-            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
-                self.handle_flush_result(apply_result)
+            // PRIORITY 2: Handle the oldest pending destination write result.
+            apply_result = Self::wait_for_streaming_write_result(self.state.streaming_write_window.front_result_mut()), if self.state.has_pending_streaming_write_result() => {
+                self.handle_streaming_write_result(apply_result)
                     .await?;
             }
 
@@ -1448,7 +1609,8 @@ where
         if self.state.has_unresolved_batch_work() {
             info!(
                 %worker_type,
-                pending_flush_result = self.state.has_pending_flush_result(),
+                pending_streaming_writes = self.state.has_pending_streaming_write_result(),
+                deferred_streaming_writes = self.state.has_deferred_streaming_writes(),
                 pending_batch = self.state.has_pending_batch(),
                 processing_paused = self.state.processing_paused,
                 "shutdown signal received, stopping new intake and entering shutdown drain",
@@ -1673,62 +1835,112 @@ where
         Ok(table_schema_retentions)
     }
 
-    /// Waits for the pending flush result, if any.
-    async fn wait_for_flush_result(
-        pending_flush_result: Option<&mut PendingWriteEventsResult<()>>,
-    ) -> CompletedWriteEventsResult<()> {
-        match pending_flush_result {
-            Some(flush_result) => flush_result.await,
+    /// Waits for the oldest pending streaming write result, if any.
+    async fn wait_for_streaming_write_result(
+        pending_write_result: Option<&mut PendingWriteEventsResult>,
+    ) -> CompletedWriteEventsResult {
+        match pending_write_result {
+            Some(write_result) => write_result.await,
             None => std::future::pending().await,
         }
     }
 
-    /// Handles a completed batch flush result.
-    async fn handle_flush_result(
+    /// Records metrics for a successfully handled streaming write result.
+    fn record_streaming_write_metrics(&self, metadata: ApplyLoopAsyncResultMetadata) {
+        counter!(
+            ETL_EVENTS_PROCESSED_TOTAL,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+            ACTION_LABEL => "table_streaming",
+        )
+        .increment(metadata.metrics.items_count as u64);
+
+        histogram!(
+            ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+            ACTION_LABEL => "table_streaming",
+        )
+        .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
+    }
+
+    /// Ensures deferred streaming progress still has a pending tail result that
+    /// can eventually prove durability.
+    fn ensure_deferred_streaming_progress_has_tail(&self) -> EtlResult<()> {
+        if self.state.streaming_write_window.has_stranded_deferred_writes() {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "Destination accepted a streaming write without a pending durability tail",
+                "Deferred streaming destinations must keep a pending write result that can later \
+                 report cumulative durability while accepted writes have not been retired"
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Resumes a queued batch if streaming write capacity became available.
+    async fn maybe_resume_processing_after_streaming_result(
         &mut self,
-        flush_result: CompletedWriteEventsResult<()>,
+        reason: &str,
     ) -> EtlResult<()> {
-        // We clear the state up front because this flush is no longer in flight.
-        let processing_paused = self.state.resume_processing();
+        if self.state.processing_paused
+            && self.state.has_pending_batch()
+            && self.state.streaming_write_window.has_capacity_for(self.state.events_batch_bytes)
+        {
+            self.state.resume_processing();
+            self.flush_batch(reason).await?;
+        }
 
-        // Explode the result into parts which are used for handling the flush result.
-        let (metadata, result) = flush_result.into_parts();
+        Ok(())
+    }
 
-        // If there was an error in the flushing, we return it immediately.
-        result?;
+    /// Handles a completed streaming write result.
+    async fn handle_streaming_write_result(
+        &mut self,
+        write_result: CompletedWriteEventsResult,
+    ) -> EtlResult<()> {
+        let Some(pending_write) = self.state.streaming_write_window.pop_front() else {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "Streaming write result completed without a pending write"
+            ));
+        };
 
-        if let Some(metadata) = metadata {
-            counter!(
-                ETL_EVENTS_PROCESSED_TOTAL,
-                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                ACTION_LABEL => "table_streaming",
-            )
-            .increment(metadata.metrics.items_count as u64);
+        // Explode the result into parts used for durability handling.
+        let (metadata, result) = write_result.into_parts();
+        let metadata = metadata.ok_or_else(|| {
+            etl_error!(ErrorKind::InvalidState, "Streaming write result completed without metadata")
+        })?;
 
-            histogram!(
-                ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                ACTION_LABEL => "table_streaming",
-            )
-            .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
+        // If the destination write failed, return it without advancing progress.
+        let status = result?;
+        self.record_streaming_write_metrics(metadata);
 
-            // We process the syncing tables with the last end lsn that the batch contains.
-            //
-            // Note that it could be that there is no end lsn for a specific batch, which
-            // could happen if we process a huge transaction, and we don't reach the
-            // commit before flushing. In that case, we don't process syncing
-            // tables, meaning that progress it not tracked, since it's not going to
-            // do anything because we can only track progress at commit boundaries.
-            if let Some(commit_end_lsn) = metadata.commit_end_lsn {
-                self.process_syncing_tables_after_flush(commit_end_lsn).await?;
+        match status {
+            DestinationWriteStatus::Accepted => {
+                self.state.streaming_write_window.defer(metadata, pending_write.estimated_bytes);
+                self.ensure_deferred_streaming_progress_has_tail()?;
+            }
+            DestinationWriteStatus::Durable => {
+                let commit_end_lsn = max_commit_end_lsn(
+                    self.state.streaming_write_window.retire_deferred_writes(),
+                    metadata.commit_end_lsn,
+                );
+
+                // We process the syncing tables with the greatest end LSN proven durable by
+                // this cumulative result.
+                //
+                // It can be that there is no end LSN for a specific batch, which can happen if
+                // we process a huge transaction and do not reach the commit before flushing. In
+                // that case, progress is not tracked yet because ETL only persists durable
+                // progress at commit boundaries.
+                if let Some(commit_end_lsn) = commit_end_lsn {
+                    self.process_syncing_tables_after_flush(commit_end_lsn).await?;
+                }
             }
         }
 
-        // If processing was paused, there must be a queued batch that still needs to be
-        // flushed now that the previous in-flight result has resolved.
-        if processing_paused {
-            self.flush_batch("pending flush result received").await?;
-        }
+        self.maybe_resume_processing_after_streaming_result("streaming write result received")
+            .await?;
 
         Ok(())
     }
@@ -1824,19 +2036,19 @@ where
 
     /// Flushes the current batch of events to the destination.
     ///
-    /// If a flush is already in flight, this pauses the loop and leaves the
-    /// current batch queued until the pending flush result has been
-    /// processed. The queued batch is then retried from
-    /// [`Self::handle_flush_result`] when that in-flight flush resolves.
+    /// If the streaming write window is full, this pauses the loop and leaves
+    /// the current batch queued until write capacity is available. The queued
+    /// batch is then retried from [`Self::handle_streaming_write_result`] when
+    /// a destination result retires enough in-flight work.
     async fn flush_batch(&mut self, reason: &str) -> EtlResult<()> {
         // If the batch is empty, we don't need to do anything.
         if !self.state.has_pending_batch() {
             return Ok(());
         }
 
-        // A flush is already in flight. Pause processing until the result resolves, at
-        // which point the loop will resume and dispatch this batch.
-        if self.state.has_pending_flush_result() {
+        // The streaming write window is full. Pause processing until a durable result
+        // retires enough work for this queued batch.
+        if self.state.streaming_write_window_blocks_pending_batch() {
             self.state.pause_processing();
             return Ok(());
         }
@@ -1861,19 +2073,20 @@ where
             },
         };
 
-        // Create the flush result channel: the sender is handed to the destination and
+        // Create the write result channel: the sender is handed to the destination and
         // the pending receiver is stored on the loop state until the
         // destination signals completion.
-        let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
-        self.destination.write_events(events_batch, flush_result).await?;
-        self.state.pending_flush_result = Some(pending_flush_result);
+        let (write_result, pending_write_result) = WriteEventsResult::new(metadata);
+        self.destination.write_events(events_batch, write_result).await?;
+        self.state.streaming_write_window.push(pending_write_result, events_batch_bytes);
 
         // We reset the deadline for the batch, since we are now flushing a new batch.
         // The new deadline will start as soon as we process a new element.
         //
-        // It's important to note that the deadline is removed only when the batch is
-        // flushed and not before this way, if a batch fails to flush due to
-        // inflight, it will be re-tried indefinitely until that finishes.
+        // It's important to note that the deadline is removed only when the
+        // batch is dispatched. If the batch cannot be dispatched because the
+        // streaming write window is full, it will be retried once capacity is
+        // available.
         self.state.reset_flush_deadline();
 
         Ok(())

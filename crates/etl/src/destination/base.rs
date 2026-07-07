@@ -2,7 +2,9 @@ use std::future::Future;
 
 use crate::{
     data::TableRow,
-    destination::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+    destination::{
+        DropTableForCopyResult, DurabilityConfig, WriteEventsResult, WriteTableRowsResult,
+    },
     error::EtlResult,
     event::Event,
     schema::ReplicatedTableSchema,
@@ -48,6 +50,22 @@ pub trait Destination {
     /// implementation is a no-op.
     fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
+    }
+
+    /// Returns destination-provided durability configuration.
+    ///
+    /// The default configuration preserves the original immediate-durability
+    /// behavior: ETL does not dispatch a second streaming batch until the
+    /// previous write result completes.
+    ///
+    /// Destinations that return
+    /// [`crate::destination::DestinationWriteStatus::Accepted`] should set
+    /// [`crate::destination::DurabilityConfig::streaming_write_limits`] to
+    /// allow more than one in-flight streaming write and must preserve the
+    /// cumulative durability contract documented on
+    /// [`Destination::write_events`].
+    fn durability_config(&self) -> DurabilityConfig {
+        DurabilityConfig::default()
     }
 
     /// Drops destination objects before restarting a table copy.
@@ -117,16 +135,33 @@ pub trait Destination {
     /// The main ordering guarantee is per table: ETL preserves the required
     /// order for streaming operations on the same table.
     ///
-    /// Implementations report asynchronous completion through `async_result`.
-    /// The method return value is reserved for immediate dispatch/setup
-    /// failures before the work has been accepted.
+    /// Implementations report asynchronous write status through
+    /// `async_result`. The method return value is reserved for immediate
+    /// dispatch/setup failures before the work has been accepted.
     ///
-    /// This lets ETL distinguish synchronous dispatch errors from asynchronous
-    /// flush completion. This is also the path where ETL gains real
-    /// overlap: once dispatch succeeds, the apply loop may continue
-    /// processing while the destination finishes the current batch. ETL still
-    /// will not hand the destination the next streaming batch until the
-    /// previous `async_result` has been completed.
+    /// [`crate::destination::DestinationWriteStatus::Durable`] means this write
+    /// and all earlier accepted writes in the same ordered apply-loop stream
+    /// are durable according to the destination contract. ETL may advance
+    /// durable replication progress only after observing this status.
+    ///
+    /// [`crate::destination::DestinationWriteStatus::Accepted`] means the
+    /// destination accepted ownership of the write, but ETL must not advance
+    /// durable progress for it yet.
+    ///
+    /// Deferred destinations commonly maintain a moving durability tail. The
+    /// first non-durable write is kept pending. After the destination accepts a
+    /// successor write, it may complete the previous tail as
+    /// [`crate::destination::DestinationWriteStatus::Accepted`] and retain the
+    /// successor result as the new pending tail. Once the destination has made
+    /// the current tail write and all earlier `Accepted` writes durable, it
+    /// completes the current tail as
+    /// [`crate::destination::DestinationWriteStatus::Durable`].
+    ///
+    /// The apply loop processes write results in the order the writes were
+    /// dispatched. A deferred destination may return `Accepted` for earlier
+    /// writes and `Durable` for a later write. That later `Durable` result is
+    /// cumulative: it must mean that later write and all earlier `Accepted`
+    /// writes are durable.
     ///
     /// Async implementations that offload work should coordinate `async_result`
     /// with [`Destination::shutdown`]. ETL calls [`Destination::shutdown`]
@@ -149,6 +184,6 @@ pub trait Destination {
     fn write_events(
         &self,
         events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        async_result: WriteEventsResult,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }
