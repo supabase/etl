@@ -109,6 +109,15 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
                 "memory": "250Mi"
               }
             },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "runAsNonRoot": true
+            },
             "volumeMounts": [
               {
                 "mountPath": "/app/configuration",
@@ -119,6 +128,11 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
         ],
         "initContainers": [],
         "nodeSelector": {},
+        "securityContext": {
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
         "serviceAccountName": "etl-replicator",
         "terminationGracePeriodSeconds": 300,
         "tolerations": [

@@ -81,18 +81,22 @@ export APP_CONFIG_DIR=/etc/etl-api/config
 ### Replicator Resources
 
 The ETL API configuration must define the default Kubernetes requests for
-replicator containers:
+replicator and Vector containers:
 
 ```yaml
 k8s:
   replicator_resources:
-    replicator_cpu_request_millicores: 500
-    replicator_memory_request_mib: 2000
+    cpu_request_millicores: 500
+    memory_request_mib: 2000
+  vector_resources:
+    cpu_request_millicores: 75
+    memory_request_mib: 192
 ```
 
 These defaults are mandatory and request-only. The ETL API derives Kubernetes
 limits from the final request values with static multipliers in the Kubernetes
-materializer.
+materializer. Vector resources are configured only at the API level; pipeline
+configuration may override replicator resources only.
 
 Pipeline configuration may override any replicator resource field:
 

@@ -59,6 +59,8 @@ pub struct K8sConfig {
     /// replicator pod unless a pipeline-level override supplies one of those
     /// request values.
     pub replicator_resources: DefaultReplicatorResourcesConfig,
+    /// Default request sizing for the Vector sidecar.
+    pub vector_resources: DefaultVectorResourcesConfig,
 }
 
 /// Mandatory default request sizing for replicator workloads.
@@ -71,29 +73,50 @@ pub struct K8sConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DefaultReplicatorResourcesConfig {
     /// Replicator memory request, in Mi.
-    pub replicator_memory_request_mib: i32,
+    pub memory_request_mib: i32,
     /// Replicator CPU request, in millicores.
-    pub replicator_cpu_request_millicores: i32,
+    pub cpu_request_millicores: i32,
+}
+
+/// Mandatory default request sizing for Vector sidecars.
+///
+/// These values are part of the ETL API service configuration and provide the
+/// baseline Kubernetes requests for Vector containers. Resource limits are
+/// derived from requests with the same static multipliers used for replicator
+/// containers.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DefaultVectorResourcesConfig {
+    /// Vector memory request, in Mi.
+    pub memory_request_mib: i32,
+    /// Vector CPU request, in millicores.
+    pub cpu_request_millicores: i32,
 }
 
 impl ApiConfig {
     /// Validates API service configuration.
     pub fn validate(&self) -> Result<(), String> {
-        self.k8s.replicator_resources.validate()
+        self.k8s.replicator_resources.validate()?;
+        self.k8s.vector_resources.validate()?;
+
+        Ok(())
     }
 }
 
 impl DefaultReplicatorResourcesConfig {
     /// Validates that configured request values are positive.
     pub fn validate(&self) -> Result<(), String> {
-        validate_positive_request(
-            "K8s replicator memory request",
-            self.replicator_memory_request_mib,
-        )?;
-        validate_positive_request(
-            "K8s replicator cpu request",
-            self.replicator_cpu_request_millicores,
-        )?;
+        validate_positive_request("K8s replicator memory request", self.memory_request_mib)?;
+        validate_positive_request("K8s replicator cpu request", self.cpu_request_millicores)?;
+
+        Ok(())
+    }
+}
+
+impl DefaultVectorResourcesConfig {
+    /// Validates that configured request values are positive.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_positive_request("K8s Vector memory request", self.memory_request_mib)?;
+        validate_positive_request("K8s Vector cpu request", self.cpu_request_millicores)?;
 
         Ok(())
     }

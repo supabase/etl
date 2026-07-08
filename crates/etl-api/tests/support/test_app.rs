@@ -10,7 +10,8 @@ use base64::prelude::*;
 use etl_api::{
     config::{
         ApiConfig, ApplicationSettings, DefaultReplicatorResourcesConfig,
-        EncryptionKeyConfig as ConfigEncryptionKey, K8sConfig, SourceConfig,
+        DefaultVectorResourcesConfig, EncryptionKeyConfig as ConfigEncryptionKey, K8sConfig,
+        SourceConfig,
     },
     configs::encryption,
     k8s::{K8sClient, SourceTlsConfig},
@@ -580,8 +581,12 @@ async fn spawn_test_app_with_services(
         application: ApplicationSettings { host: base_address.to_owned(), port },
         k8s: K8sConfig {
             replicator_resources: DefaultReplicatorResourcesConfig {
-                replicator_memory_request_mib: 250,
-                replicator_cpu_request_millicores: 125,
+                memory_request_mib: 250,
+                cpu_request_millicores: 125,
+            },
+            vector_resources: DefaultVectorResourcesConfig {
+                memory_request_mib: 192,
+                cpu_request_millicores: 75,
             },
         },
         encryption_keys: vec![ConfigEncryptionKey {

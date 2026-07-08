@@ -139,6 +139,15 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
                 "memory": "250Mi"
               }
             },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "runAsNonRoot": true
+            },
             "volumeMounts": [
               {
                 "mountPath": "/app/configuration",
@@ -165,6 +174,7 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
               }
             ],
             "image": "public.ecr.aws/supabase/timberio/vector:0.55.0-distroless-libc",
+            "imagePullPolicy": "IfNotPresent",
             "name": "abcdefghijklmnopqrst-42-vector",
             "resources": {
               "limits": {
@@ -177,6 +187,14 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
               }
             },
             "restartPolicy": "Always",
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
             "volumeMounts": [
               {
                 "mountPath": "/etc/vector",
@@ -191,6 +209,11 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
         ],
         "nodeSelector": {
           "etl.supabase.com/node-role": "workloads"
+        },
+        "securityContext": {
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
         },
         "serviceAccountName": "etl-replicator",
         "terminationGracePeriodSeconds": 300,
