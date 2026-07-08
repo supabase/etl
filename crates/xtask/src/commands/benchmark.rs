@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
@@ -35,6 +36,22 @@ const MEMORY_BACKPRESSURE_ACTIVATE_THRESHOLD: f32 = 0.85;
 const MEMORY_BACKPRESSURE_RESUME_THRESHOLD: f32 = 0.75;
 const BENCH_SNOWFLAKE_CONNECTION_ENV: &str = "BENCH_SNOWFLAKE_CONNECTION";
 const DEFAULT_HOTPATH_MCP_PORT: u16 = 6771;
+const CPU_SAMPLE_SUMMARY_FILTER_PATTERNS: &[&str] = &[
+    "hotpath::",
+    "hotpath..",
+    "addr2line",
+    "aho_corasick",
+    "clap::",
+    "clap_",
+    "clap-builder",
+    "clap_builder",
+    "crossbeam_channel",
+    "gimli::",
+    "object::",
+    "rustc_demangle",
+];
+const CPU_SAMPLE_SUMMARY_ETL_PATTERNS: &[&str] =
+    &["etl::", "etl_benchmarks::", "table_copy::", "table_streaming::"];
 
 #[derive(Args)]
 pub(crate) struct BenchmarkArgs {
@@ -1065,7 +1082,7 @@ impl BenchmarkArgs {
         table_copy_report: Option<&Value>,
         table_streaming_report: Option<&Value>,
     ) -> Result<()> {
-        let summary = json!({
+        let mut summary = json!({
             "output_dir": self.output_dir,
             "hotpath_output_dir": self.effective_hotpath_output_dir(),
             "benchmarks": [
@@ -1073,6 +1090,11 @@ impl BenchmarkArgs {
                 self.benchmark_artifact_summary("table_streaming", table_streaming_report)?,
             ],
         });
+
+        let cpu_profile_copies = self.copy_cpu_profiles(&summary)?;
+        if let Some(summary) = summary.as_object_mut() {
+            summary.insert("cpu_profile_copies".to_owned(), cpu_profile_copies);
+        }
 
         let json_path = self.output_dir.join("benchmark_artifacts.json");
         write_json_report(&summary, &json_path)?;
@@ -1109,6 +1131,100 @@ impl BenchmarkArgs {
             "benchmark_report": summarize_benchmark_report(report),
             "hotpath_report": summarize_hotpath_report(hotpath_report.as_ref()),
         }))
+    }
+
+    fn copy_cpu_profiles(&self, summary: &Value) -> Result<Value> {
+        let Some(benchmarks) = summary.get("benchmarks").and_then(Value::as_array) else {
+            return Ok(Value::Array(Vec::new()));
+        };
+
+        let mut copied_profiles = Vec::new();
+        for benchmark in benchmarks {
+            let benchmark_name =
+                benchmark.get("benchmark").and_then(Value::as_str).unwrap_or("unknown");
+            let Some(source_path) = benchmark
+                .get("hotpath_report")
+                .and_then(|hotpath| hotpath.get("flamegraph"))
+                .and_then(|flamegraph| flamegraph.get("samply_profile_path"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+
+            let source_path = PathBuf::from(source_path);
+            let mut profile_copy = json!({
+                "benchmark": benchmark_name,
+                "source_path": source_path,
+            });
+
+            if source_path.is_file() {
+                let cpu_profiles_dir = self.output_dir.join("cpu-profiles");
+                fs::create_dir_all(&cpu_profiles_dir).with_context(|| {
+                    format!("failed to create CPU profile directory {}", cpu_profiles_dir.display())
+                })?;
+
+                let file_name = source_path
+                    .file_name()
+                    .and_then(|file_name| file_name.to_str())
+                    .unwrap_or("hp.json.gz");
+                let run_id = source_path
+                    .parent()
+                    .and_then(|path| path.file_name())
+                    .and_then(|file_name| file_name.to_str())
+                    .unwrap_or("unknown-run");
+                let copied_path =
+                    cpu_profiles_dir.join(format!("{benchmark_name}-{run_id}-{file_name}"));
+
+                fs::copy(&source_path, &copied_path).with_context(|| {
+                    format!(
+                        "failed to copy CPU profile {} to {}",
+                        source_path.display(),
+                        copied_path.display()
+                    )
+                })?;
+
+                if let Some(profile_copy) = profile_copy.as_object_mut() {
+                    profile_copy.insert("status".to_owned(), Value::String("copied".to_owned()));
+                    profile_copy.insert("copied_path".to_owned(), json!(copied_path));
+                    profile_copy.insert(
+                        "open_command".to_owned(),
+                        Value::String(format!("samply load {}", copied_path.display())),
+                    );
+
+                    match write_cpu_sample_summary(benchmark_name, &copied_path) {
+                        Ok(Some(summary)) => {
+                            profile_copy.insert(
+                                "sample_summary_status".to_owned(),
+                                Value::String("ok".to_owned()),
+                            );
+                            profile_copy.insert("sample_summary".to_owned(), summary);
+                        }
+                        Ok(None) => {
+                            profile_copy.insert(
+                                "sample_summary_status".to_owned(),
+                                Value::String("not_available".to_owned()),
+                            );
+                        }
+                        Err(error) => {
+                            profile_copy.insert(
+                                "sample_summary_status".to_owned(),
+                                Value::String("failed".to_owned()),
+                            );
+                            profile_copy.insert(
+                                "sample_summary_error".to_owned(),
+                                Value::String(error.to_string()),
+                            );
+                        }
+                    }
+                }
+            } else if let Some(profile_copy) = profile_copy.as_object_mut() {
+                profile_copy.insert("status".to_owned(), Value::String("missing".to_owned()));
+            }
+
+            copied_profiles.push(profile_copy);
+        }
+
+        Ok(Value::Array(copied_profiles))
     }
 
     fn hotpath_sample_report_paths(&self, benchmark: &str) -> Result<Option<Vec<PathBuf>>> {
@@ -1272,12 +1388,35 @@ fn summarize_benchmark_report(report: Option<&Value>) -> Value {
         "events_per_second": report.get("end_to_end_with_shutdown_events_per_second"),
         "decoded_mib_per_second": report.get("estimated_mib_per_second").or_else(|| report.get("decoded_mib_per_second")),
         "total_ms": report.get("total_ms"),
+        "stage_breakdown": benchmark_stage_breakdown(report),
         "sample_summary": report.get("sample_summary"),
         "null_flush_delay_min_ms": report.get("null_flush_delay_min_ms"),
         "null_flush_delay_max_ms": report.get("null_flush_delay_max_ms"),
         "tokio_runtime_stats": report.get("tokio_runtime_stats"),
         "destination_stats": report.get("destination_stats"),
     })
+}
+
+fn benchmark_stage_breakdown(report: &Value) -> Value {
+    match report.get("benchmark").and_then(Value::as_str) {
+        Some("table_copy") => json!({
+            "pipeline_start_ms": report.get("pipeline_start_ms"),
+            "copy_wait_ms": report.get("copy_wait_ms"),
+            "shutdown_ms": report.get("shutdown_ms"),
+            "total_ms": report.get("total_ms"),
+        }),
+        Some("table_streaming") => json!({
+            "pipeline_start_ms": report.get("pipeline_start_ms"),
+            "ready_wait_ms": report.get("ready_wait_ms"),
+            "producer_ms": report.get("producer_ms"),
+            "drain_ms": report.get("drain_ms"),
+            "end_to_end_ms": report.get("end_to_end_ms"),
+            "shutdown_ms": report.get("shutdown_ms"),
+            "end_to_end_with_shutdown_ms": report.get("end_to_end_with_shutdown_ms"),
+            "total_ms": report.get("total_ms"),
+        }),
+        _ => Value::Null,
+    }
 }
 
 fn summarize_hotpath_report(report: Option<&Value>) -> Value {
@@ -1337,6 +1476,517 @@ fn summarize_hotpath_section(report: &Value, section_name: &str) -> Value {
     })
 }
 
+fn write_cpu_sample_summary(benchmark_name: &str, profile_path: &Path) -> Result<Option<Value>> {
+    let Some(profile_json) = read_gzip_json(profile_path)? else {
+        return Ok(None);
+    };
+    let Some(summary) = summarize_cpu_profile_samples(benchmark_name, &profile_json) else {
+        return Ok(None);
+    };
+
+    let summary_path = profile_path.with_extension("sample-summary.json");
+    write_json_report(&summary, &summary_path)?;
+
+    let markdown_path = profile_path.with_extension("sample-summary.md");
+    write_markdown_report(&render_cpu_sample_summary_markdown(&summary), &markdown_path)?;
+
+    Ok(Some(json!({
+        "json_path": summary_path,
+        "markdown_path": markdown_path,
+    })))
+}
+
+fn read_gzip_json(path: &Path) -> Result<Option<Value>> {
+    let output = Command::new("gzip")
+        .arg("-dc")
+        .arg(path)
+        .output()
+        .with_context(|| format!("failed to decompress CPU profile {}", path.display()))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let profile = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("failed to parse CPU profile {}", path.display()))?;
+    Ok(Some(profile))
+}
+
+fn summarize_cpu_profile_samples(benchmark_name: &str, profile: &Value) -> Option<Value> {
+    let threads = profile.get("threads").and_then(Value::as_array)?;
+    let binary_path = find_profile_binary_path(benchmark_name, profile);
+    let mut inclusive_counts = HashMap::<String, u64>::new();
+    let mut leaf_counts = HashMap::<String, u64>::new();
+    let mut application_inclusive_counts = HashMap::<String, u64>::new();
+    let mut application_leaf_counts = HashMap::<String, u64>::new();
+    let mut threads_seen = HashSet::<String>::new();
+    let mut application_threads_seen = HashSet::<String>::new();
+    let mut sample_count = 0_u64;
+    let mut application_sample_count = 0_u64;
+
+    for thread in threads {
+        let thread_name = thread.get("name").and_then(Value::as_str).unwrap_or("unknown");
+        let application_thread = !is_hotpath_internal_thread(thread_name);
+        threads_seen.insert(thread_name.to_owned());
+        if application_thread {
+            application_threads_seen.insert(thread_name.to_owned());
+        }
+
+        let Some(sample_stacks) = thread
+            .get("samples")
+            .and_then(|samples| samples.get("stack"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+
+        for stack in sample_stacks {
+            let Some(stack_index) = stack.as_u64().and_then(|stack| usize::try_from(stack).ok())
+            else {
+                continue;
+            };
+            sample_count += 1;
+            if application_thread {
+                application_sample_count += 1;
+            }
+
+            let mut stack_functions = profile_stack_functions(thread, stack_index);
+            if stack_functions.is_empty() {
+                continue;
+            }
+
+            if let Some(leaf) = stack_functions.first() {
+                *leaf_counts.entry(leaf.clone()).or_default() += 1;
+                if application_thread {
+                    *application_leaf_counts.entry(leaf.clone()).or_default() += 1;
+                }
+            }
+
+            stack_functions.sort();
+            stack_functions.dedup();
+            for function in stack_functions {
+                if application_thread {
+                    *application_inclusive_counts.entry(function.clone()).or_default() += 1;
+                }
+                *inclusive_counts.entry(function).or_default() += 1;
+            }
+        }
+    }
+
+    let symbolizer = binary_path.as_deref().map_or_else(
+        || {
+            json!({
+                "status": "missing_binary_path",
+                "symbols": {},
+            })
+        },
+        |path| symbolize_cpu_profile_addresses(Path::new(path), inclusive_counts.keys()),
+    );
+    let symbols = symbolizer.get("symbols").and_then(Value::as_object);
+
+    let mut thread_names = threads_seen.into_iter().collect::<Vec<_>>();
+    thread_names.sort();
+    let mut application_thread_names = application_threads_seen.into_iter().collect::<Vec<_>>();
+    application_thread_names.sort();
+
+    Some(json!({
+        "benchmark": benchmark_name,
+        "sample_count": sample_count,
+        "application_sample_count": application_sample_count,
+        "thread_count": thread_names.len(),
+        "application_thread_count": application_thread_names.len(),
+        "threads": thread_names,
+        "application_threads": application_thread_names,
+        "binary_path": binary_path,
+        "symbolizer": symbolizer,
+        "application_filter": {
+            "description": "Filtered application tables hide common profiler, symbolication, CLI, and sampling transport frames so ETL symbols are easier to review. Unfiltered tables remain below for auditability.",
+            "hidden_patterns": CPU_SAMPLE_SUMMARY_FILTER_PATTERNS,
+            "etl_patterns": CPU_SAMPLE_SUMMARY_ETL_PATTERNS,
+        },
+        "top_etl_application_inclusive": top_etl_cpu_profile_entries(&application_inclusive_counts, symbols, 30),
+        "top_etl_application_leaf": top_etl_cpu_profile_entries(&application_leaf_counts, symbols, 30),
+        "top_filtered_application_inclusive": top_filtered_cpu_profile_entries(&application_inclusive_counts, symbols, 30),
+        "top_filtered_application_leaf": top_filtered_cpu_profile_entries(&application_leaf_counts, symbols, 30),
+        "top_application_inclusive": top_cpu_profile_entries(&application_inclusive_counts, symbols, 30),
+        "top_application_leaf": top_cpu_profile_entries(&application_leaf_counts, symbols, 30),
+        "top_inclusive": top_cpu_profile_entries(&inclusive_counts, symbols, 30),
+        "top_leaf": top_cpu_profile_entries(&leaf_counts, symbols, 30),
+    }))
+}
+
+fn is_hotpath_internal_thread(thread_name: &str) -> bool {
+    thread_name.starts_with("hp-")
+}
+
+fn find_profile_binary_path(benchmark_name: &str, profile: &Value) -> Option<String> {
+    profile
+        .get("libs")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|library| library.get("path").and_then(Value::as_str))
+        .find(|path| path.ends_with(benchmark_name))
+        .map(ToOwned::to_owned)
+}
+
+fn profile_stack_functions(thread: &Value, mut stack_index: usize) -> Vec<String> {
+    let mut functions = Vec::new();
+    let mut visited = HashSet::new();
+
+    while visited.insert(stack_index) {
+        let Some(frame_index) = table_index(thread, "stackTable", "frame", stack_index) else {
+            break;
+        };
+        let Some(function_index) = table_index(thread, "frameTable", "func", frame_index) else {
+            break;
+        };
+        if let Some(function_name) = table_string(thread, "funcTable", "name", function_index) {
+            functions.push(function_name.to_owned());
+        }
+
+        let Some(prefix_index) = table_index(thread, "stackTable", "prefix", stack_index) else {
+            break;
+        };
+        stack_index = prefix_index;
+    }
+
+    functions
+}
+
+fn table_index(thread: &Value, table: &str, column: &str, row: usize) -> Option<usize> {
+    thread
+        .get(table)?
+        .get(column)?
+        .as_array()?
+        .get(row)?
+        .as_u64()
+        .and_then(|index| usize::try_from(index).ok())
+}
+
+fn table_string<'a>(thread: &'a Value, table: &str, column: &str, row: usize) -> Option<&'a str> {
+    let string_index = table_index(thread, table, column, row)?;
+    thread.get("stringArray")?.as_array()?.get(string_index)?.as_str()
+}
+
+fn symbolize_cpu_profile_addresses<'a>(
+    binary_path: &Path,
+    functions: impl Iterator<Item = &'a String>,
+) -> Value {
+    let mut addresses =
+        functions.filter_map(|function| parse_hex_address(function)).collect::<Vec<_>>();
+    addresses.sort_unstable();
+    addresses.dedup();
+
+    if addresses.is_empty() {
+        return json!({
+            "status": "no_addresses",
+            "symbols": {},
+        });
+    }
+
+    if cfg!(target_os = "macos") {
+        return symbolize_with_atos(binary_path, &addresses);
+    }
+
+    symbolize_with_addr2line(binary_path, &addresses)
+}
+
+fn parse_hex_address(function: &str) -> Option<u64> {
+    function.strip_prefix("0x").and_then(|address| u64::from_str_radix(address, 16).ok())
+}
+
+fn symbolize_with_atos(binary_path: &Path, addresses: &[u64]) -> Value {
+    let Some(load_address) = macho_text_vmaddr(binary_path) else {
+        return json!({
+            "status": "missing_load_address",
+            "symbols": {},
+        });
+    };
+
+    let mut command = Command::new("xcrun");
+    command.arg("atos").arg("-o").arg(binary_path).arg("-l").arg(format!("0x{load_address:x}"));
+    for address in addresses {
+        command.arg(format!("0x{:x}", load_address + address));
+    }
+
+    let Ok(output) = command.output() else {
+        return json!({
+            "status": "failed_to_start",
+            "symbols": {},
+        });
+    };
+    if !output.status.success() {
+        return json!({
+            "status": "failed",
+            "symbols": {},
+            "stderr": String::from_utf8_lossy(&output.stderr).trim(),
+        });
+    }
+
+    let symbols = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .zip(addresses.iter())
+        .map(|(symbol, address)| (format!("0x{address:x}"), Value::String(symbol.to_owned())))
+        .collect::<Map<_, _>>();
+
+    json!({
+        "status": "ok",
+        "tool": "atos",
+        "load_address": format!("0x{load_address:x}"),
+        "symbols": symbols,
+    })
+}
+
+fn macho_text_vmaddr(binary_path: &Path) -> Option<u64> {
+    let output = Command::new("xcrun").arg("otool").arg("-l").arg(binary_path).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let mut in_text_segment = false;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed == "segname __TEXT" {
+            in_text_segment = true;
+            continue;
+        }
+        if in_text_segment && trimmed.starts_with("vmaddr ") {
+            return trimmed
+                .split_whitespace()
+                .nth(1)
+                .and_then(|address| address.strip_prefix("0x"))
+                .and_then(|address| u64::from_str_radix(address, 16).ok());
+        }
+    }
+
+    None
+}
+
+fn symbolize_with_addr2line(binary_path: &Path, addresses: &[u64]) -> Value {
+    let mut command = Command::new("addr2line");
+    command.arg("-e").arg(binary_path).arg("-f").arg("-C");
+    for address in addresses {
+        command.arg(format!("0x{address:x}"));
+    }
+
+    let Ok(output) = command.output() else {
+        return json!({
+            "status": "failed_to_start",
+            "symbols": {},
+        });
+    };
+    if !output.status.success() {
+        return json!({
+            "status": "failed",
+            "symbols": {},
+            "stderr": String::from_utf8_lossy(&output.stderr).trim(),
+        });
+    }
+
+    let lines =
+        String::from_utf8_lossy(&output.stdout).lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let mut symbols = Map::new();
+    for (index, address) in addresses.iter().enumerate() {
+        let function = lines.get(index * 2).cloned().unwrap_or_else(|| "??".to_owned());
+        let location = lines.get(index * 2 + 1).cloned().unwrap_or_else(|| "??:0".to_owned());
+        symbols.insert(format!("0x{address:x}"), Value::String(format!("{function} ({location})")));
+    }
+
+    json!({
+        "status": "ok",
+        "tool": "addr2line",
+        "symbols": symbols,
+    })
+}
+
+fn top_cpu_profile_entries(
+    counts: &HashMap<String, u64>,
+    symbols: Option<&Map<String, Value>>,
+    limit: usize,
+) -> Vec<Value> {
+    top_cpu_profile_entries_with_filter(counts, symbols, limit, |_| true)
+}
+
+fn top_filtered_cpu_profile_entries(
+    counts: &HashMap<String, u64>,
+    symbols: Option<&Map<String, Value>>,
+    limit: usize,
+) -> Vec<Value> {
+    top_cpu_profile_entries_with_filter(counts, symbols, limit, |function| {
+        !is_filtered_cpu_profile_frame(function, symbols)
+    })
+}
+
+fn top_etl_cpu_profile_entries(
+    counts: &HashMap<String, u64>,
+    symbols: Option<&Map<String, Value>>,
+    limit: usize,
+) -> Vec<Value> {
+    top_cpu_profile_entries_with_filter(counts, symbols, limit, |function| {
+        is_etl_cpu_profile_frame(function, symbols)
+            && !is_filtered_cpu_profile_frame(function, symbols)
+    })
+}
+
+fn top_cpu_profile_entries_with_filter(
+    counts: &HashMap<String, u64>,
+    symbols: Option<&Map<String, Value>>,
+    limit: usize,
+    keep_entry: impl Fn(&str) -> bool,
+) -> Vec<Value> {
+    let mut entries = counts.iter().collect::<Vec<_>>();
+    entries.sort_by(|(left_function, left_count), (right_function, right_count)| {
+        right_count.cmp(left_count).then_with(|| left_function.cmp(right_function))
+    });
+
+    entries
+        .into_iter()
+        .filter(|(function, _)| keep_entry(function))
+        .take(limit)
+        .map(|(function, count)| {
+            let symbol = symbols
+                .and_then(|symbols| symbols.get(function))
+                .and_then(Value::as_str)
+                .filter(|symbol| !symbol.starts_with("0x"));
+
+            json!({
+                "function": function,
+                "symbol": symbol,
+                "sample_count": count,
+            })
+        })
+        .collect()
+}
+
+fn is_filtered_cpu_profile_frame(function: &str, symbols: Option<&Map<String, Value>>) -> bool {
+    let symbol = symbols.and_then(|symbols| symbols.get(function)).and_then(Value::as_str);
+    let normalized_function = function.to_ascii_lowercase();
+    let normalized_symbol = symbol.map(str::to_ascii_lowercase);
+
+    CPU_SAMPLE_SUMMARY_FILTER_PATTERNS.iter().any(|pattern| {
+        normalized_function.contains(pattern)
+            || normalized_symbol.as_deref().is_some_and(|symbol| symbol.contains(pattern))
+    })
+}
+
+fn is_etl_cpu_profile_frame(function: &str, symbols: Option<&Map<String, Value>>) -> bool {
+    let symbol = symbols.and_then(|symbols| symbols.get(function)).and_then(Value::as_str);
+    let normalized_function = function.to_ascii_lowercase();
+    let normalized_symbol = symbol.map(str::to_ascii_lowercase);
+
+    CPU_SAMPLE_SUMMARY_ETL_PATTERNS.iter().any(|pattern| {
+        normalized_function.contains(pattern)
+            || normalized_symbol.as_deref().is_some_and(|symbol| symbol.contains(pattern))
+    })
+}
+
+fn render_cpu_sample_summary_markdown(summary: &Value) -> String {
+    let benchmark = summary.get("benchmark").and_then(Value::as_str).unwrap_or("unknown");
+    let mut markdown = format!("# CPU Sample Summary: {benchmark}\n\n");
+
+    if let Some(sample_count) = summary.get("sample_count").and_then(Value::as_u64) {
+        markdown.push_str(&format!("- Samples: `{sample_count}`\n"));
+    }
+    if let Some(thread_count) = summary.get("thread_count").and_then(Value::as_u64) {
+        markdown.push_str(&format!("- Threads: `{thread_count}`\n"));
+    }
+    if let Some(sample_count) = summary.get("application_sample_count").and_then(Value::as_u64) {
+        markdown.push_str(&format!("- Application samples: `{sample_count}`\n"));
+    }
+    if let Some(thread_count) = summary.get("application_thread_count").and_then(Value::as_u64) {
+        markdown.push_str(&format!("- Application threads: `{thread_count}`\n"));
+    }
+    if let Some(binary_path) = summary.get("binary_path").and_then(Value::as_str) {
+        markdown.push_str(&format!("- Binary: `{binary_path}`\n"));
+    }
+    if let Some(status) = summary
+        .get("symbolizer")
+        .and_then(|symbolizer| symbolizer.get("status"))
+        .and_then(Value::as_str)
+    {
+        markdown.push_str(&format!("- Symbolizer: `{status}`\n"));
+    }
+    if let Some(patterns) = summary
+        .get("application_filter")
+        .and_then(|filter| filter.get("hidden_patterns"))
+        .and_then(Value::as_array)
+    {
+        let patterns = patterns.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("`, `");
+        markdown.push_str(&format!("- Filtered application frames hide: `{patterns}`\n"));
+    }
+    if let Some(patterns) = summary
+        .get("application_filter")
+        .and_then(|filter| filter.get("etl_patterns"))
+        .and_then(Value::as_array)
+    {
+        let patterns = patterns.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("`, `");
+        markdown.push_str(&format!("- ETL-focused frames match: `{patterns}`\n"));
+    }
+
+    append_cpu_sample_table(
+        &mut markdown,
+        "Top ETL Application Inclusive Samples",
+        summary.get("top_etl_application_inclusive"),
+    );
+    append_cpu_sample_table(
+        &mut markdown,
+        "Top ETL Application Leaf Samples",
+        summary.get("top_etl_application_leaf"),
+    );
+    append_cpu_sample_table(
+        &mut markdown,
+        "Top Filtered Application Inclusive Samples",
+        summary.get("top_filtered_application_inclusive"),
+    );
+    append_cpu_sample_table(
+        &mut markdown,
+        "Top Filtered Application Leaf Samples",
+        summary.get("top_filtered_application_leaf"),
+    );
+    append_cpu_sample_table(
+        &mut markdown,
+        "Top Unfiltered Application Inclusive Samples",
+        summary.get("top_application_inclusive"),
+    );
+    append_cpu_sample_table(
+        &mut markdown,
+        "Top Unfiltered Application Leaf Samples",
+        summary.get("top_application_leaf"),
+    );
+    append_cpu_sample_table(
+        &mut markdown,
+        "Top All-Thread Inclusive Samples",
+        summary.get("top_inclusive"),
+    );
+    append_cpu_sample_table(&mut markdown, "Top All-Thread Leaf Samples", summary.get("top_leaf"));
+
+    markdown
+}
+
+fn append_cpu_sample_table(markdown: &mut String, title: &str, rows: Option<&Value>) {
+    markdown.push_str(&format!("\n## {title}\n\n"));
+    markdown.push_str("| Samples | Function |\n");
+    markdown.push_str("| ---: | --- |\n");
+
+    let Some(rows) = rows.and_then(Value::as_array) else {
+        markdown.push_str("_No samples matched this section._\n");
+        return;
+    };
+    if rows.is_empty() {
+        markdown.push_str("_No samples matched this section._\n");
+        return;
+    };
+    for row in rows.iter().take(20) {
+        let samples = row.get("sample_count").and_then(Value::as_u64).unwrap_or(0);
+        let function = row
+            .get("symbol")
+            .and_then(Value::as_str)
+            .or_else(|| row.get("function").and_then(Value::as_str))
+            .unwrap_or("unknown");
+        markdown.push_str(&format!("| {samples} | `{function}` |\n"));
+    }
+}
+
 fn find_string_key(value: &Value, key: &str) -> Option<String> {
     match value {
         Value::Object(object) => {
@@ -1364,6 +2014,25 @@ fn render_artifact_markdown(summary: &Value) -> String {
     }
     if let Some(output_dir) = summary.get("hotpath_output_dir").and_then(Value::as_str) {
         markdown.push_str(&format!("- HotPath output directory: `{output_dir}`\n"));
+    }
+    if let Some(cpu_profile_copies) = summary.get("cpu_profile_copies").and_then(Value::as_array)
+        && !cpu_profile_copies.is_empty()
+    {
+        markdown.push_str("- Copied CPU profiles:\n");
+        for profile in cpu_profile_copies {
+            let benchmark = profile.get("benchmark").and_then(Value::as_str).unwrap_or("unknown");
+            let status = profile.get("status").and_then(Value::as_str).unwrap_or("unknown");
+            let copied_path =
+                profile.get("copied_path").and_then(Value::as_str).unwrap_or("not copied");
+            markdown.push_str(&format!("  - `{benchmark}`: `{status}` `{copied_path}`\n"));
+            if let Some(summary_path) = profile
+                .get("sample_summary")
+                .and_then(|summary| summary.get("markdown_path"))
+                .and_then(Value::as_str)
+            {
+                markdown.push_str(&format!("    - sample summary: `{summary_path}`\n"));
+            }
+        }
     }
     markdown.push('\n');
 
@@ -1407,6 +2076,8 @@ fn render_artifact_markdown(summary: &Value) -> String {
         if let Some(stats) = report.get("tokio_runtime_stats").filter(|value| !value.is_null()) {
             markdown.push_str(&format!("- Tokio runtime snapshot: `{}`\n", compact_json(stats)));
         }
+        append_stage_breakdown(&mut markdown, report.get("stage_breakdown"));
+        append_destination_distribution_summary(&mut markdown, report.get("destination_stats"));
 
         let hotpath = benchmark.get("hotpath_report").unwrap_or(&Value::Null);
         let flamegraph = hotpath.get("flamegraph").unwrap_or(&Value::Null);
@@ -1456,6 +2127,70 @@ fn render_artifact_markdown(summary: &Value) -> String {
     }
 
     markdown
+}
+
+fn append_stage_breakdown(markdown: &mut String, stage_breakdown: Option<&Value>) {
+    let Some(stages) = stage_breakdown.and_then(Value::as_object) else {
+        return;
+    };
+    if stages.is_empty() {
+        return;
+    }
+
+    markdown.push_str("- Stage breakdown:");
+    for (stage, value) in stages {
+        if let Some(value) = value.as_u64() {
+            markdown.push_str(&format!(" `{stage}`={value}ms"));
+        }
+    }
+    markdown.push('\n');
+}
+
+fn append_destination_distribution_summary(
+    markdown: &mut String,
+    destination_stats: Option<&Value>,
+) {
+    let Some(stats) = destination_stats.and_then(Value::as_object) else {
+        return;
+    };
+
+    let fields = [
+        ("table_row_batch_rows", "row batch rows"),
+        ("table_row_batch_bytes", "row batch bytes"),
+        ("table_row_write_ms", "row write ms"),
+        ("event_batch_total_events", "event batch events"),
+        ("event_batch_data_events", "event batch CDC events"),
+        ("event_batch_bytes", "event batch bytes"),
+        ("event_write_ms", "event write ms"),
+    ];
+
+    let mut wrote_header = false;
+    for (field, label) in fields {
+        let Some(summary) = stats.get(field).and_then(Value::as_object) else {
+            continue;
+        };
+        let count = summary.get("count").and_then(Value::as_u64).unwrap_or(0);
+        if count == 0 {
+            continue;
+        }
+        if !wrote_header {
+            markdown.push_str("- Destination distributions:\n");
+            wrote_header = true;
+        }
+
+        let min = metric_summary_value(summary.get("min"));
+        let avg = metric_summary_value(summary.get("avg"));
+        let max = metric_summary_value(summary.get("max"));
+        markdown.push_str(&format!("  - `{label}` count={count} min={min} avg={avg} max={max}\n"));
+    }
+}
+
+fn metric_summary_value(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::Number(number)) => number.to_string(),
+        Some(Value::Null) | None => "n/a".to_owned(),
+        Some(value) => compact_json(value),
+    }
 }
 
 fn append_path(markdown: &mut String, label: &str, value: Option<&Value>) {

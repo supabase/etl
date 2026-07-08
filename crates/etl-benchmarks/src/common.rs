@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -265,6 +265,35 @@ pub struct DestinationStatsSnapshot {
     pub event_batches: u64,
     /// Largest event batch observed.
     pub max_event_batch_size: u64,
+    /// Distribution of rows per table-copy batch.
+    pub table_row_batch_rows: MetricSummarySnapshot,
+    /// Distribution of estimated bytes per table-copy batch.
+    pub table_row_batch_bytes: MetricSummarySnapshot,
+    /// Distribution of destination table-row write durations in milliseconds.
+    pub table_row_write_ms: MetricSummarySnapshot,
+    /// Distribution of total logical replication events per event batch.
+    pub event_batch_total_events: MetricSummarySnapshot,
+    /// Distribution of row-level CDC mutation events per event batch.
+    pub event_batch_data_events: MetricSummarySnapshot,
+    /// Distribution of estimated bytes per logical replication event batch.
+    pub event_batch_bytes: MetricSummarySnapshot,
+    /// Distribution of destination event write durations in milliseconds.
+    pub event_write_ms: MetricSummarySnapshot,
+}
+
+/// Snapshot of a compact numeric distribution.
+#[derive(Debug, Clone, Serialize)]
+pub struct MetricSummarySnapshot {
+    /// Number of recorded values.
+    pub count: u64,
+    /// Sum of all recorded values.
+    pub total: u64,
+    /// Smallest recorded value.
+    pub min: Option<u64>,
+    /// Largest recorded value.
+    pub max: Option<u64>,
+    /// Arithmetic mean of recorded values.
+    pub avg: f64,
 }
 
 /// Snapshot of Tokio runtime scheduler metrics captured by a benchmark.
@@ -299,7 +328,53 @@ struct DestinationStats {
     total_event_bytes: AtomicU64,
     event_batches: AtomicU64,
     max_event_batch_size: AtomicU64,
+    table_row_batch_rows: AtomicMetricSummary,
+    table_row_batch_bytes: AtomicMetricSummary,
+    table_row_write_ms: AtomicMetricSummary,
+    event_batch_total_events: AtomicMetricSummary,
+    event_batch_data_events: AtomicMetricSummary,
+    event_batch_bytes: AtomicMetricSummary,
+    event_write_ms: AtomicMetricSummary,
     cdc_target: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct AtomicMetricSummary {
+    count: AtomicU64,
+    total: AtomicU64,
+    min: AtomicU64,
+    max: AtomicU64,
+}
+
+impl AtomicMetricSummary {
+    fn snapshot(&self) -> MetricSummarySnapshot {
+        let count = self.count.load(Ordering::Relaxed);
+        let total = self.total.load(Ordering::Relaxed);
+        let min = self.min.load(Ordering::Relaxed);
+        let max = self.max.load(Ordering::Relaxed);
+
+        MetricSummarySnapshot {
+            count,
+            total,
+            min: (count > 0).then_some(min),
+            max: (count > 0).then_some(max),
+            avg: if count > 0 { total as f64 / count as f64 } else { 0.0 },
+        }
+    }
+
+    fn record(&self, value: u64) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.total.fetch_add(value, Ordering::Relaxed);
+        update_atomic_min(&self.min, value);
+        update_atomic_max(&self.max, value);
+    }
+
+    fn reset(&self) {
+        self.count.store(0, Ordering::Relaxed);
+        self.total.store(0, Ordering::Relaxed);
+        self.min.store(0, Ordering::Relaxed);
+        self.max.store(0, Ordering::Relaxed);
+    }
 }
 
 impl DestinationStats {
@@ -320,6 +395,13 @@ impl DestinationStats {
             total_event_bytes: self.total_event_bytes.load(Ordering::Relaxed),
             event_batches: self.event_batches.load(Ordering::Relaxed),
             max_event_batch_size: self.max_event_batch_size.load(Ordering::Relaxed),
+            table_row_batch_rows: self.table_row_batch_rows.snapshot(),
+            table_row_batch_bytes: self.table_row_batch_bytes.snapshot(),
+            table_row_write_ms: self.table_row_write_ms.snapshot(),
+            event_batch_total_events: self.event_batch_total_events.snapshot(),
+            event_batch_data_events: self.event_batch_data_events.snapshot(),
+            event_batch_bytes: self.event_batch_bytes.snapshot(),
+            event_write_ms: self.event_write_ms.snapshot(),
         }
     }
 
@@ -336,6 +418,10 @@ impl DestinationStats {
         self.total_event_bytes.store(0, Ordering::Relaxed);
         self.event_batches.store(0, Ordering::Relaxed);
         self.max_event_batch_size.store(0, Ordering::Relaxed);
+        self.event_batch_total_events.reset();
+        self.event_batch_data_events.reset();
+        self.event_batch_bytes.reset();
+        self.event_write_ms.reset();
     }
 }
 
@@ -401,9 +487,13 @@ impl<D> CountingDestination<D> {
         }
     }
 
-    fn count_events(stats: &DestinationStats, counts: &EventBatchCounts) {
+    fn count_events(stats: &DestinationStats, counts: &EventBatchCounts, write_ms: u64) {
         if counts.total_events > 0 {
             stats.event_batches.fetch_add(1, Ordering::Relaxed);
+            stats.event_batch_total_events.record(counts.total_events);
+            stats.event_batch_data_events.record(counts.data_events);
+            stats.event_batch_bytes.record(counts.total_event_bytes);
+            stats.event_write_ms.record(write_ms);
         }
         stats.total_events.fetch_add(counts.total_events, Ordering::Relaxed);
         stats.total_event_bytes.fetch_add(counts.total_event_bytes, Ordering::Relaxed);
@@ -448,12 +538,17 @@ where
     ) -> EtlResult<()> {
         let row_count = table_rows.len() as u64;
         let row_bytes = table_rows.iter().map(SizeHint::size_hint).sum::<usize>() as u64;
+        let write_started = Instant::now();
         self.inner.write_table_rows(replicated_table_schema, table_rows, async_result).await?;
+        let write_ms = duration_to_u64_millis(write_started.elapsed());
 
         self.stats.table_rows.fetch_add(row_count, Ordering::Relaxed);
         self.stats.table_row_bytes.fetch_add(row_bytes, Ordering::Relaxed);
         if row_count > 0 {
             self.stats.table_row_batches.fetch_add(1, Ordering::Relaxed);
+            self.stats.table_row_batch_rows.record(row_count);
+            self.stats.table_row_batch_bytes.record(row_bytes);
+            self.stats.table_row_write_ms.record(write_ms);
         }
 
         Ok(())
@@ -466,9 +561,11 @@ where
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         let counts = classify_events(&events);
+        let write_started = Instant::now();
         self.inner.write_events(events, async_result).await?;
+        let write_ms = duration_to_u64_millis(write_started.elapsed());
 
-        Self::count_events(&self.stats, &counts);
+        Self::count_events(&self.stats, &counts, write_ms);
         let target = self.stats.cdc_target.load(Ordering::Acquire);
         if self.stats.cdc_data_events.load(Ordering::Acquire) >= target {
             self.notify.notify_waiters();
@@ -1163,6 +1260,21 @@ fn update_atomic_max(value: &AtomicU64, candidate: u64) {
             Err(next) => current = next,
         }
     }
+}
+
+fn update_atomic_min(value: &AtomicU64, candidate: u64) {
+    let mut current = value.load(Ordering::Relaxed);
+    while current == 0 || candidate < current {
+        match value.compare_exchange_weak(current, candidate, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return,
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn duration_to_u64_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 async fn drop_replication_slot(pool: &PgPool, slot_name: &str) {

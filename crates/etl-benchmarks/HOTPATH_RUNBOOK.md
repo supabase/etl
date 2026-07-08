@@ -111,11 +111,21 @@ Expected files:
 - `target/bench-results-hotpath-smoke/hotpath/.table_streaming_sample_*.json`
 - `target/bench-results-hotpath-smoke/benchmark_artifacts.md`
 - `target/bench-results-hotpath-smoke/benchmark_artifacts.json`
+- `target/bench-results-hotpath-smoke/cpu-profiles/*.json.gz` when
+  `--hotpath-cpu` is enabled and Samply succeeds.
+- `target/bench-results-hotpath-smoke/cpu-profiles/*.sample-summary.md` and
+  `*.sample-summary.json` when the copied Samply profile can be summarized.
 
 Start with `benchmark_artifacts.md`. It is intentionally optimized for humans
 and agents: it lists throughput, destination counters, Tokio runtime snapshots,
-HotPath section counts, and top rows from timing, allocation, futures, mutexes,
-RwLocks, SQL, threads, and CPU sections when available.
+stage timings, destination batch/write distributions, HotPath section counts,
+and top rows from timing, allocation, futures, mutexes, RwLocks, SQL, threads,
+and CPU sections when available.
+
+Use the stage breakdown and destination distributions before drilling into
+profiles. They answer the basic shape questions quickly: whether time went into
+table sync, producer runtime, drain, shutdown, row/event batch size, or
+destination write duration.
 
 The canonical `hotpath/table_copy.json` and `hotpath/table_streaming.json` files
 are copied from the measured sample selected as the representative aggregate
@@ -210,16 +220,33 @@ cargo xtask benchmark \
   --hotpath-output-dir target/bench-results-hotpath-cpu/hotpath
 ```
 
-If CPU profiling succeeds, `benchmark_artifacts.md` includes a command like:
+If CPU profiling succeeds, `benchmark_artifacts.md` lists copied CPU profiles
+under `<output-dir>/cpu-profiles`, plus a text summary for agent review. Use
+the summary first when you need a quick symbol-level view:
 
 ```bash
-samply load /tmp/hotpath/<run>/hp.json.gz
+less target/bench-results-hotpath-cpu/cpu-profiles/<benchmark>-<run>-hp.json.sample-summary.md
 ```
 
-Run that command to open the interactive call tree and flamegraph. If the
-`functions_cpu` section contains an error message instead of a profile path,
-keep the timing and allocation data, then fix Samply permissions before relying
-on CPU data.
+Read the CPU sample summary from top to bottom. The ETL-focused tables only
+show project symbols such as `etl::`, `etl_benchmarks::`, and benchmark binary
+entrypoints. The filtered application tables hide common profiler,
+symbolication, CLI, and sampling transport frames. The unfiltered application
+and all-thread tables are kept below them for auditability.
+
+Use the copied Samply profile for the full interactive UI:
+
+```bash
+samply load target/bench-results-hotpath-cpu/cpu-profiles/<benchmark>-<run>-hp.json.gz
+```
+
+Run that command to open the interactive call tree and flamegraph. The original
+`/tmp/hotpath/...` Samply path is still preserved in JSON for debugging. The raw
+Samply JSON is a Firefox Profiler profile and may contain addresses before UI
+symbolication; the `*.sample-summary.*` files are the machine-readable
+symbol-level summaries. If the `functions_cpu` section contains an error message
+instead of a profile path, keep the timing and allocation data, then fix Samply
+permissions before relying on CPU data.
 
 ## Long MCP Debug Run
 
@@ -288,8 +315,8 @@ The lifecycle is:
 5. When the benchmark binary finishes, the process exits and the MCP endpoint
    closes.
 6. After exit, use the persisted artifacts instead: benchmark JSON, HotPath
-   JSON, `benchmark_artifacts.md`, `benchmark_artifacts.json`, and CPU
-   flamegraphs when available.
+   JSON, `benchmark_artifacts.md`, `benchmark_artifacts.json`, and copied CPU
+   profiles under `cpu-profiles/` when available.
 
 For interactive LLM debugging, make the benchmark long enough to inspect. The
 recommended pattern is to enable MCP only for `table_streaming`, skip table copy

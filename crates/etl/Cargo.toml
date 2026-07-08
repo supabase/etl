@@ -25,7 +25,7 @@ etl-config = { workspace = true }
 etl-postgres = { workspace = true, features = ["tokio", "store"] }
 fail = { workspace = true }
 futures = { workspace = true }
-hotpath = { workspace = true, optional = true, features = ["threads"] }
+hotpath = { workspace = true, optional = true }
 memchr = { workspace = true }
 metrics = { workspace = true }
 pg_escape = { workspace = true }
