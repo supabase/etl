@@ -49,19 +49,33 @@ jobs:
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
+          if [[ -f /tmp/metrics/head/table_copy.json && -f /tmp/metrics/base/table_copy.json ]]; then
+            echo "table_copy_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "table_copy_available=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ -f /tmp/metrics/head/table_streaming.json && -f /tmp/metrics/base/table_streaming.json ]]; then
+            echo "table_streaming_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "table_streaming_available=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install hotpath-utils
-        if: steps.hotpath-metadata.outputs.available == 'true'
+        if: >
+          steps.hotpath-metadata.outputs.table_copy_available == 'true' ||
+          steps.hotpath-metadata.outputs.table_streaming_available == 'true'
         run: cargo install hotpath --version 0.21.1 --bin hotpath-utils --features utils --locked
 
       - name: Post table-copy profile comment
-        if: steps.hotpath-metadata.outputs.available == 'true'
+        if: steps.hotpath-metadata.outputs.table_copy_available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          export GITHUB_BASE_REF="$(cat /tmp/metrics/base_ref.txt)"
-          export GITHUB_HEAD_REF="$(cat /tmp/metrics/head_ref.txt)"
+          github_base_ref="$(cat /tmp/metrics/base_ref.txt)"
+          github_head_ref="$(cat /tmp/metrics/head_ref.txt)"
+          export GITHUB_BASE_REF="$github_base_ref"
+          export GITHUB_HEAD_REF="$github_head_ref"
           hotpath-utils profile-pr \
             --head-metrics /tmp/metrics/head/table_copy.json \
             --base-metrics /tmp/metrics/base/table_copy.json \
@@ -70,13 +84,15 @@ jobs:
             --benchmark-id "table_copy_null"
 
       - name: Post table-streaming profile comment
-        if: steps.hotpath-metadata.outputs.available == 'true'
+        if: steps.hotpath-metadata.outputs.table_streaming_available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          export GITHUB_BASE_REF="$(cat /tmp/metrics/base_ref.txt)"
-          export GITHUB_HEAD_REF="$(cat /tmp/metrics/head_ref.txt)"
+          github_base_ref="$(cat /tmp/metrics/base_ref.txt)"
+          github_head_ref="$(cat /tmp/metrics/head_ref.txt)"
+          export GITHUB_BASE_REF="$github_base_ref"
+          export GITHUB_HEAD_REF="$github_head_ref"
           hotpath-utils profile-pr \
             --head-metrics /tmp/metrics/head/table_streaming.json \
             --base-metrics /tmp/metrics/base/table_streaming.json \

@@ -18,7 +18,13 @@ const DEFAULT_DB_USER: &str = "postgres";
 const DEFAULT_DB_PASSWORD: &str = "postgres";
 const DEFAULT_TPCC_TABLES: &str =
     "customer,district,item,new_order,order_line,orders,stock,warehouse";
+const DEFAULT_TPCC_WAREHOUSES: u16 = 4;
 const DEFAULT_STREAMING_DURATION_SECONDS: u64 = 60;
+const DEFAULT_STREAMING_DRAIN_QUIET_MS: u64 = 2_000;
+const DEFAULT_BATCH_MAX_FILL_MS: u64 = 1_000;
+const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
+const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 4;
+const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.2;
 const DEFAULT_TPCC_THREADS_PER_WAREHOUSE: usize = 8;
 const DEFAULT_TPCC_THREADS_PER_CPU: usize = 2;
 const DEFAULT_TPCC_MIN_THREADS: usize = 8;
@@ -46,7 +52,7 @@ pub(crate) struct BenchmarkArgs {
     #[arg(long, env = "POSTGRES_PASSWORD", default_value = DEFAULT_DB_PASSWORD)]
     password: String,
     /// Number of TPC-C warehouses to prepare.
-    #[arg(long, env = "TPCC_WAREHOUSES", default_value_t = 1)]
+    #[arg(long, env = "TPCC_WAREHOUSES", default_value_t = DEFAULT_TPCC_WAREHOUSES)]
     warehouses: u16,
     /// Threads to use when preparing TPC-C data. Defaults to a warehouse and
     /// CPU based value.
@@ -96,19 +102,19 @@ pub(crate) struct BenchmarkArgs {
     streaming_duration_seconds: Option<u64>,
     /// Quiet period with no CDC events before TPC-C streaming is considered
     /// drained.
-    #[arg(long, default_value_t = 2_000)]
+    #[arg(long, default_value_t = DEFAULT_STREAMING_DRAIN_QUIET_MS)]
     streaming_drain_quiet_ms: u64,
     /// Maximum batch fill time in milliseconds.
-    #[arg(long, default_value_t = 1_000)]
+    #[arg(long, default_value_t = DEFAULT_BATCH_MAX_FILL_MS)]
     batch_max_fill_ms: u64,
     /// Ratio of process memory reserved for stream batch bytes.
-    #[arg(long, default_value_t = 0.2)]
+    #[arg(long, default_value_t = DEFAULT_MEMORY_BUDGET_RATIO)]
     memory_budget_ratio: f32,
     /// Maximum table sync workers.
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = DEFAULT_MAX_TABLE_SYNC_WORKERS)]
     max_table_sync_workers: u16,
     /// Maximum worker connections per table during initial copy.
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE)]
     max_copy_connections_per_table: u16,
     /// Enable ETL memory backpressure. Benchmark orchestration disables it by
     /// default.
@@ -186,7 +192,19 @@ impl BenchmarkArgs {
             ("Database", format!("{}@{}:{}", self.database, self.host, self.port)),
             ("Warehouses", self.warehouses.to_string()),
             ("TPC-C threads", tpcc_threads.to_string()),
+            ("TPC-C tables", self.tpcc_tables.join(",")),
             ("Streaming workload", "tpcc".to_owned()),
+            (
+                "Streaming duration",
+                format!(
+                    "{} seconds",
+                    self.streaming_duration_seconds.unwrap_or(DEFAULT_STREAMING_DURATION_SECONDS)
+                ),
+            ),
+            ("Streaming drain quiet", format!("{} ms", self.streaming_drain_quiet_ms)),
+            ("Batch max fill", format!("{} ms", self.batch_max_fill_ms)),
+            ("Table-sync workers", self.max_table_sync_workers.to_string()),
+            ("Copy connections/table", self.max_copy_connections_per_table.to_string()),
             ("Measured samples", self.samples.to_string()),
             ("Warmup samples", self.warmup_samples.to_string()),
             ("Pipeline id base", pipeline_id_base.to_string()),
@@ -276,6 +294,28 @@ impl BenchmarkArgs {
 
         if self.streaming_drain_quiet_ms == 0 {
             bail!("--streaming-drain-quiet-ms must be greater than 0");
+        }
+
+        if self.batch_max_fill_ms == 0 {
+            bail!("--batch-max-fill-ms must be greater than 0");
+        }
+
+        if !(0.0..=1.0).contains(&self.memory_budget_ratio) || self.memory_budget_ratio == 0.0 {
+            bail!("--memory-budget-ratio must be greater than 0 and at most 1");
+        }
+
+        if self.max_table_sync_workers == 0 {
+            bail!("--max-table-sync-workers must be greater than 0");
+        }
+
+        if self.max_copy_connections_per_table == 0 {
+            bail!("--max-copy-connections-per-table must be greater than 0");
+        }
+
+        if let Some(tpcc_threads) = self.tpcc_threads
+            && tpcc_threads == 0
+        {
+            bail!("--tpcc-threads must be greater than 0");
         }
 
         if let Some(duration_seconds) = self.streaming_duration_seconds

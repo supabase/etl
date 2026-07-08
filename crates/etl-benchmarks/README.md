@@ -85,7 +85,8 @@ it activates at 85% used memory and resumes at 75%, with memory refreshed every
 
 ## Quick Smoke Run
 
-Use this while iterating on benchmark code. It prepares one TPC-C warehouse,
+Use this while iterating on benchmark code. It intentionally overrides the
+default reproducible profile with a smaller shape: it prepares one TPC-C warehouse,
 runs table copy, runs a 10-second TPC-C streaming workload with inserts,
 updates, and deletes, drains CDC, and writes reports under
 `target/bench-results-smoke/`.
@@ -94,7 +95,7 @@ updates, and deletes, drains CDC, and writes reports under
 cargo xtask benchmark \
   --warehouses 1 \
   --streaming-duration-seconds 10 \
-  --batch-max-fill-ms 100 \
+  --batch-max-fill-ms 1000 \
   --max-table-sync-workers 2 \
   --max-copy-connections-per-table 1 \
   --output-dir target/bench-results-smoke
@@ -145,6 +146,13 @@ cargo xtask benchmark \
 
 Use `--force-prepare` when changing the warehouse count for an existing local
 benchmark database. Without it, `xtask` reuses the existing TPC-C tables.
+
+Plain `cargo xtask benchmark` uses the reproducible default profile: four
+warehouses, 60 seconds of streaming, 1s batch fill, four table-sync workers,
+four copy connections per table, one measured sample, no warmup samples, null
+destination, release profile, and memory backpressure disabled. Pass
+`--tpcc-threads 32` when you want the TPC-C load and streaming concurrency to
+match CI exactly instead of using the CPU-based thread heuristic.
 
 `--samples` repeats each selected benchmark and writes the median result to
 `table_copy.json` and `table_streaming.json`. `--warmup-samples` runs extra
@@ -344,10 +352,13 @@ comments for:
 - `table_streaming_null`
 
 The CI profile uses the null destination, all default replicated TPC-C tables,
-four warehouses, 20 seconds of streaming, one measured sample, no warmup
-samples, four table-sync workers, and two copy connections per table. The
-default replicated TPC-C table set has eight tables, so the profile exercises
-table-sync worker scheduling instead of starting every table at once.
+four warehouses, 32 TPC-C threads, 60 seconds of streaming, 1s batch fill,
+one measured sample, no warmup samples, four table-sync workers, four copy
+connections per table, and disabled memory backpressure. The default replicated
+TPC-C table set has eight tables, so the profile exercises table-sync worker
+scheduling instead of starting every table at once. The 1s batch fill lets
+stream batches grow enough to expose memory growth and larger destination
+flushes.
 
 The GitHub step summary includes the benchmark environment plus the generated
 `benchmark_artifacts.md` for the head run and, on pull requests, the base run.

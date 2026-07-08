@@ -88,7 +88,7 @@ cargo xtask benchmark \
   --warehouses 1 \
   --streaming-duration-seconds 10 \
   --streaming-drain-quiet-ms 1000 \
-  --batch-max-fill-ms 100 \
+  --batch-max-fill-ms 1000 \
   --max-table-sync-workers 2 \
   --max-copy-connections-per-table 1 \
   --destination null \
@@ -132,11 +132,12 @@ Use this before asking CI for a benchmark or when reproducing CI locally:
 cargo xtask benchmark \
   --force-prepare \
   --warehouses 4 \
-  --streaming-duration-seconds 20 \
+  --tpcc-threads 32 \
+  --streaming-duration-seconds 60 \
   --streaming-drain-quiet-ms 1000 \
-  --batch-max-fill-ms 100 \
+  --batch-max-fill-ms 1000 \
   --max-table-sync-workers 4 \
-  --max-copy-connections-per-table 2 \
+  --max-copy-connections-per-table 4 \
   --destination null \
   --samples 1 \
   --warmup-samples 0 \
@@ -148,7 +149,12 @@ cargo xtask benchmark \
 
 This uses all default replicated TPC-C tables. The default table set has more
 tables than `--max-table-sync-workers 4`, so table-sync worker scheduling and
-copy concurrency control are exercised.
+copy concurrency control are exercised. The pinned `--tpcc-threads 32` avoids
+runner CPU count changing the generated workload shape. The 60-second streaming
+window gives the apply loop, batching, Tokio scheduling, destination flush
+tasks, SQL, and lock paths enough time to show stable hotspots. The 1s batch
+fill gives batches room to grow, making memory growth and larger destination
+flushes easier to inspect.
 
 ## CPU And Flamegraph Run
 
@@ -159,7 +165,7 @@ path:
 cargo xtask benchmark \
   --force-prepare \
   --warehouses 1 \
-  --streaming-duration-seconds 20 \
+  --streaming-duration-seconds 60 \
   --destination null \
   --samples 1 \
   --warmup-samples 0 \

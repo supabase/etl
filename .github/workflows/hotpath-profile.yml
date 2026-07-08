@@ -91,10 +91,13 @@ jobs:
             echo "| Cgroup memory limit | ${cgroup_memory_limit} |"
             echo "| Destination | null |"
             echo "| Warehouses | 4 |"
+            echo "| TPC-C threads | 32 |"
             echo "| TPC-C tables | default replicated set |"
-            echo "| Streaming duration | 20 seconds |"
+            echo "| Streaming duration | 60 seconds |"
             echo "| Table-sync workers | 4 |"
-            echo "| Copy connections/table | 2 |"
+            echo "| Copy connections/table | 4 |"
+            echo "| Memory backpressure | disabled |"
+            echo "| Batch max fill | 1000 ms |"
             echo "| Measured samples | 1 |"
             echo "| Warmup samples | 0 |"
             echo "| HotPath modes | timing, allocation |"
@@ -111,11 +114,12 @@ jobs:
             --password "$POSTGRES_PASSWORD" \
             --force-prepare \
             --warehouses 4 \
-            --streaming-duration-seconds 20 \
+            --tpcc-threads 32 \
+            --streaming-duration-seconds 60 \
             --streaming-drain-quiet-ms 1000 \
-            --batch-max-fill-ms 100 \
+            --batch-max-fill-ms 1000 \
             --max-table-sync-workers 4 \
-            --max-copy-connections-per-table 2 \
+            --max-copy-connections-per-table 4 \
             --destination null \
             --samples 1 \
             --warmup-samples 0 \
@@ -138,12 +142,28 @@ jobs:
 
       - name: Checkout base
         if: github.event_name == 'pull_request'
-        run: git checkout ${{ github.event.pull_request.base.sha }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git checkout "$BASE_SHA"
 
       - name: Base benchmarks
         if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
+
+          if ! cargo xtask benchmark --help | grep -q -- '--hotpath'; then
+            echo "false" > /tmp/metrics/base_hotpath_compatible.txt
+            {
+              echo
+              echo "## Base HotPath artifacts"
+              echo
+              echo "Base commit does not support HotPath benchmark flags yet, so base profiling was skipped."
+              echo "This is expected for the PR that introduces the HotPath benchmark suite."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "true" > /tmp/metrics/base_hotpath_compatible.txt
           cargo xtask benchmark \
             --host "$POSTGRES_HOST" \
             --port "$POSTGRES_PORT" \
@@ -152,11 +172,12 @@ jobs:
             --password "$POSTGRES_PASSWORD" \
             --force-prepare \
             --warehouses 4 \
-            --streaming-duration-seconds 20 \
+            --tpcc-threads 32 \
+            --streaming-duration-seconds 60 \
             --streaming-drain-quiet-ms 1000 \
-            --batch-max-fill-ms 100 \
+            --batch-max-fill-ms 1000 \
             --max-table-sync-workers 4 \
-            --max-copy-connections-per-table 2 \
+            --max-copy-connections-per-table 4 \
             --destination null \
             --samples 1 \
             --warmup-samples 0 \
@@ -176,15 +197,21 @@ jobs:
               echo
               cat /tmp/metrics/base-benchmark/benchmark_artifacts.md
             } >> "$GITHUB_STEP_SUMMARY"
+          elif [[ -f /tmp/metrics/base_hotpath_compatible.txt ]] && [[ "$(cat /tmp/metrics/base_hotpath_compatible.txt)" == "false" ]]; then
+            echo "base HotPath artifacts were skipped because the base commit lacks HotPath benchmark support"
           fi
 
       - name: Save PR metadata
         if: github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
-          echo '${{ github.event.pull_request.number }}' > /tmp/metrics/pr_number.txt
-          echo '${{ github.base_ref }}' > /tmp/metrics/base_ref.txt
-          echo '${{ github.head_ref }}' > /tmp/metrics/head_ref.txt
+          echo "$PR_NUMBER" > /tmp/metrics/pr_number.txt
+          echo "$BASE_REF" > /tmp/metrics/base_ref.txt
+          echo "$HEAD_REF" > /tmp/metrics/head_ref.txt
 
       - name: Upload HotPath metrics
         if: always()
