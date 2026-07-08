@@ -64,7 +64,7 @@ pub const BENCHMARK_DEFAULT_NULL_FLUSH_DELAY_MAX_MS: u64 = 100;
 #[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
 static INIT_CRYPTO: Once = Once::new();
 
-/// Initializes HotPath Tokio runtime metrics when profiling is enabled.
+/// Initializes Tokio runtime profiling metrics when profiling is enabled.
 pub fn init_hotpath_tokio_runtime() {
     #[cfg(feature = "hotpath")]
     hotpath::tokio_runtime!();
@@ -946,8 +946,9 @@ impl Destination for BenchDestination {
             #[cfg(feature = "bigquery")]
             #[allow(
                 clippy::large_futures,
-                reason = "The BigQuery benchmark write future is large under all-features HotPath \
-                          checks; keep it stack-allocated to avoid per-batch heap boxing."
+                reason = "The BigQuery benchmark write future is large under all-features \
+                          profiling checks; keep it stack-allocated to avoid per-batch heap \
+                          boxing."
             )]
             Self::BigQuery(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "clickhouse")]

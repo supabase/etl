@@ -11,9 +11,9 @@ use clap::Args;
 use serde::Deserialize;
 use serde_json::Value;
 
-const DEFAULT_ARTIFACT_NAME: &str = "hotpath-profile-metrics";
+const DEFAULT_ARTIFACT_NAME: &str = "benchmark-profile-artifacts";
 const DEFAULT_CURRENT_DIR: &str = "target/bench-results";
-const DEFAULT_WORKFLOW: &str = "hotpath-profile.yml";
+const DEFAULT_WORKFLOW: &str = "benchmark-ci.yml";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";

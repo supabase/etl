@@ -158,26 +158,26 @@ pub(crate) struct BenchmarkArgs {
     /// Cargo profile used for benchmark binaries.
     #[arg(long, default_value = "release")]
     benchmark_profile: String,
-    /// Enable HotPath timing and Tokio runtime profiling.
+    /// Enable timing and Tokio runtime profiling.
     #[arg(long, default_value_t = false)]
     hotpath: bool,
-    /// Enable HotPath allocation profiling.
+    /// Enable allocation profiling.
     #[arg(long, default_value_t = false)]
     hotpath_alloc: bool,
-    /// Enable HotPath CPU sampling.
+    /// Enable CPU sampling.
     #[arg(long, default_value_t = false)]
     hotpath_cpu: bool,
-    /// Comma-separated benchmarks that should expose the HotPath MCP server.
+    /// Comma-separated benchmarks that should expose the profiling MCP server.
     ///
     /// Supported values are `table_copy`, `table_streaming`, and `all`.
     #[arg(long, value_delimiter = ',')]
     hotpath_mcp_benchmarks: Vec<String>,
-    /// Port used by the unauthenticated HotPath MCP server.
+    /// Port used by the unauthenticated profiling MCP server.
     #[arg(long, default_value_t = DEFAULT_HOTPATH_MCP_PORT)]
     hotpath_mcp_port: u16,
-    /// Directory where per-benchmark HotPath JSON reports are written.
+    /// Directory where per-benchmark profiling JSON reports are written.
     ///
-    /// Defaults to `<output-dir>/hotpath` when any HotPath mode is enabled.
+    /// Defaults to `<output-dir>/profile` when profiling is enabled.
     #[arg(long)]
     hotpath_output_dir: Option<PathBuf>,
 }
@@ -206,7 +206,7 @@ impl BenchmarkArgs {
         fs::create_dir_all(&self.output_dir).context("failed to create benchmark output dir")?;
         if let Some(hotpath_output_dir) = self.effective_hotpath_output_dir() {
             fs::create_dir_all(&hotpath_output_dir)
-                .context("failed to create HotPath output dir")?;
+                .context("failed to create profiling output dir")?;
         }
 
         let tpcc_threads =
@@ -239,7 +239,7 @@ impl BenchmarkArgs {
             ("Memory budget ratio", format_decimal(f64::from(self.memory_budget_ratio), 2)),
             ("Output dir", self.output_dir.display().to_string()),
             ("Cargo profile", self.benchmark_profile.clone()),
-            ("HotPath", self.hotpath_label()),
+            ("Profiling", self.hotpath_label()),
         ]);
 
         print_phase("Benchmark database", "ensuring it exists");
@@ -952,7 +952,7 @@ impl BenchmarkArgs {
 
     fn effective_hotpath_output_dir(&self) -> Option<PathBuf> {
         self.hotpath_enabled_for_any_benchmark().then(|| {
-            self.hotpath_output_dir.clone().unwrap_or_else(|| self.output_dir.join("hotpath"))
+            self.hotpath_output_dir.clone().unwrap_or_else(|| self.output_dir.join("profile"))
         })
     }
 
@@ -1023,13 +1023,13 @@ impl BenchmarkArgs {
             && !parent.as_os_str().is_empty()
         {
             fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create HotPath report directory {}", parent.display())
+                format!("failed to create profiling report directory {}", parent.display())
             })?;
         }
 
         fs::copy(source_path, &canonical_path).with_context(|| {
             format!(
-                "failed to copy selected HotPath report from {} to {}",
+                "failed to copy selected profiling report from {} to {}",
                 source_path.display(),
                 canonical_path.display()
             )
@@ -1238,7 +1238,7 @@ impl BenchmarkArgs {
         let prefix = format!(".{benchmark}_sample_");
         let mut paths = Vec::new();
         for entry in fs::read_dir(&output_dir).with_context(|| {
-            format!("failed to read HotPath output dir {}", output_dir.display())
+            format!("failed to read profiling output dir {}", output_dir.display())
         })? {
             let path = entry?.path();
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
@@ -1386,7 +1386,9 @@ fn summarize_benchmark_report(report: Option<&Value>) -> Value {
         "produced_events": report.get("produced_events"),
         "observed_cdc_events": report.get("observed_cdc_events"),
         "events_per_second": report.get("end_to_end_with_shutdown_events_per_second"),
-        "decoded_mib_per_second": report.get("estimated_mib_per_second").or_else(|| report.get("decoded_mib_per_second")),
+        "decoded_mib_per_second": report.get("estimated_mib_per_second")
+            .or_else(|| report.get("end_to_end_with_shutdown_estimated_mib_per_second"))
+            .or_else(|| report.get("decoded_mib_per_second")),
         "total_ms": report.get("total_ms"),
         "stage_breakdown": benchmark_stage_breakdown(report),
         "sample_summary": report.get("sample_summary"),
@@ -2005,7 +2007,7 @@ fn render_artifact_markdown(summary: &Value) -> String {
     let mut markdown = String::new();
     markdown.push_str("# Benchmark Artifacts\n\n");
     markdown.push_str(
-        "This file indexes the benchmark and HotPath outputs for human review and LLM \
+        "This file indexes the benchmark and profiling outputs for human review and LLM \
          analysis.\n\n",
     );
 
@@ -2013,7 +2015,7 @@ fn render_artifact_markdown(summary: &Value) -> String {
         markdown.push_str(&format!("- Benchmark output directory: `{output_dir}`\n"));
     }
     if let Some(output_dir) = summary.get("hotpath_output_dir").and_then(Value::as_str) {
-        markdown.push_str(&format!("- HotPath output directory: `{output_dir}`\n"));
+        markdown.push_str(&format!("- Profiling output directory: `{output_dir}`\n"));
     }
     if let Some(cpu_profile_copies) = summary.get("cpu_profile_copies").and_then(Value::as_array)
         && !cpu_profile_copies.is_empty()
@@ -2045,12 +2047,12 @@ fn render_artifact_markdown(summary: &Value) -> String {
         markdown.push_str(&format!("## {name}\n\n"));
 
         append_path(&mut markdown, "Benchmark JSON", benchmark.get("benchmark_report_path"));
-        append_path(&mut markdown, "HotPath JSON", benchmark.get("hotpath_report_path"));
+        append_path(&mut markdown, "Profile JSON", benchmark.get("hotpath_report_path"));
         if let Some(sample_paths) =
             benchmark.get("hotpath_sample_report_paths").and_then(Value::as_array)
             && !sample_paths.is_empty()
         {
-            markdown.push_str("- HotPath sample JSON:\n");
+            markdown.push_str("- Profile sample JSON:\n");
             for path in sample_paths {
                 if let Some(path) = path.as_str() {
                     markdown.push_str(&format!("  - `{path}`\n"));
@@ -2091,9 +2093,9 @@ fn render_artifact_markdown(summary: &Value) -> String {
             markdown.push_str(&format!("- CPU profiler message: `{message}`\n"));
         }
 
-        markdown.push_str("\n### HotPath Sections\n\n");
+        markdown.push_str("\n### Profile Sections\n\n");
         let Some(sections) = hotpath.get("sections").and_then(Value::as_object) else {
-            markdown.push_str("HotPath report missing.\n\n");
+            markdown.push_str("Profile report missing.\n\n");
             continue;
         };
 

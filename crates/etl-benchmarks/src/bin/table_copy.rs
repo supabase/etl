@@ -6,7 +6,7 @@ async fn main() -> anyhow::Result<()> {
         feature = "hotpath",
         allow(
             clippy::large_futures,
-            reason = "HotPath benchmark startup futures are intentionally stack-allocated to \
+            reason = "Benchmark profiling startup futures are intentionally stack-allocated to \
                       avoid per-run heap boxing."
         )
     )]

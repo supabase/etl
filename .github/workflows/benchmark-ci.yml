@@ -1,4 +1,4 @@
-name: hotpath-profile
+name: Benchmark CI
 
 on:
   pull_request:
@@ -18,8 +18,8 @@ env:
 
 jobs:
   profile:
-    name: HotPath profile
-    runs-on: ubuntu-latest
+    name: Benchmarks
+    runs-on: blacksmith-16vcpu-ubuntu-2404-arm
     if: >
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'benchmark')
@@ -35,7 +35,7 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: hotpath-profile
+          key: benchmark-ci-arm
 
       - name: Install system tools
         run: |
@@ -79,13 +79,14 @@ jobs:
           fi
 
           {
-            echo "## HotPath benchmark environment"
+            echo "## Benchmark environment"
             echo
             echo "| Setting | Value |"
             echo "| --- | --- |"
             echo "| Runner | ${RUNNER_NAME} |"
             echo "| Runner OS | ${RUNNER_OS} |"
             echo "| Runner arch | ${RUNNER_ARCH} |"
+            echo "| Runner class | Blacksmith Ubuntu 24.04 ARM, 16 vCPU |"
             echo "| CPUs | $(nproc) |"
             echo "| Host memory | ${host_memory} |"
             echo "| Cgroup memory limit | ${cgroup_memory_limit} |"
@@ -101,10 +102,85 @@ jobs:
             echo "| Null flush delay | 10-100 ms |"
             echo "| Measured samples | 1 |"
             echo "| Warmup samples | 0 |"
-            echo "| HotPath modes | timing, allocation |"
+            echo "| Profiling modes | timing, allocation |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Head benchmarks
+      - name: Create benchmark summary renderer
+        run: |
+          cat > /tmp/render-benchmark-summary.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          title="$1"
+          benchmark_dir="$2"
+          artifacts_note="$3"
+          artifacts_json="${benchmark_dir}/benchmark_artifacts.json"
+
+          echo "## ${title} benchmark summary"
+          echo
+          echo "${artifacts_note}"
+          echo
+
+          if [[ ! -f "${artifacts_json}" ]]; then
+            echo "Benchmark artifact summary was not generated."
+            exit 0
+          fi
+
+          jq -r '
+            def display_number:
+              if . == null then "n/a"
+              elif type == "number" then
+                if . == floor then tostring
+                else (. * 100 | round / 100 | tostring)
+                end
+              else tostring
+              end;
+
+            def distribution_row($stats; $key; $label):
+              if ($stats[$key]? and (($stats[$key].count // 0) > 0)) then
+                "| `\($label)` | `\($stats[$key].count | display_number)` | `\($stats[$key].min | display_number)` | `\($stats[$key].avg | display_number)` | `\($stats[$key].max | display_number)` |"
+              else empty end;
+
+            .benchmarks[]
+            | select(.benchmark_report.status == "ok")
+            | . as $benchmark
+            | ($benchmark.benchmark_report.destination_stats // {}) as $stats
+            | "### \($benchmark.benchmark)\n"
+              + "\n| Metric | Value |\n| --- | ---: |\n"
+              + (
+                  if $benchmark.benchmark == "table_copy" then
+                    "| Rows copied | `\($benchmark.benchmark_report.rows_copied | display_number)` |\n"
+                    + "| Rows/s | `\($benchmark.benchmark_report.rows_per_second | display_number)` |\n"
+                    + "| Decoded MiB/s | `\($benchmark.benchmark_report.decoded_mib_per_second | display_number)` |\n"
+                  else
+                    "| Produced events | `\($benchmark.benchmark_report.produced_events | display_number)` |\n"
+                    + "| Observed CDC events | `\($benchmark.benchmark_report.observed_cdc_events | display_number)` |\n"
+                    + "| Events/s | `\($benchmark.benchmark_report.events_per_second | display_number)` |\n"
+                    + "| Decoded MiB/s | `\($benchmark.benchmark_report.decoded_mib_per_second | display_number)` |\n"
+                  end
+                )
+              + "| Total ms | `\($benchmark.benchmark_report.total_ms | display_number)` |\n"
+              + "\n**Stage breakdown:** "
+              + (($benchmark.benchmark_report.stage_breakdown // {}) | to_entries | map("`\(.key)`=\(.value | display_number)ms") | join(", "))
+              + "\n\n**Destination distributions:**\n\n"
+              + "| Distribution | Count | Min | Avg | Max |\n| --- | ---: | ---: | ---: | ---: |\n"
+              + ([
+                  distribution_row($stats; "table_row_batch_rows"; "row batch rows"),
+                  distribution_row($stats; "table_row_batch_bytes"; "row batch bytes"),
+                  distribution_row($stats; "table_row_write_ms"; "row write ms"),
+                  distribution_row($stats; "event_batch_total_events"; "event batch events"),
+                  distribution_row($stats; "event_batch_data_events"; "event batch CDC events"),
+                  distribution_row($stats; "event_batch_bytes"; "event batch bytes"),
+                  distribution_row($stats; "event_write_ms"; "event write ms")
+                ] | map(select(. != null and . != "")) | if length == 0 then "_No destination distributions were recorded._" else join("\n") end)
+              + "\n\n**Profile section rows:** "
+              + (($benchmark.hotpath_report.sections // {}) | to_entries | map("`\(.key)`=\(.value.count)") | join(", "))
+              + "\n"
+          ' "${artifacts_json}"
+          EOF
+          chmod +x /tmp/render-benchmark-summary.sh
+
+      - name: Head Benchmarks
         run: |
           set -euo pipefail
           cargo xtask benchmark \
@@ -131,42 +207,41 @@ jobs:
             --hotpath-alloc \
             --hotpath-output-dir /tmp/metrics/head
 
-      - name: Summarize head artifacts
+      - name: Summarize Head Artifacts
         run: |
           set -euo pipefail
           if [[ -f /tmp/metrics/head-benchmark/benchmark_artifacts.md ]]; then
-            {
-              echo
-              echo "## Head HotPath artifacts"
-              echo
-              cat /tmp/metrics/head-benchmark/benchmark_artifacts.md
-            } >> "$GITHUB_STEP_SUMMARY"
+            /tmp/render-benchmark-summary.sh \
+              "Head" \
+              /tmp/metrics/head-benchmark \
+              "Full machine-readable benchmark and profile artifacts are available in the uploaded \`benchmark-profile-artifacts\` artifact." \
+              >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Checkout base
+      - name: Checkout Base
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: git checkout "$BASE_SHA"
 
-      - name: Base benchmarks
+      - name: Base Benchmarks
         if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
 
           if ! cargo xtask benchmark --help | grep -q -- '--hotpath'; then
-            echo "false" > /tmp/metrics/base_hotpath_compatible.txt
+            echo "false" > /tmp/metrics/base_profile_compatible.txt
             {
               echo
-              echo "## Base HotPath artifacts"
+              echo "## Base profile artifacts"
               echo
-              echo "Base commit does not support HotPath benchmark flags yet, so base profiling was skipped."
-              echo "This is expected for the PR that introduces the HotPath benchmark suite."
+              echo "Base commit does not support profiling benchmark flags yet, so base profiling was skipped."
+              echo "This is expected for the PR that introduces the benchmark profiling suite."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          echo "true" > /tmp/metrics/base_hotpath_compatible.txt
+          echo "true" > /tmp/metrics/base_profile_compatible.txt
           cargo xtask benchmark \
             --host "$POSTGRES_HOST" \
             --port "$POSTGRES_PORT" \
@@ -191,22 +266,21 @@ jobs:
             --hotpath-alloc \
             --hotpath-output-dir /tmp/metrics/base
 
-      - name: Summarize base artifacts
+      - name: Summarize Base Artifacts
         if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           if [[ -f /tmp/metrics/base-benchmark/benchmark_artifacts.md ]]; then
-            {
-              echo
-              echo "## Base HotPath artifacts"
-              echo
-              cat /tmp/metrics/base-benchmark/benchmark_artifacts.md
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [[ -f /tmp/metrics/base_hotpath_compatible.txt ]] && [[ "$(cat /tmp/metrics/base_hotpath_compatible.txt)" == "false" ]]; then
-            echo "base HotPath artifacts were skipped because the base commit lacks HotPath benchmark support"
+            /tmp/render-benchmark-summary.sh \
+              "Base" \
+              /tmp/metrics/base-benchmark \
+              "Full machine-readable benchmark and profile artifacts are available in the uploaded \`benchmark-profile-artifacts\` artifact." \
+              >> "$GITHUB_STEP_SUMMARY"
+          elif [[ -f /tmp/metrics/base_profile_compatible.txt ]] && [[ "$(cat /tmp/metrics/base_profile_compatible.txt)" == "false" ]]; then
+            echo "base profile artifacts were skipped because the base commit lacks benchmark profiling support"
           fi
 
-      - name: Save PR metadata
+      - name: Save PR Metadata
         if: github.event_name == 'pull_request'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -218,10 +292,10 @@ jobs:
           echo "$BASE_REF" > /tmp/metrics/base_ref.txt
           echo "$HEAD_REF" > /tmp/metrics/head_ref.txt
 
-      - name: Upload HotPath metrics
+      - name: Upload Benchmark Profile Artifacts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: hotpath-profile-metrics
+          name: benchmark-profile-artifacts
           path: /tmp/metrics/
           retention-days: 1

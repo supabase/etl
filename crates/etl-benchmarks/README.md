@@ -104,9 +104,9 @@ cargo xtask benchmark \
 If the TPC-C tables already exist, preparation is skipped. Add
 `--force-prepare` to drop and regenerate them.
 
-## HotPath Profiling
+## Profiling
 
-Use HotPath when you want timing, allocation, Tokio runtime, thread, and
+Use profiling when you want timing, allocation, Tokio runtime, thread, and
 destination-flush visibility from the benchmark binaries. The null destination
 simulates destination batch flushing by waiting before dropping each table-copy
 row batch and streaming event batch. The default range is 10-100ms. Use
@@ -117,7 +117,7 @@ pending destination write path is exercised. Benchmark JSON reports also include
 a final Tokio runtime metrics snapshot with worker counts, live tasks, global
 queue depth, per-worker park counts, and per-worker busy time.
 
-Enable HotPath through explicit benchmark flags only:
+Enable profiling through explicit benchmark flags only:
 
 - `--hotpath`: timing, Tokio, thread, future, lock, and SQL profiling support.
 - `--hotpath-alloc`: allocation profiling.
@@ -126,7 +126,7 @@ Enable HotPath through explicit benchmark flags only:
   benchmark binaries.
 
 For commands, MCP probes, artifact analysis, CI behavior, CPU flamegraphs, and
-regression triage, see [`HOTPATH_RUNBOOK.md`](HOTPATH_RUNBOOK.md).
+regression triage, see [`BENCHMARK_RUNBOOK.md`](BENCHMARK_RUNBOOK.md).
 
 ## Larger Local Run
 
@@ -327,17 +327,17 @@ Optional:
 
 ## GitHub Actions
 
-The HotPath benchmark workflow runs for pull requests labeled `benchmark` and
-can also be started manually through `workflow_dispatch`. This keeps the default
-PR loop light while making performance profiling self-serve when a PR needs it.
+The benchmark workflow runs for pull requests labeled `benchmark` and can also
+be started manually through `workflow_dispatch`. This keeps the default PR loop
+light while making performance profiling self-serve when a PR needs it.
 
-From the GitHub UI, open **Actions**, select **hotpath-profile**, then choose
+From the GitHub UI, open **Actions**, select **Benchmark CI**, then choose
 **Run workflow** for a manual null-destination profile run.
 
 With the GitHub CLI:
 
 ```bash
-gh workflow run hotpath-profile.yml
+gh workflow run benchmark-ci.yml
 ```
 
 For a PR run, add the `benchmark` label. The workflow also listens for new
@@ -346,28 +346,29 @@ the latest pushed revision.
 
 The workflow starts source Postgres, installs pinned `go-tpc`, and runs both
 `table_copy` and `table_streaming` through `cargo xtask benchmark` with
-HotPath timing and allocation profiling enabled. Labeled pull-request runs
-profile the head commit and the base commit, upload all benchmark and HotPath
-artifacts, and then the `hotpath-comment` workflow posts HotPath comparison
+timing and allocation profiling enabled. Labeled pull-request runs profile the
+head commit and the base commit, upload all benchmark and profile artifacts,
+and then the **Benchmark Comment** workflow posts profile comparison
 comments for:
 
 - `table_copy_null`
 - `table_streaming_null`
 
-The CI profile uses the null destination, all default replicated TPC-C tables,
-four warehouses, 32 TPC-C threads, 60 seconds of streaming, 1s batch fill,
-one measured sample, no warmup samples, four table-sync workers, four copy
-connections per table, and disabled memory backpressure. The default replicated
-TPC-C table set has eight tables, so the profile exercises table-sync worker
-scheduling instead of starting every table at once. The 1s batch fill lets
-stream batches grow enough to expose memory growth and larger destination
-flushes.
+The CI profile runs on a Blacksmith 16 vCPU Ubuntu 24.04 ARM runner and uses
+the null destination, all default replicated TPC-C tables, four warehouses, 32
+TPC-C threads, 60 seconds of streaming, 1s batch fill, one measured sample, no
+warmup samples, four table-sync workers, four copy connections per table, and
+disabled memory backpressure. The default replicated TPC-C table set has eight
+tables, so the profile exercises table-sync worker scheduling instead of
+starting every table at once. The 1s batch fill lets stream batches grow enough
+to expose memory growth and larger destination flushes.
 
-The GitHub step summary includes the benchmark environment plus the generated
-`benchmark_artifacts.md` for the head run and, on pull requests, the base run.
-The uploaded `hotpath-profile-metrics` artifact contains:
+The GitHub step summary includes the benchmark environment plus concise
+human-readable head and base benchmark summaries. The uploaded
+`benchmark-profile-artifacts` artifact contains the full machine-readable
+benchmark and profiling outputs:
 
-- `head/table_copy.json` and `head/table_streaming.json`: HotPath reports used
+- `head/table_copy.json` and `head/table_streaming.json`: profile reports used
   by `hotpath-utils profile-pr`.
 - `head-benchmark/*.json` and `head-benchmark/benchmark_artifacts.*`: benchmark
   reports and human/agent summaries.

@@ -1,6 +1,6 @@
-# HotPath Benchmark Runbook
+# Benchmark Profiling Runbook
 
-This runbook explains how to run ETL benchmarks with HotPath, collect
+This runbook explains how to run ETL benchmarks with profiling, collect
 end-to-end profiling data, query the live MCP server, and turn the outputs into
 debugging evidence. It is written for both human operators and LLM agents.
 
@@ -18,12 +18,12 @@ Use this workflow when you need to answer one or more of these questions:
 - Can an agent inspect live profiler data through MCP while the benchmark is
   still running?
 
-HotPath is optional. Normal production builds do not include it unless the
+Profiling is optional. Normal production builds do not include it unless the
 benchmark features and flags are explicitly enabled.
 
 ## What Gets Profiled
 
-The HotPath benchmark build enables these data sources:
+The profiling benchmark build enables these data sources:
 
 - Function timing for benchmark orchestration, pipeline startup and shutdown,
   table sync workers, apply workers, batch flushing, destination writes, status
@@ -32,9 +32,9 @@ The HotPath benchmark build enables these data sources:
 - CPU profiling and Samply flamegraphs when `--hotpath-cpu` is enabled and the
   host allows profiler attachment.
 - Tokio runtime snapshots in benchmark JSON reports.
-- Tokio runtime live data through HotPath MCP.
-- Future, thread, mutex, RwLock, and SQL sections from HotPath reports where
-  the relevant HotPath feature is active and the profiled code emits data.
+- Tokio runtime live data through profiling MCP.
+- Future, thread, mutex, RwLock, and SQL sections from profile reports where
+  the relevant profiling feature is active and the profiled code emits data.
 - Null destination write delay. Both `write_table_rows` and `write_events`
   wait before dropping a full destination batch. The default range is 10-100ms,
   `0..0` disables the artificial delay, and equal min/max values create a fixed
@@ -75,7 +75,7 @@ samply record --pid "$!"
 ```
 
 If that fails with `task_for_pid` or an attach error, fix the local terminal or
-developer-tools permission first. HotPath CPU output will not produce a useful
+developer-tools permission first. CPU profiler output will not produce a useful
 `hp.json.gz` file until Samply can attach.
 
 ## Fast Local Timing And Allocation Run
@@ -95,30 +95,30 @@ cargo xtask benchmark \
   --destination null \
   --samples 1 \
   --warmup-samples 0 \
-  --output-dir target/bench-results-hotpath-smoke \
+  --output-dir target/bench-results-profile-smoke \
   --hotpath \
   --hotpath-alloc \
-  --hotpath-output-dir target/bench-results-hotpath-smoke/hotpath
+  --hotpath-output-dir target/bench-results-profile-smoke/profile
 ```
 
 Expected files:
 
-- `target/bench-results-hotpath-smoke/table_copy.json`
-- `target/bench-results-hotpath-smoke/table_streaming.json`
-- `target/bench-results-hotpath-smoke/hotpath/table_copy.json`
-- `target/bench-results-hotpath-smoke/hotpath/table_streaming.json`
-- `target/bench-results-hotpath-smoke/hotpath/.table_copy_sample_*.json`
-- `target/bench-results-hotpath-smoke/hotpath/.table_streaming_sample_*.json`
-- `target/bench-results-hotpath-smoke/benchmark_artifacts.md`
-- `target/bench-results-hotpath-smoke/benchmark_artifacts.json`
-- `target/bench-results-hotpath-smoke/cpu-profiles/*.json.gz` when
+- `target/bench-results-profile-smoke/table_copy.json`
+- `target/bench-results-profile-smoke/table_streaming.json`
+- `target/bench-results-profile-smoke/profile/table_copy.json`
+- `target/bench-results-profile-smoke/profile/table_streaming.json`
+- `target/bench-results-profile-smoke/profile/.table_copy_sample_*.json`
+- `target/bench-results-profile-smoke/profile/.table_streaming_sample_*.json`
+- `target/bench-results-profile-smoke/benchmark_artifacts.md`
+- `target/bench-results-profile-smoke/benchmark_artifacts.json`
+- `target/bench-results-profile-smoke/cpu-profiles/*.json.gz` when
   `--hotpath-cpu` is enabled and Samply succeeds.
-- `target/bench-results-hotpath-smoke/cpu-profiles/*.sample-summary.md` and
+- `target/bench-results-profile-smoke/cpu-profiles/*.sample-summary.md` and
   `*.sample-summary.json` when the copied Samply profile can be summarized.
 
 Start with `benchmark_artifacts.md`. It is intentionally optimized for humans
 and agents: it lists throughput, destination counters, Tokio runtime snapshots,
-stage timings, destination batch/write distributions, HotPath section counts,
+stage timings, destination batch/write distributions, profile section counts,
 and top rows from timing, allocation, futures, mutexes, RwLocks, SQL, threads,
 and CPU sections when available.
 
@@ -127,12 +127,12 @@ profiles. They answer the basic shape questions quickly: whether time went into
 table sync, producer runtime, drain, shutdown, row/event batch size, or
 destination write duration.
 
-The canonical `hotpath/table_copy.json` and `hotpath/table_streaming.json` files
+The canonical `profile/table_copy.json` and `profile/table_streaming.json` files
 are copied from the measured sample selected as the representative aggregate
 report. For an odd number of samples this is the median sample by primary
 throughput; for an even number, numeric aggregate fields may be averaged while
-the canonical HotPath file still comes from one representative sample. The
-hidden `.table_*_sample_*.json` files preserve every per-sample HotPath report
+the canonical profile file still comes from one representative sample. The
+hidden `.table_*_sample_*.json` files preserve every per-sample profile report
 for spread and outlier analysis.
 
 ## CI-Sized Local Run
@@ -152,10 +152,10 @@ cargo xtask benchmark \
   --destination null \
   --samples 1 \
   --warmup-samples 0 \
-  --output-dir target/bench-results-hotpath-ci-local \
+  --output-dir target/bench-results-profile-ci-local \
   --hotpath \
   --hotpath-alloc \
-  --hotpath-output-dir target/bench-results-hotpath-ci-local/hotpath
+  --hotpath-output-dir target/bench-results-profile-ci-local/profile
 ```
 
 This uses all default replicated TPC-C tables. The default table set has more
@@ -213,11 +213,11 @@ cargo xtask benchmark \
   --samples 1 \
   --warmup-samples 0 \
   --benchmark-profile profiling \
-  --output-dir target/bench-results-hotpath-cpu \
+  --output-dir target/bench-results-profile-cpu \
   --hotpath \
   --hotpath-alloc \
   --hotpath-cpu \
-  --hotpath-output-dir target/bench-results-hotpath-cpu/hotpath
+  --hotpath-output-dir target/bench-results-profile-cpu/profile
 ```
 
 If CPU profiling succeeds, `benchmark_artifacts.md` lists copied CPU profiles
@@ -225,7 +225,7 @@ under `<output-dir>/cpu-profiles`, plus a text summary for agent review. Use
 the summary first when you need a quick symbol-level view:
 
 ```bash
-less target/bench-results-hotpath-cpu/cpu-profiles/<benchmark>-<run>-hp.json.sample-summary.md
+less target/bench-results-profile-cpu/cpu-profiles/<benchmark>-<run>-hp.json.sample-summary.md
 ```
 
 Read the CPU sample summary from top to bottom. The ETL-focused tables only
@@ -237,11 +237,11 @@ and all-thread tables are kept below them for auditability.
 Use the copied Samply profile for the full interactive UI:
 
 ```bash
-samply load target/bench-results-hotpath-cpu/cpu-profiles/<benchmark>-<run>-hp.json.gz
+samply load target/bench-results-profile-cpu/cpu-profiles/<benchmark>-<run>-hp.json.gz
 ```
 
 Run that command to open the interactive call tree and flamegraph. The original
-`/tmp/hotpath/...` Samply path is still preserved in JSON for debugging. The raw
+temporary Samply path is still preserved in JSON for debugging. The raw
 Samply JSON is a Firefox Profiler profile and may contain addresses before UI
 symbolication; the `*.sample-summary.*` files are the machine-readable
 symbol-level summaries. If the `functions_cpu` section contains an error message
@@ -266,12 +266,12 @@ cargo xtask benchmark \
   --destination null \
   --samples 1 \
   --warmup-samples 0 \
-  --output-dir target/bench-results-hotpath-mcp \
+  --output-dir target/bench-results-profile-mcp \
   --hotpath \
   --hotpath-alloc \
   --hotpath-mcp-benchmarks table_streaming \
   --hotpath-mcp-port 6771 \
-  --hotpath-output-dir target/bench-results-hotpath-mcp/hotpath
+  --hotpath-output-dir target/bench-results-profile-mcp/profile
 ```
 
 Connect an MCP client to:
@@ -285,7 +285,7 @@ Example MCP client config:
 ```json
 {
   "mcpServers": {
-    "hotpath": {
+    "profile": {
       "type": "http",
       "url": "http://localhost:6771/mcp"
     }
@@ -299,22 +299,22 @@ longer streaming duration.
 
 ## MCP Lifetime Model
 
-HotPath MCP is an in-process profiler endpoint. It does not keep the ETL
+Profiling MCP is an in-process profiler endpoint. It does not keep the ETL
 benchmark open until a human manually closes it, and it does not preserve a
 queryable server after the benchmark exits.
 
 The lifecycle is:
 
 1. `cargo xtask benchmark` starts a benchmark binary such as `table_streaming`.
-2. If that binary is selected by `--hotpath-mcp-benchmarks`, HotPath starts an
-   HTTP MCP server inside the benchmark process.
+2. If that binary is selected by `--hotpath-mcp-benchmarks`, the benchmark
+   starts an HTTP MCP server inside the benchmark process.
 3. An LLM or human MCP client connects to `http://localhost:6771/mcp` while the
    benchmark is still running.
 4. The client queries live profiler state such as timing, allocations, futures,
    Tokio runtime data, threads, mutexes, RwLocks, SQL, and profiler status.
 5. When the benchmark binary finishes, the process exits and the MCP endpoint
    closes.
-6. After exit, use the persisted artifacts instead: benchmark JSON, HotPath
+6. After exit, use the persisted artifacts instead: benchmark JSON, profile
    JSON, `benchmark_artifacts.md`, `benchmark_artifacts.json`, and copied CPU
    profiles under `cpu-profiles/` when available.
 
@@ -410,16 +410,20 @@ Repeat the same request with these tool names:
 Not every tool will have rows in every run. Empty sections are useful signal:
 they usually mean that code path did not execute, the feature was not enabled,
 or the benchmark ended before enough data accumulated.
-If `rw_locks` is not listed by the MCP server, use the persisted HotPath JSON
-or HotPath HTTP JSON endpoint for that section instead.
+If `rw_locks` is not listed by the MCP server, use the persisted profile JSON
+or profile HTTP JSON endpoint for that section instead.
 
 ## Reading Artifact JSON With jq
 
 Use the Markdown report first, then use JSON for exact values:
 
 ```bash
-jq '.benchmarks[] | {benchmark, report_path, hotpath_report_path}' \
-  target/bench-results-hotpath-smoke/benchmark_artifacts.json
+jq '.benchmarks[] | {
+  benchmark,
+  benchmark_report_path,
+  profile_report_path: .hotpath_report_path
+}' \
+  target/bench-results-profile-smoke/benchmark_artifacts.json
 ```
 
 List throughput and destination counters:
@@ -427,19 +431,19 @@ List throughput and destination counters:
 ```bash
 jq '.benchmarks[] | {
   benchmark,
-  throughput: .report.summary,
-  destination_stats: .report.destination_stats,
-  tokio_runtime: .report.tokio_runtime
-}' target/bench-results-hotpath-smoke/benchmark_artifacts.json
+  throughput: .benchmark_report,
+  destination_stats: .benchmark_report.destination_stats,
+  tokio_runtime: .benchmark_report.tokio_runtime_stats
+}' target/bench-results-profile-smoke/benchmark_artifacts.json
 ```
 
-List available HotPath sections:
+List available profile sections:
 
 ```bash
 jq '.benchmarks[] | {
   benchmark,
-  sections: (.hotpath.sections | keys)
-}' target/bench-results-hotpath-smoke/benchmark_artifacts.json
+  sections: (.hotpath_report.sections | keys)
+}' target/bench-results-profile-smoke/benchmark_artifacts.json
 ```
 
 Inspect top timing and allocation rows:
@@ -447,9 +451,9 @@ Inspect top timing and allocation rows:
 ```bash
 jq '.benchmarks[] | {
   benchmark,
-  timing: .hotpath.sections.functions_timing.top_rows,
-  alloc: .hotpath.sections.functions_alloc.top_rows
-}' target/bench-results-hotpath-smoke/benchmark_artifacts.json
+  timing: .hotpath_report.sections.functions_timing.top_rows,
+  alloc: .hotpath_report.sections.functions_alloc.top_rows
+}' target/bench-results-profile-smoke/benchmark_artifacts.json
 ```
 
 ## Debugging Rubric
@@ -458,7 +462,7 @@ Use the same order for human review and LLM analysis:
 
 1. Confirm the run shape. Check destination, warehouse count, table list,
    sample count, streaming duration, table-sync workers, copy connections, and
-   enabled HotPath modes.
+   enabled profiling modes.
 2. Confirm row and event volume. A benchmark with too little data can miss
    regressions even if it completes successfully.
 3. Confirm destination behavior. For the null destination, verify row and event
@@ -499,20 +503,21 @@ Secondary signal: corroborating artifact or MCP tool output
 Likely bottleneck: short hypothesis with the responsible subsystem
 Confidence: high/medium/low and why
 Next action: one concrete code or measurement step
-Artifacts: benchmark_artifacts.md/json, HotPath JSON, flamegraph path if any
+Artifacts: benchmark_artifacts.md/json, profile JSON, flamegraph path if any
 ```
 
 ## GitHub Actions
 
 Benchmarks are intentionally label-gated. A pull request must have the
-`benchmark` label before the HotPath workflow runs. The workflow also runs on
+`benchmark` label before the benchmark workflow runs. The workflow also runs on
 new commits to a labeled PR and through manual `workflow_dispatch`.
 
 The split workflow design is intentional:
 
-- `hotpath-profile.yml` runs the benchmark with read-only permissions and
-  uploads `hotpath-profile-metrics`.
-- `hotpath-comment.yml` runs after the profiling workflow and posts comparison
+- `benchmark-ci.yml` runs the benchmark on a Blacksmith 16 vCPU Ubuntu 24.04
+  ARM runner with read-only permissions and uploads
+  `benchmark-profile-artifacts`.
+- `benchmark-comment.yml` runs after the profiling workflow and posts comparison
   comments with pull-request write permission.
 
 This keeps the default CI loop light and avoids giving benchmark execution the
@@ -521,24 +526,23 @@ same permissions as PR commenting.
 To run from the GitHub UI:
 
 1. Add the `benchmark` label to the PR, or open Actions and manually run
-   `hotpath-profile`.
-2. Wait for the `HotPath profile` job.
-3. Open the step summary and inspect the head and base
-   `benchmark_artifacts.md` summaries.
-4. Download `hotpath-profile-metrics` if deeper JSON inspection is needed.
-5. Read the PR comments posted by `hotpath-comment` for HotPath comparisons.
+   **Benchmark CI**.
+2. Wait for the `Benchmarks` job.
+3. Open the step summary and inspect the concise head and base summaries.
+4. Download `benchmark-profile-artifacts` if deeper JSON inspection is needed.
+5. Read the PR comments posted by **Benchmark Comment** for profile comparisons.
 
 To run manually with the GitHub CLI:
 
 ```bash
-gh workflow run hotpath-profile.yml
+gh workflow run benchmark-ci.yml
 ```
 
 ## Agent Checklist
 
 When an LLM agent runs or reviews a benchmark, follow this checklist exactly:
 
-1. Run the smallest relevant local HotPath command first.
+1. Run the smallest relevant local profiling command first.
 2. Open `benchmark_artifacts.md`.
 3. Parse `benchmark_artifacts.json` for exact values.
 4. If MCP was requested, prove `tools/list` works and call at least
@@ -562,23 +566,23 @@ not enabled for that benchmark. Use a longer streaming duration and
 
 No CPU flamegraph:
 
-Samply could not attach or HotPath CPU mode was not enabled. Verify
+Samply could not attach or CPU profiling was not enabled. Verify
 `--hotpath-cpu`, `--benchmark-profile profiling`, `hotpath-samply`, and local
 profiler permissions.
 
-HotPath report exists but a section is empty:
+Profile report exists but a section is empty:
 
-The code path might not have run, the relevant HotPath feature might not be
+The code path might not have run, the relevant profiling feature might not be
 enabled, or the run was too short. Increase data volume or duration before
 concluding the subsystem has no cost.
 
 CI benchmark did not run for a PR:
 
 Add the `benchmark` label, push a new commit, reopen the PR, or run
-`hotpath-profile` manually from Actions.
+**Benchmark CI** manually from Actions.
 
 PR comment did not appear:
 
-Check whether `hotpath-profile` uploaded `hotpath-profile-metrics` and whether
-`hotpath-comment` found `pr_number.txt`. Manual workflow runs are useful for
-artifacts but do not always have PR metadata for comments.
+Check whether **Benchmark CI** uploaded `benchmark-profile-artifacts` and
+whether **Benchmark Comment** found `pr_number.txt`. Manual workflow runs are
+useful for artifacts but do not always have PR metadata for comments.

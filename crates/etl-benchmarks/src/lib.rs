@@ -1,4 +1,4 @@
-/// Awaits a future with HotPath future lifecycle instrumentation when enabled.
+/// Awaits a future with future lifecycle instrumentation when enabled.
 #[macro_export]
 macro_rules! profile_future {
     ($label:literal, $future:expr) => {{

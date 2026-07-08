@@ -19,6 +19,54 @@ const SHARED_PG_FILTER: &str = "\
                                 (binary_id(etl-destinations) & \
                                 test(/ducklake::core::tests::postgres_backed::/))";
 
+/// Workspace features covered by full test CI, excluding benchmark profiling.
+///
+/// Benchmark profiling is intentionally benchmark-only. Running the normal
+/// integration suite with profiler runtime hooks enabled starts those hooks in
+/// every test process, which can collide on profiler ports and distort the test
+/// runtime.
+const NON_PROFILING_FEATURES: &[&str] = &[
+    "etl/egress",
+    "etl/failpoints",
+    "etl/fuzzing",
+    "etl/test-utils",
+    "etl-api/bigquery",
+    "etl-api/clickhouse",
+    "etl-api/ducklake",
+    "etl-api/iceberg",
+    "etl-api/snowflake",
+    "etl-benchmarks/bigquery",
+    "etl-benchmarks/clickhouse",
+    "etl-benchmarks/snowflake",
+    "etl-config/supabase",
+    "etl-config/utoipa",
+    "etl-destinations/bigquery",
+    "etl-destinations/clickhouse",
+    "etl-destinations/ducklake",
+    "etl-destinations/egress",
+    "etl-destinations/iceberg",
+    "etl-destinations/snowflake",
+    "etl-destinations/test-utils",
+    "etl-examples/bigquery",
+    "etl-examples/clickhouse",
+    "etl-examples/ducklake",
+    "etl-examples/snowflake",
+    "etl-maintenance/ducklake",
+    "etl-maintenance/test-utils",
+    "etl-postgres/bigquery",
+    "etl-postgres/sqlx",
+    "etl-postgres/store",
+    "etl-postgres/test-utils",
+    "etl-postgres/tokio",
+    "etl-replicator/any-destination",
+    "etl-replicator/bigquery",
+    "etl-replicator/clickhouse",
+    "etl-replicator/ducklake",
+    "etl-replicator/egress",
+    "etl-replicator/iceberg",
+    "etl-replicator/snowflake",
+];
+
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum Mode {
     /// Run tests via `cargo nextest run`.
@@ -187,8 +235,8 @@ impl PgEnv {
     }
 }
 
-/// Builds a nextest `Command` with mode-specific args and the common flags
-/// shared by all lanes (`--workspace --all-features --no-fail-fast`).
+/// Builds a nextest [`Command`] with mode-specific args and the common flags
+/// shared by all lanes.
 fn nextest_command(mode: Mode) -> Command {
     let mut cmd = Command::new("cargo");
 
@@ -197,7 +245,8 @@ fn nextest_command(mode: Mode) -> Command {
         Mode::LlvmCov => cmd.args(["llvm-cov", "nextest"]),
     };
 
-    cmd.args(["--workspace", "--all-features", "--no-fail-fast"]);
+    cmd.args(["--workspace", "--no-default-features", "--no-fail-fast"]);
+    cmd.args(["--features", &NON_PROFILING_FEATURES.join(",")]);
 
     if matches!(mode, Mode::LlvmCov) {
         cmd.arg("--no-report");
@@ -262,7 +311,8 @@ fn run_lane(lane: &Lane, mode: Mode, extra: &[String], pg_env: &PgEnv) -> Result
 fn prebuild_test_binaries() -> Result<()> {
     eprintln!("prebuilding test binaries.");
     let status = Command::new("cargo")
-        .args(["nextest", "run", "--workspace", "--all-features", "--no-run"])
+        .args(["nextest", "run", "--workspace", "--no-default-features", "--no-run"])
+        .args(["--features", &NON_PROFILING_FEATURES.join(",")])
         .status()
         .context("failed to prebuild test binaries")?;
 

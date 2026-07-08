@@ -1,8 +1,8 @@
-name: hotpath-comment
+name: Benchmark Comment
 
 on:
   workflow_run:
-    workflows: ["hotpath-profile"]
+    workflows: ["Benchmark CI"]
     types:
       - completed
 
@@ -13,8 +13,8 @@ permissions:
 
 jobs:
   comment:
-    name: HotPath comment
-    runs-on: ubuntu-latest
+    name: Benchmark Comment
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'pull_request'
@@ -28,20 +28,20 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: hotpath-comment
+          key: benchmark-comment
 
-      - name: Download HotPath metrics
+      - name: Download benchmark profile artifacts
         id: download-metrics
         continue-on-error: true
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          name: hotpath-profile-metrics
+          name: benchmark-profile-artifacts
           path: /tmp/metrics/
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
 
-      - name: Check HotPath metadata
-        id: hotpath-metadata
+      - name: Check benchmark metadata
+        id: profile-metadata
         run: |
           set -euo pipefail
           if [[ -f /tmp/metrics/pr_number.txt ]]; then
@@ -60,14 +60,14 @@ jobs:
             echo "table_streaming_available=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install hotpath-utils
+      - name: Install Profile Comment Tool
         if: >
-          steps.hotpath-metadata.outputs.table_copy_available == 'true' ||
-          steps.hotpath-metadata.outputs.table_streaming_available == 'true'
+          steps.profile-metadata.outputs.table_copy_available == 'true' ||
+          steps.profile-metadata.outputs.table_streaming_available == 'true'
         run: cargo install hotpath --version 0.21.1 --bin hotpath-utils --features utils --locked
 
-      - name: Post table-copy profile comment
-        if: steps.hotpath-metadata.outputs.table_copy_available == 'true'
+      - name: Post Table Copy Profile Comment
+        if: steps.profile-metadata.outputs.table_copy_available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -83,8 +83,8 @@ jobs:
             --pr-number "$(cat /tmp/metrics/pr_number.txt)" \
             --benchmark-id "table_copy_null"
 
-      - name: Post table-streaming profile comment
-        if: steps.hotpath-metadata.outputs.table_streaming_available == 'true'
+      - name: Post Table Streaming Profile Comment
+        if: steps.profile-metadata.outputs.table_streaming_available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
