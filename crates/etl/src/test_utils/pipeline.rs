@@ -198,6 +198,7 @@ where
             replication_lag_refresh_interval_ms:
                 PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
             memory_backpressure: Some(self.memory_backpressure),
+            run_source_migrations: true,
         };
 
         Pipeline::new(config, self.store, self.destination)

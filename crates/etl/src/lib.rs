@@ -154,6 +154,7 @@
 //!         memory_backpressure: Some(MemoryBackpressureConfig::default()),
 //!         table_sync_copy: TableSyncCopyConfig::default(),
 //!         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+//!         run_source_migrations: true,
 //!     };
 //!
 //!     // Create and start the pipeline
