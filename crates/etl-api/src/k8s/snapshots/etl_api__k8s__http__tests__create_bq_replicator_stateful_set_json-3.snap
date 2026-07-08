@@ -146,12 +146,12 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
             "name": "abcdefghijklmnopqrst-42-vector",
             "resources": {
               "limits": {
-                "cpu": "200m",
-                "memory": "307Mi"
+                "cpu": "150m",
+                "memory": "230Mi"
               },
               "requests": {
-                "cpu": "100m",
-                "memory": "256Mi"
+                "cpu": "75m",
+                "memory": "192Mi"
               }
             },
             "restartPolicy": "Always",

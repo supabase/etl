@@ -173,12 +173,14 @@ pub struct ReadDestinationsResponse {
 pub struct ValidateDestinationRequest {
     /// Source identifier used for source-aware destination validation.
     #[schema(example = 1)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_id: Option<i64>,
     /// Destination configuration to validate.
     #[schema(required = true)]
     pub config: FullApiDestinationConfig,
     /// Pipeline configuration used to cross-reference source publication
     /// details.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline_config: Option<FullApiPipelineConfig>,
 }
 
