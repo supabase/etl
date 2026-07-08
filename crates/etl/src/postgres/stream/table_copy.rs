@@ -83,29 +83,26 @@ pin_project! {
     /// using the provided column schemas. The conversion process handles both text and
     /// binary format data.
     #[must_use = "streams do nothing unless polled"]
-    pub(crate) struct TableCopyStream<I> {
+    pub(crate) struct TableCopyStream {
         #[pin]
         stream: CopyOutStream,
-        column_schemas: I,
+        column_schemas: Vec<ColumnSchema>,
         metrics_batch: CopyMetricsBatch,
     }
 }
 
-impl<I> TableCopyStream<I> {
+impl TableCopyStream {
     /// Creates a new [`TableCopyStream`] from a [`CopyOutStream`] and column
     /// schemas.
     ///
     /// The column schemas are used to convert the raw Postgres data into
     /// [`TableRow`]s.
-    pub(crate) fn wrap(stream: CopyOutStream, column_schemas: I) -> Self {
+    pub(crate) fn wrap(stream: CopyOutStream, column_schemas: Vec<ColumnSchema>) -> Self {
         Self { stream, column_schemas, metrics_batch: CopyMetricsBatch::default() }
     }
 }
 
-impl<'a, I> Stream for TableCopyStream<I>
-where
-    I: ExactSizeIterator<Item = &'a ColumnSchema> + Clone,
-{
+impl Stream for TableCopyStream {
     type Item = EtlResult<TableRow>;
 
     /// Polls the stream for the next converted table row with comprehensive
@@ -131,7 +128,8 @@ where
 
                 // Conversion step: transform raw bytes into structured TableRow.
                 // This is where most errors occur due to data format or type issues.
-                match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.clone()) {
+                match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.as_slice())
+                {
                     Ok(row) => Poll::Ready(Some(Ok(row))),
                     Err(err) => {
                         this.metrics_batch.flush();
