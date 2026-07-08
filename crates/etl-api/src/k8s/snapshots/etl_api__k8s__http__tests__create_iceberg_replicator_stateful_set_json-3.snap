@@ -170,7 +170,6 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
               }
             ],
             "image": "public.ecr.aws/supabase/timberio/vector:0.55.0-distroless-libc",
-            "imagePullPolicy": "IfNotPresent",
             "name": "abcdefghijklmnopqrst-42-vector",
             "resources": {
               "limits": {

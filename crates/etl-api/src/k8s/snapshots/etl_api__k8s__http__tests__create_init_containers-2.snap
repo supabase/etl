@@ -16,7 +16,6 @@ expression: node_selector
       }
     ],
     "image": "public.ecr.aws/supabase/timberio/vector:0.55.0-distroless-libc",
-    "imagePullPolicy": "IfNotPresent",
     "name": "abcdefghijklmnopqrst-42-vector",
     "resources": {
       "limits": {

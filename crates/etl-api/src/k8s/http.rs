@@ -1426,9 +1426,6 @@ fn create_init_containers_json(
           {
             "name": vector_container_name,
             "image": VECTOR_IMAGE_NAME,
-            // The image tag is pinned to a specific Vector release, so the node-local
-            // cache is trustworthy and re-pulling on every restart is unnecessary.
-            "imagePullPolicy": "IfNotPresent",
             "restartPolicy": "Always",
             "securityContext": {
               "allowPrivilegeEscalation": false,
