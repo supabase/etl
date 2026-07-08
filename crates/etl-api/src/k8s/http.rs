@@ -132,7 +132,7 @@ const CPU_LIMIT_MULTIPLIER: f32 = 2.0;
 
 /// Kubernetes resource settings for all containers in a replicator StatefulSet.
 #[derive(Debug)]
-struct ReplicatorStatefulSetResources {
+struct ReplicatorStatefulSetResourcesConfig {
     replicator_memory_limit: String,
     replicator_memory_request: String,
     replicator_cpu_limit: String,
@@ -143,7 +143,7 @@ struct ReplicatorStatefulSetResources {
     vector_cpu_request: String,
 }
 
-impl ReplicatorStatefulSetResources {
+impl ReplicatorStatefulSetResourcesConfig {
     /// Builds StatefulSet resources from environment-specific test defaults.
     #[cfg(test)]
     fn for_environment(environment: &Environment) -> Result<Self, K8sError> {
@@ -723,7 +723,7 @@ impl K8sClient for HttpK8sClient {
         let prefix = request.prefix.as_str();
         let replicator_image = request.replicator_image.as_str();
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::from_default_replicator_resources(
+            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
                 &self.k8s_config.replicator_resources,
                 request.replicator_resources.as_ref(),
             )?;
@@ -1400,7 +1400,7 @@ fn create_node_selector_json(environment: &Environment) -> serde_json::Value {
 fn create_init_containers_json(
     prefix: &str,
     environment: &Environment,
-    stateful_set_resources: &ReplicatorStatefulSetResources,
+    stateful_set_resources: &ReplicatorStatefulSetResourcesConfig,
 ) -> serde_json::Value {
     let vector_container_name = create_vector_container_name(prefix);
     // In staging and prod, run vector init container to collect logs
@@ -1652,7 +1652,7 @@ fn create_replicator_stateful_set_json(
     init_containers: serde_json::Value,
     volumes: Vec<serde_json::Value>,
     volume_mounts: Vec<serde_json::Value>,
-    stateful_set_resources: &ReplicatorStatefulSetResources,
+    stateful_set_resources: &ReplicatorStatefulSetResourcesConfig,
 ) -> serde_json::Value {
     let replicator_app_name = create_replicator_app_name(prefix);
     let restarted_at_annotation = get_restarted_at_annotation_value();
@@ -1884,9 +1884,10 @@ mod tests {
 
     #[test]
     fn test_replicator_stateful_set_resources_uses_api_config_requests() {
-        let prod = ReplicatorStatefulSetResources::for_environment(&Environment::Prod).unwrap();
+        let prod =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Prod).unwrap();
         let staging =
-            ReplicatorStatefulSetResources::for_environment(&Environment::Staging).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Staging).unwrap();
 
         assert_eq!(prod.replicator_cpu_request, "500m");
         assert_eq!(prod.replicator_memory_request, "500Mi");
@@ -1904,7 +1905,7 @@ mod tests {
         let k8s_config = test_k8s_config(&Environment::Prod);
 
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::from_default_replicator_resources(
+            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
                 &k8s_config.replicator_resources,
                 Some(&overrides),
             )
@@ -1927,7 +1928,7 @@ mod tests {
         let k8s_config = test_k8s_config(&Environment::Prod);
 
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::from_default_replicator_resources(
+            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
                 &k8s_config.replicator_resources,
                 Some(&overrides),
             )
@@ -1955,7 +1956,7 @@ mod tests {
         };
 
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::from_default_replicator_resources(
+            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
                 &k8s_config.replicator_resources,
                 Some(&overrides),
             )
@@ -1978,7 +1979,7 @@ mod tests {
         let k8s_config = test_k8s_config(&Environment::Prod);
 
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::from_default_replicator_resources(
+            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
                 &k8s_config.replicator_resources,
                 Some(&overrides),
             )
@@ -2015,7 +2016,7 @@ mod tests {
 
         let environment = Environment::Prod;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
         let replicator_image = "supabase/replicator:1.2.3";
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2167,7 +2168,7 @@ mod tests {
         };
 
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::from_default_replicator_resources(
+            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
                 &k8s_config.replicator_resources,
                 Some(&overrides),
             )
@@ -2681,21 +2682,21 @@ mod tests {
 
         let environment = Environment::Dev;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
         let node_selector =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         assert_json_snapshot!(node_selector);
 
         let environment = Environment::Staging;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
         let node_selector =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         assert_json_snapshot!(node_selector);
 
         let environment = Environment::Prod;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
         let node_selector =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         assert_json_snapshot!(node_selector);
@@ -2742,7 +2743,7 @@ mod tests {
         // Dev env
         let environment = Environment::Dev;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2784,7 +2785,7 @@ mod tests {
         // Staging env
         let environment = Environment::Staging;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2826,7 +2827,7 @@ mod tests {
         // Prod env
         let environment = Environment::Prod;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2875,7 +2876,7 @@ mod tests {
         // Dev env
         let environment = Environment::Dev;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2917,7 +2918,7 @@ mod tests {
         // Staging env
         let environment = Environment::Staging;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2959,7 +2960,7 @@ mod tests {
         // Prod env
         let environment = Environment::Prod;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -3008,7 +3009,7 @@ mod tests {
         // Dev env
         let environment = Environment::Dev;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -3050,7 +3051,7 @@ mod tests {
         // Staging env
         let environment = Environment::Staging;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -3092,7 +3093,7 @@ mod tests {
         // Prod env
         let environment = Environment::Prod;
         let stateful_set_resources =
-            ReplicatorStatefulSetResources::for_environment(&environment).unwrap();
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
