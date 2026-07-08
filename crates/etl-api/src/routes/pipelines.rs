@@ -446,6 +446,7 @@ pub struct SlotLagMetricsResponse {
     /// How many bytes of WAL are still safe to build up before the limit of the
     /// slot is reached. `None` means Postgres reports unlimited slot WAL
     /// retention.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = 8192, nullable = true)]
     pub safe_wal_size_bytes: Option<i64>,
     /// Write lag expressed in milliseconds.

@@ -18,17 +18,15 @@ const API_KEY_LENGTH_IN_BYTES: usize = 32;
 ///
 /// Contains all settings required to run the API including database connection,
 /// server settings, encryption, authentication, and optional monitoring.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ApiConfig {
     /// Database connection configuration for the API database.
     pub database: PgConnectionConfig,
     /// Application server settings.
     pub application: ApplicationSettings,
     /// Kubernetes-specific API configuration.
-    #[serde(default)]
     pub k8s: K8sConfig,
     /// Source database configuration and validation settings.
-    #[serde(default)]
     pub source: SourceConfig,
     /// Encryption key configurations.
     pub encryption_keys: Vec<EncryptionKeyConfig>,
@@ -51,25 +49,101 @@ pub struct ApiConfig {
     pub configcat_sdk_key: Option<String>,
 }
 
-/// Kubernetes-specific API configuration.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct K8sConfig {
-    /// Optional request sizing overrides for replicator workloads.
-    #[serde(default)]
-    pub replicator_resources: ReplicatorResourcesConfig,
+impl<'de> Deserialize<'de> for ApiConfig {
+    /// Deserializes and validates ETL API service configuration.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawApiConfig {
+            database: PgConnectionConfig,
+            application: ApplicationSettings,
+            k8s: K8sConfig,
+            #[serde(default)]
+            source: SourceConfig,
+            encryption_keys: Vec<EncryptionKeyConfig>,
+            api_keys: Vec<String>,
+            sentry: Option<SentryConfig>,
+            supabase_api_url: Option<String>,
+            configcat_sdk_key: Option<String>,
+        }
+
+        let raw = RawApiConfig::deserialize(deserializer)?;
+        let config = Self {
+            database: raw.database,
+            application: raw.application,
+            k8s: raw.k8s,
+            source: raw.source,
+            encryption_keys: raw.encryption_keys,
+            api_keys: raw.api_keys,
+            sentry: raw.sentry,
+            supabase_api_url: raw.supabase_api_url,
+            configcat_sdk_key: raw.configcat_sdk_key,
+        };
+
+        config.validate().map_err(de::Error::custom)?;
+
+        Ok(config)
+    }
 }
 
-/// Optional request sizing overrides for replicator workloads.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct ReplicatorResourcesConfig {
-    /// Override for the replicator memory request, in Mi.
-    pub replicator_memory_request_mib: Option<i32>,
-    /// Override for the replicator CPU request, in millicores.
-    pub replicator_cpu_request_millicores: Option<i32>,
-    /// Override for the Vector sidecar memory request, in Mi.
-    pub vector_memory_request_mib: Option<i32>,
-    /// Override for the Vector sidecar CPU request, in millicores.
-    pub vector_cpu_request_millicores: Option<i32>,
+/// Kubernetes-specific API configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct K8sConfig {
+    /// Default request sizing for replicator workloads.
+    ///
+    /// This key remains `replicator_resources` in API configuration files. It
+    /// provides the mandatory baseline CPU and memory requests used for every
+    /// replicator pod unless a pipeline-level override supplies one of those
+    /// request values.
+    pub replicator_resources: DefaultReplicationResourcesConfig,
+}
+
+/// Mandatory default request sizing for replicator workloads.
+///
+/// These values are part of the ETL API service configuration, not the
+/// customer-facing pipeline configuration. They define the baseline Kubernetes
+/// requests for replicator containers. Resource limits are not configurable
+/// here; the ETL API derives them from requests with its static multipliers
+/// unless a pipeline-level override provides explicit limits.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DefaultReplicationResourcesConfig {
+    /// Replicator memory request, in Mi.
+    pub replicator_memory_request_mib: i32,
+    /// Replicator CPU request, in millicores.
+    pub replicator_cpu_request_millicores: i32,
+}
+
+impl ApiConfig {
+    /// Validates API service configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        self.k8s.replicator_resources.validate()
+    }
+}
+
+impl DefaultReplicationResourcesConfig {
+    /// Validates that configured request values are positive.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_positive_request(
+            "K8s replicator memory request",
+            self.replicator_memory_request_mib,
+        )?;
+        validate_positive_request(
+            "K8s replicator cpu request",
+            self.replicator_cpu_request_millicores,
+        )?;
+
+        Ok(())
+    }
+}
+
+fn validate_positive_request(name: &str, value: i32) -> Result<(), String> {
+    if value <= 0 {
+        return Err(format!("{name} must be greater than 0"));
+    }
+
+    Ok(())
 }
 
 /// Configuration for source database connections and behavior.

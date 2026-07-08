@@ -78,6 +78,36 @@ export APP_CONFIG_DIR=/etc/etl-api/config
 ./etl-api
 ```
 
+### Replicator Resources
+
+The ETL API configuration must define the default Kubernetes requests for
+replicator containers:
+
+```yaml
+k8s:
+  replicator_resources:
+    replicator_cpu_request_millicores: 500
+    replicator_memory_request_mib: 2000
+```
+
+These defaults are mandatory and request-only. The ETL API derives Kubernetes
+limits from the final request values with static multipliers in the Kubernetes
+materializer.
+
+Pipeline configuration may override any replicator resource field:
+
+```yaml
+replicator_resources:
+  cpu_request_millicores: 750
+  memory_request_mib: 1536
+  cpu_limit_millicores: 1500
+  memory_limit_mib: 1843
+```
+
+All pipeline resource fields are optional. If a request is omitted, the API
+configuration default is used. If a limit is omitted, the ETL API computes it
+from the final request and the static multiplier.
+
 ### Encryption Keys
 
 Sensitive source and destination config fields are encrypted before being stored
