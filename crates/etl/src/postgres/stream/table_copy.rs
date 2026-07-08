@@ -3,7 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::{Stream, ready};
+use futures::Stream;
 use metrics::{counter, histogram};
 use pin_project_lite::pin_project;
 use tokio_postgres::CopyOutStream;
@@ -20,6 +20,62 @@ use crate::{
     schema::ColumnSchema,
 };
 
+/// Number of COPY rows to aggregate before emitting counter metrics.
+///
+/// Row-size histograms are still recorded per row so their distribution keeps
+/// the same meaning.
+const COPY_METRICS_FLUSH_ROWS: u64 = 1024;
+
+/// Pending COPY metrics waiting to be emitted.
+#[derive(Debug, Default)]
+struct CopyMetricsBatch {
+    /// Number of rows seen since the last flush.
+    rows: u64,
+    /// Number of raw COPY bytes seen since the last flush.
+    bytes: u64,
+}
+
+impl CopyMetricsBatch {
+    /// Records one COPY row and flushes counters when the batch is full.
+    fn record_row(&mut self, row_size_bytes: u64) {
+        self.rows = self.rows.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(row_size_bytes);
+
+        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy").record(row_size_bytes as f64);
+
+        if self.rows >= COPY_METRICS_FLUSH_ROWS {
+            self.flush();
+        }
+    }
+
+    /// Flushes pending metric deltas to the metrics recorder.
+    fn flush(&mut self) {
+        if self.rows == 0 {
+            return;
+        }
+
+        counter!(
+            ETL_EVENTS_RECEIVED_TOTAL,
+            WORKER_TYPE_LABEL => "table_sync",
+            ACTION_LABEL => "table_copy",
+        )
+        .increment(self.rows);
+
+        counter!(
+            ETL_EVENTS_PROCESSED_TOTAL,
+            WORKER_TYPE_LABEL => "table_sync",
+            ACTION_LABEL => "table_copy",
+        )
+        .increment(self.rows);
+
+        counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => "copy").increment(self.bytes);
+        counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "copy").increment(self.bytes);
+
+        self.rows = 0;
+        self.bytes = 0;
+    }
+}
+
 pin_project! {
     /// A stream that yields rows from a Postgres COPY operation.
     ///
@@ -31,6 +87,7 @@ pin_project! {
         #[pin]
         stream: CopyOutStream,
         column_schemas: I,
+        metrics_batch: CopyMetricsBatch,
     }
 }
 
@@ -41,33 +98,7 @@ impl<I> TableCopyStream<I> {
     /// The column schemas are used to convert the raw Postgres data into
     /// [`TableRow`]s.
     pub(crate) fn wrap(stream: CopyOutStream, column_schemas: I) -> Self {
-        Self { stream, column_schemas }
-    }
-
-    /// Records source-side metrics for a COPY row received from Postgres.
-    fn record_row_received(row_size_bytes: u64) {
-        counter!(
-            ETL_EVENTS_RECEIVED_TOTAL,
-            WORKER_TYPE_LABEL => "table_sync",
-            ACTION_LABEL => "table_copy",
-        )
-        .increment(1);
-
-        counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => "copy").increment(row_size_bytes);
-    }
-
-    /// Records pipeline-side metrics for a COPY row read from the stream.
-    fn record_row_processed(row_size_bytes: u64) {
-        counter!(
-            ETL_EVENTS_PROCESSED_TOTAL,
-            WORKER_TYPE_LABEL => "table_sync",
-            ACTION_LABEL => "table_copy",
-        )
-        .increment(1);
-
-        counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "copy").increment(row_size_bytes);
-
-        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy").record(row_size_bytes as f64);
+        Self { stream, column_schemas, metrics_batch: CopyMetricsBatch::default() }
     }
 }
 
@@ -86,25 +117,41 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
-        match ready!(this.stream.poll_next(cx)) {
+        match this.stream.poll_next(cx) {
+            Poll::Pending => {
+                this.metrics_batch.flush();
+
+                Poll::Pending
+            }
             // Row copy received.
-            Some(Ok(row)) => {
+            Poll::Ready(Some(Ok(row))) => {
                 let row_size_bytes = row.len() as u64;
 
-                Self::record_row_received(row_size_bytes);
-                Self::record_row_processed(row_size_bytes);
+                this.metrics_batch.record_row(row_size_bytes);
 
                 // Conversion step: transform raw bytes into structured TableRow.
                 // This is where most errors occur due to data format or type issues.
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.clone()) {
                     Ok(row) => Poll::Ready(Some(Ok(row))),
-                    Err(err) => Poll::Ready(Some(Err(err))),
+                    Err(err) => {
+                        this.metrics_batch.flush();
+
+                        Poll::Ready(Some(Err(err)))
+                    }
                 }
             }
             // Postgres connection or protocol-level failure.
-            Some(Err(err)) => Poll::Ready(Some(Err(err.into()))),
+            Poll::Ready(Some(Err(err))) => {
+                this.metrics_batch.flush();
+
+                Poll::Ready(Some(Err(err.into())))
+            }
             // Normal completion, no more rows available.
-            None => Poll::Ready(None),
+            Poll::Ready(None) => {
+                this.metrics_batch.flush();
+
+                Poll::Ready(None)
+            }
         }
     }
 }

@@ -15,6 +15,12 @@ use crate::{
     schema::TableId,
 };
 
+/// Maximum item-vector capacity retained after emitting a stream batch.
+///
+/// This avoids reallocating for normal batch sizes while bounding memory after
+/// a transiently large batch.
+const MAX_RETAINED_BATCH_ITEMS: usize = 16 * 1024;
+
 /// Builds the stream id for a table sync worker's initial table-copy stream.
 pub(crate) fn table_sync_worker_copy_stream_id(table_id: TableId) -> String {
     format!("table_sync_worker_copy_{}_stream", table_id.0)
@@ -28,6 +34,14 @@ pub(crate) fn table_sync_worker_apply_stream_id(table_id: TableId) -> String {
 /// Builds the stream id for the apply worker's apply stream.
 pub(crate) fn apply_worker_apply_stream_id() -> String {
     "apply_worker_apply_stream".to_owned()
+}
+
+/// Takes buffered items and leaves behind a bounded retained-capacity
+/// replacement.
+fn take_items_with_retained_capacity<T>(items: &mut Vec<T>) -> Vec<T> {
+    let replacement_capacity = items.capacity().min(MAX_RETAINED_BATCH_ITEMS);
+
+    std::mem::replace(items, Vec::with_capacity(replacement_capacity))
 }
 
 pin_project! {
@@ -279,7 +293,9 @@ where
                         *this.reset_timer = true;
                         *this.current_batch_bytes = 0;
 
-                        return Poll::Ready(Some(Ok(std::mem::take(this.items))));
+                        return Poll::Ready(Some(Ok(take_items_with_retained_capacity(
+                            this.items,
+                        ))));
                     }
                 }
                 Poll::Ready(Some(Err(err))) => {
@@ -313,7 +329,7 @@ where
             *this.reset_timer = true;
             *this.current_batch_bytes = 0;
 
-            return Poll::Ready(Some(Ok(std::mem::take(this.items))));
+            return Poll::Ready(Some(Ok(take_items_with_retained_capacity(this.items))));
         }
 
         Poll::Pending

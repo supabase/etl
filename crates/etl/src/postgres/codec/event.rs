@@ -790,14 +790,15 @@ impl<'a> OldRowResolver<'a> {
 
 /// Converts a dense key-image tuple into a dense row containing only
 /// replica-identity columns in replicated table-column order.
-fn convert_dense_key_tuple_to_row(
-    identity_column_schemas: &[&ColumnSchema],
+fn convert_dense_key_tuple_to_row<'a>(
+    identity_column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
     tuple_data: &[protocol::TupleData],
 ) -> EtlResult<TableRow> {
-    let mut values = Vec::with_capacity(identity_column_schemas.len());
+    let identity_column_count = identity_column_schemas.len();
+    let mut values = Vec::with_capacity(identity_column_count);
 
     for (i, (column_schema, tuple_data)) in
-        identity_column_schemas.iter().zip(tuple_data.iter()).enumerate()
+        identity_column_schemas.zip(tuple_data.iter()).enumerate()
     {
         let ConvertedTupleCell::Present(value) =
             convert_tuple_data_to_cell(i, column_schema, tuple_data, None)?
@@ -819,16 +820,17 @@ fn convert_dense_key_tuple_to_row(
 
 /// Converts a full-width key-image tuple into a dense row containing only
 /// replica-identity columns in replicated table-column order.
-fn convert_full_width_key_tuple_to_row(
-    identity_column_schemas: &[&ColumnSchema],
-    replicated_column_schemas: &[&ColumnSchema],
+fn convert_full_width_key_tuple_to_row<'a>(
+    identity_column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
+    replicated_column_schemas: impl Iterator<Item = &'a ColumnSchema>,
     tuple_data: &[protocol::TupleData],
 ) -> EtlResult<TableRow> {
-    let mut values = Vec::with_capacity(identity_column_schemas.len());
-    let mut identity_columns = identity_column_schemas.iter().peekable();
+    let identity_column_count = identity_column_schemas.len();
+    let mut values = Vec::with_capacity(identity_column_count);
+    let mut identity_columns = identity_column_schemas.peekable();
 
     for (i, (column_schema, tuple_data)) in
-        replicated_column_schemas.iter().zip(tuple_data.iter()).enumerate()
+        replicated_column_schemas.zip(tuple_data.iter()).enumerate()
     {
         if !identity_columns.peek().is_some_and(|identity_column| {
             identity_column.ordinal_position == column_schema.ordinal_position
@@ -882,11 +884,8 @@ fn normalize_key_tuple_to_row(
     replicated_table_schema: &ReplicatedTableSchema,
     tuple_data: &[protocol::TupleData],
 ) -> EtlResult<TableRow> {
-    let identity_column_schemas: Vec<_> =
-        replicated_table_schema.identity_column_schemas().collect();
-    let identity_column_count = identity_column_schemas.len();
-    let replicated_column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
-    let replicated_column_count = replicated_column_schemas.len();
+    let identity_column_count = replicated_table_schema.identity_column_schemas().len();
+    let replicated_column_count = replicated_table_schema.column_schemas().len();
 
     if identity_column_count == 0 {
         bail!(
@@ -897,12 +896,13 @@ fn normalize_key_tuple_to_row(
     }
 
     match tuple_data.len() {
-        len if len == identity_column_count => {
-            convert_dense_key_tuple_to_row(&identity_column_schemas, tuple_data)
-        }
+        len if len == identity_column_count => convert_dense_key_tuple_to_row(
+            replicated_table_schema.identity_column_schemas(),
+            tuple_data,
+        ),
         len if len == replicated_column_count => convert_full_width_key_tuple_to_row(
-            &identity_column_schemas,
-            &replicated_column_schemas,
+            replicated_table_schema.identity_column_schemas(),
+            replicated_table_schema.column_schemas(),
             tuple_data,
         ),
         _ => {
