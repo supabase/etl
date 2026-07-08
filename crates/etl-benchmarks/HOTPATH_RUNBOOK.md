@@ -36,9 +36,10 @@ The HotPath benchmark build enables these data sources:
 - Future, thread, mutex, RwLock, and SQL sections from HotPath reports where
   the relevant HotPath feature is active and the profiled code emits data.
 - Null destination write delay. Both `write_table_rows` and `write_events`
-  wait a random 10-100ms to simulate flushing a full destination batch. The
-  streaming event path flushes from a spawned task so pending destination writes
-  and apply-loop scheduling are visible.
+  wait before dropping a full destination batch. The default range is 10-100ms,
+  `0..0` disables the artificial delay, and equal min/max values create a fixed
+  delay. The streaming event path flushes from a spawned task so pending
+  destination writes and apply-loop scheduling are visible.
 
 ## Prerequisites
 
@@ -156,6 +157,38 @@ tasks, SQL, and lock paths enough time to show stable hotspots. The 1s batch
 fill gives batches room to grow, making memory growth and larger destination
 flushes easier to inspect.
 
+## Null Delay Sweep
+
+Use fixed delay sweeps to separate core pipeline cost from destination flush
+pressure:
+
+```bash
+for spec in no_delay:0:0 fixed_10ms:10:10 fixed_100ms:100:100 range_10_100ms:10:100; do
+  IFS=: read -r name min_ms max_ms <<< "$spec"
+  cargo xtask benchmark \
+    --force-prepare \
+    --warehouses 1 \
+    --tpcc-threads 8 \
+    --streaming-duration-seconds 10 \
+    --streaming-drain-quiet-ms 1000 \
+    --batch-max-fill-ms 1000 \
+    --null-flush-delay-min-ms "$min_ms" \
+    --null-flush-delay-max-ms "$max_ms" \
+    --max-table-sync-workers 2 \
+    --max-copy-connections-per-table 1 \
+    --destination null \
+    --samples 1 \
+    --warmup-samples 0 \
+    --output-dir "target/bench-results-null-delay/${name}"
+done
+```
+
+Compare `table_streaming.json` fields `total_ms`, `ready_wait_ms`,
+`end_to_end_with_shutdown_ms`, `destination_stats.event_batches`, and
+`destination_stats.max_event_batch_size`. The no-delay run shows raw pipeline
+cost; fixed 10ms is a light pressure profile; fixed 100ms and the 10-100ms
+range are stress profiles for pending destination writes and scheduling.
+
 ## CPU And Flamegraph Run
 
 Use CPU profiling after timing and allocation reports identify a suspicious
@@ -200,7 +233,7 @@ cargo xtask benchmark \
   --tpcc-tables warehouse,district \
   --streaming-duration-seconds 60 \
   --streaming-drain-quiet-ms 1000 \
-  --batch-max-fill-ms 50 \
+  --batch-max-fill-ms 1000 \
   --max-table-sync-workers 2 \
   --max-copy-connections-per-table 1 \
   --destination null \
@@ -402,7 +435,7 @@ Use the same order for human review and LLM analysis:
 2. Confirm row and event volume. A benchmark with too little data can miss
    regressions even if it completes successfully.
 3. Confirm destination behavior. For the null destination, verify row and event
-   batches were written and dropped after the simulated 10-100ms flush delay.
+   batches were written and dropped after the configured simulated flush delay.
 4. Check throughput and latency first. Compare table copy rows/sec and
    streaming events/sec against the base run or previous local run.
 5. Check function timing. The top wall-clock rows identify where the system is

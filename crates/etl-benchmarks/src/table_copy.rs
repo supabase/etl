@@ -94,6 +94,8 @@ struct TableCopyReport {
     batch_max_fill_ms: u64,
     memory_budget_ratio: f32,
     memory_backpressure_enabled: bool,
+    null_flush_delay_min_ms: u64,
+    null_flush_delay_max_ms: u64,
     destination_stats: DestinationStatsSnapshot,
     tokio_runtime_stats: TokioRuntimeStatsSnapshot,
 }
@@ -105,12 +107,14 @@ pub async fn main() -> Result<()> {
     let _log_flusher = init_benchmark_tracing(args.log_target, "table_copy")?;
 
     match args.command {
-        Commands::Run(args) => Box::pin(run(args)).await,
+        Commands::Run(args) => run(args).await,
     }
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn run(args: RunArgs) -> Result<()> {
+    args.destination.validate()?;
+
     if args.table_ids.is_empty() {
         bail!("--table-ids must include at least one table");
     }
@@ -193,6 +197,8 @@ async fn run(args: RunArgs) -> Result<()> {
         batch_max_fill_ms: args.tuning.batch_max_fill_ms,
         memory_budget_ratio: args.tuning.memory_budget_ratio,
         memory_backpressure_enabled: !args.tuning.disable_memory_backpressure,
+        null_flush_delay_min_ms: args.destination.null_flush_delay_min_ms,
+        null_flush_delay_max_ms: args.destination.null_flush_delay_max_ms,
         destination_stats,
         tokio_runtime_stats: tokio_runtime_stats(),
     };

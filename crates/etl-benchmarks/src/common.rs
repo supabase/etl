@@ -55,6 +55,10 @@ use url::Url;
 
 /// Default batch fill time for benchmark runs.
 pub const BENCHMARK_DEFAULT_BATCH_MAX_FILL_MS: u64 = 1_000;
+/// Default minimum artificial flush delay for the null destination.
+pub const BENCHMARK_DEFAULT_NULL_FLUSH_DELAY_MIN_MS: u64 = 10;
+/// Default maximum artificial flush delay for the null destination.
+pub const BENCHMARK_DEFAULT_NULL_FLUSH_DELAY_MAX_MS: u64 = 100;
 
 /// Ensures crypto provider is only initialized once.
 #[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
@@ -193,6 +197,12 @@ pub struct DestinationArgs {
     /// Destination type to use.
     #[arg(long, value_enum, default_value = "null")]
     pub destination: DestinationType,
+    /// Minimum artificial null-destination flush delay in milliseconds.
+    #[arg(long, default_value_t = BENCHMARK_DEFAULT_NULL_FLUSH_DELAY_MIN_MS)]
+    pub null_flush_delay_min_ms: u64,
+    /// Maximum artificial null-destination flush delay in milliseconds.
+    #[arg(long, default_value_t = BENCHMARK_DEFAULT_NULL_FLUSH_DELAY_MAX_MS)]
+    pub null_flush_delay_max_ms: u64,
     /// BigQuery project ID.
     #[arg(long)]
     pub bq_project_id: Option<String>,
@@ -472,12 +482,19 @@ where
 #[derive(Clone)]
 pub struct NullDestination {
     tasks: TaskSet,
+    flush_delay: NullFlushDelay,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NullFlushDelay {
+    min_ms: u64,
+    max_ms: u64,
 }
 
 impl NullDestination {
     /// Creates a null destination.
-    fn new() -> Self {
-        Self { tasks: TaskSet::new() }
+    fn new(flush_delay: NullFlushDelay) -> Self {
+        Self { tasks: TaskSet::new(), flush_delay }
     }
 }
 
@@ -507,7 +524,7 @@ impl Destination for NullDestination {
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        sleep_random_null_flush_delay().await;
+        sleep_random_null_flush_delay(self.flush_delay).await;
         drop(table_rows);
         async_result.send(Ok(()));
         Ok(())
@@ -520,9 +537,10 @@ impl Destination for NullDestination {
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
+        let flush_delay = self.flush_delay;
         self.tasks
             .spawn(async move {
-                sleep_random_null_flush_delay().await;
+                sleep_random_null_flush_delay(flush_delay).await;
                 drop(events);
                 async_result.send(Ok(DestinationWriteStatus::Durable));
             })
@@ -533,10 +551,14 @@ impl Destination for NullDestination {
 }
 
 /// Sleeps for a randomized null-destination batch flush delay.
-async fn sleep_random_null_flush_delay() {
-    let delay_ms = {
-        let mut rng = rand::rng();
-        rng.random_range(10..=100)
+async fn sleep_random_null_flush_delay(flush_delay: NullFlushDelay) {
+    let delay_ms = match (flush_delay.min_ms, flush_delay.max_ms) {
+        (0, 0) => return,
+        (min_ms, max_ms) if min_ms == max_ms => min_ms,
+        (min_ms, max_ms) => {
+            let mut rng = rand::rng();
+            rng.random_range(min_ms..=max_ms)
+        }
     };
     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 }
@@ -573,9 +595,14 @@ impl BenchDestination {
         pipeline_id: u64,
         store: NotifyingStore,
     ) -> Result<Self> {
+        destination_args.validate()?;
+
         match destination_args.destination {
             DestinationType::Null => {
-                Ok(Self::Null(CountingDestination::new(NullDestination::new())))
+                Ok(Self::Null(CountingDestination::new(NullDestination::new(NullFlushDelay {
+                    min_ms: destination_args.null_flush_delay_min_ms,
+                    max_ms: destination_args.null_flush_delay_max_ms,
+                }))))
             }
             #[cfg(feature = "bigquery")]
             DestinationType::BigQuery => {
@@ -725,6 +752,19 @@ impl BenchDestination {
     }
 }
 
+impl DestinationArgs {
+    /// Validates destination-specific benchmark arguments.
+    pub fn validate(&self) -> Result<()> {
+        if self.null_flush_delay_min_ms > self.null_flush_delay_max_ms {
+            bail!(
+                "--null-flush-delay-min-ms must be less than or equal to --null-flush-delay-max-ms"
+            );
+        }
+
+        Ok(())
+    }
+}
+
 impl Destination for BenchDestination {
     fn name() -> &'static str {
         "bench_destination"
@@ -807,9 +847,12 @@ impl Destination for BenchDestination {
         match self {
             Self::Null(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "bigquery")]
-            Self::BigQuery(destination) => {
-                Box::pin(destination.write_events(events, async_result)).await
-            }
+            #[allow(
+                clippy::large_futures,
+                reason = "The BigQuery benchmark write future is large under all-features HotPath \
+                          checks; keep it stack-allocated to avoid per-batch heap boxing."
+            )]
+            Self::BigQuery(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "snowflake")]

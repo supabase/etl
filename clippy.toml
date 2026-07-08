@@ -1,1 +1,3 @@
+# Keep large futures visible while allowing destination orchestration futures in
+# all-features checks without adding Box::pin heap allocations.
 future-size-threshold = 32768

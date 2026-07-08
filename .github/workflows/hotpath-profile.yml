@@ -98,6 +98,7 @@ jobs:
             echo "| Copy connections/table | 4 |"
             echo "| Memory backpressure | disabled |"
             echo "| Batch max fill | 1000 ms |"
+            echo "| Null flush delay | 10-100 ms |"
             echo "| Measured samples | 1 |"
             echo "| Warmup samples | 0 |"
             echo "| HotPath modes | timing, allocation |"
@@ -118,6 +119,8 @@ jobs:
             --streaming-duration-seconds 60 \
             --streaming-drain-quiet-ms 1000 \
             --batch-max-fill-ms 1000 \
+            --null-flush-delay-min-ms 10 \
+            --null-flush-delay-max-ms 100 \
             --max-table-sync-workers 4 \
             --max-copy-connections-per-table 4 \
             --destination null \
@@ -176,6 +179,8 @@ jobs:
             --streaming-duration-seconds 60 \
             --streaming-drain-quiet-ms 1000 \
             --batch-max-fill-ms 1000 \
+            --null-flush-delay-min-ms 10 \
+            --null-flush-delay-max-ms 100 \
             --max-table-sync-workers 4 \
             --max-copy-connections-per-table 4 \
             --destination null \

@@ -22,6 +22,8 @@ const DEFAULT_TPCC_WAREHOUSES: u16 = 4;
 const DEFAULT_STREAMING_DURATION_SECONDS: u64 = 60;
 const DEFAULT_STREAMING_DRAIN_QUIET_MS: u64 = 2_000;
 const DEFAULT_BATCH_MAX_FILL_MS: u64 = 1_000;
+const DEFAULT_NULL_FLUSH_DELAY_MIN_MS: u64 = 10;
+const DEFAULT_NULL_FLUSH_DELAY_MAX_MS: u64 = 100;
 const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
 const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 4;
 const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.2;
@@ -107,6 +109,12 @@ pub(crate) struct BenchmarkArgs {
     /// Maximum batch fill time in milliseconds.
     #[arg(long, default_value_t = DEFAULT_BATCH_MAX_FILL_MS)]
     batch_max_fill_ms: u64,
+    /// Minimum artificial null-destination flush delay in milliseconds.
+    #[arg(long, default_value_t = DEFAULT_NULL_FLUSH_DELAY_MIN_MS)]
+    null_flush_delay_min_ms: u64,
+    /// Maximum artificial null-destination flush delay in milliseconds.
+    #[arg(long, default_value_t = DEFAULT_NULL_FLUSH_DELAY_MAX_MS)]
+    null_flush_delay_max_ms: u64,
     /// Ratio of process memory reserved for stream batch bytes.
     #[arg(long, default_value_t = DEFAULT_MEMORY_BUDGET_RATIO)]
     memory_budget_ratio: f32,
@@ -203,6 +211,7 @@ impl BenchmarkArgs {
             ),
             ("Streaming drain quiet", format!("{} ms", self.streaming_drain_quiet_ms)),
             ("Batch max fill", format!("{} ms", self.batch_max_fill_ms)),
+            ("Null flush delay", self.null_flush_delay_label()),
             ("Table-sync workers", self.max_table_sync_workers.to_string()),
             ("Copy connections/table", self.max_copy_connections_per_table.to_string()),
             ("Measured samples", self.samples.to_string()),
@@ -298,6 +307,12 @@ impl BenchmarkArgs {
 
         if self.batch_max_fill_ms == 0 {
             bail!("--batch-max-fill-ms must be greater than 0");
+        }
+
+        if self.null_flush_delay_min_ms > self.null_flush_delay_max_ms {
+            bail!(
+                "--null-flush-delay-min-ms must be less than or equal to --null-flush-delay-max-ms"
+            );
         }
 
         if !(0.0..=1.0).contains(&self.memory_budget_ratio) || self.memory_budget_ratio == 0.0 {
@@ -548,6 +563,25 @@ impl BenchmarkArgs {
             .context("failed to drop benchmark publication")
     }
 
+    fn finish_sample_with_publication(
+        &self,
+        publication_name: &str,
+        report: Result<Value>,
+    ) -> Result<Value> {
+        match report {
+            Ok(report) => {
+                self.drop_publication(publication_name)?;
+                Ok(report)
+            }
+            Err(error) => {
+                if let Err(cleanup_error) = self.drop_publication(publication_name) {
+                    eprintln!("failed to clean up benchmark publication: {cleanup_error:#}");
+                }
+                Err(error)
+            }
+        }
+    }
+
     fn run_table_copy_samples(
         &self,
         selected_tables: &[String],
@@ -577,8 +611,8 @@ impl BenchmarkArgs {
                 expected_row_count,
                 pipeline_id,
                 sample_report_path.clone(),
-            )?;
-            self.drop_publication(&publication_name)?;
+            );
+            let report = self.finish_sample_with_publication(&publication_name, report)?;
             remove_sample_report(&sample_report_path)?;
             print_sample_result("table_copy", &sample_label, &report);
 
@@ -668,8 +702,8 @@ impl BenchmarkArgs {
                 pipeline_id,
                 &selected_tables,
                 sample_report_path.clone(),
-            )?;
-            self.drop_publication(&publication_name)?;
+            );
+            let report = self.finish_sample_with_publication(&publication_name, report)?;
             remove_sample_report(&sample_report_path)?;
             print_sample_result("table_streaming", &sample_label, &report);
 
@@ -793,6 +827,10 @@ impl BenchmarkArgs {
         args.extend([
             "--batch-max-fill-ms".to_owned(),
             self.batch_max_fill_ms.to_string(),
+            "--null-flush-delay-min-ms".to_owned(),
+            self.null_flush_delay_min_ms.to_string(),
+            "--null-flush-delay-max-ms".to_owned(),
+            self.null_flush_delay_max_ms.to_string(),
             "--memory-budget-ratio".to_owned(),
             self.memory_budget_ratio.to_string(),
             "--max-table-sync-workers".to_owned(),
@@ -1014,6 +1052,14 @@ impl BenchmarkArgs {
         label
     }
 
+    fn null_flush_delay_label(&self) -> String {
+        match (self.null_flush_delay_min_ms, self.null_flush_delay_max_ms) {
+            (0, 0) => "disabled".to_owned(),
+            (min_ms, max_ms) if min_ms == max_ms => format!("{min_ms} ms"),
+            (min_ms, max_ms) => format!("{min_ms}-{max_ms} ms"),
+        }
+    }
+
     fn write_artifact_summaries(
         &self,
         table_copy_report: Option<&Value>,
@@ -1227,6 +1273,8 @@ fn summarize_benchmark_report(report: Option<&Value>) -> Value {
         "decoded_mib_per_second": report.get("estimated_mib_per_second").or_else(|| report.get("decoded_mib_per_second")),
         "total_ms": report.get("total_ms"),
         "sample_summary": report.get("sample_summary"),
+        "null_flush_delay_min_ms": report.get("null_flush_delay_min_ms"),
+        "null_flush_delay_max_ms": report.get("null_flush_delay_max_ms"),
         "tokio_runtime_stats": report.get("tokio_runtime_stats"),
         "destination_stats": report.get("destination_stats"),
     })
@@ -1350,6 +1398,8 @@ fn render_artifact_markdown(summary: &Value) -> String {
             append_metric(&mut markdown, report, "events_per_second", "Events/s");
             append_metric(&mut markdown, report, "decoded_mib_per_second", "Decoded MiB/s");
             append_metric(&mut markdown, report, "total_ms", "Total ms");
+            append_metric(&mut markdown, report, "null_flush_delay_min_ms", "Null flush min ms");
+            append_metric(&mut markdown, report, "null_flush_delay_max_ms", "Null flush max ms");
         } else {
             markdown.push_str("- Status: not run\n");
         }

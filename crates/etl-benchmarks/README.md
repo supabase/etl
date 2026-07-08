@@ -108,8 +108,10 @@ If the TPC-C tables already exist, preparation is skipped. Add
 
 Use HotPath when you want timing, allocation, Tokio runtime, thread, and
 destination-flush visibility from the benchmark binaries. The null destination
-simulates destination batch flushing by waiting a random 10-100ms for both
-table-copy row batches and streaming event batches before dropping the batch.
+simulates destination batch flushing by waiting before dropping each table-copy
+row batch and streaming event batch. The default range is 10-100ms. Use
+`--null-flush-delay-min-ms 0 --null-flush-delay-max-ms 0` to disable the
+artificial delay, or set both values to the same number for a fixed delay.
 Streaming event batches are flushed from a spawned task so the apply loop's
 pending destination write path is exercised. Benchmark JSON reports also include
 a final Tokio runtime metrics snapshot with worker counts, live tasks, global
@@ -157,7 +159,8 @@ match CI exactly instead of using the CPU-based thread heuristic.
 `--samples` repeats each selected benchmark and writes the median result to
 `table_copy.json` and `table_streaming.json`. `--warmup-samples` runs extra
 samples before the measured samples and discards them. Use at least three
-samples for CI or other noisy hosts; the JSON reports include
+samples for noisy local investigations; the label-gated CI benchmark uses one
+measured sample to keep the opt-in PR check practical. The JSON reports include
 `sample_summary` with min, median, max, and spread for each numeric top-level
 metric.
 
