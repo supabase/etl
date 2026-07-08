@@ -69,7 +69,7 @@ pub async fn create_destination_and_pipeline(
 
 #[expect(clippy::too_many_arguments)]
 pub async fn update_destination_and_pipeline(
-    mut txn: PgTransaction<'_>,
+    txn: &mut PgTransaction<'_>,
     tenant_id: &str,
     destination_id: i64,
     pipeline_id: i64,
@@ -90,7 +90,6 @@ pub async fn update_destination_and_pipeline(
     .await?;
 
     if destination_id_res.is_none() {
-        txn.rollback().await?;
         return Err(DestinationPipelinesDbError::DestinationNotFound(destination_id));
     };
 
@@ -105,10 +104,8 @@ pub async fn update_destination_and_pipeline(
     .await?;
 
     if pipeline_id_res.is_none() {
-        txn.rollback().await?;
         return Err(DestinationPipelinesDbError::PipelineNotFound(pipeline_id));
     };
-    txn.commit().await?;
 
     Ok(())
 }
