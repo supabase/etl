@@ -329,7 +329,7 @@ There are also optional `startup()` and `shutdown()` methods with default no-op 
 
 ETL clears its own schema versions, destination metadata, and table-sync progress **only after `drop_table_for_copy()` succeeds**. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. If the object is already gone, return success.
 
-All write-like methods must complete their async result handle. Treat the method return value as the place for immediate dispatch or setup failures, and send the final write result through `async_result`. ETL is **at least once**, so make row and event writes idempotent. `write_events()` preserves per-table ordering, but batches can include multiple tables and transaction markers are not a complete all-tables boundary during initial copy and catch-up.
+All write-like methods must complete their async result handle. Treat the method return value as the place for immediate dispatch or setup failures, and send the final write result through `async_result`. Immediate streaming destinations should send `DestinationWriteStatus::Durable` after a successful `write_events()` call. ETL is **at least once**, so make row and event writes idempotent. `write_events()` preserves per-table ordering, but batches can include multiple tables and transaction markers are not a complete all-tables boundary during initial copy and catch-up.
 
 ```rust
 use reqwest::Client;
@@ -338,7 +338,8 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use etl::destination::{
-    Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
+    Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult,
+    WriteTableRowsResult,
 };
 use etl::error::{ErrorKind, EtlResult};
 use etl::{data::TableRow, event::Event, schema::ReplicatedTableSchema};
@@ -426,10 +427,10 @@ impl Destination for HttpDestination {
     async fn write_events(
         &self,
         events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         if events.is_empty() {
-            async_result.send(Ok(()));
+            async_result.send(Ok(DestinationWriteStatus::Durable));
             return Ok(());
         }
         info!("writing {} events", events.len());
@@ -450,7 +451,7 @@ impl Destination for HttpDestination {
         });
 
         let result = self.post("events", payload).await;
-        async_result.send(result);
+        async_result.send(result.map(|_| DestinationWriteStatus::Durable));
         Ok(())
     }
 }

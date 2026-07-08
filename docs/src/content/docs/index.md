@@ -81,7 +81,10 @@ use etl::{
         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
     data::TableRow,
-    destination::{Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+    destination::{
+        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult,
+        WriteTableRowsResult,
+    },
     error::EtlResult,
     event::Event,
     pipeline::Pipeline,
@@ -119,9 +122,9 @@ impl Destination for NoopDestination {
     async fn write_events(
         &self,
         _events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        async_result.send(Ok(()));
+        async_result.send(Ok(DestinationWriteStatus::Durable));
         Ok(())
     }
 }

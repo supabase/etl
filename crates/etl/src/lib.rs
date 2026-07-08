@@ -72,7 +72,8 @@
 //!     },
 //!     data::TableRow,
 //!     destination::{
-//!         Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
+//!         Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult,
+//!         WriteTableRowsResult,
 //!     },
 //!     error::EtlResult,
 //!     event::Event,
@@ -108,9 +109,9 @@
 //!     async fn write_events(
 //!         &self,
 //!         _events: Vec<Event>,
-//!         async_result: WriteEventsResult<()>,
+//!         async_result: WriteEventsResult,
 //!     ) -> EtlResult<()> {
-//!         async_result.send(Ok(()));
+//!         async_result.send(Ok(DestinationWriteStatus::Durable));
 //!         Ok(())
 //!     }
 //! }
@@ -153,6 +154,7 @@
 //!         memory_backpressure: Some(MemoryBackpressureConfig::default()),
 //!         table_sync_copy: TableSyncCopyConfig::default(),
 //!         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+//!         run_source_migrations: true,
 //!     };
 //!
 //!     // Create and start the pipeline

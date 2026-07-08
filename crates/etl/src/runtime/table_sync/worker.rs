@@ -138,12 +138,6 @@ impl TableSyncWorkerStateInner {
 
         // Conditionally persist based on state type requirements
         if state.as_type().should_store() {
-            info!(
-                table_id = self.table_id.0,
-                %state,
-                "storing state change",
-            );
-
             // Persist to external storage - this may fail without affecting in-memory state
             state_store.update_table_state(self.table_id, state).await?;
         }
@@ -543,7 +537,7 @@ where
     /// storage, creating the state management structure, and spawning the
     /// synchronization process into the pool.
     pub(crate) async fn spawn_into_pool(self, pool: &TableSyncWorkerPool) -> EtlResult<()> {
-        info!(table_id = self.table_id.0, "starting table sync worker");
+        debug!(table_id = self.table_id.0, "starting table sync worker");
 
         let Some(table_state) = self.store.get_table_state(self.table_id).await? else {
             bail!(
