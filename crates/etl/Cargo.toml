@@ -24,6 +24,7 @@ etl-config = { workspace = true }
 etl-postgres = { workspace = true, features = ["tokio", "store"] }
 fail = { workspace = true }
 futures = { workspace = true }
+memchr = { workspace = true }
 metrics = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }

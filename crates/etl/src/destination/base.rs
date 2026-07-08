@@ -117,16 +117,31 @@ pub trait Destination {
     /// The main ordering guarantee is per table: ETL preserves the required
     /// order for streaming operations on the same table.
     ///
-    /// Implementations report asynchronous completion through `async_result`.
-    /// The method return value is reserved for immediate dispatch/setup
-    /// failures before the work has been accepted.
+    /// Implementations report asynchronous write status through
+    /// `async_result`. The method return value is reserved for immediate
+    /// dispatch/setup failures before the work has been accepted.
     ///
-    /// This lets ETL distinguish synchronous dispatch errors from asynchronous
-    /// flush completion. This is also the path where ETL gains real
-    /// overlap: once dispatch succeeds, the apply loop may continue
-    /// processing while the destination finishes the current batch. ETL still
-    /// will not hand the destination the next streaming batch until the
-    /// previous `async_result` has been completed.
+    /// [`crate::destination::DestinationWriteStatus::Durable`] means this write
+    /// and all earlier accepted writes in the same ordered apply-loop stream
+    /// are durable according to the destination contract. ETL may advance
+    /// durable replication progress only after observing this status.
+    ///
+    /// [`crate::destination::DestinationWriteStatus::Accepted`] means the
+    /// destination accepted ownership of the write, but ETL must not advance
+    /// durable progress for it yet.
+    ///
+    /// ETL keeps at most one streaming write result pending while it continues
+    /// building the next batch. If a result completes as
+    /// [`crate::destination::DestinationWriteStatus::Accepted`], ETL carries
+    /// that write's commit end LSN into the next streaming write instead of
+    /// advancing durable progress. A later
+    /// [`crate::destination::DestinationWriteStatus::Durable`] result is
+    /// cumulative: it must mean that later write and all earlier `Accepted`
+    /// writes in the same apply-loop stream are durable.
+    ///
+    /// If no later streaming write is dispatched before shutdown, ETL exits
+    /// without acknowledging accepted-but-not-durable progress. Restart then
+    /// replays from the last durable checkpoint.
     ///
     /// Async implementations that offload work should coordinate `async_result`
     /// with [`Destination::shutdown`]. ETL calls [`Destination::shutdown`]
@@ -149,6 +164,6 @@ pub trait Destination {
     fn write_events(
         &self,
         events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        async_result: WriteEventsResult,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }

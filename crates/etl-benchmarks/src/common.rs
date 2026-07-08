@@ -15,8 +15,8 @@ use clap::{Args, ValueEnum};
 use etl::{
     data::{SizeHint, TableRow},
     destination::{
-        Destination, DropTableForCopyResult, PipelineDestination, WriteEventsResult,
-        WriteTableRowsResult,
+        Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -408,7 +408,7 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         let counts = classify_events(&events);
         self.inner.write_events(events, async_result).await?;
@@ -454,9 +454,9 @@ impl Destination for NullDestination {
     async fn write_events(
         &self,
         _events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        async_result.send(Ok(()));
+        async_result.send(Ok(DestinationWriteStatus::Durable));
         Ok(())
     }
 }
@@ -720,7 +720,7 @@ impl Destination for BenchDestination {
     async fn write_events(
         &self,
         events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         match self {
             Self::Null(destination) => destination.write_events(events, async_result).await,
@@ -844,6 +844,7 @@ pub fn pipeline_config(
         table_sync_copy,
         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
         max_copy_connections_per_table: tuning.max_copy_connections_per_table,
+        run_source_migrations: true,
     }
 }
 

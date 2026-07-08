@@ -8,7 +8,7 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use etl_postgres::slots::EtlReplicationSlot;
 use tokio::sync::Semaphore;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub use crate::runtime::concurrency::ShutdownTx;
 use crate::{
@@ -144,8 +144,17 @@ where
         );
 
         // Source migrations install schema helper functions and DDL event
-        // triggers used by all stores.
-        migrations::run_source_migrations(&self.config.pg_connection).await?;
+        // triggers used by all stores. Creating the `ddl_command_end` event
+        // trigger requires superuser, so this is gated: a de-elevated role can
+        // disable it and have an admin install the source objects out-of-band.
+        if self.config.run_source_migrations {
+            migrations::run_source_migrations(&self.config.pg_connection).await?;
+        } else {
+            warn!(
+                "skipping source migrations (run_source_migrations = false); the source schema \
+                 helpers and DDL event trigger must be installed out-of-band"
+            );
+        }
 
         // We always start memory monitoring for running workers to keep total memory
         // snapshots available.
@@ -237,8 +246,6 @@ where
             return Ok(());
         };
 
-        info!("waiting for apply worker to complete");
-
         let mut errors = vec![];
 
         // We first wait for the apply worker to finish, since that must be done before
@@ -246,10 +253,9 @@ where
         // for sync workers first, we might be having the apply worker that
         // spawns new sync workers after we waited for the current
         // ones to finish.
+        debug!("waiting for apply worker to complete");
         let apply_worker_result = apply_worker.wait().await;
         if let Err(err) = apply_worker_result {
-            warn!("apply worker failed, shutting down table sync workers and collecting error");
-
             errors.push(err);
 
             // If we fail to send the shutdown signal, we are not going to capture the error
@@ -258,31 +264,24 @@ where
             let _ = self.shutdown_tx.shutdown();
         }
 
-        info!("waiting for table sync workers to complete");
-
         // We wait for all table sync workers to finish.
+        debug!("waiting for table sync workers to complete");
         let table_sync_workers_result = pool.wait_all().await;
         if let Err(err) = table_sync_workers_result {
-            // We naively use the `kinds` as number of errors.
-            let errors_number = err.kinds().len();
-            warn!(error_count = errors_number, "table sync workers failed, collecting errors");
-
             errors.push(err);
         }
 
-        info!("waiting for destination shutdown to complete");
-
         // Once all workers completed, we notify the destination of shutting down.
+        debug!("waiting for destination shutdown to complete");
         if let Err(err) = self.destination.shutdown().await {
             warn!("destination shutdown failed, collecting errors");
 
             errors.push(err);
         }
 
-        info!("waiting for memory monitor to complete");
-
         // As last thing, we want the memory refresh to be done, so that we can cleanly
         // terminate the process.
+        debug!("waiting for memory monitor to complete");
         if let Err(err) = memory_monitor.wait_for_refresh_task().await {
             if err.is_cancelled() {
                 warn!(error = %err, "memory monitor task was cancelled");

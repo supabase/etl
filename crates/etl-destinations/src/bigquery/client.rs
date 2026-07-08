@@ -662,7 +662,10 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
+        // Gzip is CPU-bound on every append with no compression-level control, and rows
+        // can carry large text/JSON payloads.
+        let storage_config =
+            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
@@ -683,7 +686,10 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
+        // Gzip is CPU-bound on every append with no compression-level control, and rows
+        // can carry large text/JSON payloads.
+        let storage_config =
+            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
         let sa_key = parse_service_account_key(sa_key)
             .map_err(BQError::from)
@@ -707,7 +713,10 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
+        // Gzip is CPU-bound on every append with no compression-level control, and rows
+        // can carry large text/JSON payloads.
+        let storage_config =
+            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
@@ -730,7 +739,10 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
+        // Gzip is CPU-bound on every append with no compression-level control, and rows
+        // can carry large text/JSON payloads.
+        let storage_config =
+            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)

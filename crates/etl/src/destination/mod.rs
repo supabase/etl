@@ -17,7 +17,9 @@ pub(crate) use async_result::{
     ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
     PendingWriteEventsResult,
 };
-pub use async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult};
+pub use async_result::{
+    DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
+};
 pub use base::Destination;
 pub use capabilities::PipelineDestination;
 pub use metadata::{
