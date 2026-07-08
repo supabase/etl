@@ -123,14 +123,6 @@ const DUCKLAKE_MAINTENANCE_KIND: &str = "DuckLakeMaintenance";
 const MIN_K8S_CPU_MILLICORES: i32 = 1;
 /// Minimum Kubernetes memory quantity emitted by the API, in Mi.
 const MIN_K8S_MEMORY_MIB: i32 = 1;
-/// Memory limit multiplier (request × 1.2 = limit).
-///
-/// We want to have 20% leeway in case of a memory usage spike.
-const MEMORY_LIMIT_MULTIPLIER: f32 = 1.2;
-/// CPU limit multiplier (request × 2.0 = limit).
-///
-/// CPU can be throttled, so the limits can be put higher.
-const CPU_LIMIT_MULTIPLIER: f32 = 2.0;
 
 /// Kubernetes resource settings for all containers in a replicator StatefulSet.
 #[derive(Debug)]
@@ -162,10 +154,11 @@ impl ReplicatorStatefulSetResourcesConfig {
     ///
     /// Request precedence is pipeline override first, then the mandatory API
     /// default from `k8s.replicator_resources`. Limit precedence is explicit
-    /// pipeline limit first, then the final request multiplied by the static
-    /// ETL API multiplier constants. Vector requests come from
-    /// `k8s.vector_resources`, and Vector limits are derived from those
-    /// requests with the same static multipliers.
+    /// pipeline limit first, then the final request. Vector requests come from
+    /// `k8s.vector_resources`, and Vector limits match those requests. Keeping
+    /// both CPU and memory limits equal to requests for every container lets
+    /// the pod qualify for Kubernetes Guaranteed QoS unless the pipeline opts
+    /// into different replicator limits.
     fn from_default_resources(
         default_replicator_resources: &DefaultReplicatorResourcesConfig,
         default_vector_resources: &DefaultVectorResourcesConfig,
@@ -192,11 +185,15 @@ impl ReplicatorStatefulSetResourcesConfig {
             MIN_K8S_CPU_MILLICORES,
         );
 
+        // Keep default limits equal to requests so long-running pipelines get
+        // Guaranteed QoS. A pipeline-level limit override is an intentional
+        // opt-out for workloads that need extra replicator headroom. The
+        // replicator memory monitor reads the container cgroup limit through
+        // sysinfo, so batch budgets and memory backpressure scale with this
+        // default limit.
         let replicator_memory_limit = pipeline_replicator_resources
             .and_then(|config| config.memory_limit_mib)
-            .unwrap_or_else(|| {
-                limit_from_request(replicator_memory_request, MEMORY_LIMIT_MULTIPLIER)
-            });
+            .unwrap_or(replicator_memory_request);
         let replicator_memory_limit = clamp_k8s_resource_limit(
             replicator_memory_limit,
             replicator_memory_request,
@@ -204,22 +201,17 @@ impl ReplicatorStatefulSetResourcesConfig {
         );
         let replicator_cpu_limit = pipeline_replicator_resources
             .and_then(|config| config.cpu_limit_millicores)
-            .unwrap_or_else(|| limit_from_request(replicator_cpu_request, CPU_LIMIT_MULTIPLIER));
+            .unwrap_or(replicator_cpu_request);
         let replicator_cpu_limit = clamp_k8s_resource_limit(
             replicator_cpu_limit,
             replicator_cpu_request,
             MIN_K8S_CPU_MILLICORES,
         );
-        let vector_memory_limit = clamp_k8s_resource_limit(
-            limit_from_request(vector_memory_request, MEMORY_LIMIT_MULTIPLIER),
-            vector_memory_request,
-            MIN_K8S_MEMORY_MIB,
-        );
-        let vector_cpu_limit = clamp_k8s_resource_limit(
-            limit_from_request(vector_cpu_request, CPU_LIMIT_MULTIPLIER),
-            vector_cpu_request,
-            MIN_K8S_CPU_MILLICORES,
-        );
+
+        // Sidecars participate in pod QoS too, so Vector must also keep
+        // limits equal to requests for the pod to stay Guaranteed.
+        let vector_memory_limit = vector_memory_request;
+        let vector_cpu_limit = vector_cpu_request;
 
         Ok(Self {
             replicator_memory_limit: format!("{replicator_memory_limit}Mi"),
@@ -242,11 +234,6 @@ fn clamp_k8s_resource_quantity(value: i32, minimum: i32) -> i32 {
 /// Clamps a Kubernetes resource limit so it can satisfy its paired request.
 fn clamp_k8s_resource_limit(limit: i32, request: i32, minimum: i32) -> i32 {
     limit.max(request).max(minimum)
-}
-
-/// Computes a limit from a request and multiplier.
-fn limit_from_request(request: i32, multiplier: f32) -> i32 {
-    ((request as f32) * multiplier).round() as i32
 }
 
 #[cfg(test)]
@@ -1928,8 +1915,8 @@ mod tests {
         assert_eq!(staging.replicator_memory_request, "250Mi");
         assert_eq!(prod.vector_cpu_request, "75m");
         assert_eq!(prod.vector_memory_request, "192Mi");
-        assert_eq!(prod.vector_cpu_limit, "150m");
-        assert_eq!(prod.vector_memory_limit, "230Mi");
+        assert_eq!(prod.vector_cpu_limit, "75m");
+        assert_eq!(prod.vector_memory_limit, "192Mi");
     }
 
     #[test]
@@ -1950,8 +1937,8 @@ mod tests {
 
         assert_eq!(stateful_set_resources.replicator_cpu_request, "750m");
         assert_eq!(stateful_set_resources.replicator_memory_request, "1536Mi");
-        assert_eq!(stateful_set_resources.replicator_cpu_limit, "1500m");
-        assert_eq!(stateful_set_resources.replicator_memory_limit, "1843Mi");
+        assert_eq!(stateful_set_resources.replicator_cpu_limit, "750m");
+        assert_eq!(stateful_set_resources.replicator_memory_limit, "1536Mi");
     }
 
     #[test]
@@ -2009,7 +1996,7 @@ mod tests {
         assert_eq!(stateful_set_resources.replicator_memory_limit, "1Mi");
         assert_eq!(stateful_set_resources.vector_cpu_request, "1m");
         assert_eq!(stateful_set_resources.vector_memory_request, "1Mi");
-        assert_eq!(stateful_set_resources.vector_cpu_limit, "2m");
+        assert_eq!(stateful_set_resources.vector_cpu_limit, "1m");
         assert_eq!(stateful_set_resources.vector_memory_limit, "1Mi");
     }
 
@@ -2058,8 +2045,8 @@ mod tests {
 
         assert_eq!(stateful_set_resources.vector_cpu_request, "80m");
         assert_eq!(stateful_set_resources.vector_memory_request, "192Mi");
-        assert_eq!(stateful_set_resources.vector_cpu_limit, "160m");
-        assert_eq!(stateful_set_resources.vector_memory_limit, "230Mi");
+        assert_eq!(stateful_set_resources.vector_cpu_limit, "80m");
+        assert_eq!(stateful_set_resources.vector_memory_limit, "192Mi");
     }
 
     #[test]
