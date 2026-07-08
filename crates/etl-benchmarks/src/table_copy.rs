@@ -18,9 +18,10 @@ use tracing::info;
 
 use crate::common::{
     BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
-    PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_replication_slots, duration_millis,
-    format_decimal, format_duration_ms, format_integer, init_benchmark_tracing, mib_per_second,
-    per_second, pipeline_config, run_etl_migrations, write_report,
+    PgConnectionArgs, PipelineTuningArgs, TokioRuntimeStatsSnapshot, bytes_to_mib,
+    cleanup_replication_slots, duration_millis, format_decimal, format_duration_ms, format_integer,
+    init_benchmark_tracing, mib_per_second, per_second, pipeline_config, run_etl_migrations,
+    tokio_runtime_stats, write_report,
 };
 
 /// Command-line arguments for the table-copy benchmark.
@@ -94,18 +95,21 @@ struct TableCopyReport {
     memory_budget_ratio: f32,
     memory_backpressure_enabled: bool,
     destination_stats: DestinationStatsSnapshot,
+    tokio_runtime_stats: TokioRuntimeStatsSnapshot,
 }
 
 /// Runs the table-copy benchmark binary.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn main() -> Result<()> {
     let args = Args::parse();
     let _log_flusher = init_benchmark_tracing(args.log_target, "table_copy")?;
 
     match args.command {
-        Commands::Run(args) => run(args).await,
+        Commands::Run(args) => Box::pin(run(args)).await,
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn run(args: RunArgs) -> Result<()> {
     if args.table_ids.is_empty() {
         bail!("--table-ids must include at least one table");
@@ -135,17 +139,20 @@ async fn run(args: RunArgs) -> Result<()> {
     let mut pipeline = Pipeline::new(config, store, destination.clone());
 
     let start_started = Instant::now();
-    pipeline.start().await.context("failed to start pipeline")?;
+    crate::profile_future!("table_copy_pipeline_start", pipeline.start())
+        .context("failed to start pipeline")?;
     let pipeline_start_ms = duration_millis(start_started.elapsed());
 
     let copy_started = Instant::now();
-    let copy_result =
+    let copy_result = crate::profile_future!(
+        "table_copy_wait_for_table_copies",
         wait_for_table_copies(&destination, args.expected_row_count, table_copy_notifications)
-            .await;
+    );
     let copy_wait_duration = copy_started.elapsed();
 
     let shutdown_started = Instant::now();
-    let shutdown_result = pipeline.shutdown_and_wait().await;
+    let shutdown_result =
+        crate::profile_future!("table_copy_pipeline_shutdown", pipeline.shutdown_and_wait());
     let shutdown_ms = duration_millis(shutdown_started.elapsed());
 
     let cleanup_result =
@@ -187,6 +194,7 @@ async fn run(args: RunArgs) -> Result<()> {
         memory_budget_ratio: args.tuning.memory_budget_ratio,
         memory_backpressure_enabled: !args.tuning.disable_memory_backpressure,
         destination_stats,
+        tokio_runtime_stats: tokio_runtime_stats(),
     };
 
     print_summary(&report);
@@ -260,6 +268,7 @@ async fn register_table_copy_notifications(
     Ok(notifications)
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn wait_for_table_copies(
     destination: &BenchDestination,
     expected_row_count: Option<u64>,
@@ -289,6 +298,7 @@ async fn wait_for_table_copies(
     Ok(())
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn wait_for_expected_rows(
     destination: &BenchDestination,
     expected_row_count: u64,

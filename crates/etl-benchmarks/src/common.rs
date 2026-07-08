@@ -15,7 +15,7 @@ use clap::{Args, ValueEnum};
 use etl::{
     data::{SizeHint, TableRow},
     destination::{
-        Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
+        Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination, TaskSet,
         WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
@@ -42,6 +42,7 @@ use etl_destinations::snowflake::{
     Destination as SnowflakeDestination,
 };
 use etl_telemetry::tracing::{LogFlusher, init_tracing};
+use rand::Rng;
 use serde::Serialize;
 use sqlx::{
     Connection, Executor, PgConnection, PgPool,
@@ -58,6 +59,33 @@ pub const BENCHMARK_DEFAULT_BATCH_MAX_FILL_MS: u64 = 1_000;
 /// Ensures crypto provider is only initialized once.
 #[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
 static INIT_CRYPTO: Once = Once::new();
+
+/// Initializes HotPath Tokio runtime metrics when profiling is enabled.
+pub fn init_hotpath_tokio_runtime() {
+    #[cfg(feature = "hotpath")]
+    hotpath::tokio_runtime!();
+}
+
+/// Captures Tokio runtime scheduler metrics for benchmark reports.
+pub fn tokio_runtime_stats() -> TokioRuntimeStatsSnapshot {
+    let metrics = tokio::runtime::Handle::current().metrics();
+    let workers = metrics.num_workers();
+    let mut worker_park_counts = Vec::with_capacity(workers);
+    let mut worker_busy_ms = Vec::with_capacity(workers);
+
+    for worker in 0..workers {
+        worker_park_counts.push(metrics.worker_park_count(worker));
+        worker_busy_ms.push(metrics.worker_total_busy_duration(worker).as_millis());
+    }
+
+    TokioRuntimeStatsSnapshot {
+        workers,
+        alive_tasks: metrics.num_alive_tasks(),
+        global_queue_depth: metrics.global_queue_depth(),
+        worker_park_counts,
+        worker_busy_ms,
+    }
+}
 
 /// Where benchmark logs should be written.
 #[derive(ValueEnum, Debug, Clone, Copy, Serialize)]
@@ -229,6 +257,21 @@ pub struct DestinationStatsSnapshot {
     pub max_event_batch_size: u64,
 }
 
+/// Snapshot of Tokio runtime scheduler metrics captured by a benchmark.
+#[derive(Debug, Clone, Serialize)]
+pub struct TokioRuntimeStatsSnapshot {
+    /// Number of runtime worker threads.
+    pub workers: usize,
+    /// Number of currently alive Tokio tasks.
+    pub alive_tasks: usize,
+    /// Number of tasks waiting in the global injection queue.
+    pub global_queue_depth: usize,
+    /// Number of times each worker parked while waiting for work.
+    pub worker_park_counts: Vec<u64>,
+    /// Total busy time for each worker in milliseconds.
+    pub worker_busy_ms: Vec<u128>,
+}
+
 #[derive(Debug, Default)]
 struct DestinationStats {
     table_rows: AtomicU64,
@@ -386,6 +429,7 @@ where
         self.inner.drop_table_for_copy(replicated_table_schema, async_result).await
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "CountingDestination<D>"))]
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -405,6 +449,7 @@ where
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "CountingDestination<D>"))]
     async fn write_events(
         &self,
         events: Vec<Event>,
@@ -425,11 +470,25 @@ where
 
 /// Destination that acknowledges and discards all writes.
 #[derive(Clone)]
-pub struct NullDestination;
+pub struct NullDestination {
+    tasks: TaskSet,
+}
+
+impl NullDestination {
+    /// Creates a null destination.
+    fn new() -> Self {
+        Self { tasks: TaskSet::new() }
+    }
+}
 
 impl Destination for NullDestination {
     fn name() -> &'static str {
         "null"
+    }
+
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "NullDestination"))]
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.tasks.drain().await
     }
 
     async fn drop_table_for_copy(
@@ -441,24 +500,45 @@ impl Destination for NullDestination {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "NullDestination"))]
     async fn write_table_rows(
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
-        _table_rows: Vec<TableRow>,
+        table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
+        sleep_random_null_flush_delay().await;
+        drop(table_rows);
         async_result.send(Ok(()));
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "NullDestination"))]
     async fn write_events(
         &self,
-        _events: Vec<Event>,
+        events: Vec<Event>,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        async_result.send(Ok(DestinationWriteStatus::Durable));
+        self.tasks.try_reap().await?;
+        self.tasks
+            .spawn(async move {
+                sleep_random_null_flush_delay().await;
+                drop(events);
+                async_result.send(Ok(DestinationWriteStatus::Durable));
+            })
+            .await;
+
         Ok(())
     }
+}
+
+/// Sleeps for a randomized null-destination batch flush delay.
+async fn sleep_random_null_flush_delay() {
+    let delay_ms = {
+        let mut rng = rand::rng();
+        rng.random_range(10..=100)
+    };
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 }
 
 /// Benchmark destination variants.
@@ -494,7 +574,9 @@ impl BenchDestination {
         store: NotifyingStore,
     ) -> Result<Self> {
         match destination_args.destination {
-            DestinationType::Null => Ok(Self::Null(CountingDestination::new(NullDestination))),
+            DestinationType::Null => {
+                Ok(Self::Null(CountingDestination::new(NullDestination::new())))
+            }
             #[cfg(feature = "bigquery")]
             DestinationType::BigQuery => {
                 install_crypto_provider();
@@ -775,6 +857,7 @@ pub async fn pg_pool(args: &PgConnectionArgs) -> Result<PgPool> {
 }
 
 /// Applies ETL source-side migrations required by replication triggers/state.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn run_etl_migrations(args: &PgConnectionArgs) -> Result<()> {
     let mut connection = PgConnection::connect_with(&pg_connect_options(args))
         .await
@@ -804,6 +887,7 @@ pub async fn run_etl_migrations(args: &PgConnectionArgs) -> Result<()> {
 }
 
 /// Builds an ETL pipeline config for a benchmark.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn pipeline_config(
     pipeline_id: u64,
     publication_name: String,
@@ -849,6 +933,7 @@ pub fn pipeline_config(
 }
 
 /// Drops replication slots created by a benchmark pipeline.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn cleanup_replication_slots(
     pg: &PgConnectionArgs,
     pipeline_id: u64,
@@ -988,6 +1073,7 @@ pub fn split_table_name(table_name: &str) -> Result<(String, String)> {
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn classify_events(events: &[Event]) -> EventBatchCounts {
     let mut counts = EventBatchCounts { total_events: events.len() as u64, ..Default::default() };
     for event in events {

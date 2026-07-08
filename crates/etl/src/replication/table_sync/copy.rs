@@ -7,10 +7,14 @@ use std::{
 
 use etl_config::shared::BatchConfig;
 use futures::{Stream, StreamExt};
+#[cfg(feature = "hotpath")]
+use hotpath::wrap::tokio::sync::Mutex;
 use metrics::{counter, gauge, histogram};
+#[cfg(not(feature = "hotpath"))]
+use tokio::sync::Mutex;
 use tokio::{
     pin,
-    sync::{Mutex, watch},
+    sync::watch,
     task::{JoinHandle, JoinSet},
     time::MissedTickBehavior,
 };
@@ -313,6 +317,12 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     // Every child copy connection imports the same exported snapshot, so all
     // CTID ranges for this table copy see a consistent source view.
     let snapshot_id = replication_transaction.export_snapshot().await?;
+    #[cfg(feature = "hotpath")]
+    let work_queue = Arc::new(hotpath::mutex!(
+        tokio::sync::Mutex::new(VecDeque::from(copy_partitions)),
+        label = "table_copy_work_queue"
+    ));
+    #[cfg(not(feature = "hotpath"))]
     let work_queue = Arc::new(Mutex::new(VecDeque::from(copy_partitions)));
     let publication_name = publication_name.map(str::to_owned);
     let mut join_set = JoinSet::new();

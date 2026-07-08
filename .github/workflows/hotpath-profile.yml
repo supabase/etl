@@ -1,0 +1,195 @@
+name: hotpath-profile
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: postgres
+  POSTGRES_DB: bench
+  POSTGRES_PORT: 5430
+  POSTGRES_HOST: localhost
+
+jobs:
+  profile:
+    name: HotPath profile
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'benchmark')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: hotpath-profile
+
+      - name: Install system tools
+        run: |
+          set -euo pipefail
+          missing_packages=()
+          if ! command -v go >/dev/null 2>&1; then
+            missing_packages+=(golang-go)
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            missing_packages+=(postgresql-client)
+          fi
+          if (( ${#missing_packages[@]} > 0 )); then
+            sudo apt-get update
+            sudo apt-get install -y "${missing_packages[@]}"
+          fi
+          go install github.com/pingcap/go-tpc/cmd/go-tpc@v1.0.12
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Start Postgres
+        run: |
+          POSTGRES_IMAGE=postgres:18 \
+          POSTGRES_VERSION=18 \
+            cargo xtask postgres start --shards 1 --base-port "$POSTGRES_PORT" --source-only
+
+      - name: Create metrics directory
+        run: mkdir -p /tmp/metrics/head /tmp/metrics/base
+
+      - name: Record benchmark environment
+        run: |
+          set -euo pipefail
+          host_memory="$(awk '/MemTotal/ { printf "%.2f GiB", $2 / 1024 / 1024 }' /proc/meminfo || true)"
+          if [[ -z "${host_memory}" ]]; then
+            host_memory="unavailable"
+          fi
+
+          cgroup_memory_limit="unavailable"
+          if [[ -r /sys/fs/cgroup/memory.max ]]; then
+            cgroup_memory_limit="$(cat /sys/fs/cgroup/memory.max)"
+          elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+            cgroup_memory_limit="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+          fi
+
+          {
+            echo "## HotPath benchmark environment"
+            echo
+            echo "| Setting | Value |"
+            echo "| --- | --- |"
+            echo "| Runner | ${RUNNER_NAME} |"
+            echo "| Runner OS | ${RUNNER_OS} |"
+            echo "| Runner arch | ${RUNNER_ARCH} |"
+            echo "| CPUs | $(nproc) |"
+            echo "| Host memory | ${host_memory} |"
+            echo "| Cgroup memory limit | ${cgroup_memory_limit} |"
+            echo "| Destination | null |"
+            echo "| Warehouses | 4 |"
+            echo "| TPC-C tables | default replicated set |"
+            echo "| Streaming duration | 20 seconds |"
+            echo "| Table-sync workers | 4 |"
+            echo "| Copy connections/table | 2 |"
+            echo "| Measured samples | 1 |"
+            echo "| Warmup samples | 0 |"
+            echo "| HotPath modes | timing, allocation |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Head benchmarks
+        run: |
+          set -euo pipefail
+          cargo xtask benchmark \
+            --host "$POSTGRES_HOST" \
+            --port "$POSTGRES_PORT" \
+            --database "$POSTGRES_DB" \
+            --username "$POSTGRES_USER" \
+            --password "$POSTGRES_PASSWORD" \
+            --force-prepare \
+            --warehouses 4 \
+            --streaming-duration-seconds 20 \
+            --streaming-drain-quiet-ms 1000 \
+            --batch-max-fill-ms 100 \
+            --max-table-sync-workers 4 \
+            --max-copy-connections-per-table 2 \
+            --destination null \
+            --samples 1 \
+            --warmup-samples 0 \
+            --output-dir /tmp/metrics/head-benchmark \
+            --hotpath \
+            --hotpath-alloc \
+            --hotpath-output-dir /tmp/metrics/head
+
+      - name: Summarize head artifacts
+        run: |
+          set -euo pipefail
+          if [[ -f /tmp/metrics/head-benchmark/benchmark_artifacts.md ]]; then
+            {
+              echo
+              echo "## Head HotPath artifacts"
+              echo
+              cat /tmp/metrics/head-benchmark/benchmark_artifacts.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Checkout base
+        if: github.event_name == 'pull_request'
+        run: git checkout ${{ github.event.pull_request.base.sha }}
+
+      - name: Base benchmarks
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          cargo xtask benchmark \
+            --host "$POSTGRES_HOST" \
+            --port "$POSTGRES_PORT" \
+            --database "$POSTGRES_DB" \
+            --username "$POSTGRES_USER" \
+            --password "$POSTGRES_PASSWORD" \
+            --force-prepare \
+            --warehouses 4 \
+            --streaming-duration-seconds 20 \
+            --streaming-drain-quiet-ms 1000 \
+            --batch-max-fill-ms 100 \
+            --max-table-sync-workers 4 \
+            --max-copy-connections-per-table 2 \
+            --destination null \
+            --samples 1 \
+            --warmup-samples 0 \
+            --output-dir /tmp/metrics/base-benchmark \
+            --hotpath \
+            --hotpath-alloc \
+            --hotpath-output-dir /tmp/metrics/base
+
+      - name: Summarize base artifacts
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          if [[ -f /tmp/metrics/base-benchmark/benchmark_artifacts.md ]]; then
+            {
+              echo
+              echo "## Base HotPath artifacts"
+              echo
+              cat /tmp/metrics/base-benchmark/benchmark_artifacts.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Save PR metadata
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          echo '${{ github.event.pull_request.number }}' > /tmp/metrics/pr_number.txt
+          echo '${{ github.base_ref }}' > /tmp/metrics/base_ref.txt
+          echo '${{ github.head_ref }}' > /tmp/metrics/head_ref.txt
+
+      - name: Upload HotPath metrics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hotpath-profile-metrics
+          path: /tmp/metrics/
+          retention-days: 1

@@ -1,13 +1,15 @@
 use std::{
     collections::HashMap,
+    fmt,
     future::Future,
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use tokio::{
-    sync::{Mutex, RwLock},
-    task::JoinSet,
-};
+#[cfg(feature = "hotpath")]
+use hotpath::wrap::tokio::sync::{Mutex, RwLock};
+#[cfg(not(feature = "hotpath"))]
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
 use crate::{
@@ -52,7 +54,6 @@ impl std::fmt::Display for TableSyncWorkerId {
 /// Locking order during spawn is: workers_join_set lock -> workers write lock.
 /// This ensures that [`wait_all`] (which holds the workers_join_set lock)
 /// blocks any new spawns until all existing workers have completed.
-#[derive(Debug)]
 pub(crate) struct TableSyncWorkerPool {
     /// Monotonically increasing counter for generating unique run IDs.
     next_run_id: AtomicU64,
@@ -62,14 +63,34 @@ pub(crate) struct TableSyncWorkerPool {
     workers: RwLock<HashMap<TableId, TableSyncWorkerHandle>>,
 }
 
+impl fmt::Debug for TableSyncWorkerPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TableSyncWorkerPool")
+            .field("next_run_id", &self.next_run_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl TableSyncWorkerPool {
     /// Creates a new empty table sync worker pool.
     pub(crate) fn new() -> Self {
-        Self {
-            next_run_id: AtomicU64::new(0),
-            workers_join_set: Mutex::new(JoinSet::new()),
-            workers: RwLock::new(HashMap::new()),
-        }
+        #[cfg(feature = "hotpath")]
+        let workers_join_set = hotpath::mutex!(
+            tokio::sync::Mutex::new(JoinSet::new()),
+            label = "table_sync_pool_join_set"
+        );
+        #[cfg(not(feature = "hotpath"))]
+        let workers_join_set = Mutex::new(JoinSet::new());
+
+        #[cfg(feature = "hotpath")]
+        let workers = hotpath::rw_lock!(
+            tokio::sync::RwLock::new(HashMap::new()),
+            label = "table_sync_pool_workers"
+        );
+        #[cfg(not(feature = "hotpath"))]
+        let workers = RwLock::new(HashMap::new());
+
+        Self { next_run_id: AtomicU64::new(0), workers_join_set, workers }
     }
 
     /// Spawns a new worker into the pool if no active worker exists for the

@@ -1,6 +1,10 @@
-use std::{future::Future, sync::Arc};
+use std::{fmt, future::Future, sync::Arc};
 
-use tokio::{sync::Mutex, task::JoinSet};
+#[cfg(feature = "hotpath")]
+use hotpath::wrap::tokio::sync::Mutex;
+#[cfg(not(feature = "hotpath"))]
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tracing::{error, warn};
 
 use crate::{
@@ -31,15 +35,30 @@ struct TaskSetInner {
 /// Shared handle used to manage spawned background tasks.
 ///
 /// [`TaskSet`] is a small lifecycle primitive, not a scheduler.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TaskSet {
     inner: Arc<Mutex<TaskSetInner>>,
+}
+
+impl fmt::Debug for TaskSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskSet").finish_non_exhaustive()
+    }
 }
 
 impl TaskSet {
     /// Creates a new task set.
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(TaskSetInner { join_set: JoinSet::new() })) }
+        #[cfg(feature = "hotpath")]
+        let inner = hotpath::mutex!(
+            tokio::sync::Mutex::new(TaskSetInner { join_set: JoinSet::new() }),
+            label = "task_set"
+        );
+
+        #[cfg(not(feature = "hotpath"))]
+        let inner = Mutex::new(TaskSetInner { join_set: JoinSet::new() });
+
+        Self { inner: Arc::new(inner) }
     }
 
     /// Spawns a new tracked background task.

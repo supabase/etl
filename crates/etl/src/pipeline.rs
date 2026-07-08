@@ -136,6 +136,7 @@ where
     /// table metadata and schemas, creates the worker pool for table
     /// synchronization, and starts the apply worker for processing replication
     /// stream events.
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "Pipeline<S, D>"))]
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             publication_name = %self.config.publication_name,
@@ -239,6 +240,7 @@ where
     /// 2. All table sync workers complete
     /// 3. Any errors from workers are aggregated and returned
     /// 4. Background pipeline tasks complete after shutdown
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "Pipeline<S, D>"))]
     pub async fn wait(self) -> EtlResult<()> {
         let PipelineState::Started { apply_worker, pool, memory_monitor } = self.state else {
             warn!("pipeline was not started, skipping wait");
@@ -327,6 +329,7 @@ where
     /// [`Pipeline::wait`] to provide a single call that both initiates
     /// shutdown and waits for completion. Returns any errors encountered
     /// during the shutdown process.
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "Pipeline<S, D>"))]
     pub async fn shutdown_and_wait(self) -> EtlResult<()> {
         self.shutdown();
         self.wait().await
@@ -344,6 +347,7 @@ where
     /// destination table metadata, table schemas, and durable table-sync
     /// progress), and performs best-effort cleanup of their table sync
     /// replication slots without touching the actual destination tables.
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "Pipeline<S, D>"))]
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,

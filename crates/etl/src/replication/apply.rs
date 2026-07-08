@@ -1860,6 +1860,7 @@ where
     /// current batch queued until the pending flush result has been
     /// processed. The queued batch is then retried from
     /// [`Self::handle_flush_result`] when that in-flight flush resolves.
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "ApplyLoop<S, D>"))]
     async fn flush_batch(&mut self, reason: &str) -> EtlResult<()> {
         // If the batch is empty, we don't need to do anything.
         if !self.state.has_pending_batch() {

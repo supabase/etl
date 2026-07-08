@@ -48,6 +48,7 @@ impl ApplyWorkerHandle {
     /// This method blocks until the apply worker finishes processing, either
     /// due to successful completion, shutdown signal, or error. It properly
     /// handles panics that might occur within the worker task.
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "ApplyWorkerHandle"))]
     pub(crate) async fn wait(mut self) -> EtlResult<()> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
@@ -235,6 +236,7 @@ where
     /// table sync workers (`table_error_retry_delay_ms` and
     /// `table_error_retry_max_attempts`) so retry behavior is
     /// coherent across worker types.
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "ApplyWorker<S, D>"))]
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
         let pipeline_id = self.pipeline_id;
         let config = Arc::clone(&self.config);
@@ -282,6 +284,7 @@ where
     }
 
     /// Runs a single apply worker attempt.
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "ApplyWorker<S, D>"))]
     async fn run_apply_worker(self) -> EtlResult<()> {
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
@@ -362,6 +365,7 @@ where
 /// Init state. If any table is not in Init state when creating a new slot, it
 /// indicates that data was synchronized based on a different apply worker
 /// lineage, which would break replication correctness.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,

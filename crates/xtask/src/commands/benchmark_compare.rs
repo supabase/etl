@@ -11,9 +11,9 @@ use clap::Args;
 use serde::Deserialize;
 use serde_json::Value;
 
-const DEFAULT_ARTIFACT_NAME: &str = "benchmark-results";
+const DEFAULT_ARTIFACT_NAME: &str = "hotpath-profile-metrics";
 const DEFAULT_CURRENT_DIR: &str = "target/bench-results";
-const DEFAULT_WORKFLOW: &str = "benchmark.yml";
+const DEFAULT_WORKFLOW: &str = "hotpath-profile.yml";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
@@ -404,9 +404,24 @@ impl Drop for TempDir {
 
 fn load_reports(dir: &Path) -> Result<Reports> {
     let mut reports = Reports::new();
-    let entries = fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
-    for entry in entries {
+    load_reports_recursive(dir, &mut reports)
+        .with_context(|| format!("failed to read {}", dir.display()))?;
+
+    if reports.is_empty() {
+        bail!("no benchmark JSON reports found in {}", dir.display());
+    }
+
+    Ok(reports)
+}
+
+fn load_reports_recursive(dir: &Path, reports: &mut Reports) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
         let path = entry?.path();
+        if path.is_dir() {
+            load_reports_recursive(&path, reports)?;
+            continue;
+        }
+
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             continue;
         }
@@ -415,22 +430,15 @@ fn load_reports(dir: &Path) -> Result<Reports> {
             .with_context(|| format!("failed to read {}", path.display()))?;
         let report: Value = serde_json::from_str(&contents)
             .with_context(|| format!("failed to parse {}", path.display()))?;
-        let benchmark = report
-            .get("benchmark")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .or_else(|| path.file_stem().and_then(|stem| stem.to_str()).map(ToOwned::to_owned))
-            .with_context(|| {
-                format!("failed to determine benchmark name for {}", path.display())
-            })?;
+        let Some(benchmark) =
+            report.get("benchmark").and_then(Value::as_str).map(ToOwned::to_owned)
+        else {
+            continue;
+        };
         reports.insert(benchmark, report);
     }
 
-    if reports.is_empty() {
-        bail!("no benchmark JSON reports found in {}", dir.display());
-    }
-
-    Ok(reports)
+    Ok(())
 }
 
 fn render_missing_previous(args: &BenchmarkCompareArgs) -> String {

@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use pg_escape::{quote_identifier, quote_literal};
-use serde_json::{Map, Number, Value};
+use serde_json::{Map, Number, Value, json};
 
 const DEFAULT_DB_HOST: &str = "localhost";
 const DEFAULT_DB_PORT: u16 = 5430;
@@ -26,6 +26,7 @@ const DEFAULT_TPCC_MAX_THREADS: usize = 64;
 const MEMORY_BACKPRESSURE_ACTIVATE_THRESHOLD: f32 = 0.85;
 const MEMORY_BACKPRESSURE_RESUME_THRESHOLD: f32 = 0.75;
 const BENCH_SNOWFLAKE_CONNECTION_ENV: &str = "BENCH_SNOWFLAKE_CONNECTION";
+const DEFAULT_HOTPATH_MCP_PORT: u16 = 6771;
 
 #[derive(Args)]
 pub(crate) struct BenchmarkArgs {
@@ -123,6 +124,31 @@ pub(crate) struct BenchmarkArgs {
     /// Directory where JSON benchmark reports are written.
     #[arg(long, default_value = "target/bench-results")]
     output_dir: PathBuf,
+    /// Cargo profile used for benchmark binaries.
+    #[arg(long, default_value = "release")]
+    benchmark_profile: String,
+    /// Enable HotPath timing and Tokio runtime profiling.
+    #[arg(long, default_value_t = false)]
+    hotpath: bool,
+    /// Enable HotPath allocation profiling.
+    #[arg(long, default_value_t = false)]
+    hotpath_alloc: bool,
+    /// Enable HotPath CPU sampling.
+    #[arg(long, default_value_t = false)]
+    hotpath_cpu: bool,
+    /// Comma-separated benchmarks that should expose the HotPath MCP server.
+    ///
+    /// Supported values are `table_copy`, `table_streaming`, and `all`.
+    #[arg(long, value_delimiter = ',')]
+    hotpath_mcp_benchmarks: Vec<String>,
+    /// Port used by the unauthenticated HotPath MCP server.
+    #[arg(long, default_value_t = DEFAULT_HOTPATH_MCP_PORT)]
+    hotpath_mcp_port: u16,
+    /// Directory where per-benchmark HotPath JSON reports are written.
+    ///
+    /// Defaults to `<output-dir>/hotpath` when any HotPath mode is enabled.
+    #[arg(long)]
+    hotpath_output_dir: Option<PathBuf>,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -147,6 +173,10 @@ impl BenchmarkArgs {
         }
 
         fs::create_dir_all(&self.output_dir).context("failed to create benchmark output dir")?;
+        if let Some(hotpath_output_dir) = self.effective_hotpath_output_dir() {
+            fs::create_dir_all(&hotpath_output_dir)
+                .context("failed to create HotPath output dir")?;
+        }
 
         let tpcc_threads =
             self.tpcc_threads.unwrap_or_else(|| recommended_threads(self.warehouses));
@@ -164,6 +194,8 @@ impl BenchmarkArgs {
             ("Memory backpressure", memory_backpressure_label(self.enable_memory_backpressure)),
             ("Memory budget ratio", format_decimal(f64::from(self.memory_budget_ratio), 2)),
             ("Output dir", self.output_dir.display().to_string()),
+            ("Cargo profile", self.benchmark_profile.clone()),
+            ("HotPath", self.hotpath_label()),
         ]);
 
         print_phase("Benchmark database", "ensuring it exists");
@@ -224,6 +256,7 @@ impl BenchmarkArgs {
         }
 
         print_combined_summary(table_copy_report.as_ref(), table_streaming_report.as_ref());
+        self.write_artifact_summaries(table_copy_report.as_ref(), table_streaming_report.as_ref())?;
 
         Ok(())
     }
@@ -249,6 +282,16 @@ impl BenchmarkArgs {
             && duration_seconds == 0
         {
             bail!("--streaming-duration-seconds must be greater than 0");
+        }
+
+        for benchmark in &self.hotpath_mcp_benchmarks {
+            match benchmark.as_str() {
+                "all" | "table_copy" | "table_streaming" => {}
+                other => bail!(
+                    "unsupported --hotpath-mcp-benchmarks value '{other}'; expected table_copy, \
+                     table_streaming, or all"
+                ),
+            }
         }
 
         if matches!(self.destination, Destination::BigQuery) {
@@ -474,12 +517,15 @@ impl BenchmarkArgs {
         report_path: PathBuf,
     ) -> Result<Value> {
         let mut measured_reports = Vec::with_capacity(usize::from(self.samples));
+        let mut measured_hotpath_report_paths = Vec::with_capacity(usize::from(self.samples));
         let total_samples = self.total_sample_count();
         for sample_idx in 0..total_samples {
             let pipeline_id = sample_pipeline_id(pipeline_id_base, 0, sample_idx)?;
             let publication_name = format!("bench_pub_{pipeline_id}");
             let sample_report_path =
                 self.sample_report_path("table_copy", sample_idx.saturating_add(1));
+            let sample_hotpath_report_path =
+                self.hotpath_report_path_for_report("table_copy", &sample_report_path);
             let sample_label = self.sample_label(sample_idx);
 
             print_phase("Table copy", &format!("{sample_label} creating publication"));
@@ -500,6 +546,7 @@ impl BenchmarkArgs {
                 print_skip("Table copy", &format!("{sample_label} discarded as warmup"));
             } else {
                 measured_reports.push(report);
+                measured_hotpath_report_paths.push(sample_hotpath_report_path);
             }
         }
 
@@ -508,6 +555,11 @@ impl BenchmarkArgs {
             usize::from(self.samples),
             usize::from(self.warmup_samples),
             &measured_reports,
+        )?;
+        self.copy_selected_hotpath_report(
+            "table_copy",
+            &measured_reports,
+            &measured_hotpath_report_paths,
         )?;
         write_json_report(&aggregate, &report_path)?;
         print_benchmark_report("table_copy", &aggregate);
@@ -540,7 +592,14 @@ impl BenchmarkArgs {
             expected_row_count.to_string(),
         ]);
 
-        run_benchmark_binary("table_copy", self.destination, &args, &report_path)
+        run_benchmark_binary(
+            "table_copy",
+            self.destination,
+            &self.benchmark_profile,
+            self.hotpath_run_config("table_copy", &report_path),
+            &args,
+            &report_path,
+        )
     }
 
     fn run_table_streaming_samples(
@@ -551,12 +610,15 @@ impl BenchmarkArgs {
     ) -> Result<Value> {
         let selected_tables = self.validated_tpcc_tables()?;
         let mut measured_reports = Vec::with_capacity(usize::from(self.samples));
+        let mut measured_hotpath_report_paths = Vec::with_capacity(usize::from(self.samples));
         let total_samples = self.total_sample_count();
         for sample_idx in 0..total_samples {
             let pipeline_id = sample_pipeline_id(pipeline_id_base, 1, sample_idx)?;
             let publication_name = format!("bench_streaming_pub_{pipeline_id}");
             let sample_report_path =
                 self.sample_report_path("table_streaming", sample_idx.saturating_add(1));
+            let sample_hotpath_report_path =
+                self.hotpath_report_path_for_report("table_streaming", &sample_report_path);
             let sample_label = self.sample_label(sample_idx);
 
             print_phase("Table streaming", &format!("{sample_label} preparing"));
@@ -575,6 +637,7 @@ impl BenchmarkArgs {
                 print_skip("Table streaming", &format!("{sample_label} discarded as warmup"));
             } else {
                 measured_reports.push(report);
+                measured_hotpath_report_paths.push(sample_hotpath_report_path);
             }
         }
 
@@ -583,6 +646,11 @@ impl BenchmarkArgs {
             usize::from(self.samples),
             usize::from(self.warmup_samples),
             &measured_reports,
+        )?;
+        self.copy_selected_hotpath_report(
+            "table_streaming",
+            &measured_reports,
+            &measured_hotpath_report_paths,
         )?;
         write_json_report(&aggregate, &report_path)?;
         print_benchmark_report("table_streaming", &aggregate);
@@ -635,7 +703,14 @@ impl BenchmarkArgs {
             duration_seconds.to_string(),
         ]);
 
-        run_benchmark_binary("table_streaming", self.destination, &args, &report_path)
+        run_benchmark_binary(
+            "table_streaming",
+            self.destination,
+            &self.benchmark_profile,
+            self.hotpath_run_config("table_streaming", &report_path),
+            &args,
+            &report_path,
+        )
     }
 
     fn total_sample_count(&self) -> usize {
@@ -771,6 +846,222 @@ impl BenchmarkArgs {
     fn needs_tpcc_tables(&self) -> bool {
         !self.skip_table_copy || self.runs_tpcc_streaming()
     }
+
+    fn hotpath_enabled_for_any_benchmark(&self) -> bool {
+        self.hotpath
+            || self.hotpath_alloc
+            || self.hotpath_cpu
+            || !self.hotpath_mcp_benchmarks.is_empty()
+            || self.hotpath_output_dir.is_some()
+    }
+
+    fn effective_hotpath_output_dir(&self) -> Option<PathBuf> {
+        self.hotpath_enabled_for_any_benchmark().then(|| {
+            self.hotpath_output_dir.clone().unwrap_or_else(|| self.output_dir.join("hotpath"))
+        })
+    }
+
+    fn hotpath_mcp_enabled_for(&self, benchmark: &str) -> bool {
+        self.hotpath_mcp_benchmarks.iter().any(|value| value == "all" || value == benchmark)
+    }
+
+    fn hotpath_run_config(&self, benchmark: &str, report_path: &Path) -> HotpathRunConfig {
+        let mcp_enabled = self.hotpath_mcp_enabled_for(benchmark);
+        let enabled = self.hotpath
+            || self.hotpath_alloc
+            || self.hotpath_cpu
+            || mcp_enabled
+            || self.hotpath_output_dir.is_some();
+        let output_path =
+            enabled.then(|| self.hotpath_report_path_for_report(benchmark, report_path)).flatten();
+
+        HotpathRunConfig {
+            enabled,
+            alloc: self.hotpath_alloc,
+            cpu: self.hotpath_cpu,
+            mcp: mcp_enabled,
+            mcp_port: self.hotpath_mcp_port,
+            output_path,
+        }
+    }
+
+    fn hotpath_report_path_for_report(
+        &self,
+        benchmark: &str,
+        report_path: &Path,
+    ) -> Option<PathBuf> {
+        self.effective_hotpath_output_dir().map(|dir| {
+            let file_name = report_path
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                .map_or_else(|| format!("{benchmark}.json"), ToOwned::to_owned);
+            dir.join(file_name)
+        })
+    }
+
+    fn canonical_hotpath_report_path(&self, benchmark: &str) -> Option<PathBuf> {
+        self.effective_hotpath_output_dir().map(|dir| dir.join(format!("{benchmark}.json")))
+    }
+
+    fn copy_selected_hotpath_report(
+        &self,
+        benchmark: &str,
+        measured_reports: &[Value],
+        measured_hotpath_report_paths: &[Option<PathBuf>],
+    ) -> Result<()> {
+        let Some(canonical_path) = self.canonical_hotpath_report_path(benchmark) else {
+            return Ok(());
+        };
+        let Some(selected_idx) = selected_report_index(benchmark, measured_reports) else {
+            return Ok(());
+        };
+        let Some(source_path) =
+            measured_hotpath_report_paths.get(selected_idx).and_then(Option::as_deref)
+        else {
+            return Ok(());
+        };
+        if !source_path.exists() {
+            return Ok(());
+        }
+
+        if let Some(parent) = canonical_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create HotPath report directory {}", parent.display())
+            })?;
+        }
+
+        fs::copy(source_path, &canonical_path).with_context(|| {
+            format!(
+                "failed to copy selected HotPath report from {} to {}",
+                source_path.display(),
+                canonical_path.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    fn hotpath_label(&self) -> String {
+        if !self.hotpath_enabled_for_any_benchmark() {
+            return "disabled".to_owned();
+        }
+
+        let mut modes = Vec::new();
+        if self.hotpath {
+            modes.push("timing");
+        }
+        if self.hotpath_alloc {
+            modes.push("alloc");
+        }
+        if self.hotpath_cpu {
+            modes.push("cpu");
+        }
+        if !self.hotpath_mcp_benchmarks.is_empty() {
+            modes.push("mcp");
+        }
+        if modes.is_empty() {
+            modes.push("timing");
+        }
+
+        let output_dir = self
+            .effective_hotpath_output_dir()
+            .map_or_else(|| "stdout".to_owned(), |path| path.display().to_string());
+        let mut label = format!("{} ({output_dir})", modes.join(","));
+        if !self.hotpath_mcp_benchmarks.is_empty() {
+            label.push_str(&format!(", mcp=http://localhost:{}/mcp", self.hotpath_mcp_port));
+        }
+        label
+    }
+
+    fn write_artifact_summaries(
+        &self,
+        table_copy_report: Option<&Value>,
+        table_streaming_report: Option<&Value>,
+    ) -> Result<()> {
+        let summary = json!({
+            "output_dir": self.output_dir,
+            "hotpath_output_dir": self.effective_hotpath_output_dir(),
+            "benchmarks": [
+                self.benchmark_artifact_summary("table_copy", table_copy_report)?,
+                self.benchmark_artifact_summary("table_streaming", table_streaming_report)?,
+            ],
+        });
+
+        let json_path = self.output_dir.join("benchmark_artifacts.json");
+        write_json_report(&summary, &json_path)?;
+
+        let markdown_path = self.output_dir.join("benchmark_artifacts.md");
+        write_markdown_report(&render_artifact_markdown(&summary), &markdown_path)?;
+
+        print_done(
+            "Artifacts",
+            &format!("wrote {} and {}", json_path.display(), markdown_path.display()),
+        );
+
+        Ok(())
+    }
+
+    fn benchmark_artifact_summary(&self, benchmark: &str, report: Option<&Value>) -> Result<Value> {
+        let report_path = report.map(|_| self.output_dir.join(format!("{benchmark}.json")));
+        let hotpath_report_path =
+            report.and_then(|_| self.canonical_hotpath_report_path(benchmark)).as_ref().cloned();
+        let hotpath_sample_report_paths = report
+            .and_then(|_| self.hotpath_sample_report_paths(benchmark).transpose())
+            .transpose()?;
+        let hotpath_report = report
+            .and_then(|_| self.canonical_hotpath_report_path(benchmark))
+            .as_deref()
+            .and_then(read_report_if_exists);
+
+        Ok(json!({
+            "benchmark": benchmark,
+            "ran": report.is_some(),
+            "benchmark_report_path": report_path,
+            "hotpath_report_path": hotpath_report_path,
+            "hotpath_sample_report_paths": hotpath_sample_report_paths,
+            "benchmark_report": summarize_benchmark_report(report),
+            "hotpath_report": summarize_hotpath_report(hotpath_report.as_ref()),
+        }))
+    }
+
+    fn hotpath_sample_report_paths(&self, benchmark: &str) -> Result<Option<Vec<PathBuf>>> {
+        let Some(output_dir) = self.effective_hotpath_output_dir() else {
+            return Ok(None);
+        };
+        if !output_dir.exists() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let prefix = format!(".{benchmark}_sample_");
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(&output_dir).with_context(|| {
+            format!("failed to read HotPath output dir {}", output_dir.display())
+        })? {
+            let path = entry?.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|file_name| file_name.to_str()) else {
+                continue;
+            };
+            if file_name.starts_with(&prefix) {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        Ok(Some(paths))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HotpathRunConfig {
+    enabled: bool,
+    alloc: bool,
+    cpu: bool,
+    mcp: bool,
+    mcp_port: u16,
+    output_path: Option<PathBuf>,
 }
 
 impl Destination {
@@ -862,6 +1153,246 @@ fn write_json_report(report: &Value, path: &Path) -> Result<()> {
     let json = serde_json::to_string_pretty(report)?;
     fs::write(path, format!("{json}\n"))
         .with_context(|| format!("failed to write benchmark report to {}", path.display()))
+}
+
+fn write_markdown_report(markdown: &str, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create report directory {}", parent.display()))?;
+    }
+
+    fs::write(path, markdown)
+        .with_context(|| format!("failed to write benchmark summary to {}", path.display()))
+}
+
+fn read_report_if_exists(path: &Path) -> Option<Value> {
+    fs::read_to_string(path).ok().and_then(|contents| serde_json::from_str(&contents).ok())
+}
+
+fn summarize_benchmark_report(report: Option<&Value>) -> Value {
+    let Some(report) = report else {
+        return json!({"status": "not_run"});
+    };
+
+    json!({
+        "status": "ok",
+        "benchmark": report.get("benchmark"),
+        "rows_copied": report.get("copied_rows"),
+        "rows_per_second": report.get("rows_per_second"),
+        "produced_events": report.get("produced_events"),
+        "observed_cdc_events": report.get("observed_cdc_events"),
+        "events_per_second": report.get("end_to_end_with_shutdown_events_per_second"),
+        "decoded_mib_per_second": report.get("estimated_mib_per_second").or_else(|| report.get("decoded_mib_per_second")),
+        "total_ms": report.get("total_ms"),
+        "sample_summary": report.get("sample_summary"),
+        "tokio_runtime_stats": report.get("tokio_runtime_stats"),
+        "destination_stats": report.get("destination_stats"),
+    })
+}
+
+fn summarize_hotpath_report(report: Option<&Value>) -> Value {
+    let Some(report) = report else {
+        return json!({"status": "missing"});
+    };
+
+    let cpu_profile_path = find_string_key(report, "profile_path");
+    let cpu_message = report
+        .get("functions_cpu")
+        .and_then(|section| section.get("message"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let flamegraph_status = match (&cpu_profile_path, &cpu_message) {
+        (Some(_), _) => "available",
+        (None, Some(_)) => "failed",
+        (None, None) if report.get("functions_cpu").is_some() => "empty",
+        (None, None) => "not_requested",
+    };
+
+    json!({
+        "status": "ok",
+        "sections": {
+            "functions_timing": summarize_hotpath_section(report, "functions_timing"),
+            "functions_alloc": summarize_hotpath_section(report, "functions_alloc"),
+            "functions_cpu": summarize_hotpath_section(report, "functions_cpu"),
+            "futures": summarize_hotpath_section(report, "futures"),
+            "mutexes": summarize_hotpath_section(report, "mutexes"),
+            "rw_locks": summarize_hotpath_section(report, "rw_locks"),
+            "sql": summarize_hotpath_section(report, "sql"),
+            "threads": summarize_hotpath_section(report, "threads"),
+            "cpu_baseline": summarize_hotpath_section(report, "cpu_baseline"),
+        },
+        "flamegraph": {
+            "status": flamegraph_status,
+            "samply_profile_path": cpu_profile_path,
+            "open_command": cpu_profile_path.as_ref().map(|path| format!("samply load {path}")),
+            "message": cpu_message,
+        },
+    })
+}
+
+fn summarize_hotpath_section(report: &Value, section_name: &str) -> Value {
+    let Some(section) = report.get(section_name) else {
+        return json!({"status": "missing", "count": 0});
+    };
+
+    let data = section.get("data").and_then(Value::as_array);
+    let top =
+        data.map(|rows| rows.iter().take(10).cloned().collect::<Vec<_>>()).unwrap_or_default();
+
+    json!({
+        "status": "ok",
+        "count": data.map_or(0, Vec::len),
+        "message": section.get("message"),
+        "top": top,
+    })
+}
+
+fn find_string_key(value: &Value, key: &str) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            if let Some(found) = object.get(key).and_then(Value::as_str) {
+                return Some(found.to_owned());
+            }
+
+            object.values().find_map(|value| find_string_key(value, key))
+        }
+        Value::Array(values) => values.iter().find_map(|value| find_string_key(value, key)),
+        _ => None,
+    }
+}
+
+fn render_artifact_markdown(summary: &Value) -> String {
+    let mut markdown = String::new();
+    markdown.push_str("# Benchmark Artifacts\n\n");
+    markdown.push_str(
+        "This file indexes the benchmark and HotPath outputs for human review and LLM \
+         analysis.\n\n",
+    );
+
+    if let Some(output_dir) = summary.get("output_dir").and_then(Value::as_str) {
+        markdown.push_str(&format!("- Benchmark output directory: `{output_dir}`\n"));
+    }
+    if let Some(output_dir) = summary.get("hotpath_output_dir").and_then(Value::as_str) {
+        markdown.push_str(&format!("- HotPath output directory: `{output_dir}`\n"));
+    }
+    markdown.push('\n');
+
+    let Some(benchmarks) = summary.get("benchmarks").and_then(Value::as_array) else {
+        return markdown;
+    };
+
+    for benchmark in benchmarks {
+        let name = benchmark.get("benchmark").and_then(Value::as_str).unwrap_or("unknown");
+        markdown.push_str(&format!("## {name}\n\n"));
+
+        append_path(&mut markdown, "Benchmark JSON", benchmark.get("benchmark_report_path"));
+        append_path(&mut markdown, "HotPath JSON", benchmark.get("hotpath_report_path"));
+        if let Some(sample_paths) =
+            benchmark.get("hotpath_sample_report_paths").and_then(Value::as_array)
+            && !sample_paths.is_empty()
+        {
+            markdown.push_str("- HotPath sample JSON:\n");
+            for path in sample_paths {
+                if let Some(path) = path.as_str() {
+                    markdown.push_str(&format!("  - `{path}`\n"));
+                }
+            }
+        }
+
+        let report = benchmark.get("benchmark_report").unwrap_or(&Value::Null);
+        if report.get("status").and_then(Value::as_str) == Some("ok") {
+            append_metric(&mut markdown, report, "rows_copied", "Rows copied");
+            append_metric(&mut markdown, report, "rows_per_second", "Rows/s");
+            append_metric(&mut markdown, report, "produced_events", "Produced events");
+            append_metric(&mut markdown, report, "observed_cdc_events", "Observed CDC events");
+            append_metric(&mut markdown, report, "events_per_second", "Events/s");
+            append_metric(&mut markdown, report, "decoded_mib_per_second", "Decoded MiB/s");
+            append_metric(&mut markdown, report, "total_ms", "Total ms");
+        } else {
+            markdown.push_str("- Status: not run\n");
+        }
+
+        if let Some(stats) = report.get("tokio_runtime_stats").filter(|value| !value.is_null()) {
+            markdown.push_str(&format!("- Tokio runtime snapshot: `{}`\n", compact_json(stats)));
+        }
+
+        let hotpath = benchmark.get("hotpath_report").unwrap_or(&Value::Null);
+        let flamegraph = hotpath.get("flamegraph").unwrap_or(&Value::Null);
+        if let Some(status) = flamegraph.get("status").and_then(Value::as_str) {
+            markdown.push_str(&format!("- Flamegraph/Samply status: `{status}`\n"));
+        }
+        if let Some(command) = flamegraph.get("open_command").and_then(Value::as_str) {
+            markdown.push_str(&format!("- Open flamegraph/call tree: `{command}`\n"));
+        }
+        if let Some(message) = flamegraph.get("message").and_then(Value::as_str) {
+            markdown.push_str(&format!("- CPU profiler message: `{message}`\n"));
+        }
+
+        markdown.push_str("\n### HotPath Sections\n\n");
+        let Some(sections) = hotpath.get("sections").and_then(Value::as_object) else {
+            markdown.push_str("HotPath report missing.\n\n");
+            continue;
+        };
+
+        for section_name in [
+            "functions_timing",
+            "functions_alloc",
+            "functions_cpu",
+            "futures",
+            "mutexes",
+            "rw_locks",
+            "sql",
+            "threads",
+            "cpu_baseline",
+        ] {
+            let Some(section) = sections.get(section_name) else {
+                continue;
+            };
+            let count = section.get("count").and_then(Value::as_u64).unwrap_or(0);
+            markdown.push_str(&format!("- `{section_name}`: {count} rows\n"));
+            if let Some(message) = section.get("message").and_then(Value::as_str) {
+                markdown.push_str(&format!("  - message: `{message}`\n"));
+            }
+            if let Some(top) = section.get("top").and_then(Value::as_array) {
+                for row in top.iter().take(3) {
+                    markdown.push_str(&format!("  - `{}`\n", compact_json(row)));
+                }
+            }
+        }
+
+        markdown.push('\n');
+    }
+
+    markdown
+}
+
+fn append_path(markdown: &mut String, label: &str, value: Option<&Value>) {
+    if let Some(path) = value.and_then(Value::as_str) {
+        markdown.push_str(&format!("- {label}: `{path}`\n"));
+    }
+}
+
+fn append_metric(markdown: &mut String, report: &Value, key: &str, label: &str) {
+    let Some(value) = report.get(key).filter(|value| !value.is_null()) else {
+        return;
+    };
+
+    markdown.push_str(&format!("- {label}: `{}`\n", display_json_value(value)));
+}
+
+fn display_json_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        _ => compact_json(value),
+    }
+}
+
+fn compact_json(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned())
 }
 
 fn aggregate_reports(
@@ -972,6 +1503,16 @@ fn median(mut values: Vec<f64>) -> f64 {
 }
 
 fn median_report_by_metric<'a>(reports: &'a [Value], key: &str) -> Option<&'a Value> {
+    selected_report_index_by_metric(reports, key).map(|idx| &reports[idx])
+}
+
+fn selected_report_index(benchmark: &str, reports: &[Value]) -> Option<usize> {
+    primary_metric_key(benchmark)
+        .and_then(|key| selected_report_index_by_metric(reports, key))
+        .or_else(|| (!reports.is_empty()).then_some(reports.len() / 2))
+}
+
+fn selected_report_index_by_metric(reports: &[Value], key: &str) -> Option<usize> {
     let mut indexed_values = reports
         .iter()
         .enumerate()
@@ -982,7 +1523,7 @@ fn median_report_by_metric<'a>(reports: &'a [Value], key: &str) -> Option<&'a Va
     }
 
     indexed_values.sort_by(|(_, left), (_, right)| left.total_cmp(right));
-    Some(&reports[indexed_values[indexed_values.len() / 2].0])
+    Some(indexed_values[indexed_values.len() / 2].0)
 }
 
 fn json_number(value: f64) -> Value {
@@ -1128,14 +1669,35 @@ fn paint(enabled: bool, code: &str, text: &str) -> String {
 fn run_benchmark_binary(
     binary_name: &str,
     destination: Destination,
+    benchmark_profile: &str,
+    hotpath: HotpathRunConfig,
     binary_args: &[String],
     report_path: &Path,
 ) -> Result<Value> {
     let mut command = Command::new("cargo");
-    command.args(["run", "--quiet", "-p", "etl-benchmarks", "--release"]);
-    if !matches!(destination, Destination::Null) {
-        command.args(["--features", destination.as_arg()]);
+    command.args(["run", "--quiet", "-p", "etl-benchmarks", "--profile", benchmark_profile]);
+
+    let features = cargo_features(destination, &hotpath);
+    if !features.is_empty() {
+        command.args(["--features", &features.join(",")]);
     }
+
+    if let Some(output_path) = &hotpath.output_path {
+        command.env("HOTPATH_OUTPUT_FORMAT", "json");
+        command.env("HOTPATH_OUTPUT_PATH", output_path);
+    }
+    if hotpath.mcp {
+        command.env("HOTPATH_MCP_PORT", hotpath.mcp_port.to_string());
+        command.env("HOTPATH_META_MCP_PORT", hotpath.mcp_port.to_string());
+    }
+    if hotpath.enabled {
+        command.env("HOTPATH_FUNCTIONS_NAME_DEPTH", "0");
+        command.env("HOTPATH_REPORT", "all");
+    }
+    if hotpath.alloc {
+        command.env("HOTPATH_ALLOC_CUMULATIVE", "true");
+    }
+
     command.args(["--bin", binary_name, "--"]).args(binary_args);
 
     print_phase(
@@ -1164,6 +1726,27 @@ fn run_benchmark_binary(
     let report = read_report(report_path)
         .with_context(|| format!("benchmark {binary_name} did not write a valid report"))?;
     Ok(report)
+}
+
+fn cargo_features(destination: Destination, hotpath: &HotpathRunConfig) -> Vec<&'static str> {
+    let mut features = Vec::new();
+    if !matches!(destination, Destination::Null) {
+        features.push(destination.as_arg());
+    }
+    if hotpath.enabled {
+        features.push("hotpath");
+    }
+    if hotpath.alloc {
+        features.push("hotpath-alloc");
+    }
+    if hotpath.cpu {
+        features.push("hotpath-cpu");
+    }
+    if hotpath.mcp {
+        features.push("hotpath-mcp");
+    }
+
+    features
 }
 
 fn read_report(path: &Path) -> Result<Value> {

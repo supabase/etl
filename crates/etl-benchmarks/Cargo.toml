@@ -16,6 +16,16 @@ doctest = false
 default = []
 bigquery = ["dep:etl-destinations", "etl-destinations/bigquery"]
 clickhouse = ["dep:etl-destinations", "etl-destinations/clickhouse", "dep:url"]
+hotpath = [
+    "dep:hotpath",
+    "etl/hotpath",
+    "etl-telemetry/hotpath",
+    "hotpath/hotpath",
+    "hotpath/tokio",
+]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu"]
+hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
 snowflake = ["dep:etl-destinations", "etl-destinations/snowflake"]
 
 [dependencies]
@@ -26,6 +36,8 @@ etl-config = { workspace = true }
 etl-destinations = { workspace = true, optional = true }
 etl-postgres = { workspace = true, features = ["sqlx"] }
 etl-telemetry = { workspace = true }
+hotpath = { workspace = true, optional = true, features = ["threads"] }
+rand = { workspace = true, features = ["thread_rng"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

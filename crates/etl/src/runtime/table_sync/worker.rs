@@ -1,12 +1,16 @@
-use std::{any::Any, ops::Deref, panic::AssertUnwindSafe, sync::Arc, time::Duration};
+use std::{any::Any, fmt, ops::Deref, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::slots::EtlReplicationSlot;
 use futures::FutureExt;
+#[cfg(feature = "hotpath")]
+use hotpath::wrap::tokio::sync::{Mutex, MutexGuard};
 use metrics::counter;
+#[cfg(not(feature = "hotpath"))]
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::{
-    sync::{Mutex, MutexGuard, Notify, Semaphore},
+    sync::{Notify, Semaphore},
     task::AbortHandle,
 };
 use tracing::{Instrument, debug, error, info, warn};
@@ -180,9 +184,15 @@ impl TableSyncWorkerStateInner {
 /// The state handle supports atomic updates, notifications, and blocking waits
 /// for specific state transitions, making it suitable for complex multi-worker
 /// scenarios.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct TableSyncWorkerState {
     inner: Arc<Mutex<TableSyncWorkerStateInner>>,
+}
+
+impl fmt::Debug for TableSyncWorkerState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TableSyncWorkerState").finish_non_exhaustive()
+    }
 }
 
 impl TableSyncWorkerState {
@@ -199,7 +209,13 @@ impl TableSyncWorkerState {
             retry_attempts: 0,
         };
 
-        Self { inner: Arc::new(Mutex::new(inner)) }
+        #[cfg(feature = "hotpath")]
+        let inner = hotpath::mutex!(tokio::sync::Mutex::new(inner), label = "table_sync_state");
+
+        #[cfg(not(feature = "hotpath"))]
+        let inner = Mutex::new(inner);
+
+        Self { inner: Arc::new(inner) }
     }
 
     /// Waits for the table to reach a specific table state type.
@@ -682,6 +698,7 @@ where
     /// sync, running catchup replication, and cleaning up resources. It
     /// handles both the bulk data copy state and the incremental
     /// table state.
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "TableSyncWorker<S, D>"))]
     async fn run_table_sync_worker(
         mut self,
         state: TableSyncWorkerState,

@@ -89,6 +89,7 @@ fail = { version = "0.5.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 gcp-bigquery-client = { git = "https://github.com/iambriccardo/gcp-bigquery-client", rev = "f5458eb9e67f7f8748675565c8b15d710f1eacc7", default-features = false }
 hex = { version = "0.4", default-features = false }
+hotpath = { version = "0.21.1", default-features = false }
 humantime = { version = "2.3.0", default-features = false }
 iceberg = { version = "0.8.0", default-features = false }
 iceberg-catalog-rest = { version = "0.8.0", default-features = false }
@@ -144,6 +145,10 @@ x509-cert = { version = "0.2.2", default-features = false }
 zstd = { version = "0.13", default-features = false }
 
 [profile.bench]
+debug = true
+
+[profile.profiling]
+inherits = "release"
 debug = true
 
 [profile.release]

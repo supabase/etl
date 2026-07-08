@@ -103,6 +103,28 @@ cargo xtask benchmark \
 If the TPC-C tables already exist, preparation is skipped. Add
 `--force-prepare` to drop and regenerate them.
 
+## HotPath Profiling
+
+Use HotPath when you want timing, allocation, Tokio runtime, thread, and
+destination-flush visibility from the benchmark binaries. The null destination
+simulates destination batch flushing by waiting a random 10-100ms for both
+table-copy row batches and streaming event batches before dropping the batch.
+Streaming event batches are flushed from a spawned task so the apply loop's
+pending destination write path is exercised. Benchmark JSON reports also include
+a final Tokio runtime metrics snapshot with worker counts, live tasks, global
+queue depth, per-worker park counts, and per-worker busy time.
+
+Enable HotPath through explicit benchmark flags only:
+
+- `--hotpath`: timing, Tokio, thread, future, lock, and SQL profiling support.
+- `--hotpath-alloc`: allocation profiling.
+- `--hotpath-cpu`: CPU sampling and Samply flamegraph output.
+- `--hotpath-mcp-benchmarks`: live unauthenticated MCP access for selected
+  benchmark binaries.
+
+For commands, MCP probes, artifact analysis, CI behavior, CPU flamegraphs, and
+regression triage, see [`HOTPATH_RUNBOOK.md`](HOTPATH_RUNBOOK.md).
+
 ## Larger Local Run
 
 This is closer to the default CI-sized run, but still practical on a strong
@@ -294,72 +316,52 @@ Optional:
 
 ## GitHub Actions
 
-The `Benchmark` workflow is manual and runs through `workflow_dispatch`.
+The HotPath benchmark workflow runs for pull requests labeled `benchmark` and
+can also be started manually through `workflow_dispatch`. This keeps the default
+PR loop light while making performance profiling self-serve when a PR needs it.
 
-From the GitHub UI, open **Actions**, select **Benchmark**, choose **Run
-workflow**, then set the inputs.
+From the GitHub UI, open **Actions**, select **hotpath-profile**, then choose
+**Run workflow** for a manual null-destination profile run.
 
 With the GitHub CLI:
 
 ```bash
-gh workflow run benchmark.yml \
-  -f benchmark_runner=blacksmith-16vcpu-ubuntu-2404 \
-  -f warehouses=10 \
-  -f streaming_duration_seconds=300 \
-  -f max_table_sync_workers=8 \
-  -f max_copy_connections_per_table=4 \
-  -f batch_max_fill_ms=1000 \
-  -f memory_budget_ratio=0.2 \
-  -f destination=null
+gh workflow run hotpath-profile.yml
 ```
 
-Important workflow inputs:
+For a PR run, add the `benchmark` label. The workflow also listens for new
+commits on PRs that already have that label, so benchmark comments stay tied to
+the latest pushed revision.
 
-- `benchmark_runner`: `blacksmith-8vcpu-ubuntu-2404`,
-  `blacksmith-16vcpu-ubuntu-2404`, or `blacksmith-32vcpu-ubuntu-2404`.
-- `warehouses`: number of TPC-C warehouses to prepare.
-- `tpcc_threads`: optional `go-tpc` prepare and streaming threads. Empty means
-  xtask derives it.
-- `streaming_duration_seconds`: TPC-C workload duration. Defaults to 60.
-- `streaming_drain_quiet_ms`: CDC quiet period before TPC-C drain completes.
-- `max_table_sync_workers`: table-copy worker parallelism.
-- `max_copy_connections_per_table`: per-table copy connection parallelism.
-- `batch_max_fill_ms`: stream batch fill timeout.
-- `memory_budget_ratio`: ratio of detected memory reserved for stream batch
-  bytes. Defaults to `0.2`.
-- `enable_memory_backpressure`: opt into ETL memory backpressure. Defaults to
-  `false` for benchmark runs.
-- `destination`: `null`, `bigquery`, `clickhouse`, or `snowflake`.
-- `force_prepare`: drop and regenerate TPC-C tables before running.
-- `skip_table_copy`: skip table copy.
-- `skip_table_streaming`: skip table streaming.
+The workflow starts source Postgres, installs pinned `go-tpc`, and runs both
+`table_copy` and `table_streaming` through `cargo xtask benchmark` with
+HotPath timing and allocation profiling enabled. Labeled pull-request runs
+profile the head commit and the base commit, upload all benchmark and HotPath
+artifacts, and then the `hotpath-comment` workflow posts HotPath comparison
+comments for:
 
-For BigQuery workflow runs, set the repository secret
-`BENCHMARK_BQ_SA_KEY_JSON`, then pass `destination=bigquery`,
-`bq_project_id`, and an existing `bq_dataset_id`.
+- `table_copy_null`
+- `table_streaming_null`
 
-For Snowflake workflow runs, set the `BENCH_SNOWFLAKE_CONNECTION` repository secret and pass `destination=snowflake`.
+The CI profile uses the null destination, all default replicated TPC-C tables,
+four warehouses, 20 seconds of streaming, one measured sample, no warmup
+samples, four table-sync workers, and two copy connections per table. The
+default replicated TPC-C table set has eight tables, so the profile exercises
+table-sync worker scheduling instead of starting every table at once.
 
-For ClickHouse workflow runs, pass `destination=clickhouse`. The workflow
-starts the `clickhouse` service from `scripts/docker/docker-compose.yaml` and points
-the benchmark at it (user `etl`, database `default`); no secrets are needed.
+The GitHub step summary includes the benchmark environment plus the generated
+`benchmark_artifacts.md` for the head run and, on pull requests, the base run.
+The uploaded `hotpath-profile-metrics` artifact contains:
 
-The workflow starts only source Postgres, installs pinned `go-tpc`, runs
-`cargo xtask benchmark` with three measured samples plus one warmup sample,
-compares the median reports against the most recent successful
-`benchmark-results` artifact on the same ref, and uploads
-`target/bench-results/*.json`. The GitHub step summary contains the benchmark
-environment, formatted median results with sample spread, and the comparison
-diff against the previous successful run when one is available.
+- `head/table_copy.json` and `head/table_streaming.json`: HotPath reports used
+  by `hotpath-utils profile-pr`.
+- `head-benchmark/*.json` and `head-benchmark/benchmark_artifacts.*`: benchmark
+  reports and human/agent summaries.
+- `base/...` and `base-benchmark/...` equivalents on pull requests.
 
-If no previous successful run exists, the comparison writes a "no previous
-benchmark artifact" summary and passes. If a comparable previous run exists, the
-comparison fails the workflow when median throughput and timing metrics regress
-beyond their per-metric thresholds. Row counts and TPC-C streaming event counts
-are informational because the transaction workload is duration-based and
-naturally varies between runs. If benchmark configuration differs, the
-comparison still prints the diff table but skips the regression gate for that
-benchmark.
+Destination-specific manual benchmarking for BigQuery, ClickHouse, and
+Snowflake is now run locally with `cargo xtask benchmark --destination ...`
+rather than through the CI benchmark workflow.
 
 The comparison is also available locally when you have two result directories:
 
@@ -372,7 +374,8 @@ cargo xtask benchmark-compare \
 
 In GitHub Actions mode, `benchmark-compare` uses `GITHUB_TOKEN`,
 `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, and `GITHUB_REF_NAME` to find the previous
-successful `workflow_dispatch` run for `benchmark.yml`.
+successful workflow run configured by its `--workflow` and `--artifact-name`
+arguments.
 
 ## Reading The Output
 

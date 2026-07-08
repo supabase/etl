@@ -42,8 +42,11 @@
 //!   `RELATION` message materializes the runtime masks and moves the table back
 //!   to [`SharedTableState::Ready`].
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc};
 
+#[cfg(feature = "hotpath")]
+use hotpath::wrap::tokio::sync::RwLock;
+#[cfg(not(feature = "hotpath"))]
 use tokio::sync::RwLock;
 
 use crate::schema::{ReplicatedTableSchema, SnapshotId, TableId};
@@ -84,15 +87,35 @@ impl SharedTableState {
 }
 
 /// Thread-safe container for shared per-table protocol state.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct SharedTableCache {
     inner: Arc<RwLock<HashMap<TableId, SharedTableState>>>,
+}
+
+impl fmt::Debug for SharedTableCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SharedTableCache").finish_non_exhaustive()
+    }
+}
+
+impl Default for SharedTableCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SharedTableCache {
     /// Creates a new empty [`SharedTableCache`] container.
     pub(crate) fn new() -> Self {
-        Self { inner: Arc::new(RwLock::new(HashMap::new())) }
+        #[cfg(feature = "hotpath")]
+        let inner = hotpath::rw_lock!(
+            tokio::sync::RwLock::new(HashMap::new()),
+            label = "shared_table_cache"
+        );
+        #[cfg(not(feature = "hotpath"))]
+        let inner = RwLock::new(HashMap::new());
+
+        Self { inner: Arc::new(inner) }
     }
 
     /// Returns the shared state for a table, if present.
