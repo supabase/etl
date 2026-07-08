@@ -60,6 +60,10 @@ async fn async_main() -> anyhow::Result<()> {
         1 => {
             let config = load_config::<ApiConfig>()
                 .context("Loading API configuration for server startup")?;
+            config
+                .validate()
+                .map_err(anyhow::Error::msg)
+                .context("Validating API configuration")?;
             log_pg_connection_config(&config.database);
             let application = Application::build(config.clone()).await?;
             application.run_until_stopped().await?;

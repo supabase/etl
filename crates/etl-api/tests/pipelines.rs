@@ -224,6 +224,7 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
     config.replicator_resources = Some(ReplicatorResourcesConfig {
         cpu_request_millicores: Some(750),
         memory_request_mib: Some(1536),
+        ..ReplicatorResourcesConfig::default()
     });
 
     let pipeline = CreatePipelineRequest { source_id, destination_id, config };
@@ -240,6 +241,7 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
         Some(ReplicatorResourcesConfig {
             cpu_request_millicores: Some(750),
             memory_request_mib: Some(1536),
+            ..ReplicatorResourcesConfig::default()
         })
     );
 
@@ -250,6 +252,7 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
         Some(ReplicatorResourcesConfig {
             cpu_request_millicores: Some(750),
             memory_request_mib: Some(1536),
+            ..ReplicatorResourcesConfig::default()
         })
     );
 }
@@ -453,6 +456,7 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
     updated_pipeline_config.replicator_resources = Some(ReplicatorResourcesConfig {
         cpu_request_millicores: Some(900),
         memory_request_mib: Some(2048),
+        ..ReplicatorResourcesConfig::default()
     });
     let update_request =
         UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config };
@@ -466,6 +470,7 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
         Some(ReplicatorResourcesConfig {
             cpu_request_millicores: Some(900),
             memory_request_mib: Some(2048),
+            ..ReplicatorResourcesConfig::default()
         })
     );
 }
@@ -491,6 +496,7 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
     updated_pipeline_config.replicator_resources = Some(ReplicatorResourcesConfig {
         cpu_request_millicores: Some(333),
         memory_request_mib: Some(444),
+        ..ReplicatorResourcesConfig::default()
     });
     let update_request =
         UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config };
@@ -509,6 +515,7 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
         Some(ReplicatorResourcesConfig {
             cpu_request_millicores: Some(333),
             memory_request_mib: Some(444),
+            ..ReplicatorResourcesConfig::default()
         })
     );
 }
@@ -526,6 +533,7 @@ async fn invalid_replicator_resources_are_rejected() {
     config.replicator_resources = Some(ReplicatorResourcesConfig {
         cpu_request_millicores: Some(0),
         memory_request_mib: Some(100),
+        ..ReplicatorResourcesConfig::default()
     });
     let pipeline = CreatePipelineRequest { source_id, destination_id, config };
 

@@ -56,6 +56,7 @@ pub enum FullApiDestinationConfig {
         #[serde(deserialize_with = "crate::utils::trim_string")]
         user: String,
         /// ClickHouse password (omit for passwordless access)
+        #[serde(skip_serializing_if = "Option::is_none")]
         password: Option<SerializableSecretString>,
         /// ClickHouse target database
         #[schema(example = "my_db")]
@@ -1301,6 +1302,7 @@ pub enum EncryptedStoredDestinationConfig {
         project_id: String,
         dataset_id: String,
         service_account_key: EncryptedValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
@@ -1308,6 +1310,7 @@ pub enum EncryptedStoredDestinationConfig {
     ClickHouse {
         url: Url,
         user: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<EncryptedValue>,
         database: String,
         #[serde(default)]
@@ -1322,14 +1325,23 @@ pub enum EncryptedStoredDestinationConfig {
         data_path: String,
         #[serde(default = "default_ducklake_pool_size")]
         pool_size: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         s3_access_key_id: Option<EncryptedValue>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         s3_secret_access_key: Option<EncryptedValue>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         s3_region: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         s3_endpoint: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         s3_url_style: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         s3_use_ssl: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata_schema: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         maintenance_target_file_size: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         expire_snapshots_older_than: Option<String>,
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
@@ -1338,9 +1350,11 @@ pub enum EncryptedStoredDestinationConfig {
         account_id: String,
         user: String,
         private_key: EncryptedValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         private_key_passphrase: Option<EncryptedValue>,
         database: String,
         schema: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<String>,
     },
 }
@@ -1579,7 +1593,11 @@ pub enum FullApiIcebergConfig {
         #[serde(deserialize_with = "crate::utils::trim_string")]
         warehouse_name: String,
         #[schema(example = "my-namespace")]
-        #[serde(default, deserialize_with = "crate::utils::trim_option_string")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
         namespace: Option<String>,
         #[schema(example = "9156667efc2c70d89af6588da86d2924")]
         s3_access_key_id: SerializableSecretString,
@@ -1631,7 +1649,11 @@ pub enum UpdateApiIcebergConfig {
         #[serde(deserialize_with = "crate::utils::trim_string")]
         warehouse_name: String,
         #[schema(example = "my-namespace")]
-        #[serde(default, deserialize_with = "crate::utils::trim_option_string")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
         namespace: Option<String>,
         #[schema(example = "9156667efc2c70d89af6588da86d2924")]
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1756,6 +1778,7 @@ pub enum EncryptedStoredIcebergConfig {
     Supabase {
         project_ref: String,
         warehouse_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
         catalog_token: EncryptedValue,
         s3_access_key_id: EncryptedValue,
@@ -1765,6 +1788,7 @@ pub enum EncryptedStoredIcebergConfig {
     Rest {
         catalog_uri: String,
         warehouse_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
         s3_access_key_id: EncryptedValue,
         s3_secret_access_key: EncryptedValue,

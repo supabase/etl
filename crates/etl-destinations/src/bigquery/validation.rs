@@ -18,8 +18,8 @@ const BIGQUERY_BIGNUMERIC_MAX_SCALE: usize = 38;
 /// only that corruption-prone case locally and let BigQuery reject values that
 /// are outside its domain.
 fn validate_numeric_for_bigquery(numeric: &PgNumeric) -> EtlResult<()> {
-    if matches!(numeric, PgNumeric::Value { .. })
-        && bigquery_bignumeric_scale(numeric) > BIGQUERY_BIGNUMERIC_MAX_SCALE
+    if let PgNumeric::Value { scale, .. } = numeric
+        && usize::from(*scale) > BIGQUERY_BIGNUMERIC_MAX_SCALE
     {
         bail!(
             ErrorKind::UnsupportedValueInDestination,
@@ -188,11 +188,6 @@ fn validate_array_cell_for_bigquery(array_cell: &ArrayCell) -> EtlResult<()> {
         }
         ArrayCell::Bytes(vec) => reject_nulls(vec),
     }
-}
-
-/// Returns the number of fractional digits in a canonical numeric string.
-fn bigquery_bignumeric_scale(pg_numeric: &PgNumeric) -> usize {
-    pg_numeric.to_string().split_once('.').map_or(0, |(_, fractional)| fractional.len())
 }
 
 #[cfg(test)]
