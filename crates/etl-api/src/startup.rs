@@ -145,16 +145,22 @@ impl Application {
                     client.preflight().await.context("Checking Kubernetes prerequisites")?;
                     Some(Arc::new(client) as Arc<dyn K8sClient>)
                 }
-                Err(e) => {
+                Err(err) => {
                     warn!(
-                        error = %e,
-                        "failed to create kubernetes client, running without kubernetes support"
+                        error = %err,
+                        "failed to create kubernetes client; etl-api is running in degraded mode \
+                        without full kubernetes capabilities and will skip kubernetes resource \
+                        creation, updates, deletion, status checks, and pod restarts"
                     );
                     None
                 }
             },
             None => {
-                warn!("kubernetes client unavailable, running without kubernetes support");
+                warn!(
+                    "kubernetes client unavailable; etl-api is running in degraded mode without \
+                     full kubernetes capabilities and will skip kubernetes resource creation, \
+                     updates, deletion, status checks, and pod restarts"
+                );
                 None
             }
         };
@@ -494,8 +500,7 @@ pub fn run(
         .layer(sentry_layer)
         .layer(trace_layer);
 
-    let app =
-        if let Some(k8s_client) = k8s_client { app.layer(Extension(k8s_client)) } else { app };
+    let app = app.layer(Extension(k8s_client));
 
     let app = app.layer(Extension(source_tls_config));
 

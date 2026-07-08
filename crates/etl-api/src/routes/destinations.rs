@@ -309,7 +309,7 @@ pub(crate) async fn update_destination(
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
-    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
+    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
     destination_id: Path<i64>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     destination: Json<UpdateDestinationRequest>,
@@ -338,7 +338,7 @@ pub(crate) async fn update_destination(
             tenant_id,
             pipeline_id,
             &encryption_key,
-            k8s_client.as_ref(),
+            k8s_client.as_deref(),
             source_tls_config.as_ref(),
             api_config.as_ref(),
         )
@@ -372,7 +372,7 @@ pub(crate) async fn delete_destination(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     destination_id: Path<i64>,
-    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
+    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
 ) -> Result<impl IntoResponse, DestinationError> {
     let tenant_id = extract_tenant_id(&headers)?;
     let destination_id = destination_id.into_inner();
@@ -384,7 +384,7 @@ pub(crate) async fn delete_destination(
     let pipelines =
         read_pipelines_for_destination_for_deletion(&pool, tenant_id, destination_id).await?;
     if let Some(pipeline_id) =
-        first_active_pipeline_id(k8s_client.as_ref(), tenant_id, &pipelines).await?
+        first_active_pipeline_id(k8s_client.as_deref(), tenant_id, &pipelines).await?
     {
         return Err(DestinationError::ActivePipeline(pipeline_id));
     }

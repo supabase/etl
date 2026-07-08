@@ -24,16 +24,21 @@ use crate::{
 /// running pod must be restarted after config materialization in order to pick
 /// up those changes.
 ///
-/// If the pipeline has no active Kubernetes resources, the call is a no-op.
+/// If Kubernetes support is unavailable, or the pipeline has no active
+/// Kubernetes resources, the call is a no-op.
 pub(crate) async fn restart_pipeline_replicator_if_running(
     connection: &mut sqlx::PgConnection,
     tenant_id: &str,
     pipeline_id: i64,
     encryption_key: &EncryptionKeyring,
-    k8s_client: &dyn K8sClient,
+    k8s_client: Option<&dyn K8sClient>,
     source_tls_config: &SourceTlsConfig,
     api_config: &ApiConfig,
 ) -> Result<(), PipelineError> {
+    let Some(k8s_client) = k8s_client else {
+        return Ok(());
+    };
+
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(connection, tenant_id, pipeline_id, encryption_key).await?;
 

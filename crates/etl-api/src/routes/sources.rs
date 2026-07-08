@@ -346,7 +346,7 @@ pub(crate) async fn update_source(
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
-    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
+    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
     source_id: Path<i64>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     source: Json<UpdateSourceRequest>,
@@ -382,7 +382,7 @@ pub(crate) async fn update_source(
             tenant_id,
             pipeline_id,
             &encryption_key,
-            k8s_client.as_ref(),
+            k8s_client.as_deref(),
             source_tls_config.as_ref(),
             api_config.as_ref(),
         )
@@ -415,7 +415,7 @@ pub(crate) async fn update_source(
 pub(crate) async fn delete_source(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
+    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
     source_id: Path<i64>,
 ) -> Result<impl IntoResponse, SourceError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -427,7 +427,7 @@ pub(crate) async fn delete_source(
 
     let pipelines = read_pipelines_for_source_for_deletion(&pool, tenant_id, source_id).await?;
     if let Some(pipeline_id) =
-        first_active_pipeline_id(k8s_client.as_ref(), tenant_id, &pipelines).await?
+        first_active_pipeline_id(k8s_client.as_deref(), tenant_id, &pipelines).await?
     {
         return Err(SourceError::ActivePipeline(pipeline_id));
     }

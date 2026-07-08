@@ -549,6 +549,10 @@ pub(crate) async fn spawn_test_app_with_k8s_state(
     spawn_test_app_with_services(trusted_source_username, Some(k8s_client), k8s_state).await
 }
 
+pub(crate) async fn spawn_test_app_without_k8s_client() -> TestApp {
+    spawn_test_app_with_services(None, None, MockK8sState::default()).await
+}
+
 async fn spawn_test_app_with_services(
     trusted_source_username: Option<String>,
     k8s_client: Option<Arc<dyn K8sClient>>,
