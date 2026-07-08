@@ -185,7 +185,6 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
             tenant_id: tenant_id.to_owned(),
             pipeline_id: pipeline.id,
             replicator_image,
-            environment,
             replicator_resources,
             destination_type,
             ducklake_maintenance: ducklake_maintenance_for_kubernetes,

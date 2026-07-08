@@ -25,10 +25,8 @@ pub struct ApiConfig {
     /// Application server settings.
     pub application: ApplicationSettings,
     /// Kubernetes-specific API configuration.
-    #[serde(default)]
     pub k8s: K8sConfig,
     /// Source database configuration and validation settings.
-    #[serde(default)]
     pub source: SourceConfig,
     /// Encryption key configurations.
     pub encryption_keys: Vec<EncryptionKeyConfig>,
@@ -52,24 +50,61 @@ pub struct ApiConfig {
 }
 
 /// Kubernetes-specific API configuration.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct K8sConfig {
-    /// Optional request sizing overrides for replicator workloads.
-    #[serde(default)]
-    pub replicator_resources: ReplicatorResourcesConfig,
+    /// Default request sizing for replicator workloads.
+    ///
+    /// This key remains `replicator_resources` in API configuration files. It
+    /// provides the mandatory baseline CPU and memory requests used for every
+    /// replicator pod unless a pipeline-level override supplies one of those
+    /// request values.
+    pub replicator_resources: DefaultReplicatorResourcesConfig,
 }
 
-/// Optional request sizing overrides for replicator workloads.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct ReplicatorResourcesConfig {
-    /// Override for the replicator memory request, in Mi.
-    pub replicator_memory_request_mib: Option<i32>,
-    /// Override for the replicator CPU request, in millicores.
-    pub replicator_cpu_request_millicores: Option<i32>,
-    /// Override for the Vector sidecar memory request, in Mi.
-    pub vector_memory_request_mib: Option<i32>,
-    /// Override for the Vector sidecar CPU request, in millicores.
-    pub vector_cpu_request_millicores: Option<i32>,
+/// Mandatory default request sizing for replicator workloads.
+///
+/// These values are part of the ETL API service configuration, not the
+/// customer-facing pipeline configuration. They define the baseline Kubernetes
+/// requests for replicator containers. Resource limits are not configurable
+/// here; the ETL API derives them from requests with its static multipliers
+/// unless a pipeline-level override provides explicit limits.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DefaultReplicatorResourcesConfig {
+    /// Replicator memory request, in Mi.
+    pub replicator_memory_request_mib: i32,
+    /// Replicator CPU request, in millicores.
+    pub replicator_cpu_request_millicores: i32,
+}
+
+impl ApiConfig {
+    /// Validates API service configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        self.k8s.replicator_resources.validate()
+    }
+}
+
+impl DefaultReplicatorResourcesConfig {
+    /// Validates that configured request values are positive.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_positive_request(
+            "K8s replicator memory request",
+            self.replicator_memory_request_mib,
+        )?;
+        validate_positive_request(
+            "K8s replicator cpu request",
+            self.replicator_cpu_request_millicores,
+        )?;
+
+        Ok(())
+    }
+}
+
+fn validate_positive_request(name: &str, value: i32) -> Result<(), String> {
+    if value <= 0 {
+        return Err(format!("{name} must be greater than 0"));
+    }
+
+    Ok(())
 }
 
 /// Configuration for source database connections and behavior.
@@ -84,7 +119,6 @@ pub struct SourceConfig {
     /// direct API connections (e.g., listing tables, managing publications)
     /// and to replicator pods deployed in Kubernetes, which receive the same
     /// resolved value embedded in their generated configuration.
-    #[serde(default = "default_source_tls")]
     pub tls: TlsConfig,
     /// Optional trusted username for source profile validation.
     ///
@@ -93,20 +127,6 @@ pub struct SourceConfig {
     ///
     /// If `None`, trusted source profile validation is skipped.
     pub trusted_username: Option<String>,
-}
-
-impl Default for SourceConfig {
-    fn default() -> Self {
-        Self { tls: default_source_tls(), trusted_username: None }
-    }
-}
-
-/// Returns the default source TLS configuration: enabled, with no certs set.
-///
-/// Defaults to enabled (unlike [`TlsConfig::disabled`]) because source
-/// connections should require TLS unless explicitly turned off.
-fn default_source_tls() -> TlsConfig {
-    TlsConfig { enabled: true, trusted_root_certs: String::new() }
 }
 
 impl Config for ApiConfig {
