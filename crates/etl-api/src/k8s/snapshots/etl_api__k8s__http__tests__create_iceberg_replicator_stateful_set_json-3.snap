@@ -135,6 +135,14 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
                 "memory": "500Mi"
               }
             },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
             "volumeMounts": [
               {
                 "mountPath": "/app/configuration",
@@ -173,6 +181,14 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
               }
             },
             "restartPolicy": "Always",
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
             "volumeMounts": [
               {
                 "mountPath": "/etc/vector",
@@ -187,6 +203,11 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
         ],
         "nodeSelector": {
           "etl.supabase.com/node-role": "workloads"
+        },
+        "securityContext": {
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
         },
         "serviceAccountName": "etl-replicator",
         "terminationGracePeriodSeconds": 300,

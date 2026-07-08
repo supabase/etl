@@ -32,7 +32,10 @@ use crate::support::{
         },
         tenants::create_tenant,
     },
-    test_app::{TestApp, spawn_test_app, spawn_test_app_with_trusted_username},
+    test_app::{
+        TestApp, spawn_test_app, spawn_test_app_with_trusted_username,
+        spawn_test_app_without_k8s_client,
+    },
 };
 
 fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullApiSourceConfig {
@@ -146,6 +149,57 @@ async fn an_existing_source_can_be_updated() {
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, updated_config.name);
     insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_source_with_running_pipeline_restarts_replicator() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let source = CreateSourceRequest { name: new_name(), config: new_source_config() };
+    let response = app.create_source(tenant_id, &source).await;
+    let response: CreateSourceResponse =
+        response.json().await.expect("failed to deserialize response");
+    let source_id = response.id;
+
+    create_default_image(&app).await;
+    create_pipeline_for_source(&app, tenant_id, source_id).await;
+
+    let create_calls_before = app.k8s_state.create_calls();
+    let updated_config =
+        UpdateSourceRequest { name: updated_name(), config: updated_source_config() };
+
+    let response = app.update_source(tenant_id, source_id, &updated_config).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(app.k8s_state.create_calls() > create_calls_before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_source_with_pipeline_succeeds_without_k8s_client() {
+    init_test_tracing();
+    let app = spawn_test_app_without_k8s_client().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let source = CreateSourceRequest { name: new_name(), config: new_source_config() };
+    let response = app.create_source(tenant_id, &source).await;
+    let response: CreateSourceResponse =
+        response.json().await.expect("failed to deserialize response");
+    let source_id = response.id;
+
+    create_default_image(&app).await;
+    create_pipeline_for_source(&app, tenant_id, source_id).await;
+
+    let updated_config =
+        UpdateSourceRequest { name: updated_name(), config: updated_source_config() };
+    let response = app.update_source(tenant_id, source_id, &updated_config).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app.read_source(tenant_id, source_id).await;
+    let response: ReadSourceResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.name, updated_config.name);
 }
 
 #[tokio::test(flavor = "multi_thread")]

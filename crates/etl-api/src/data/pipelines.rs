@@ -383,6 +383,55 @@ where
     Ok(records)
 }
 
+/// Reads the ids of all pipelines that use `source_id` as their source.
+pub async fn read_pipeline_ids_for_source<'c, E>(
+    executor: E,
+    tenant_id: &str,
+    source_id: i64,
+) -> Result<Vec<i64>, PipelinesDbError>
+where
+    E: PgExecutor<'c>,
+{
+    let records = sqlx::query_scalar!(
+        r#"
+        select id
+        from app.pipelines
+        where tenant_id = $1 and source_id = $2
+        "#,
+        tenant_id,
+        source_id
+    )
+    .fetch_all(executor)
+    .await?;
+
+    Ok(records)
+}
+
+/// Reads the ids of all pipelines that use `destination_id` as their
+/// destination.
+pub async fn read_pipeline_ids_for_destination<'c, E>(
+    executor: E,
+    tenant_id: &str,
+    destination_id: i64,
+) -> Result<Vec<i64>, PipelinesDbError>
+where
+    E: PgExecutor<'c>,
+{
+    let records = sqlx::query_scalar!(
+        r#"
+        select id
+        from app.pipelines
+        where tenant_id = $1 and destination_id = $2
+        "#,
+        tenant_id,
+        destination_id
+    )
+    .fetch_all(executor)
+    .await?;
+
+    Ok(records)
+}
+
 pub async fn read_pipelines_for_source_for_deletion<'c, E>(
     executor: E,
     tenant_id: &str,

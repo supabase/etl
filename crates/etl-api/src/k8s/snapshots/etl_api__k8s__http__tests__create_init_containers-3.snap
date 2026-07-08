@@ -28,6 +28,14 @@ expression: node_selector
       }
     },
     "restartPolicy": "Always",
+    "securityContext": {
+      "allowPrivilegeEscalation": false,
+      "capabilities": {
+        "drop": [
+          "ALL"
+        ]
+      }
+    },
     "volumeMounts": [
       {
         "mountPath": "/etc/vector",

@@ -159,6 +159,29 @@ async fn an_existing_bigquery_destination_can_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn updating_destination_with_running_pipeline_restarts_replicator() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    create_default_image(&app).await;
+
+    let source_id = create_source(&app, tenant_id).await;
+    let (destination_id, _pipeline_id) =
+        create_destination_pipeline_for_source(&app, tenant_id, source_id).await;
+
+    let create_calls_before = app.k8s_state.create_calls();
+    let updated_config = UpdateDestinationRequest {
+        name: updated_name(),
+        config: updated_destination_config().into(),
+    };
+
+    let response = app.update_destination(tenant_id, destination_id, &updated_config).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(app.k8s_state.create_calls() > create_calls_before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_existing_iceberg_supabase_destination_can_be_updated() {
     init_test_tracing();
     // Arrange
