@@ -1,20 +1,19 @@
 # Scripts
 
 Development workflows should be exposed through the `cargo x` task runner (see
-`cargo x --help`). Shell scripts in `scripts/bin` are legacy entrypoints kept
-only until their implementation is moved into native xtask commands and the
-scripts can be removed.
+`cargo x --help`). Shell scripts in `scripts/bin` are not the preferred way to
+add new development commands.
 
 New development commands should be added as xtask commands in
-`crates/xtask/src/commands/` rather than as shell scripts here. Existing shell
-scripts are being removed over time as their logic moves into xtask.
+`crates/xtask/src/commands/` rather than as shell scripts here. A shell helper
+may remain when it must run in an environment where Cargo and xtask are
+intentionally unavailable, such as a slim Docker build stage.
 
-## Script to xtask mapping
+## Retained helpers
 
-| Script                                | xtask command             |
-| ------------------------------------- | ------------------------- |
-| `bin/deploy-local-replicator-orbstack.sh` | `cargo x deploy-local` |
-| `bin/vendor-duckdb-extensions.sh`     | `cargo x vendor-duckdb`   |
+| Helper | Reason | xtask command |
+| ------ | ------ | ------------- |
+| `bin/vendor-duckdb-extensions.sh` | Used by Dockerfiles while fetching DuckDB extensions in a slim Debian stage without Rust or Cargo. | `cargo x vendor-duckdb` |
 
 ## Directory layout
 
