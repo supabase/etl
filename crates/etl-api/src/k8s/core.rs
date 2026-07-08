@@ -111,7 +111,9 @@ pub enum Secrets {
 /// This function orchestrates the creation or update of secrets, config maps,
 /// and stateful sets needed to run a pipeline in Kubernetes. It extracts
 /// credentials from the source and destination configurations, builds the
-/// replicator configuration, and applies all resources to the cluster.
+/// replicator configuration, and applies all resources to the cluster. Updating
+/// the StatefulSet intentionally forces pod recreation so the replicator
+/// process picks up the latest mounted config and secret-backed environment.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_or_update_pipeline_resources_in_k8s(
     k8s_client: &dyn K8sClient,

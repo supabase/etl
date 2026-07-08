@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::DerefMut, sync::Arc};
 
 use axum::{
     Extension, Json,
@@ -19,7 +19,9 @@ use crate::{
     },
     data,
     data::{
-        pipelines::{PipelinesDbError, read_pipelines_for_source_for_deletion},
+        pipelines::{
+            PipelinesDbError, read_pipeline_ids_for_source, read_pipelines_for_source_for_deletion,
+        },
         sources::{SourcesDbError, source_exists},
     },
     k8s::{
@@ -28,7 +30,7 @@ use crate::{
     },
     routes::{
         ErrorMessage, IntoInner, TenantIdError, common, error_response_with_internal_error,
-        extract_tenant_id, utils,
+        extract_tenant_id, pipelines::PipelineError, utils,
     },
     validation::{FailureType, ValidationError, ValidationFailure},
 };
@@ -64,15 +66,19 @@ pub enum SourceError {
 
     #[error("The source with id {0} is still used by pipelines; delete those pipelines first")]
     SourceInUse(i64),
+
+    #[error(transparent)]
+    Pipeline(#[from] PipelineError),
 }
 
 impl SourceError {
     pub fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            SourceError::SourcesDb(_) | SourceError::PipelinesDb(_) | SourceError::K8sCore(_) => {
-                "Internal server error".to_owned()
-            }
+            SourceError::SourcesDb(_)
+            | SourceError::PipelinesDb(_)
+            | SourceError::K8sCore(_)
+            | SourceError::Pipeline(_) => "Internal server error".to_owned(),
             SourceError::Validation(error) => utils::validation_error_message(error).to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
@@ -85,9 +91,10 @@ impl IntoResponse for SourceError {
         let status_code = match &self {
             SourceError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             SourceError::TenantId(_) => StatusCode::BAD_REQUEST,
-            SourceError::SourcesDb(_) | SourceError::PipelinesDb(_) | SourceError::K8sCore(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            SourceError::SourcesDb(_)
+            | SourceError::PipelinesDb(_)
+            | SourceError::K8sCore(_)
+            | SourceError::Pipeline(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SourceError::Validation(error) => utils::validation_error_status_code(error),
             SourceError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
             SourceError::ActivePipeline(_) | SourceError::SourceInUse(_) => StatusCode::CONFLICT,
@@ -333,11 +340,13 @@ pub(crate) async fn read_source(
     ),
     tag = "Sources"
 )]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn update_source(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     source_id: Path<i64>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     source: Json<UpdateSourceRequest>,
@@ -353,8 +362,10 @@ pub(crate) async fn update_source(
     )
     .await?;
 
+    let mut txn = pool.begin().await.map_err(SourcesDbError::from)?;
+
     data::sources::update_source(
-        &pool,
+        txn.deref_mut(),
         tenant_id,
         &source.name,
         source_id,
@@ -363,6 +374,22 @@ pub(crate) async fn update_source(
     )
     .await?
     .ok_or(SourceError::SourceNotFound(source_id))?;
+
+    let pipeline_ids = read_pipeline_ids_for_source(txn.deref_mut(), tenant_id, source_id).await?;
+    for pipeline_id in pipeline_ids {
+        common::restart_pipeline_replicator_if_running(
+            txn.deref_mut(),
+            tenant_id,
+            pipeline_id,
+            &encryption_key,
+            k8s_client.as_ref(),
+            source_tls_config.as_ref(),
+            api_config.as_ref(),
+        )
+        .await?;
+    }
+
+    txn.commit().await.map_err(SourcesDbError::from)?;
 
     Ok(StatusCode::OK)
 }

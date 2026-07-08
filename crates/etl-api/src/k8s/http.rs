@@ -34,6 +34,8 @@ use crate::{
     },
 };
 
+/// Server-side apply field manager for resources owned by the API service.
+const FIELD_MANAGER: &str = "etl-api";
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
 /// Secret name suffix for the ClickHouse password.
@@ -421,7 +423,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for credentials.
-        let pp = PatchParams::apply(&postgres_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&postgres_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -448,7 +450,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for credentials.
-        let pp = PatchParams::apply(&bq_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&bq_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -474,7 +476,7 @@ impl K8sClient for HttpK8sClient {
             // fields. If there is an override (likely during an incident or
             // SREs intervention), we want to override their changes. The API
             // database is the source of truth for credentials.
-            let pp = PatchParams::apply(&clickhouse_secret_name).force();
+            let pp = PatchParams::apply(FIELD_MANAGER).force();
             self.secrets_api.patch(&clickhouse_secret_name, &pp, &Patch::Apply(secret)).await?;
         }
 
@@ -509,7 +511,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for credentials.
-        let pp = PatchParams::apply(&iceberg_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&iceberg_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -539,7 +541,7 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(ducklake_secret_json)?;
 
-        let pp = PatchParams::apply(&ducklake_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&ducklake_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -624,7 +626,7 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(snowflake_secret_json)?;
 
-        let pp = PatchParams::apply(&snowflake_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&snowflake_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -663,7 +665,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for configuration.
-        let pp = PatchParams::apply(&replicator_config_map_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.config_maps_api
             .patch(&replicator_config_map_name, &pp, &Patch::Apply(config_map))
             .await?;
@@ -739,7 +741,7 @@ impl K8sClient for HttpK8sClient {
         // We are forcing the update since we are the field manager that should own the
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes.
-        let pp = PatchParams::apply(&stateful_set_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.stateful_sets_api.patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set)).await?;
 
         Ok(())
@@ -781,7 +783,7 @@ impl K8sClient for HttpK8sClient {
 
         let name = create_ducklake_maintenance_name(prefix);
         let ducklake_maintenance_json = create_ducklake_maintenance_json(prefix, &name, config);
-        let pp = PatchParams::apply(&name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.ducklake_maintenance_api
             .patch(&name, &pp, &Patch::Apply(ducklake_maintenance_json))
             .await?;
@@ -1653,7 +1655,7 @@ fn create_replicator_stateful_set_json(
               "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
             },
             "annotations": {
-              // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
+              // Attach template annotations (e.g., restart checksum) to trigger a rolling restart.
               "etl.supabase.com/restarted-at": restarted_at_annotation,
             }
           },

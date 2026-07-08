@@ -42,12 +42,11 @@ use crate::{
         core::{
             create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
             delete_pipeline_resources_in_k8s, is_replicator_active,
-            should_reconcile_replicator_resources,
         },
     },
     routes::{
-        ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
-        extract_tenant_id, utils as route_utils,
+        ErrorMessage, IntoInner, TenantIdError, common::restart_pipeline_replicator_if_running,
+        error_response_with_internal_error, extract_tenant_id, utils as route_utils,
     },
     utils::parse_docker_image_tag,
     validation,
@@ -778,27 +777,14 @@ pub(crate) async fn update_pipeline(
     .await?
     .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
-    let (pipeline, replicator, image, source, destination) =
-        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
-
-    if !should_reconcile_replicator_resources(k8s_client.as_ref(), tenant_id, replicator.id).await?
-    {
-        txn.commit().await?;
-
-        return Ok(StatusCode::OK);
-    }
-
-    let tls_config = source_tls_config.get_tls_config();
-    create_or_update_pipeline_resources_in_k8s(
-        k8s_client.as_ref(),
+    restart_pipeline_replicator_if_running(
+        &mut txn,
         tenant_id,
-        pipeline,
-        replicator,
-        image,
-        source,
-        destination,
-        api_config.supabase_api_url.as_deref(),
-        tls_config,
+        pipeline_id,
+        &encryption_key,
+        k8s_client.as_ref(),
+        source_tls_config.as_ref(),
+        api_config.as_ref(),
     )
     .await?;
 
@@ -1457,7 +1443,7 @@ pub(crate) async fn update_pipeline_version(
     let update_request = update_request.into_inner();
 
     let mut txn = pool.begin().await?;
-    let (pipeline, replicator, current_image, source, destination) =
+    let (_, replicator, current_image, _, destination) =
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
     // Only allow updating to the current default image. The client must provide the
@@ -1498,28 +1484,14 @@ pub(crate) async fn update_pipeline_version(
         return Ok(StatusCode::OK);
     }
 
-    // If a replicator has no runtime resources, we don't want to create new K8s
-    // resources. If a StatefulSet still exists, reconcile it even when no pod is
-    // currently running so a broken or stale StatefulSet can be repaired.
-    if !should_reconcile_replicator_resources(k8s_client.as_ref(), tenant_id, replicator.id).await?
-    {
-        txn.commit().await?;
-
-        return Ok(StatusCode::OK);
-    }
-
-    let tls_config = source_tls_config.get_tls_config();
-
-    create_or_update_pipeline_resources_in_k8s(
-        k8s_client.as_ref(),
+    restart_pipeline_replicator_if_running(
+        &mut txn,
         tenant_id,
-        pipeline,
-        replicator,
-        target_image,
-        source,
-        destination,
-        api_config.supabase_api_url.as_deref(),
-        tls_config,
+        pipeline_id,
+        &encryption_key,
+        k8s_client.as_ref(),
+        source_tls_config.as_ref(),
+        api_config.as_ref(),
     )
     .await?;
 

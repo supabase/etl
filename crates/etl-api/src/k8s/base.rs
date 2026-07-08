@@ -291,8 +291,10 @@ pub trait K8sClient: Send + Sync {
     /// Creates or updates the replicator `StatefulSet`.
     ///
     /// The stateful set references secrets and config maps created by other
-    /// methods. Changing the configuration may trigger a rolling restart of
-    /// the pods.
+    /// methods. Applying this resource intentionally changes the pod template
+    /// restart annotation so the StatefulSet recreates its pods. This ensures
+    /// the replicator process observes newly materialized mounted config and
+    /// secret-backed environment values.
     async fn create_or_update_replicator_stateful_set(
         &self,
         config: ReplicatorStatefulSetConfig,
