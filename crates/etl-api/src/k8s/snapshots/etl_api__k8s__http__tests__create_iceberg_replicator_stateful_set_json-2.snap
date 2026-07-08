@@ -145,8 +145,7 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
                 "drop": [
                   "ALL"
                 ]
-              },
-              "runAsNonRoot": true
+              }
             },
             "volumeMounts": [
               {

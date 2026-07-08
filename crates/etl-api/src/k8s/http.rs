@@ -1714,11 +1714,6 @@ fn create_replicator_stateful_set_json(
           },
           "spec": {
             "serviceAccountName": REPLICATOR_SERVICE_ACCOUNT_NAME,
-            // `runAsNonRoot` is intentionally not set here: it would apply to every
-            // container in the pod, but the Vector init container's upstream image
-            // has no non-root user and would fail to start under that restriction.
-            // It is instead scoped to the replicator container below, whose own
-            // image already runs as a non-root user.
             "securityContext": {
               "seccompProfile": {
                 "type": "RuntimeDefault"
@@ -1743,16 +1738,7 @@ fn create_replicator_stateful_set_json(
               {
                 "name": replicator_container_name,
                 "image": replicator_image,
-                // Deliberately omitted: Kubernetes already defaults to `Always` for the
-                // mutable `:latest` tag used in dev, and `IfNotPresent` for the
-                // content-addressed, version-tagged images used in staging/prod. Pinning
-                // this to `Always` would force every replicator restart to round-trip to
-                // the registry even when the already-cached image is unchanged.
-                // The replicator image runs as a non-root user by default (see
-                // crates/etl-replicator/Dockerfile), so this is safe here even
-                // though it is not set at the pod level.
                 "securityContext": {
-                  "runAsNonRoot": true,
                   "allowPrivilegeEscalation": false,
                   "capabilities": {
                     "drop": ["ALL"]
