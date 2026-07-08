@@ -18,7 +18,7 @@ const API_KEY_LENGTH_IN_BYTES: usize = 32;
 ///
 /// Contains all settings required to run the API including database connection,
 /// server settings, encryption, authentication, and optional monitoring.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {
     /// Database connection configuration for the API database.
     pub database: PgConnectionConfig,
@@ -47,45 +47,6 @@ pub struct ApiConfig {
     /// If provided, enables ConfigCat feature flag evaluation.
     /// If `None`, the API operates without feature flag support.
     pub configcat_sdk_key: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for ApiConfig {
-    /// Deserializes and validates ETL API service configuration.
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct RawApiConfig {
-            database: PgConnectionConfig,
-            application: ApplicationSettings,
-            k8s: K8sConfig,
-            #[serde(default)]
-            source: SourceConfig,
-            encryption_keys: Vec<EncryptionKeyConfig>,
-            api_keys: Vec<String>,
-            sentry: Option<SentryConfig>,
-            supabase_api_url: Option<String>,
-            configcat_sdk_key: Option<String>,
-        }
-
-        let raw = RawApiConfig::deserialize(deserializer)?;
-        let config = Self {
-            database: raw.database,
-            application: raw.application,
-            k8s: raw.k8s,
-            source: raw.source,
-            encryption_keys: raw.encryption_keys,
-            api_keys: raw.api_keys,
-            sentry: raw.sentry,
-            supabase_api_url: raw.supabase_api_url,
-            configcat_sdk_key: raw.configcat_sdk_key,
-        };
-
-        config.validate().map_err(de::Error::custom)?;
-
-        Ok(config)
-    }
 }
 
 /// Kubernetes-specific API configuration.
@@ -158,7 +119,6 @@ pub struct SourceConfig {
     /// direct API connections (e.g., listing tables, managing publications)
     /// and to replicator pods deployed in Kubernetes, which receive the same
     /// resolved value embedded in their generated configuration.
-    #[serde(default = "default_source_tls")]
     pub tls: TlsConfig,
     /// Optional trusted username for source profile validation.
     ///
@@ -167,20 +127,6 @@ pub struct SourceConfig {
     ///
     /// If `None`, trusted source profile validation is skipped.
     pub trusted_username: Option<String>,
-}
-
-impl Default for SourceConfig {
-    fn default() -> Self {
-        Self { tls: default_source_tls(), trusted_username: None }
-    }
-}
-
-/// Returns the default source TLS configuration: enabled, with no certs set.
-///
-/// Defaults to enabled (unlike [`TlsConfig::disabled`]) because source
-/// connections should require TLS unless explicitly turned off.
-fn default_source_tls() -> TlsConfig {
-    TlsConfig { enabled: true, trusted_root_certs: String::new() }
 }
 
 impl Config for ApiConfig {

@@ -106,7 +106,9 @@ replicator_resources:
 
 All pipeline resource fields are optional. If a request is omitted, the API
 configuration default is used. If a limit is omitted, the ETL API computes it
-from the final request and the static multiplier.
+from the final request and the static multiplier. Before Kubernetes resources
+are applied, final requests are clamped to at least `1m` CPU and `1Mi` memory,
+and final limits are clamped so they are never below their paired requests.
 
 ### Encryption Keys
 

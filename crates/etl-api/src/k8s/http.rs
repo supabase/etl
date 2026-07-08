@@ -22,6 +22,8 @@ use serde_json::json;
 use thiserror::Error;
 use tracing::debug;
 
+#[cfg(test)]
+use crate::config::DefaultReplicationResourcesConfig;
 use crate::{
     config::K8sConfig,
     configs::{
@@ -117,7 +119,10 @@ const DUCKLAKE_MAINTENANCE_KIND: &str = "DuckLakeMaintenance";
 const VECTOR_MEMORY_REQUEST_MIB: i32 = 192;
 /// Vector CPU request, in millicores.
 const VECTOR_CPU_REQUEST_MILLICORES: i32 = 75;
-
+/// Minimum Kubernetes CPU quantity emitted by the API, in millicores.
+const MIN_K8S_CPU_MILLICORES: i32 = 1;
+/// Minimum Kubernetes memory quantity emitted by the API, in Mi.
+const MIN_K8S_MEMORY_MIB: i32 = 1;
 /// Memory limit multiplier (request × 1.2 = limit).
 ///
 /// We want to have 20% leeway in case of a memory usage spike.
@@ -158,25 +163,50 @@ impl ReplicatorResourceConfig {
         k8s_config: &K8sConfig,
         replicator_resources: Option<&ReplicatorResourcesConfig>,
     ) -> Result<Self, K8sError> {
-        let replicator_memory_request = replicator_resources
-            .and_then(|config| config.memory_request_mib)
-            .unwrap_or(k8s_config.replicator_resources.replicator_memory_request_mib);
-        let replicator_cpu_request = replicator_resources
-            .and_then(|config| config.cpu_request_millicores)
-            .unwrap_or(k8s_config.replicator_resources.replicator_cpu_request_millicores);
-        let vector_memory_request = VECTOR_MEMORY_REQUEST_MIB;
-        let vector_cpu_request = VECTOR_CPU_REQUEST_MILLICORES;
+        let replicator_memory_request = clamp_k8s_resource_quantity(
+            replicator_resources
+                .and_then(|config| config.memory_request_mib)
+                .unwrap_or(k8s_config.replicator_resources.replicator_memory_request_mib),
+            MIN_K8S_MEMORY_MIB,
+        );
+        let replicator_cpu_request = clamp_k8s_resource_quantity(
+            replicator_resources
+                .and_then(|config| config.cpu_request_millicores)
+                .unwrap_or(k8s_config.replicator_resources.replicator_cpu_request_millicores),
+            MIN_K8S_CPU_MILLICORES,
+        );
+        let vector_memory_request =
+            clamp_k8s_resource_quantity(VECTOR_MEMORY_REQUEST_MIB, MIN_K8S_MEMORY_MIB);
+        let vector_cpu_request =
+            clamp_k8s_resource_quantity(VECTOR_CPU_REQUEST_MILLICORES, MIN_K8S_CPU_MILLICORES);
 
         let replicator_memory_limit =
             replicator_resources.and_then(|config| config.memory_limit_mib).unwrap_or_else(|| {
                 limit_from_request(replicator_memory_request, MEMORY_LIMIT_MULTIPLIER)
             });
+        let replicator_memory_limit = clamp_k8s_resource_limit(
+            replicator_memory_limit,
+            replicator_memory_request,
+            MIN_K8S_MEMORY_MIB,
+        );
         let replicator_cpu_limit = replicator_resources
             .and_then(|config| config.cpu_limit_millicores)
             .unwrap_or_else(|| limit_from_request(replicator_cpu_request, CPU_LIMIT_MULTIPLIER));
-        let vector_memory_limit =
-            limit_from_request(vector_memory_request, MEMORY_LIMIT_MULTIPLIER);
-        let vector_cpu_limit = limit_from_request(vector_cpu_request, CPU_LIMIT_MULTIPLIER);
+        let replicator_cpu_limit = clamp_k8s_resource_limit(
+            replicator_cpu_limit,
+            replicator_cpu_request,
+            MIN_K8S_CPU_MILLICORES,
+        );
+        let vector_memory_limit = clamp_k8s_resource_limit(
+            limit_from_request(vector_memory_request, MEMORY_LIMIT_MULTIPLIER),
+            vector_memory_request,
+            MIN_K8S_MEMORY_MIB,
+        );
+        let vector_cpu_limit = clamp_k8s_resource_limit(
+            limit_from_request(vector_cpu_request, CPU_LIMIT_MULTIPLIER),
+            vector_cpu_request,
+            MIN_K8S_CPU_MILLICORES,
+        );
 
         Ok(Self {
             replicator_memory_limit: format!("{replicator_memory_limit}Mi"),
@@ -191,6 +221,17 @@ impl ReplicatorResourceConfig {
     }
 }
 
+/// Clamps a Kubernetes resource quantity to the smallest value this API emits.
+fn clamp_k8s_resource_quantity(value: i32, minimum: i32) -> i32 {
+    value.max(minimum)
+}
+
+/// Clamps a Kubernetes resource limit so it can satisfy its paired request.
+fn clamp_k8s_resource_limit(limit: i32, request: i32, minimum: i32) -> i32 {
+    limit.max(request).max(minimum)
+}
+
+/// Computes a limit from a request and multiplier.
 fn limit_from_request(request: i32, multiplier: f32) -> i32 {
     ((request as f32) * multiplier).round() as i32
 }
@@ -202,7 +243,7 @@ fn test_k8s_config(environment: &Environment) -> K8sConfig {
         _ => (250, 125),
     };
     K8sConfig {
-        replicator_resources: crate::config::DefaultReplicationResourcesConfig {
+        replicator_resources: DefaultReplicationResourcesConfig {
             replicator_memory_request_mib,
             replicator_cpu_request_millicores,
         },
@@ -1887,6 +1928,49 @@ mod tests {
     }
 
     #[test]
+    fn test_replicator_resource_config_clamps_to_kubernetes_minimums() {
+        let overrides = ReplicatorResourcesConfig {
+            cpu_request_millicores: Some(0),
+            memory_request_mib: Some(-20),
+            cpu_limit_millicores: Some(0),
+            memory_limit_mib: Some(-1),
+        };
+        let k8s_config = K8sConfig {
+            replicator_resources: DefaultReplicationResourcesConfig {
+                replicator_cpu_request_millicores: -10,
+                replicator_memory_request_mib: 0,
+            },
+        };
+
+        let config =
+            ReplicatorResourceConfig::load_with_overrides(&k8s_config, Some(&overrides)).unwrap();
+
+        assert_eq!(config.replicator_cpu_request, "1m");
+        assert_eq!(config.replicator_memory_request, "1Mi");
+        assert_eq!(config.replicator_cpu_limit, "1m");
+        assert_eq!(config.replicator_memory_limit, "1Mi");
+    }
+
+    #[test]
+    fn test_replicator_resource_config_clamps_limits_to_requests() {
+        let overrides = ReplicatorResourcesConfig {
+            cpu_request_millicores: Some(750),
+            memory_request_mib: Some(1536),
+            cpu_limit_millicores: Some(10),
+            memory_limit_mib: Some(100),
+        };
+        let k8s_config = test_k8s_config(&Environment::Prod);
+
+        let config =
+            ReplicatorResourceConfig::load_with_overrides(&k8s_config, Some(&overrides)).unwrap();
+
+        assert_eq!(config.replicator_cpu_request, "750m");
+        assert_eq!(config.replicator_memory_request, "1536Mi");
+        assert_eq!(config.replicator_cpu_limit, "750m");
+        assert_eq!(config.replicator_memory_limit, "1536Mi");
+    }
+
+    #[test]
     fn generated_kubernetes_labels_fit_with_max_tenant_and_replicator_ids() {
         let prefix = create_k8s_object_prefix(MAX_TENANT_ID, MAX_BIGINT_ID);
         let replicator_app_name = create_replicator_app_name(&prefix);
@@ -2054,7 +2138,7 @@ mod tests {
             ..ReplicatorResourcesConfig::default()
         };
         let k8s_config = K8sConfig {
-            replicator_resources: crate::config::DefaultReplicationResourcesConfig {
+            replicator_resources: DefaultReplicationResourcesConfig {
                 replicator_cpu_request_millicores: 300,
                 replicator_memory_request_mib: 400,
             },
