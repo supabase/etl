@@ -54,15 +54,12 @@ pub fn table_sync_worker_application_name(
 /// tail. All in-repo bases fit without clamping; this is a backstop for
 /// future name growth.
 fn with_worker_suffix(base: &str, suffix: &str) -> String {
-    let budget = MAX_APPLICATION_NAME_LENGTH.saturating_sub(suffix.len());
-    if base.len() > budget {
+    let max_allowed_len = MAX_APPLICATION_NAME_LENGTH.saturating_sub(suffix.len());
+    if base.len() > max_allowed_len {
         warn!(base, suffix, "application_name base clamped to fit worker suffix");
     }
 
-    let mut end = base.len().min(budget);
-    while !base.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = base.floor_char_boundary(max_allowed_len);
 
     format!("{}{suffix}", &base[..end])
 }

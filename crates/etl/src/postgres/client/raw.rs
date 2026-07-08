@@ -246,9 +246,6 @@ impl PgReplicationClient {
     }
 
     /// Establishes a replication connection tagged for an apply worker.
-    ///
-    /// The per-worker `application_name` makes the connection identifiable in
-    /// `pg_stat_activity` and is inherited by child connections.
     pub async fn connect_for_apply_worker(
         pg_connection_config: PgConnectionConfig,
         pipeline_id: PipelineId,
@@ -261,9 +258,6 @@ impl PgReplicationClient {
     }
 
     /// Establishes a replication connection tagged for a table sync worker.
-    ///
-    /// The per-worker `application_name` makes the connection identifiable in
-    /// `pg_stat_activity` and is inherited by child connections.
     pub async fn connect_for_table_sync_worker(
         pg_connection_config: PgConnectionConfig,
         pipeline_id: PipelineId,
