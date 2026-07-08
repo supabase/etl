@@ -9,7 +9,7 @@ use aws_lc_rs::{
 use base64::prelude::*;
 use etl_api::{
     config::{
-        ApiConfig, ApplicationSettings, DefaultReplicationResourcesConfig,
+        ApiConfig, ApplicationSettings, DefaultReplicatorResourcesConfig,
         EncryptionKeyConfig as ConfigEncryptionKey, K8sConfig, SourceConfig,
     },
     configs::encryption,
@@ -579,7 +579,7 @@ async fn spawn_test_app_with_services(
         database: database_config,
         application: ApplicationSettings { host: base_address.to_owned(), port },
         k8s: K8sConfig {
-            replicator_resources: DefaultReplicationResourcesConfig {
+            replicator_resources: DefaultReplicatorResourcesConfig {
                 replicator_memory_request_mib: 250,
                 replicator_cpu_request_millicores: 125,
             },

@@ -58,7 +58,7 @@ pub struct K8sConfig {
     /// provides the mandatory baseline CPU and memory requests used for every
     /// replicator pod unless a pipeline-level override supplies one of those
     /// request values.
-    pub replicator_resources: DefaultReplicationResourcesConfig,
+    pub replicator_resources: DefaultReplicatorResourcesConfig,
 }
 
 /// Mandatory default request sizing for replicator workloads.
@@ -69,7 +69,7 @@ pub struct K8sConfig {
 /// here; the ETL API derives them from requests with its static multipliers
 /// unless a pipeline-level override provides explicit limits.
 #[derive(Debug, Clone, Deserialize)]
-pub struct DefaultReplicationResourcesConfig {
+pub struct DefaultReplicatorResourcesConfig {
     /// Replicator memory request, in Mi.
     pub replicator_memory_request_mib: i32,
     /// Replicator CPU request, in millicores.
@@ -83,7 +83,7 @@ impl ApiConfig {
     }
 }
 
-impl DefaultReplicationResourcesConfig {
+impl DefaultReplicatorResourcesConfig {
     /// Validates that configured request values are positive.
     pub fn validate(&self) -> Result<(), String> {
         validate_positive_request(
