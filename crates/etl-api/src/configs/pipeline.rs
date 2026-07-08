@@ -53,15 +53,14 @@ pub struct ReplicatorResourcesConfig {
     pub memory_request_mib: Option<i32>,
     /// CPU limit for the replicator container, in millicores.
     ///
-    /// When unset, the ETL API derives the limit from the final CPU request
-    /// using the static CPU limit multiplier in the Kubernetes materializer.
+    /// When unset, the ETL API uses the final CPU request as the CPU limit.
     #[schema(example = 1000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_limit_millicores: Option<i32>,
     /// Memory limit for the replicator container, in MiB.
     ///
-    /// When unset, the ETL API derives the limit from the final memory request
-    /// using the static memory limit multiplier in the Kubernetes materializer.
+    /// When unset, the ETL API uses the final memory request as the memory
+    /// limit.
     #[schema(example = 2400)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_limit_mib: Option<i32>,

@@ -68,8 +68,8 @@ pub struct K8sConfig {
 /// These values are part of the ETL API service configuration, not the
 /// customer-facing pipeline configuration. They define the baseline Kubernetes
 /// requests for replicator containers. Resource limits are not configurable
-/// here; the ETL API derives them from requests with its static multipliers
-/// unless a pipeline-level override provides explicit limits.
+/// here; the ETL API sets them equal to requests unless a pipeline-level
+/// override provides explicit limits.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DefaultReplicatorResourcesConfig {
     /// Replicator memory request, in Mi.
@@ -81,9 +81,8 @@ pub struct DefaultReplicatorResourcesConfig {
 /// Mandatory default request sizing for Vector sidecars.
 ///
 /// These values are part of the ETL API service configuration and provide the
-/// baseline Kubernetes requests for Vector containers. Resource limits are
-/// derived from requests with the same static multipliers used for replicator
-/// containers.
+/// baseline Kubernetes requests for Vector containers. Resource limits match
+/// these requests.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DefaultVectorResourcesConfig {
     /// Vector memory request, in Mi.
