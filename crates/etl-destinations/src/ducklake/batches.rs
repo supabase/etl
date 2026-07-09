@@ -140,7 +140,7 @@ fn format_update_mutation_error_detail(
 const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
 /// Inline small progress-table writes in the DuckLake metadata catalog instead
 /// of materializing files for this metadata-like table.
-const STREAMING_PROGRESS_TABLE_DATA_INLINING_ROW_LIMIT: usize = 256;
+const STREAMING_PROGRESS_TABLE_DATA_INLINING_ROW_LIMIT: usize = 10_000;
 /// Maximum number of times a failed write attempt is retried before giving up.
 const MAX_COMMIT_RETRIES: u32 = 10;
 /// Initial backoff duration before the first retry.

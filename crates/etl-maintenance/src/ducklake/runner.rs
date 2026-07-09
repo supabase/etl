@@ -612,6 +612,8 @@ fn build_setup_plan_with_strategy(
         ("KEY_ID", quote_literal(s3.map(|s| s.access_key_id.as_str()).unwrap_or_default())),
         ("REGION", quote_literal(s3.map(|s| s.region.as_str()).unwrap_or_default())),
         ("SECRET", quote_literal(s3.map(|s| s.secret_access_key.as_str()).unwrap_or_default())),
+        ("SCOPE", quote_literal(data_path)),
+        ("URL_COMPATIBILITY_MODE", "true".to_owned()),
         ("URL_STYLE", quote_literal(s3.map(|s| s.url_style.as_str()).unwrap_or_default())),
     ]);
 
@@ -668,7 +670,8 @@ fn build_setup_plan_with_strategy(
             label: "configure_object_store",
             sql: format!(
                 "SET enable_http_metadata_cache = true; SET parquet_metadata_cache = true; CREATE \
-                 OR REPLACE SECRET {secret_name} (TYPE S3, {secret_body}, USE_SSL {});",
+                 OR REPLACE SECRET {secret_name} (TYPE S3, PROVIDER config, {secret_body}, \
+                 USE_SSL {});",
                 if s3.use_ssl { "true" } else { "false" }
             ),
         });
@@ -2623,6 +2626,39 @@ mod tests {
             pool: Arc::new(pool),
             blocking_slots: Arc::new(Semaphore::new(1)),
         }
+    }
+
+    #[test]
+    fn build_setup_plan_configures_scoped_s3_secret() {
+        let catalog_url = Url::parse("postgres://user:pass@host/db").unwrap();
+        let data_url = Url::parse("s3://warehouse/tenant/").unwrap();
+        let s3 = S3Config {
+            access_key_id: "key".to_owned(),
+            secret_access_key: "secret".to_owned(),
+            region: "eu-west-3".to_owned(),
+            endpoint: Some("storage.example.com/storage/v1/s3".to_owned()),
+            url_style: "path".to_owned(),
+            use_ssl: true,
+        };
+        let plan = build_setup_plan_with_strategy(
+            &catalog_url,
+            &data_url,
+            Some(&s3),
+            Some("ducklake"),
+            DuckDbExtensionStrategy::InstallFromRepository,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(plan.steps()[2].label, "configure_object_store");
+        assert!(plan.steps()[2].sql.contains("CREATE OR REPLACE SECRET"));
+        assert!(plan.steps()[2].sql.contains("PROVIDER config"));
+        assert!(
+            plan.steps()[2].sql.contains(&format!("SCOPE {}", quote_literal(data_url.as_str())))
+        );
+        assert!(plan.steps()[2].sql.contains("URL_COMPATIBILITY_MODE true"));
+        assert!(plan.steps()[2].sql.contains("URL_STYLE 'path'"));
+        assert!(plan.steps()[2].sql.contains("USE_SSL true"));
     }
 
     #[test]
