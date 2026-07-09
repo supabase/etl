@@ -121,12 +121,6 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// progress points where durable ETL progress may have advanced. The next
 /// deadline is scheduled when the previous cleanup task finishes.
 const SCHEMA_CLEANUP_INTERVAL: Duration = Duration::from_hours(1);
-/// Maximum event-vector capacity retained after dispatching a destination
-/// batch.
-///
-/// This keeps normal batches from reallocating on every flush while bounding
-/// the memory retained after an unusually large batch.
-const MAX_RETAINED_EVENTS_BATCH_CAPACITY: usize = 16 * 1024;
 
 /// Result type for the apply loop execution.
 ///
@@ -739,8 +733,10 @@ impl ApplyLoopState {
     fn take_events_batch(&mut self) -> (Vec<Event>, usize) {
         debug_assert!(self.has_pending_batch());
 
-        let replacement_capacity =
-            self.events_batch.capacity().min(MAX_RETAINED_EVENTS_BATCH_CAPACITY);
+        // We replace the old vector with a new one of the same length, under the
+        // assumption that we do mostly steady-state streaming, so it's highly
+        // likely that the next batch will need the same memory footprint.
+        let replacement_capacity = self.events_batch.len();
         let events_batch =
             std::mem::replace(&mut self.events_batch, Vec::with_capacity(replacement_capacity));
         let events_batch_bytes = self.events_batch_bytes;
@@ -1830,10 +1826,7 @@ where
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<()> {
-        let result = match self.handle_replication_message(events_stream.as_mut(), message).await {
-            Ok(result) => result,
-            Err(err) => return Err(err),
-        };
+        let result = self.handle_replication_message(events_stream.as_mut(), message).await?;
 
         if let Some(event) = result.event {
             // We add the element to the pending batch.
@@ -1930,16 +1923,19 @@ where
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
-        self.record_streaming_message_received();
+        counter!(
+            ETL_REPLICATION_MESSAGES_TOTAL,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+        )
+        .increment(1);
 
         match message {
             ReplicationMessage::XLogData(message) => {
                 let start_lsn = PgLsn::from(message.wal_start());
-                let end_lsn = PgLsn::from(message.wal_end());
+                self.state.update_last_received_lsn(start_lsn);
 
-                // The received LSN tracks the maximum, so one update covers
-                // both positions.
-                self.state.update_last_received_lsn(start_lsn.max(end_lsn));
+                let end_lsn = PgLsn::from(message.wal_end());
+                self.state.update_last_received_lsn(end_lsn);
 
                 debug!(
                     %start_lsn,
@@ -2024,17 +2020,8 @@ where
         }
     }
 
-    /// Records one replication protocol message received.
-    fn record_streaming_message_received(&mut self) {
-        counter!(
-            ETL_REPLICATION_MESSAGES_TOTAL,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-        )
-        .increment(1);
-    }
-
     /// Records a source event received by the table streaming path.
-    fn record_streaming_event_received(&mut self) {
+    fn record_streaming_event_received(&self) {
         counter!(
             ETL_EVENTS_RECEIVED_TOTAL,
             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
@@ -2044,12 +2031,12 @@ where
     }
 
     /// Records row payload bytes received from logical replication.
-    fn record_streaming_bytes_received(&self, event_type: &'static str, payload_bytes: u64) {
+    fn record_streaming_bytes_received(event_type: &'static str, payload_bytes: u64) {
         counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => event_type).increment(payload_bytes);
     }
 
     /// Records row payload bytes processed after table ownership filtering.
-    fn record_streaming_bytes_processed(&self, event_type: &'static str, payload_bytes: u64) {
+    fn record_streaming_bytes_processed(event_type: &'static str, payload_bytes: u64) {
         counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => event_type)
             .increment(payload_bytes);
 
@@ -2379,14 +2366,19 @@ where
 
         let payload_bytes = insert_message_payload_bytes(message);
 
-        self.record_streaming_bytes_received("insert", payload_bytes);
+        Self::record_streaming_bytes_received("insert", payload_bytes);
 
-        let Some(replicated_table_schema) =
-            self.get_replicated_table_schema_for_row(table_id, remote_final_lsn).await?
-        else {
+        // Exactly one worker owns protocol interpretation for a table at a time, so
+        // non-owning workers skip row decoding and leave the shared table state
+        // untouched.
+        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
-        };
-        self.record_streaming_bytes_processed("insert", payload_bytes);
+        }
+
+        Self::record_streaming_bytes_processed("insert", payload_bytes);
+
+        let replicated_table_schema =
+            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
 
         let event = parse_event_from_insert_message(
             replicated_table_schema,
@@ -2418,14 +2410,19 @@ where
 
         let payload_bytes = update_message_payload_bytes(message);
 
-        self.record_streaming_bytes_received("update", payload_bytes);
+        Self::record_streaming_bytes_received("update", payload_bytes);
 
-        let Some(replicated_table_schema) =
-            self.get_replicated_table_schema_for_row(table_id, remote_final_lsn).await?
-        else {
+        // Exactly one worker owns protocol interpretation for a table at a time, so
+        // non-owning workers skip row decoding and leave the shared table state
+        // untouched.
+        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
-        };
-        self.record_streaming_bytes_processed("update", payload_bytes);
+        }
+
+        Self::record_streaming_bytes_processed("update", payload_bytes);
+
+        let replicated_table_schema =
+            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
 
         let event = parse_event_from_update_message(
             replicated_table_schema,
@@ -2457,14 +2454,19 @@ where
 
         let payload_bytes = delete_message_payload_bytes(message);
 
-        self.record_streaming_bytes_received("delete", payload_bytes);
+        Self::record_streaming_bytes_received("delete", payload_bytes);
 
-        let Some(replicated_table_schema) =
-            self.get_replicated_table_schema_for_row(table_id, remote_final_lsn).await?
-        else {
+        // Exactly one worker owns protocol interpretation for a table at a time, so
+        // non-owning workers skip row decoding and leave the shared table state
+        // untouched.
+        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
-        };
-        self.record_streaming_bytes_processed("delete", payload_bytes);
+        }
+
+        Self::record_streaming_bytes_processed("delete", payload_bytes);
+
+        let replicated_table_schema =
+            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
 
         let event = parse_event_from_delete_message(
             replicated_table_schema,
@@ -2499,9 +2501,9 @@ where
 
             // Exactly one worker owns protocol interpretation for a table at a time, so
             // non-owning workers skip truncation handling for that table as well.
-            if let Some(replicated_table_schema) =
-                self.get_replicated_table_schema_for_row(table_id, remote_final_lsn).await?
-            {
+            if self.should_apply_changes(table_id, remote_final_lsn).await? {
+                let replicated_table_schema =
+                    get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
                 truncated_tables.push(replicated_table_schema);
             }
         }
@@ -2542,26 +2544,6 @@ where
                 Ok(table_sync_worker::should_apply_changes(ctx, table_id))
             }
         }
-    }
-
-    /// Returns the replicated schema when this worker should decode a row for
-    /// `table_id`.
-    async fn get_replicated_table_schema_for_row(
-        &mut self,
-        table_id: TableId,
-        remote_final_lsn: PgLsn,
-    ) -> EtlResult<Option<ReplicatedTableSchema>> {
-        // Exactly one worker owns protocol interpretation for a table at a
-        // time, so non-owning workers skip row decoding and leave the shared
-        // table state untouched.
-        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
-            return Ok(None);
-        }
-
-        let replicated_table_schema =
-            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
-
-        Ok(Some(replicated_table_schema))
     }
 
     /// Processes syncing tables after a commit message.

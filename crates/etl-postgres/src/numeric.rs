@@ -109,9 +109,6 @@ impl FromStr for PgNumeric {
     type Err = ParseNumericError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        // Surrounding whitespace is allowed; `str::trim` uses the same Unicode
-        // whitespace predicate the previous char-based skip used. All accepted
-        // syntax beyond that is ASCII, so the value is parsed as bytes.
         let trimmed = input.trim();
 
         if trimmed.is_empty() {

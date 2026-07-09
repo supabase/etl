@@ -15,12 +15,6 @@ use crate::{
     schema::TableId,
 };
 
-/// Maximum item-vector capacity retained after emitting a stream batch.
-///
-/// This avoids reallocating for normal batch sizes while bounding memory after
-/// a transiently large batch.
-const MAX_RETAINED_BATCH_ITEMS: usize = 16 * 1024;
-
 /// Builds the stream id for a table sync worker's initial table-copy stream.
 pub(crate) fn table_sync_worker_copy_stream_id(table_id: TableId) -> String {
     format!("table_sync_worker_copy_{}_stream", table_id.0)
@@ -36,11 +30,11 @@ pub(crate) fn apply_worker_apply_stream_id() -> String {
     "apply_worker_apply_stream".to_owned()
 }
 
-/// Takes buffered items and leaves behind a bounded retained-capacity
-/// replacement.
-fn take_items_with_retained_capacity<T>(items: &mut Vec<T>) -> Vec<T> {
-    let replacement_capacity = items.capacity().min(MAX_RETAINED_BATCH_ITEMS);
-
+/// Takes buffered items and leaves behind a replacement sized for the emitted
+/// batch under the assumption that next batches are likely going to need a
+/// similar amount of memory.
+fn take_and_replace_items<T>(items: &mut Vec<T>) -> Vec<T> {
+    let replacement_capacity = items.len();
     std::mem::replace(items, Vec::with_capacity(replacement_capacity))
 }
 
@@ -265,7 +259,7 @@ where
                 *this.reset_timer = true;
                 *this.current_batch_bytes = 0;
 
-                return Poll::Ready(Some(Ok(take_items_with_retained_capacity(this.items))));
+                return Poll::Ready(Some(Ok(take_and_replace_items(this.items))));
             }
 
             return Poll::Pending;
@@ -301,9 +295,7 @@ where
                         *this.reset_timer = true;
                         *this.current_batch_bytes = 0;
 
-                        return Poll::Ready(Some(Ok(take_items_with_retained_capacity(
-                            this.items,
-                        ))));
+                        return Poll::Ready(Some(Ok(take_and_replace_items(this.items))));
                     }
 
                     // If byte budget is reached, emit immediately.
@@ -312,9 +304,7 @@ where
                         *this.reset_timer = true;
                         *this.current_batch_bytes = 0;
 
-                        return Poll::Ready(Some(Ok(take_items_with_retained_capacity(
-                            this.items,
-                        ))));
+                        return Poll::Ready(Some(Ok(take_and_replace_items(this.items))));
                     }
                 }
                 Poll::Ready(Some(Err(err))) => {
@@ -356,7 +346,7 @@ where
             *this.reset_timer = true;
             *this.current_batch_bytes = 0;
 
-            return Poll::Ready(Some(Ok(take_items_with_retained_capacity(this.items))));
+            return Poll::Ready(Some(Ok(take_and_replace_items(this.items))));
         }
 
         Poll::Pending
