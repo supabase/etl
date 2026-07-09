@@ -109,12 +109,20 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
             ],
             "resources": {
               "limits": {
-                "cpu": "1000m",
-                "memory": "600Mi"
+                "cpu": "500m",
+                "memory": "500Mi"
               },
               "requests": {
                 "cpu": "500m",
                 "memory": "500Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
               }
             },
             "volumeMounts": [
@@ -146,8 +154,8 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
             "name": "abcdefghijklmnopqrst-42-vector",
             "resources": {
               "limits": {
-                "cpu": "150m",
-                "memory": "230Mi"
+                "cpu": "75m",
+                "memory": "192Mi"
               },
               "requests": {
                 "cpu": "75m",
@@ -155,6 +163,14 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
               }
             },
             "restartPolicy": "Always",
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
             "volumeMounts": [
               {
                 "mountPath": "/etc/vector",
@@ -169,6 +185,11 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
         ],
         "nodeSelector": {
           "etl.supabase.com/node-role": "workloads"
+        },
+        "securityContext": {
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
         },
         "serviceAccountName": "etl-replicator",
         "terminationGracePeriodSeconds": 300,

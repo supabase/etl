@@ -23,7 +23,7 @@ use thiserror::Error;
 use tracing::debug;
 
 use crate::{
-    config::{DefaultReplicatorResourcesConfig, K8sConfig},
+    config::{DefaultReplicatorResourcesConfig, DefaultVectorResourcesConfig, K8sConfig},
     configs::{
         log::LogLevel,
         pipeline::{DuckLakeMaintenanceConfig, ReplicatorResourcesConfig},
@@ -34,6 +34,8 @@ use crate::{
     },
 };
 
+/// Server-side apply field manager for resources owned by the API service.
+const FIELD_MANAGER: &str = "etl-api";
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
 /// Secret name suffix for the ClickHouse password.
@@ -86,6 +88,10 @@ const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
 const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
 /// Docker image used for the Vector sidecar.
 const VECTOR_IMAGE_NAME: &str = "public.ecr.aws/supabase/timberio/vector:0.55.0-distroless-libc";
+/// Name of the replicator container port that serves Prometheus metrics.
+const REPLICATOR_METRICS_PORT_NAME: &str = "metrics";
+/// Port the replicator listens on for Prometheus metrics.
+const REPLICATOR_METRICS_PORT: i32 = 9000;
 /// ConfigMap name containing the Vector configuration.
 const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
 /// Volume name for the replicator config file.
@@ -113,22 +119,10 @@ const DUCKLAKE_MAINTENANCE_VERSION: &str = "v1alpha1";
 /// DuckLake maintenance CRD kind.
 const DUCKLAKE_MAINTENANCE_KIND: &str = "DuckLakeMaintenance";
 
-/// Vector memory request, in Mi.
-const VECTOR_MEMORY_REQUEST_MIB: i32 = 192;
-/// Vector CPU request, in millicores.
-const VECTOR_CPU_REQUEST_MILLICORES: i32 = 75;
 /// Minimum Kubernetes CPU quantity emitted by the API, in millicores.
 const MIN_K8S_CPU_MILLICORES: i32 = 1;
 /// Minimum Kubernetes memory quantity emitted by the API, in Mi.
 const MIN_K8S_MEMORY_MIB: i32 = 1;
-/// Memory limit multiplier (request × 1.2 = limit).
-///
-/// We want to have 20% leeway in case of a memory usage spike.
-const MEMORY_LIMIT_MULTIPLIER: f32 = 1.2;
-/// CPU limit multiplier (request × 2.0 = limit).
-///
-/// CPU can be throttled, so the limits can be put higher.
-const CPU_LIMIT_MULTIPLIER: f32 = 2.0;
 
 /// Kubernetes resource settings for all containers in a replicator StatefulSet.
 #[derive(Debug)]
@@ -148,7 +142,11 @@ impl ReplicatorStatefulSetResourcesConfig {
     #[cfg(test)]
     fn for_environment(environment: &Environment) -> Result<Self, K8sError> {
         let k8s_config = test_k8s_config(environment);
-        Self::from_default_replicator_resources(&k8s_config.replicator_resources, None)
+        Self::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            None,
+        )
     }
 
     /// Builds StatefulSet resources from API defaults plus optional
@@ -156,35 +154,46 @@ impl ReplicatorStatefulSetResourcesConfig {
     ///
     /// Request precedence is pipeline override first, then the mandatory API
     /// default from `k8s.replicator_resources`. Limit precedence is explicit
-    /// pipeline limit first, then the final request multiplied by the static
-    /// ETL API multiplier constants. Vector resources are always derived from
-    /// the static vector constants.
-    fn from_default_replicator_resources(
+    /// pipeline limit first, then the final request. Vector requests come from
+    /// `k8s.vector_resources`, and Vector limits match those requests. Keeping
+    /// both CPU and memory limits equal to requests for every container lets
+    /// the pod qualify for Kubernetes Guaranteed QoS unless the pipeline opts
+    /// into different replicator limits.
+    fn from_default_resources(
         default_replicator_resources: &DefaultReplicatorResourcesConfig,
+        default_vector_resources: &DefaultVectorResourcesConfig,
         pipeline_replicator_resources: Option<&ReplicatorResourcesConfig>,
     ) -> Result<Self, K8sError> {
         let replicator_memory_request = clamp_k8s_resource_quantity(
             pipeline_replicator_resources
                 .and_then(|config| config.memory_request_mib)
-                .unwrap_or(default_replicator_resources.replicator_memory_request_mib),
+                .unwrap_or(default_replicator_resources.memory_request_mib),
             MIN_K8S_MEMORY_MIB,
         );
         let replicator_cpu_request = clamp_k8s_resource_quantity(
             pipeline_replicator_resources
                 .and_then(|config| config.cpu_request_millicores)
-                .unwrap_or(default_replicator_resources.replicator_cpu_request_millicores),
+                .unwrap_or(default_replicator_resources.cpu_request_millicores),
             MIN_K8S_CPU_MILLICORES,
         );
-        let vector_memory_request =
-            clamp_k8s_resource_quantity(VECTOR_MEMORY_REQUEST_MIB, MIN_K8S_MEMORY_MIB);
-        let vector_cpu_request =
-            clamp_k8s_resource_quantity(VECTOR_CPU_REQUEST_MILLICORES, MIN_K8S_CPU_MILLICORES);
+        let vector_memory_request = clamp_k8s_resource_quantity(
+            default_vector_resources.memory_request_mib,
+            MIN_K8S_MEMORY_MIB,
+        );
+        let vector_cpu_request = clamp_k8s_resource_quantity(
+            default_vector_resources.cpu_request_millicores,
+            MIN_K8S_CPU_MILLICORES,
+        );
 
+        // Keep default limits equal to requests so long-running pipelines get
+        // Guaranteed QoS. A pipeline-level limit override is an intentional
+        // opt-out for workloads that need extra replicator headroom. The
+        // replicator memory monitor reads the container cgroup limit through
+        // sysinfo, so batch budgets and memory backpressure scale with this
+        // default limit.
         let replicator_memory_limit = pipeline_replicator_resources
             .and_then(|config| config.memory_limit_mib)
-            .unwrap_or_else(|| {
-                limit_from_request(replicator_memory_request, MEMORY_LIMIT_MULTIPLIER)
-            });
+            .unwrap_or(replicator_memory_request);
         let replicator_memory_limit = clamp_k8s_resource_limit(
             replicator_memory_limit,
             replicator_memory_request,
@@ -192,22 +201,17 @@ impl ReplicatorStatefulSetResourcesConfig {
         );
         let replicator_cpu_limit = pipeline_replicator_resources
             .and_then(|config| config.cpu_limit_millicores)
-            .unwrap_or_else(|| limit_from_request(replicator_cpu_request, CPU_LIMIT_MULTIPLIER));
+            .unwrap_or(replicator_cpu_request);
         let replicator_cpu_limit = clamp_k8s_resource_limit(
             replicator_cpu_limit,
             replicator_cpu_request,
             MIN_K8S_CPU_MILLICORES,
         );
-        let vector_memory_limit = clamp_k8s_resource_limit(
-            limit_from_request(vector_memory_request, MEMORY_LIMIT_MULTIPLIER),
-            vector_memory_request,
-            MIN_K8S_MEMORY_MIB,
-        );
-        let vector_cpu_limit = clamp_k8s_resource_limit(
-            limit_from_request(vector_cpu_request, CPU_LIMIT_MULTIPLIER),
-            vector_cpu_request,
-            MIN_K8S_CPU_MILLICORES,
-        );
+
+        // Sidecars participate in pod QoS too, so Vector must also keep
+        // limits equal to requests for the pod to stay Guaranteed.
+        let vector_memory_limit = vector_memory_request;
+        let vector_cpu_limit = vector_cpu_request;
 
         Ok(Self {
             replicator_memory_limit: format!("{replicator_memory_limit}Mi"),
@@ -232,21 +236,20 @@ fn clamp_k8s_resource_limit(limit: i32, request: i32, minimum: i32) -> i32 {
     limit.max(request).max(minimum)
 }
 
-/// Computes a limit from a request and multiplier.
-fn limit_from_request(request: i32, multiplier: f32) -> i32 {
-    ((request as f32) * multiplier).round() as i32
-}
-
 #[cfg(test)]
 fn test_k8s_config(environment: &Environment) -> K8sConfig {
-    let (replicator_memory_request_mib, replicator_cpu_request_millicores) = match environment {
+    let (memory_request_mib, cpu_request_millicores) = match environment {
         Environment::Prod => (500, 500),
         _ => (250, 125),
     };
     K8sConfig {
         replicator_resources: DefaultReplicatorResourcesConfig {
-            replicator_memory_request_mib,
-            replicator_cpu_request_millicores,
+            memory_request_mib,
+            cpu_request_millicores,
+        },
+        vector_resources: DefaultVectorResourcesConfig {
+            memory_request_mib: 192,
+            cpu_request_millicores: 75,
         },
     }
 }
@@ -452,7 +455,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for credentials.
-        let pp = PatchParams::apply(&postgres_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&postgres_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -479,7 +482,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for credentials.
-        let pp = PatchParams::apply(&bq_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&bq_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -505,7 +508,7 @@ impl K8sClient for HttpK8sClient {
             // fields. If there is an override (likely during an incident or
             // SREs intervention), we want to override their changes. The API
             // database is the source of truth for credentials.
-            let pp = PatchParams::apply(&clickhouse_secret_name).force();
+            let pp = PatchParams::apply(FIELD_MANAGER).force();
             self.secrets_api.patch(&clickhouse_secret_name, &pp, &Patch::Apply(secret)).await?;
         }
 
@@ -540,7 +543,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for credentials.
-        let pp = PatchParams::apply(&iceberg_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&iceberg_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -570,7 +573,7 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(ducklake_secret_json)?;
 
-        let pp = PatchParams::apply(&ducklake_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&ducklake_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -655,7 +658,7 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(snowflake_secret_json)?;
 
-        let pp = PatchParams::apply(&snowflake_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&snowflake_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -694,7 +697,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for configuration.
-        let pp = PatchParams::apply(&replicator_config_map_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.config_maps_api
             .patch(&replicator_config_map_name, &pp, &Patch::Apply(config_map))
             .await?;
@@ -722,11 +725,11 @@ impl K8sClient for HttpK8sClient {
 
         let prefix = request.prefix.as_str();
         let replicator_image = request.replicator_image.as_str();
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
-                &self.k8s_config.replicator_resources,
-                request.replicator_resources.as_ref(),
-            )?;
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &self.k8s_config.replicator_resources,
+            &self.k8s_config.vector_resources,
+            request.replicator_resources.as_ref(),
+        )?;
 
         let stateful_set_name = create_stateful_set_name(prefix);
         let legacy_stateful_set_name = create_legacy_stateful_set_name(prefix);
@@ -772,7 +775,7 @@ impl K8sClient for HttpK8sClient {
         // We are forcing the update since we are the field manager that should own the
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes.
-        let pp = PatchParams::apply(&stateful_set_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.stateful_sets_api.patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set)).await?;
 
         Ok(())
@@ -814,7 +817,7 @@ impl K8sClient for HttpK8sClient {
 
         let name = create_ducklake_maintenance_name(prefix);
         let ducklake_maintenance_json = create_ducklake_maintenance_json(prefix, &name, config);
-        let pp = PatchParams::apply(&name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.ducklake_maintenance_api
             .patch(&name, &pp, &Patch::Apply(ducklake_maintenance_json))
             .await?;
@@ -1411,6 +1414,12 @@ fn create_init_containers_json(
             "name": vector_container_name,
             "image": VECTOR_IMAGE_NAME,
             "restartPolicy": "Always",
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": ["ALL"]
+              }
+            },
             "env": [
               {
                 "name": "LOGFLARE_API_KEY",
@@ -1686,12 +1695,17 @@ fn create_replicator_stateful_set_json(
               "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
             },
             "annotations": {
-              // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
+              // Attach template annotations (e.g., restart checksum) to trigger a rolling restart.
               "etl.supabase.com/restarted-at": restarted_at_annotation,
             }
           },
           "spec": {
             "serviceAccountName": REPLICATOR_SERVICE_ACCOUNT_NAME,
+            "securityContext": {
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
             "volumes": volumes,
             // Allow scheduling onto nodes tainted with the right node role.
             "tolerations": [
@@ -1711,10 +1725,16 @@ fn create_replicator_stateful_set_json(
               {
                 "name": replicator_container_name,
                 "image": replicator_image,
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": ["ALL"]
+                  }
+                },
                 "ports": [
                   {
-                    "name": "metrics",
-                    "containerPort": 9000,
+                    "name": REPLICATOR_METRICS_PORT_NAME,
+                    "containerPort": REPLICATOR_METRICS_PORT,
                     "protocol": "TCP"
                   }
                 ],
@@ -1893,6 +1913,10 @@ mod tests {
         assert_eq!(prod.replicator_memory_request, "500Mi");
         assert_eq!(staging.replicator_cpu_request, "125m");
         assert_eq!(staging.replicator_memory_request, "250Mi");
+        assert_eq!(prod.vector_cpu_request, "75m");
+        assert_eq!(prod.vector_memory_request, "192Mi");
+        assert_eq!(prod.vector_cpu_limit, "75m");
+        assert_eq!(prod.vector_memory_limit, "192Mi");
     }
 
     #[test]
@@ -1904,17 +1928,17 @@ mod tests {
         };
         let k8s_config = test_k8s_config(&Environment::Prod);
 
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
-                &k8s_config.replicator_resources,
-                Some(&overrides),
-            )
-            .unwrap();
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            Some(&overrides),
+        )
+        .unwrap();
 
         assert_eq!(stateful_set_resources.replicator_cpu_request, "750m");
         assert_eq!(stateful_set_resources.replicator_memory_request, "1536Mi");
-        assert_eq!(stateful_set_resources.replicator_cpu_limit, "1500m");
-        assert_eq!(stateful_set_resources.replicator_memory_limit, "1843Mi");
+        assert_eq!(stateful_set_resources.replicator_cpu_limit, "750m");
+        assert_eq!(stateful_set_resources.replicator_memory_limit, "1536Mi");
     }
 
     #[test]
@@ -1927,12 +1951,12 @@ mod tests {
         };
         let k8s_config = test_k8s_config(&Environment::Prod);
 
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
-                &k8s_config.replicator_resources,
-                Some(&overrides),
-            )
-            .unwrap();
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            Some(&overrides),
+        )
+        .unwrap();
 
         assert_eq!(stateful_set_resources.replicator_cpu_request, "750m");
         assert_eq!(stateful_set_resources.replicator_memory_request, "1536Mi");
@@ -1950,22 +1974,30 @@ mod tests {
         };
         let k8s_config = K8sConfig {
             replicator_resources: DefaultReplicatorResourcesConfig {
-                replicator_cpu_request_millicores: -10,
-                replicator_memory_request_mib: 0,
+                cpu_request_millicores: -10,
+                memory_request_mib: 0,
+            },
+            vector_resources: DefaultVectorResourcesConfig {
+                cpu_request_millicores: 0,
+                memory_request_mib: -20,
             },
         };
 
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
-                &k8s_config.replicator_resources,
-                Some(&overrides),
-            )
-            .unwrap();
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            Some(&overrides),
+        )
+        .unwrap();
 
         assert_eq!(stateful_set_resources.replicator_cpu_request, "1m");
         assert_eq!(stateful_set_resources.replicator_memory_request, "1Mi");
         assert_eq!(stateful_set_resources.replicator_cpu_limit, "1m");
         assert_eq!(stateful_set_resources.replicator_memory_limit, "1Mi");
+        assert_eq!(stateful_set_resources.vector_cpu_request, "1m");
+        assert_eq!(stateful_set_resources.vector_memory_request, "1Mi");
+        assert_eq!(stateful_set_resources.vector_cpu_limit, "1m");
+        assert_eq!(stateful_set_resources.vector_memory_limit, "1Mi");
     }
 
     #[test]
@@ -1978,17 +2010,43 @@ mod tests {
         };
         let k8s_config = test_k8s_config(&Environment::Prod);
 
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
-                &k8s_config.replicator_resources,
-                Some(&overrides),
-            )
-            .unwrap();
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            Some(&overrides),
+        )
+        .unwrap();
 
         assert_eq!(stateful_set_resources.replicator_cpu_request, "750m");
         assert_eq!(stateful_set_resources.replicator_memory_request, "1536Mi");
         assert_eq!(stateful_set_resources.replicator_cpu_limit, "750m");
         assert_eq!(stateful_set_resources.replicator_memory_limit, "1536Mi");
+    }
+
+    #[test]
+    fn test_replicator_resource_config_uses_api_vector_resources() {
+        let k8s_config = K8sConfig {
+            replicator_resources: DefaultReplicatorResourcesConfig {
+                cpu_request_millicores: 500,
+                memory_request_mib: 500,
+            },
+            vector_resources: DefaultVectorResourcesConfig {
+                cpu_request_millicores: 80,
+                memory_request_mib: 192,
+            },
+        };
+
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(stateful_set_resources.vector_cpu_request, "80m");
+        assert_eq!(stateful_set_resources.vector_memory_request, "192Mi");
+        assert_eq!(stateful_set_resources.vector_cpu_limit, "80m");
+        assert_eq!(stateful_set_resources.vector_memory_limit, "192Mi");
     }
 
     #[test]
@@ -2162,17 +2220,21 @@ mod tests {
         };
         let k8s_config = K8sConfig {
             replicator_resources: DefaultReplicatorResourcesConfig {
-                replicator_cpu_request_millicores: 300,
-                replicator_memory_request_mib: 400,
+                cpu_request_millicores: 300,
+                memory_request_mib: 400,
+            },
+            vector_resources: DefaultVectorResourcesConfig {
+                cpu_request_millicores: 80,
+                memory_request_mib: 192,
             },
         };
 
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::from_default_replicator_resources(
-                &k8s_config.replicator_resources,
-                Some(&overrides),
-            )
-            .unwrap();
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            Some(&overrides),
+        )
+        .unwrap();
 
         assert_eq!(stateful_set_resources.replicator_cpu_request, "900m");
         assert_eq!(stateful_set_resources.replicator_memory_request, "1800Mi");

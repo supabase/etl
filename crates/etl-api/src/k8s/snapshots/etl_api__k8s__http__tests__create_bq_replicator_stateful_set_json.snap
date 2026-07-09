@@ -83,12 +83,20 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
             ],
             "resources": {
               "limits": {
-                "cpu": "250m",
-                "memory": "300Mi"
+                "cpu": "125m",
+                "memory": "250Mi"
               },
               "requests": {
                 "cpu": "125m",
                 "memory": "250Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
               }
             },
             "volumeMounts": [
@@ -101,6 +109,11 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
         ],
         "initContainers": [],
         "nodeSelector": {},
+        "securityContext": {
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
         "serviceAccountName": "etl-replicator",
         "terminationGracePeriodSeconds": 300,
         "tolerations": [

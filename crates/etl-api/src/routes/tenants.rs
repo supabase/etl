@@ -324,7 +324,7 @@ pub(crate) async fn update_tenant(
 pub(crate) async fn delete_tenant(
     Extension(pool): Extension<PgPool>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
+    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
     tenant_id: Path<String>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
 ) -> Result<impl IntoResponse, TenantError> {
@@ -335,7 +335,7 @@ pub(crate) async fn delete_tenant(
 
     let pipelines = read_all_pipelines_for_deletion(&pool, &tenant_id).await?;
     if let Some(pipeline_id) =
-        first_active_pipeline_id(k8s_client.as_ref(), &tenant_id, &pipelines).await?
+        first_active_pipeline_id(k8s_client.as_deref(), &tenant_id, &pipelines).await?
     {
         return Err(TenantError::ActivePipeline(pipeline_id));
     }
