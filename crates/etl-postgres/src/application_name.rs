@@ -6,7 +6,7 @@
 //! `pg_terminate_backend` in tests). Connections not owned by a worker keep
 //! the plain base name.
 
-use tracing::warn;
+use tracing::debug;
 
 use crate::schema::TableId;
 
@@ -56,7 +56,7 @@ pub fn table_sync_worker_application_name(
 fn with_worker_suffix(base: &str, suffix: &str) -> String {
     let max_allowed_len = MAX_APPLICATION_NAME_LENGTH.saturating_sub(suffix.len());
     if base.len() > max_allowed_len {
-        warn!(base, suffix, "application_name base clamped to fit worker suffix");
+        debug!(base, suffix, "application_name base clamped to fit worker suffix");
     }
 
     let end = base.floor_char_boundary(max_allowed_len);
