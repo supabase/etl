@@ -265,7 +265,7 @@ where
                 *this.reset_timer = true;
                 *this.current_batch_bytes = 0;
 
-                return Poll::Ready(Some(Ok(std::mem::take(this.items))));
+                return Poll::Ready(Some(Ok(take_items_with_retained_capacity(this.items))));
             }
 
             return Poll::Pending;
@@ -280,7 +280,7 @@ where
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(item))) => {
                     // Start the fill timer only when a batch becomes non-empty.
-                    // Otherwise an idle stream could expire the timer before
+                    // Otherwise, an idle stream could expire the timer before
                     // the first item arrives and flush that item immediately.
                     if this.items.is_empty() && *this.reset_timer {
                         this.deadline.set(Some(tokio::time::sleep(Duration::from_millis(
@@ -289,6 +289,7 @@ where
                         *this.reset_timer = false;
                     }
 
+                    // Add the new item to the batch and track its size.
                     *this.current_batch_bytes =
                         this.current_batch_bytes.saturating_add(item.size_hint());
                     this.items.push(item);
@@ -329,6 +330,10 @@ where
                         *this.reset_timer = true;
                         *this.current_batch_bytes = 0;
 
+                        // The inner stream is ending, so no future batch can
+                        // reuse retained capacity. `mem::take` replaces the
+                        // buffer with `Vec::new()`, which keeps zero capacity
+                        // and avoids allocating a replacement vector.
                         Some(Ok(std::mem::take(this.items)))
                     };
 
@@ -628,6 +633,9 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
+        // This covers the ready-drain path specifically: the inner stream does
+        // not return `Pending` between items, so memory pressure must be
+        // observed from the current watch value inside the drain loop.
         let batch_config = test_batch_config(10_000);
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             ActivatesBackpressureAfterFirst::new(memory.clone()),
@@ -835,6 +843,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
+        // This guards against arming the fill timer while the stream is idle.
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let batch_config = test_batch_config(100);
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
