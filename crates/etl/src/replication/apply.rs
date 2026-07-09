@@ -395,196 +395,6 @@ impl HandleMessageResult {
     }
 }
 
-/// Logical replication row event types that carry payload bytes.
-#[derive(Debug, Copy, Clone)]
-enum StreamingDataEventType {
-    /// An `INSERT` row event.
-    Insert,
-    /// An `UPDATE` row event.
-    Update,
-    /// A `DELETE` row event.
-    Delete,
-}
-
-impl StreamingDataEventType {
-    /// Returns the metric label for this event type.
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Insert => "insert",
-            Self::Update => "update",
-            Self::Delete => "delete",
-        }
-    }
-}
-
-/// Maximum row-size histogram samples buffered per event type before an
-/// inline flush.
-///
-/// This bounds batch memory when many row events arrive between the normal
-/// flush points at status updates and batch dispatches.
-const MAX_BUFFERED_ROW_SIZE_SAMPLES: usize = 4096;
-
-/// Batched streaming metrics waiting to be flushed to the metrics recorder.
-#[derive(Debug, Default)]
-struct StreamingMetricsBatch {
-    /// Number of replication protocol messages received.
-    messages_received: u64,
-    /// Number of logical replication messages received.
-    events_received: u64,
-    /// Bytes received for `INSERT` row payloads.
-    insert_bytes_received: u64,
-    /// Bytes received for `UPDATE` row payloads.
-    update_bytes_received: u64,
-    /// Bytes received for `DELETE` row payloads.
-    delete_bytes_received: u64,
-    /// Bytes processed for `INSERT` row payloads after ownership filtering.
-    insert_bytes_processed: u64,
-    /// Bytes processed for `UPDATE` row payloads after ownership filtering.
-    update_bytes_processed: u64,
-    /// Bytes processed for `DELETE` row payloads after ownership filtering.
-    delete_bytes_processed: u64,
-    /// Row sizes buffered for the `INSERT` row-size histogram.
-    ///
-    /// Buffering preserves every histogram sample while paying the
-    /// metrics-registry lookup once per flush instead of once per row event.
-    insert_row_size_samples: Vec<f64>,
-    /// Row sizes buffered for the `UPDATE` row-size histogram.
-    update_row_size_samples: Vec<f64>,
-    /// Row sizes buffered for the `DELETE` row-size histogram.
-    delete_row_size_samples: Vec<f64>,
-}
-
-impl StreamingMetricsBatch {
-    /// Records one replication protocol message received.
-    fn record_message_received(&mut self) {
-        self.messages_received = self.messages_received.saturating_add(1);
-    }
-
-    /// Records one source event received by the table streaming path.
-    fn record_event_received(&mut self) {
-        self.events_received = self.events_received.saturating_add(1);
-    }
-
-    /// Records row payload bytes received from logical replication.
-    fn record_bytes_received(&mut self, event_type: StreamingDataEventType, payload_bytes: u64) {
-        match event_type {
-            StreamingDataEventType::Insert => {
-                self.insert_bytes_received =
-                    self.insert_bytes_received.saturating_add(payload_bytes);
-            }
-            StreamingDataEventType::Update => {
-                self.update_bytes_received =
-                    self.update_bytes_received.saturating_add(payload_bytes);
-            }
-            StreamingDataEventType::Delete => {
-                self.delete_bytes_received =
-                    self.delete_bytes_received.saturating_add(payload_bytes);
-            }
-        }
-    }
-
-    /// Records row payload bytes processed after table ownership filtering.
-    fn record_bytes_processed(&mut self, event_type: StreamingDataEventType, payload_bytes: u64) {
-        let (bytes_processed, row_size_samples) = match event_type {
-            StreamingDataEventType::Insert => {
-                (&mut self.insert_bytes_processed, &mut self.insert_row_size_samples)
-            }
-            StreamingDataEventType::Update => {
-                (&mut self.update_bytes_processed, &mut self.update_row_size_samples)
-            }
-            StreamingDataEventType::Delete => {
-                (&mut self.delete_bytes_processed, &mut self.delete_row_size_samples)
-            }
-        };
-
-        *bytes_processed = bytes_processed.saturating_add(payload_bytes);
-        row_size_samples.push(payload_bytes as f64);
-
-        if row_size_samples.len() >= MAX_BUFFERED_ROW_SIZE_SAMPLES {
-            Self::flush_row_size_histogram(event_type.as_str(), row_size_samples);
-        }
-    }
-
-    /// Flushes pending metric deltas to the metrics recorder.
-    fn flush(&mut self, worker_type: WorkerType) {
-        if self.messages_received > 0 {
-            counter!(
-                ETL_REPLICATION_MESSAGES_TOTAL,
-                WORKER_TYPE_LABEL => worker_type.as_str(),
-            )
-            .increment(self.messages_received);
-            self.messages_received = 0;
-        }
-
-        if self.events_received > 0 {
-            counter!(
-                ETL_EVENTS_RECEIVED_TOTAL,
-                WORKER_TYPE_LABEL => worker_type.as_str(),
-                ACTION_LABEL => "table_streaming",
-            )
-            .increment(self.events_received);
-            self.events_received = 0;
-        }
-
-        Self::flush_bytes_counter(
-            ETL_BYTES_RECEIVED_TOTAL,
-            "insert",
-            &mut self.insert_bytes_received,
-        );
-        Self::flush_bytes_counter(
-            ETL_BYTES_RECEIVED_TOTAL,
-            "update",
-            &mut self.update_bytes_received,
-        );
-        Self::flush_bytes_counter(
-            ETL_BYTES_RECEIVED_TOTAL,
-            "delete",
-            &mut self.delete_bytes_received,
-        );
-        Self::flush_bytes_counter(
-            ETL_BYTES_PROCESSED_TOTAL,
-            "insert",
-            &mut self.insert_bytes_processed,
-        );
-        Self::flush_bytes_counter(
-            ETL_BYTES_PROCESSED_TOTAL,
-            "update",
-            &mut self.update_bytes_processed,
-        );
-        Self::flush_bytes_counter(
-            ETL_BYTES_PROCESSED_TOTAL,
-            "delete",
-            &mut self.delete_bytes_processed,
-        );
-
-        Self::flush_row_size_histogram("insert", &mut self.insert_row_size_samples);
-        Self::flush_row_size_histogram("update", &mut self.update_row_size_samples);
-        Self::flush_row_size_histogram("delete", &mut self.delete_row_size_samples);
-    }
-
-    /// Flushes a single byte counter if it has a pending delta.
-    fn flush_bytes_counter(metric_name: &'static str, event_type: &'static str, bytes: &mut u64) {
-        if *bytes == 0 {
-            return;
-        }
-
-        counter!(metric_name, EVENT_TYPE_LABEL => event_type).increment(*bytes);
-        *bytes = 0;
-    }
-
-    /// Flushes buffered row-size histogram samples for one event type.
-    fn flush_row_size_histogram(event_type: &'static str, samples: &mut Vec<f64>) {
-        if samples.is_empty() {
-            return;
-        }
-
-        let row_size_histogram = histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => event_type);
-        for sample in samples.drain(..) {
-            row_size_histogram.record(sample);
-        }
-    }
-}
-
 /// Running schema cleanup marker.
 ///
 /// Finishing the marker schedules the next cleanup deadline. This keeps the
@@ -837,8 +647,6 @@ struct ApplyLoopState {
     events_batch: Vec<Event>,
     /// Approximate total size in bytes of events currently in the batch.
     events_batch_bytes: usize,
-    /// Streaming metrics accumulated between flush points.
-    streaming_metrics_batch: StreamingMetricsBatch,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding
@@ -900,7 +708,6 @@ impl ApplyLoopState {
             replication_lag_metrics,
             events_batch: Vec::new(),
             events_batch_bytes: 0,
-            streaming_metrics_batch: StreamingMetricsBatch::default(),
             current_tx_begin_ts: None,
             current_tx_events: 0,
             next_tx_ordinal: 0,
@@ -940,39 +747,6 @@ impl ApplyLoopState {
         self.events_batch_bytes = 0;
 
         (events_batch, events_batch_bytes)
-    }
-
-    /// Records one replication protocol message received.
-    fn record_streaming_message_received(&mut self) {
-        self.streaming_metrics_batch.record_message_received();
-    }
-
-    /// Records one source event received by the table streaming path.
-    fn record_streaming_event_received(&mut self) {
-        self.streaming_metrics_batch.record_event_received();
-    }
-
-    /// Records row payload bytes received from logical replication.
-    fn record_streaming_bytes_received(
-        &mut self,
-        event_type: StreamingDataEventType,
-        payload_bytes: u64,
-    ) {
-        self.streaming_metrics_batch.record_bytes_received(event_type, payload_bytes);
-    }
-
-    /// Records row payload bytes processed after table ownership filtering.
-    fn record_streaming_bytes_processed(
-        &mut self,
-        event_type: StreamingDataEventType,
-        payload_bytes: u64,
-    ) {
-        self.streaming_metrics_batch.record_bytes_processed(event_type, payload_bytes);
-    }
-
-    /// Flushes pending streaming metric deltas to the metrics recorder.
-    fn flush_streaming_metrics(&mut self, worker_type: WorkerType) {
-        self.streaming_metrics_batch.flush(worker_type);
     }
 
     /// Returns the bootstrap snapshot used before a table has shared protocol
@@ -1360,8 +1134,6 @@ where
         start_lsn: PgLsn,
     ) -> EtlResult<ApplyLoopResult> {
         let result = self.run(replication_client, start_lsn).await;
-
-        self.flush_streaming_metrics();
 
         self.tasks
             .teardown(self.worker_context.worker_type(), &self.state.schema_cleanup_deadline)
@@ -1760,8 +1532,6 @@ where
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
-        self.flush_streaming_metrics();
-
         let status_update_result = events_stream
             .as_mut()
             .stream_mut()
@@ -2062,11 +1832,7 @@ where
     ) -> EtlResult<()> {
         let result = match self.handle_replication_message(events_stream.as_mut(), message).await {
             Ok(result) => result,
-            Err(err) => {
-                self.flush_streaming_metrics();
-
-                return Err(err);
-            }
+            Err(err) => return Err(err),
         };
 
         if let Some(event) = result.event {
@@ -2108,8 +1874,6 @@ where
     /// processed. The queued batch is then retried from
     /// [`Self::handle_flush_result`] when that in-flight flush resolves.
     async fn flush_batch(&mut self, reason: &str) -> EtlResult<()> {
-        self.flush_streaming_metrics();
-
         // If the batch is empty, we don't need to do anything.
         if !self.state.has_pending_batch() {
             return Ok(());
@@ -2166,7 +1930,7 @@ where
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
-        self.state.record_streaming_message_received();
+        self.record_streaming_message_received();
 
         match message {
             ReplicationMessage::XLogData(message) => {
@@ -2260,32 +2024,36 @@ where
         }
     }
 
+    /// Records one replication protocol message received.
+    fn record_streaming_message_received(&mut self) {
+        counter!(
+            ETL_REPLICATION_MESSAGES_TOTAL,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+        )
+        .increment(1);
+    }
+
     /// Records a source event received by the table streaming path.
     fn record_streaming_event_received(&mut self) {
-        self.state.record_streaming_event_received();
+        counter!(
+            ETL_EVENTS_RECEIVED_TOTAL,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+            ACTION_LABEL => "table_streaming",
+        )
+        .increment(1);
     }
 
     /// Records row payload bytes received from logical replication.
-    fn record_streaming_bytes_received(
-        &mut self,
-        event_type: StreamingDataEventType,
-        payload_bytes: u64,
-    ) {
-        self.state.record_streaming_bytes_received(event_type, payload_bytes);
+    fn record_streaming_bytes_received(&self, event_type: &'static str, payload_bytes: u64) {
+        counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => event_type).increment(payload_bytes);
     }
 
     /// Records row payload bytes processed after table ownership filtering.
-    fn record_streaming_bytes_processed(
-        &mut self,
-        event_type: StreamingDataEventType,
-        payload_bytes: u64,
-    ) {
-        self.state.record_streaming_bytes_processed(event_type, payload_bytes);
-    }
+    fn record_streaming_bytes_processed(&self, event_type: &'static str, payload_bytes: u64) {
+        counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => event_type)
+            .increment(payload_bytes);
 
-    /// Flushes pending streaming metrics for this worker.
-    fn flush_streaming_metrics(&mut self) {
-        self.state.flush_streaming_metrics(self.worker_context.worker_type());
+        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => event_type).record(payload_bytes as f64);
     }
 
     /// Handles Postgres MESSAGE messages (pg_logical_emit_message).
@@ -2611,14 +2379,14 @@ where
 
         let payload_bytes = insert_message_payload_bytes(message);
 
-        self.record_streaming_bytes_received(StreamingDataEventType::Insert, payload_bytes);
+        self.record_streaming_bytes_received("insert", payload_bytes);
 
         let Some(replicated_table_schema) =
             self.get_replicated_table_schema_for_row(table_id, remote_final_lsn).await?
         else {
             return Ok(HandleMessageResult::no_event());
         };
-        self.record_streaming_bytes_processed(StreamingDataEventType::Insert, payload_bytes);
+        self.record_streaming_bytes_processed("insert", payload_bytes);
 
         let event = parse_event_from_insert_message(
             replicated_table_schema,
@@ -2650,14 +2418,14 @@ where
 
         let payload_bytes = update_message_payload_bytes(message);
 
-        self.record_streaming_bytes_received(StreamingDataEventType::Update, payload_bytes);
+        self.record_streaming_bytes_received("update", payload_bytes);
 
         let Some(replicated_table_schema) =
             self.get_replicated_table_schema_for_row(table_id, remote_final_lsn).await?
         else {
             return Ok(HandleMessageResult::no_event());
         };
-        self.record_streaming_bytes_processed(StreamingDataEventType::Update, payload_bytes);
+        self.record_streaming_bytes_processed("update", payload_bytes);
 
         let event = parse_event_from_update_message(
             replicated_table_schema,
@@ -2689,14 +2457,14 @@ where
 
         let payload_bytes = delete_message_payload_bytes(message);
 
-        self.record_streaming_bytes_received(StreamingDataEventType::Delete, payload_bytes);
+        self.record_streaming_bytes_received("delete", payload_bytes);
 
         let Some(replicated_table_schema) =
             self.get_replicated_table_schema_for_row(table_id, remote_final_lsn).await?
         else {
             return Ok(HandleMessageResult::no_event());
         };
-        self.record_streaming_bytes_processed(StreamingDataEventType::Delete, payload_bytes);
+        self.record_streaming_bytes_processed("delete", payload_bytes);
 
         let event = parse_event_from_delete_message(
             replicated_table_schema,
