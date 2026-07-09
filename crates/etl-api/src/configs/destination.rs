@@ -29,7 +29,7 @@ pub const fn default_ducklake_pool_size() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum CreateApiDestinationConfig {
+pub enum ApiDestinationConfig {
     BigQuery {
         #[schema(example = "my-gcp-project")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
@@ -70,7 +70,7 @@ pub enum CreateApiDestinationConfig {
     },
     Iceberg {
         #[serde(flatten)]
-        config: CreateApiIcebergConfig,
+        config: ApiIcebergConfig,
     },
     Ducklake {
         #[schema(value_type = String, example = "postgres://localhost:5432/ducklake_catalog")]
@@ -171,9 +171,6 @@ pub enum CreateApiDestinationConfig {
         role: Option<String>,
     },
 }
-
-/// Destination configuration returned by read endpoints.
-pub type ReadApiDestinationConfig = CreateApiDestinationConfig;
 
 /// Errors returned while merging destination update configuration.
 #[derive(Debug, Error)]
@@ -468,13 +465,12 @@ pub enum UpdateApiDestinationConfig {
 }
 
 impl UpdateApiDestinationConfig {
-    /// Builds a full replacement update from a create-style destination
-    /// configuration.
+    /// Builds a replacement update from an API destination configuration.
     ///
-    /// Optional fields that are absent in the full config are cleared.
-    pub fn from_full_config(value: CreateApiDestinationConfig) -> Self {
+    /// Optional fields that are absent in the API config are cleared.
+    pub fn from_api_config(value: ApiDestinationConfig) -> Self {
         match value {
-            CreateApiDestinationConfig::BigQuery {
+            ApiDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key,
@@ -487,7 +483,7 @@ impl UpdateApiDestinationConfig {
                 max_staleness_mins: UpdateField::from_option(max_staleness_mins),
                 connection_pool_size: UpdateField::from_option(connection_pool_size),
             },
-            CreateApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
+            ApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse {
                     url: UpdateField::Set(url),
                     user: UpdateField::Set(user),
@@ -496,10 +492,10 @@ impl UpdateApiDestinationConfig {
                     engine: UpdateField::Set(engine),
                 }
             }
-            CreateApiDestinationConfig::Iceberg { config } => {
-                Self::Iceberg { config: UpdateApiIcebergConfig::from_full_config(config) }
+            ApiDestinationConfig::Iceberg { config } => {
+                Self::Iceberg { config: UpdateApiIcebergConfig::from_api_config(config) }
             }
-            CreateApiDestinationConfig::Ducklake {
+            ApiDestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
                 pool_size,
@@ -530,7 +526,7 @@ impl UpdateApiDestinationConfig {
                 expire_snapshots_older_than: UpdateField::from_option(expire_snapshots_older_than),
                 maintenance_mode: UpdateField::Set(maintenance_mode),
             },
-            CreateApiDestinationConfig::Snowflake {
+            ApiDestinationConfig::Snowflake {
                 account_id,
                 user,
                 private_key,
@@ -1156,7 +1152,7 @@ fn require_secret_update<T>(
     }
 }
 
-impl From<StoredDestinationConfig> for CreateApiDestinationConfig {
+impl From<StoredDestinationConfig> for ApiDestinationConfig {
     fn from(value: StoredDestinationConfig) -> Self {
         match value {
             StoredDestinationConfig::BigQuery {
@@ -1184,8 +1180,8 @@ impl From<StoredDestinationConfig> for CreateApiDestinationConfig {
                     s3_access_key_id,
                     s3_secret_access_key,
                     s3_region,
-                } => CreateApiDestinationConfig::Iceberg {
-                    config: CreateApiIcebergConfig::Supabase {
+                } => ApiDestinationConfig::Iceberg {
+                    config: ApiIcebergConfig::Supabase {
                         project_ref,
                         warehouse_name,
                         namespace,
@@ -1202,8 +1198,8 @@ impl From<StoredDestinationConfig> for CreateApiDestinationConfig {
                     s3_access_key_id,
                     s3_secret_access_key,
                     s3_endpoint,
-                } => CreateApiDestinationConfig::Iceberg {
-                    config: CreateApiIcebergConfig::Rest {
+                } => ApiDestinationConfig::Iceberg {
+                    config: ApiIcebergConfig::Rest {
                         catalog_uri,
                         warehouse_name,
                         namespace,
@@ -1421,10 +1417,10 @@ impl StoredDestinationConfig {
     }
 }
 
-impl From<CreateApiDestinationConfig> for StoredDestinationConfig {
-    fn from(value: CreateApiDestinationConfig) -> Self {
+impl From<ApiDestinationConfig> for StoredDestinationConfig {
+    fn from(value: ApiDestinationConfig) -> Self {
         match value {
-            CreateApiDestinationConfig::BigQuery {
+            ApiDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key,
@@ -1438,11 +1434,11 @@ impl From<CreateApiDestinationConfig> for StoredDestinationConfig {
                 connection_pool_size: connection_pool_size
                     .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
             },
-            CreateApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
+            ApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse { url, user, password, database, engine }
             }
-            CreateApiDestinationConfig::Iceberg { config } => match config {
-                CreateApiIcebergConfig::Supabase {
+            ApiDestinationConfig::Iceberg { config } => match config {
+                ApiIcebergConfig::Supabase {
                     project_ref,
                     warehouse_name,
                     namespace,
@@ -1461,7 +1457,7 @@ impl From<CreateApiDestinationConfig> for StoredDestinationConfig {
                         s3_region,
                     },
                 },
-                CreateApiIcebergConfig::Rest {
+                ApiIcebergConfig::Rest {
                     catalog_uri,
                     warehouse_name,
                     namespace,
@@ -1479,7 +1475,7 @@ impl From<CreateApiDestinationConfig> for StoredDestinationConfig {
                     },
                 },
             },
-            CreateApiDestinationConfig::Ducklake {
+            ApiDestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
                 pool_size,
@@ -1508,7 +1504,7 @@ impl From<CreateApiDestinationConfig> for StoredDestinationConfig {
                 expire_snapshots_older_than,
                 maintenance_mode,
             },
-            CreateApiDestinationConfig::Snowflake {
+            ApiDestinationConfig::Snowflake {
                 account_id,
                 user,
                 private_key,
@@ -1957,7 +1953,7 @@ pub enum StoredIcebergConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum CreateApiIcebergConfig {
+pub enum ApiIcebergConfig {
     Supabase {
         #[schema(example = "abcdefghijklmnopqrst")]
         #[serde(deserialize_with = "crate::utils::trim_supabase_project_ref")]
@@ -2111,13 +2107,12 @@ pub enum UpdateApiIcebergConfig {
 }
 
 impl UpdateApiIcebergConfig {
-    /// Builds a full replacement update from a create-style Iceberg
-    /// configuration.
+    /// Builds a replacement update from an API Iceberg configuration.
     ///
-    /// Optional fields that are absent in the full config are cleared.
-    fn from_full_config(value: CreateApiIcebergConfig) -> Self {
+    /// Optional fields that are absent in the API config are cleared.
+    fn from_api_config(value: ApiIcebergConfig) -> Self {
         match value {
-            CreateApiIcebergConfig::Supabase {
+            ApiIcebergConfig::Supabase {
                 project_ref,
                 warehouse_name,
                 namespace,
@@ -2134,7 +2129,7 @@ impl UpdateApiIcebergConfig {
                 s3_secret_access_key: UpdateField::Set(s3_secret_access_key),
                 s3_region: UpdateField::Set(s3_region),
             },
-            CreateApiIcebergConfig::Rest {
+            ApiIcebergConfig::Rest {
                 catalog_uri,
                 warehouse_name,
                 namespace,
@@ -2746,7 +2741,7 @@ mod tests {
 
     #[test]
     fn create_api_destination_config_conversion_clickhouse() {
-        let create_config = CreateApiDestinationConfig::ClickHouse {
+        let create_config = ApiDestinationConfig::ClickHouse {
             url: Url::parse("https://example.com:8443").unwrap(),
             user: "etl".to_owned(),
             password: Some(SerializableSecretString::from("secret".to_owned())),
@@ -2755,18 +2750,18 @@ mod tests {
         };
 
         let stored: StoredDestinationConfig = create_config.clone().into();
-        let back_to_create: CreateApiDestinationConfig = stored.into();
+        let back_to_create: ApiDestinationConfig = stored.into();
 
         match (create_config, back_to_create) {
             (
-                CreateApiDestinationConfig::ClickHouse {
+                ApiDestinationConfig::ClickHouse {
                     url: u1,
                     user: user1,
                     password: p1,
                     database: d1,
                     engine: e1,
                 },
-                CreateApiDestinationConfig::ClickHouse {
+                ApiDestinationConfig::ClickHouse {
                     url: u2,
                     user: user2,
                     password: p2,
@@ -2819,9 +2814,9 @@ mod tests {
         }
         "#;
 
-        let deserialized: CreateApiDestinationConfig = serde_json::from_str(json).unwrap();
+        let deserialized: ApiDestinationConfig = serde_json::from_str(json).unwrap();
         match deserialized {
-            CreateApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
+            ApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 assert_eq!(url.as_str(), "https://example.com:8443/");
                 assert_eq!(user, "etl");
                 assert!(password.is_none());
@@ -2845,9 +2840,9 @@ mod tests {
         }
         "#;
 
-        let deserialized: CreateApiDestinationConfig = serde_json::from_str(json).unwrap();
+        let deserialized: ApiDestinationConfig = serde_json::from_str(json).unwrap();
         match deserialized {
-            CreateApiDestinationConfig::ClickHouse { engine, .. } => {
+            ApiDestinationConfig::ClickHouse { engine, .. } => {
                 assert_eq!(engine, ClickHouseEngine::MergeTree);
             }
             _ => panic!("Deserialization failed or variant mismatch"),
@@ -2888,13 +2883,13 @@ mod tests {
         }
         "#;
 
-        let error = serde_json::from_str::<CreateApiDestinationConfig>(json).unwrap_err();
+        let error = serde_json::from_str::<ApiDestinationConfig>(json).unwrap_err();
         assert!(error.to_string().contains("url must use http or https scheme"));
     }
 
     #[test]
     fn create_api_destination_config_conversion_bigquery() {
-        let create_config = CreateApiDestinationConfig::BigQuery {
+        let create_config = ApiDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
@@ -2903,18 +2898,18 @@ mod tests {
         };
 
         let stored: StoredDestinationConfig = create_config.clone().into();
-        let back_to_create: CreateApiDestinationConfig = stored.into();
+        let back_to_create: ApiDestinationConfig = stored.into();
 
         match (create_config, back_to_create) {
             (
-                CreateApiDestinationConfig::BigQuery {
+                ApiDestinationConfig::BigQuery {
                     project_id: p1_project_id,
                     dataset_id: p1_dataset_id,
                     service_account_key: p1_service_account_key,
                     max_staleness_mins: p1_max_staleness_mins,
                     connection_pool_size: p1_connection_pool_size,
                 },
-                CreateApiDestinationConfig::BigQuery {
+                ApiDestinationConfig::BigQuery {
                     project_id: p2_project_id,
                     dataset_id: p2_dataset_id,
                     service_account_key: p2_service_account_key,
@@ -3212,8 +3207,8 @@ mod tests {
 
     #[test]
     fn create_api_destination_config_conversion_iceberg_supabase() {
-        let create_config = CreateApiDestinationConfig::Iceberg {
-            config: CreateApiIcebergConfig::Supabase {
+        let create_config = ApiDestinationConfig::Iceberg {
+            config: ApiIcebergConfig::Supabase {
                 project_ref: "abcdefghijklmnopqrst".to_owned(),
                 warehouse_name: "my-warehouse".to_owned(),
                 namespace: Some("my-namespace".to_owned()),
@@ -3225,13 +3220,13 @@ mod tests {
         };
 
         let stored: StoredDestinationConfig = create_config.clone().into();
-        let back_to_create: CreateApiDestinationConfig = stored.into();
+        let back_to_create: ApiDestinationConfig = stored.into();
 
         match (create_config, back_to_create) {
             (
-                CreateApiDestinationConfig::Iceberg {
+                ApiDestinationConfig::Iceberg {
                     config:
-                        CreateApiIcebergConfig::Supabase {
+                        ApiIcebergConfig::Supabase {
                             project_ref: p1_project_ref,
                             warehouse_name: p1_warehouse_name,
                             namespace: p1_namespace,
@@ -3241,9 +3236,9 @@ mod tests {
                             s3_region: p1_s3_region,
                         },
                 },
-                CreateApiDestinationConfig::Iceberg {
+                ApiDestinationConfig::Iceberg {
                     config:
-                        CreateApiIcebergConfig::Supabase {
+                        ApiIcebergConfig::Supabase {
                             project_ref: p2_project_ref,
                             warehouse_name: p2_warehouse_name,
                             namespace: p2_namespace,
@@ -3274,8 +3269,8 @@ mod tests {
 
     #[test]
     fn create_api_destination_config_conversion_iceberg_rest() {
-        let create_config = CreateApiDestinationConfig::Iceberg {
-            config: CreateApiIcebergConfig::Rest {
+        let create_config = ApiDestinationConfig::Iceberg {
+            config: ApiIcebergConfig::Rest {
                 catalog_uri: "https://abcdefghijklmnopqrst.storage.supabase.com/storage/v1/iceberg"
                     .to_owned(),
                 warehouse_name: "my-warehouse".to_owned(),
@@ -3287,13 +3282,13 @@ mod tests {
         };
 
         let stored: StoredDestinationConfig = create_config.clone().into();
-        let back_to_create: CreateApiDestinationConfig = stored.into();
+        let back_to_create: ApiDestinationConfig = stored.into();
 
         match (create_config, back_to_create) {
             (
-                CreateApiDestinationConfig::Iceberg {
+                ApiDestinationConfig::Iceberg {
                     config:
-                        CreateApiIcebergConfig::Rest {
+                        ApiIcebergConfig::Rest {
                             catalog_uri: p1_catalog_uri,
                             warehouse_name: p1_warehouse_name,
                             namespace: p1_namespace,
@@ -3302,9 +3297,9 @@ mod tests {
                             s3_endpoint: p1_s3_endpoint,
                         },
                 },
-                CreateApiDestinationConfig::Iceberg {
+                ApiDestinationConfig::Iceberg {
                     config:
-                        CreateApiIcebergConfig::Rest {
+                        ApiIcebergConfig::Rest {
                             catalog_uri: p2_catalog_uri,
                             warehouse_name: p2_warehouse_name,
                             namespace: p2_namespace,
@@ -3458,7 +3453,7 @@ mod tests {
 
     #[test]
     fn create_api_destination_config_ducklake_defaults_maintenance_mode() {
-        let config: CreateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+        let config: ApiDestinationConfig = serde_json::from_value(serde_json::json!({
             "ducklake": {
                 "catalog_url": "postgres://user:pass@localhost:5432/ducklake_catalog",
                 "data_path": "s3://bucket/path"
@@ -3467,7 +3462,7 @@ mod tests {
         .unwrap();
 
         match config {
-            CreateApiDestinationConfig::Ducklake { maintenance_mode, .. } => {
+            ApiDestinationConfig::Ducklake { maintenance_mode, .. } => {
                 assert_eq!(maintenance_mode, DuckLakeMaintenanceMode::Disabled);
             }
             _ => panic!("Config type doesn't match"),
@@ -3476,7 +3471,7 @@ mod tests {
 
     #[test]
     fn create_api_destination_config_conversion_ducklake() {
-        let create_config = CreateApiDestinationConfig::Ducklake {
+        let create_config = ApiDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from(
                 "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
             ),
@@ -3495,11 +3490,11 @@ mod tests {
         };
 
         let stored: StoredDestinationConfig = create_config.clone().into();
-        let back_to_create: CreateApiDestinationConfig = stored.into();
+        let back_to_create: ApiDestinationConfig = stored.into();
 
         match (create_config, back_to_create) {
             (
-                CreateApiDestinationConfig::Ducklake {
+                ApiDestinationConfig::Ducklake {
                     catalog_url: c1,
                     data_path: d1,
                     pool_size: p1,
@@ -3508,7 +3503,7 @@ mod tests {
                     expire_snapshots_older_than: expire1,
                     ..
                 },
-                CreateApiDestinationConfig::Ducklake {
+                ApiDestinationConfig::Ducklake {
                     catalog_url: c2,
                     data_path: d2,
                     pool_size: p2,
@@ -3532,7 +3527,7 @@ mod tests {
 
     #[test]
     fn create_api_destination_config_serialization_ducklake() {
-        let create_config = CreateApiDestinationConfig::Ducklake {
+        let create_config = ApiDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from(
                 "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
             ),
@@ -3553,10 +3548,10 @@ mod tests {
         assert_json_snapshot!(create_config);
 
         let json = serde_json::to_string_pretty(&create_config).unwrap();
-        let deserialized: CreateApiDestinationConfig = serde_json::from_str(&json).unwrap();
+        let deserialized: ApiDestinationConfig = serde_json::from_str(&json).unwrap();
         match (&create_config, deserialized) {
             (
-                CreateApiDestinationConfig::Ducklake {
+                ApiDestinationConfig::Ducklake {
                     catalog_url: c1,
                     data_path: d1,
                     pool_size: p1,
@@ -3571,7 +3566,7 @@ mod tests {
                     expire_snapshots_older_than: expire1,
                     maintenance_mode: mode1,
                 },
-                CreateApiDestinationConfig::Ducklake {
+                ApiDestinationConfig::Ducklake {
                     catalog_url: c2,
                     data_path: d2,
                     pool_size: p2,
@@ -3613,8 +3608,8 @@ mod tests {
 
     #[test]
     fn create_api_destination_config_serialization_iceberg_supabase() {
-        let create_config = CreateApiDestinationConfig::Iceberg {
-            config: CreateApiIcebergConfig::Supabase {
+        let create_config = ApiDestinationConfig::Iceberg {
+            config: ApiIcebergConfig::Supabase {
                 project_ref: "abcdefghijklmnopqrst".to_owned(),
                 warehouse_name: "my-warehouse".to_owned(),
                 namespace: Some("my-namespace".to_owned()),
@@ -3630,12 +3625,12 @@ mod tests {
 
         // Test that we can deserialize it back and all fields match
         let json = serde_json::to_string_pretty(&create_config).unwrap();
-        let deserialized: CreateApiDestinationConfig = serde_json::from_str(&json).unwrap();
+        let deserialized: ApiDestinationConfig = serde_json::from_str(&json).unwrap();
         match (&create_config, deserialized) {
             (
-                CreateApiDestinationConfig::Iceberg {
+                ApiDestinationConfig::Iceberg {
                     config:
-                        CreateApiIcebergConfig::Supabase {
+                        ApiIcebergConfig::Supabase {
                             project_ref: orig_project_ref,
                             warehouse_name: orig_warehouse_name,
                             namespace: orig_namespace,
@@ -3645,9 +3640,9 @@ mod tests {
                             s3_region: orig_s3_region,
                         },
                 },
-                CreateApiDestinationConfig::Iceberg {
+                ApiDestinationConfig::Iceberg {
                     config:
-                        CreateApiIcebergConfig::Supabase {
+                        ApiIcebergConfig::Supabase {
                             project_ref: deser_project_ref,
                             warehouse_name: deser_warehouse_name,
                             namespace: deser_namespace,
@@ -3678,8 +3673,8 @@ mod tests {
 
     #[test]
     fn create_api_destination_config_serialization_iceberg_rest() {
-        let create_config = CreateApiDestinationConfig::Iceberg {
-            config: CreateApiIcebergConfig::Rest {
+        let create_config = ApiDestinationConfig::Iceberg {
+            config: ApiIcebergConfig::Rest {
                 catalog_uri: "https://catalog.example.com/iceberg".to_owned(),
                 warehouse_name: "my-warehouse".to_owned(),
                 namespace: Some("my-namespace".to_owned()),
@@ -3694,12 +3689,12 @@ mod tests {
 
         // Test that we can deserialize it back and all fields match
         let json = serde_json::to_string_pretty(&create_config).unwrap();
-        let deserialized: CreateApiDestinationConfig = serde_json::from_str(&json).unwrap();
+        let deserialized: ApiDestinationConfig = serde_json::from_str(&json).unwrap();
         match (&create_config, deserialized) {
             (
-                CreateApiDestinationConfig::Iceberg {
+                ApiDestinationConfig::Iceberg {
                     config:
-                        CreateApiIcebergConfig::Rest {
+                        ApiIcebergConfig::Rest {
                             catalog_uri: orig_catalog_uri,
                             warehouse_name: orig_warehouse_name,
                             namespace: orig_namespace,
@@ -3708,9 +3703,9 @@ mod tests {
                             s3_endpoint: p1_s3_endpoint,
                         },
                 },
-                CreateApiDestinationConfig::Iceberg {
+                ApiDestinationConfig::Iceberg {
                     config:
-                        CreateApiIcebergConfig::Rest {
+                        ApiIcebergConfig::Rest {
                             catalog_uri: deser_catalog_uri,
                             warehouse_name: deser_warehouse_name,
                             namespace: deser_namespace,

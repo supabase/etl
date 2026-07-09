@@ -18,9 +18,9 @@ use super::{
 use crate::{
     config::ApiConfig,
     configs::{
-        destination::{CreateApiDestinationConfig, UpdateApiDestinationConfig},
+        destination::{ApiDestinationConfig, UpdateApiDestinationConfig},
         encryption::EncryptionKeyring,
-        pipeline::{CreateApiPipelineConfig, UpdateApiPipelineConfig},
+        pipeline::{ApiPipelineConfig, UpdateApiPipelineConfig},
     },
     data,
     data::{
@@ -209,11 +209,11 @@ pub struct CreateDestinationPipelineRequest {
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub destination_name: String,
     #[schema(required = true)]
-    pub destination_config: CreateApiDestinationConfig,
+    pub destination_config: ApiDestinationConfig,
     #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
-    pub pipeline_config: CreateApiPipelineConfig,
+    pub pipeline_config: ApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -248,7 +248,7 @@ pub struct DeleteDestinationPipelineResponse {
 }
 
 fn validate_create_pipeline_request(
-    config: &CreateApiPipelineConfig,
+    config: &ApiPipelineConfig,
 ) -> Result<(), DestinationPipelineError> {
     config.validate().map_err(DestinationPipelineError::InvalidPipelineRequest)
 }

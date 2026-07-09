@@ -11,7 +11,7 @@ use crate::{
     configs::{
         encryption::EncryptionKeyring,
         pipeline::{
-            CreateApiPipelineConfig, PipelineConfigUpdateError, StoredPipelineConfig,
+            ApiPipelineConfig, PipelineConfigUpdateError, StoredPipelineConfig,
             UpdateApiPipelineConfig,
         },
         serde::{DbDeserializationError, DbSerializationError, deserialize_from_value, serialize},
@@ -101,7 +101,7 @@ pub async fn create_pipeline(
     source_id: i64,
     destination_id: i64,
     image_id: i64,
-    config: CreateApiPipelineConfig,
+    config: ApiPipelineConfig,
 ) -> Result<i64, PipelinesDbError> {
     let config = serialize(StoredPipelineConfig::from(config))?;
 

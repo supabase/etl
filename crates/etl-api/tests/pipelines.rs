@@ -468,7 +468,7 @@ async fn an_existing_pipeline_can_be_updated() {
     let updated_config = UpdatePipelineRequest {
         source_id,
         destination_id,
-        config: UpdateApiPipelineConfig::from_full_config(updated_pipeline_config()),
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app.update_pipeline(tenant_id, pipeline_id, &updated_config).await;
 
@@ -629,7 +629,7 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
     let update_request = UpdatePipelineRequest {
         source_id,
         destination_id,
-        config: UpdateApiPipelineConfig::from_full_config(updated_pipeline_config),
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config),
     };
 
     let response = app.update_pipeline(tenant_id, pipeline_id, &update_request).await;
@@ -672,7 +672,7 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
     let update_request = UpdatePipelineRequest {
         source_id,
         destination_id,
-        config: UpdateApiPipelineConfig::from_full_config(updated_pipeline_config),
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config),
     };
 
     let response = app.update_pipeline(tenant_id, pipeline_id, &update_request).await;
@@ -757,7 +757,7 @@ async fn pipeline_with_another_tenants_source_cannot_be_updated() {
     let updated_config = UpdatePipelineRequest {
         source_id: source2_id,
         destination_id: destination1_id,
-        config: UpdateApiPipelineConfig::from_full_config(updated_pipeline_config()),
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app.update_pipeline(tenant1_id, pipeline_id, &updated_config).await;
 
@@ -801,7 +801,7 @@ async fn pipeline_with_another_tenants_destination_cannot_be_updated() {
     let updated_config = UpdatePipelineRequest {
         source_id: source1_id,
         destination_id: destination2_id,
-        config: UpdateApiPipelineConfig::from_full_config(updated_pipeline_config()),
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app.update_pipeline(tenant1_id, pipeline_id, &updated_config).await;
 
@@ -822,7 +822,7 @@ async fn non_existing_pipeline_cannot_be_updated() {
     let updated_config = UpdatePipelineRequest {
         source_id,
         destination_id,
-        config: UpdateApiPipelineConfig::from_full_config(updated_pipeline_config()),
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app.update_pipeline(tenant_id, 42, &updated_config).await;
 
@@ -960,7 +960,7 @@ async fn all_pipelines_can_be_read() {
 //         source_id,
 //         destination_id,
 //         config:
-// UpdateApiPipelineConfig::from_full_config(updated_pipeline_config()),     };
+// UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),     };
 //     let response = app.create_pipeline(tenant_id, &duplicate_pipeline).await;
 //
 //     // Assert
@@ -1005,7 +1005,7 @@ async fn all_pipelines_can_be_read() {
 //         source_id: source1_id, // This would create a duplicate
 //         destination_id,
 //         config:
-// UpdateApiPipelineConfig::from_full_config(updated_pipeline_config()),     };
+// UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),     };
 //     let response = app
 //         .update_pipeline(tenant_id, pipeline2_id, &updated_config)
 //         .await;

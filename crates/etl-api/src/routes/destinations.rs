@@ -15,11 +15,9 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::{
-        destination::{
-            CreateApiDestinationConfig, ReadApiDestinationConfig, UpdateApiDestinationConfig,
-        },
+        destination::{ApiDestinationConfig, UpdateApiDestinationConfig},
         encryption::EncryptionKeyring,
-        pipeline::CreateApiPipelineConfig,
+        pipeline::ApiPipelineConfig,
     },
     data,
     data::{
@@ -137,7 +135,7 @@ pub struct CreateDestinationRequest {
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
     #[schema(required = true)]
-    pub config: CreateApiDestinationConfig,
+    pub config: ApiDestinationConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -163,7 +161,7 @@ pub struct ReadDestinationResponse {
     pub tenant_id: String,
     #[schema(example = "My BigQuery Destination")]
     pub name: String,
-    pub config: ReadApiDestinationConfig,
+    pub config: ApiDestinationConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -179,11 +177,11 @@ pub struct ValidateDestinationRequest {
     pub source_id: Option<i64>,
     /// Destination configuration to validate.
     #[schema(required = true)]
-    pub config: CreateApiDestinationConfig,
+    pub config: ApiDestinationConfig,
     /// Pipeline configuration used to cross-reference source publication
     /// details.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pipeline_config: Option<CreateApiPipelineConfig>,
+    pub pipeline_config: Option<ApiPipelineConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

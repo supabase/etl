@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::configs::{
     destination::{
-        CreateApiDestinationConfig, DestinationConfigUpdateError, EncryptedStoredDestinationConfig,
+        ApiDestinationConfig, DestinationConfigUpdateError, EncryptedStoredDestinationConfig,
         StoredDestinationConfig, UpdateApiDestinationConfig,
     },
     encryption::EncryptionKeyring,
@@ -42,7 +42,7 @@ pub async fn create_destination<'c, E>(
     executor: E,
     tenant_id: &str,
     name: &str,
-    config: CreateApiDestinationConfig,
+    config: ApiDestinationConfig,
     encryption_key: &EncryptionKeyring,
 ) -> Result<i64, DestinationsDbError>
 where

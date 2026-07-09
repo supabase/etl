@@ -24,7 +24,7 @@ use crate::{
     config::ApiConfig,
     configs::{
         encryption::EncryptionKeyring,
-        pipeline::{CreateApiPipelineConfig, ReadApiPipelineConfig, UpdateApiPipelineConfig},
+        pipeline::{ApiPipelineConfig, UpdateApiPipelineConfig},
     },
     data,
     data::{
@@ -279,7 +279,7 @@ pub struct CreatePipelineRequest {
     #[schema(example = 1, required = true)]
     pub destination_id: i64,
     #[schema(required = true)]
-    pub config: CreateApiPipelineConfig,
+    pub config: ApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -314,7 +314,7 @@ pub struct ReadPipelineResponse {
     pub destination_name: String,
     #[schema(example = 1)]
     pub replicator_id: i64,
-    pub config: ReadApiPipelineConfig,
+    pub config: ApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -580,7 +580,7 @@ pub struct ValidatePipelineRequest {
     #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
-    pub config: CreateApiPipelineConfig,
+    pub config: ApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -593,7 +593,7 @@ pub struct ValidationFailureResponse {
     pub failure_type: FailureType,
 }
 
-fn validate_create_pipeline_request(config: &CreateApiPipelineConfig) -> Result<(), PipelineError> {
+fn validate_create_pipeline_request(config: &ApiPipelineConfig) -> Result<(), PipelineError> {
     config.validate().map_err(PipelineError::InvalidPipelineRequest)
 }
 

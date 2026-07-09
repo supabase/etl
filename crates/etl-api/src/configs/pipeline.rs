@@ -205,7 +205,7 @@ impl DuckLakeMaintenanceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct CreateApiPipelineConfig {
+pub struct ApiPipelineConfig {
     #[schema(example = "my_publication")]
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub publication_name: String,
@@ -242,9 +242,6 @@ pub struct CreateApiPipelineConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_level: Option<LogLevel>,
 }
-
-/// Pipeline configuration returned by read endpoints.
-pub type ReadApiPipelineConfig = CreateApiPipelineConfig;
 
 /// Errors returned while merging pipeline update configuration.
 #[derive(Debug, Error)]
@@ -299,11 +296,10 @@ pub struct UpdateApiPipelineConfig {
 }
 
 impl UpdateApiPipelineConfig {
-    /// Builds a full replacement update from a create-style pipeline
-    /// configuration.
+    /// Builds a replacement update from an API pipeline configuration.
     ///
-    /// Optional fields that are absent in the full config are cleared.
-    pub fn from_full_config(value: CreateApiPipelineConfig) -> Self {
+    /// Optional fields that are absent in the API config are cleared.
+    pub fn from_api_config(value: ApiPipelineConfig) -> Self {
         Self {
             publication_name: UpdateField::Set(value.publication_name),
             batch: UpdateField::from_option(value.batch),
@@ -468,7 +464,7 @@ impl UpdateApiPipelineConfig {
     }
 }
 
-impl CreateApiPipelineConfig {
+impl ApiPipelineConfig {
     /// Validates API-only pipeline configuration fields.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(replicator_resources) = &self.replicator_resources {
@@ -483,7 +479,7 @@ impl CreateApiPipelineConfig {
     }
 }
 
-impl From<StoredPipelineConfig> for CreateApiPipelineConfig {
+impl From<StoredPipelineConfig> for ApiPipelineConfig {
     fn from(value: StoredPipelineConfig) -> Self {
         Self {
             publication_name: value.publication_name,
@@ -565,8 +561,8 @@ impl StoredPipelineConfig {
 
 impl Store for StoredPipelineConfig {}
 
-impl From<CreateApiPipelineConfig> for StoredPipelineConfig {
-    fn from(value: CreateApiPipelineConfig) -> Self {
+impl From<ApiPipelineConfig> for StoredPipelineConfig {
+    fn from(value: ApiPipelineConfig) -> Self {
         let batch = value.batch.unwrap_or_default();
 
         Self {
@@ -720,7 +716,7 @@ mod tests {
 
     #[test]
     fn create_api_pipeline_config_conversion() {
-        let create_config = CreateApiPipelineConfig {
+        let create_config = ApiPipelineConfig {
             publication_name: "test_publication".to_owned(),
             batch: None,
             table_error_retry_delay_ms: None,
@@ -742,14 +738,14 @@ mod tests {
         };
 
         let stored: StoredPipelineConfig = create_config.clone().into();
-        let back_to_create: CreateApiPipelineConfig = stored.into();
+        let back_to_create: ApiPipelineConfig = stored.into();
 
         assert_eq!(create_config.publication_name, back_to_create.publication_name);
     }
 
     #[test]
     fn create_api_pipeline_config_defaults() {
-        let create_config = CreateApiPipelineConfig {
+        let create_config = ApiPipelineConfig {
             publication_name: "test_publication".to_owned(),
             batch: None,
             table_error_retry_delay_ms: None,
@@ -833,7 +829,7 @@ mod tests {
 
     #[test]
     fn update_api_pipeline_config_rejects_cleared_publication_name() {
-        let stored: StoredPipelineConfig = CreateApiPipelineConfig {
+        let stored: StoredPipelineConfig = ApiPipelineConfig {
             publication_name: "publication".to_owned(),
             batch: None,
             table_error_retry_delay_ms: None,
@@ -865,7 +861,7 @@ mod tests {
 
     #[test]
     fn update_api_pipeline_config_resets_cleared_defaulted_field() {
-        let stored: StoredPipelineConfig = CreateApiPipelineConfig {
+        let stored: StoredPipelineConfig = ApiPipelineConfig {
             publication_name: "publication".to_owned(),
             batch: Some(BatchConfig {
                 max_fill_ms: 5000,

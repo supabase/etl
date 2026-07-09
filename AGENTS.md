@@ -161,9 +161,9 @@
   infallible, lossless in the semantic sense, value-preserving, and obvious.
   When converting between API config shapes whose semantics are mode-specific,
   prefer a named constructor or method that states the mode. For example,
-  converting a create-style config into an update config where omitted optional
-  fields mean `Clear` rather than `Preserve` should use an explicit helper such
-  as `from_full_config`, not `From`.
+  converting an API config into an update config where omitted optional fields
+  mean `Clear` rather than `Preserve` should use an explicit helper such as
+  `from_api_config`, not `From`.
 
 ## Error Handling And Panics
 - Use typed errors and `Result` for recoverable failures.

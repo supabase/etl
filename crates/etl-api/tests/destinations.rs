@@ -1,8 +1,6 @@
 use etl_api::{
     configs::{
-        destination::{
-            CreateApiDestinationConfig, UpdateApiDestinationConfig, UpdateApiIcebergConfig,
-        },
+        destination::{ApiDestinationConfig, UpdateApiDestinationConfig, UpdateApiIcebergConfig},
         update::UpdateField,
     },
     k8s::PodStatus,
@@ -161,7 +159,7 @@ async fn an_existing_bigquery_destination_can_be_updated() {
     // Act
     let updated_config = UpdateDestinationRequest {
         name: updated_name(),
-        config: UpdateApiDestinationConfig::from_full_config(updated_destination_config()),
+        config: UpdateApiDestinationConfig::from_api_config(updated_destination_config()),
     };
     let response = app.update_destination(tenant_id, destination_id, &updated_config).await;
 
@@ -207,7 +205,7 @@ async fn destination_config_update_preserves_omitted_fields_and_resets_default_f
         response.json().await.expect("failed to deserialize response");
 
     match response.config {
-        etl_api::configs::destination::CreateApiDestinationConfig::BigQuery {
+        etl_api::configs::destination::ApiDestinationConfig::BigQuery {
             project_id,
             dataset_id,
             connection_pool_size,
@@ -368,7 +366,7 @@ async fn updating_destination_with_running_pipeline_restarts_replicator() {
     let create_calls_before = app.k8s_state.create_calls();
     let updated_config = UpdateDestinationRequest {
         name: updated_name(),
-        config: UpdateApiDestinationConfig::from_full_config(updated_destination_config()),
+        config: UpdateApiDestinationConfig::from_api_config(updated_destination_config()),
     };
 
     let response = app.update_destination(tenant_id, destination_id, &updated_config).await;
@@ -396,7 +394,7 @@ async fn an_existing_iceberg_supabase_destination_can_be_updated() {
     // Act
     let updated_config = UpdateDestinationRequest {
         name: "Iceberg Supabase Destination (Updated)".to_owned(),
-        config: UpdateApiDestinationConfig::from_full_config(
+        config: UpdateApiDestinationConfig::from_api_config(
             updated_iceberg_supabase_destination_config(),
         ),
     };
@@ -505,7 +503,7 @@ async fn non_existing_destination_cannot_be_updated() {
     // Act
     let updated_config = UpdateDestinationRequest {
         name: updated_name(),
-        config: UpdateApiDestinationConfig::from_full_config(updated_destination_config()),
+        config: UpdateApiDestinationConfig::from_api_config(updated_destination_config()),
     };
     let response = app.update_destination(tenant_id, 42, &updated_config).await;
 
@@ -714,7 +712,7 @@ async fn an_existing_snowflake_destination_can_be_updated() {
     // Act
     let updated_config = UpdateDestinationRequest {
         name: "Snowflake Destination (Updated)".to_owned(),
-        config: UpdateApiDestinationConfig::from_full_config(updated_snowflake_destination_config()),
+        config: UpdateApiDestinationConfig::from_api_config(updated_snowflake_destination_config()),
     };
     let response = app.update_destination(tenant_id, destination_id, &updated_config).await;
 
@@ -736,7 +734,7 @@ async fn snowflake_destination_update_preserves_and_clears_encrypted_fields() {
     let tenant_id = &create_tenant(&app).await;
 
     let mut config = new_snowflake_destination_config();
-    if let CreateApiDestinationConfig::Snowflake { private_key_passphrase, .. } = &mut config {
+    if let ApiDestinationConfig::Snowflake { private_key_passphrase, .. } = &mut config {
         *private_key_passphrase = Some(SerializableSecretString::from("passphrase".to_owned()));
     }
 

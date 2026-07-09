@@ -3,7 +3,7 @@ source: crates/etl-api/tests/pipelines.rs
 assertion_line: 430
 expression: response.config
 ---
-CreateApiPipelineConfig {
+ApiPipelineConfig {
     publication_name: "publication",
     batch: Some(
         BatchConfig {

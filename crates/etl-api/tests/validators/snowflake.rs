@@ -1,5 +1,5 @@
 use etl_api::{
-    configs::destination::CreateApiDestinationConfig,
+    configs::destination::ApiDestinationConfig,
     validation::{FailureType, validate_destination},
 };
 use etl_config::SerializableSecretString;
@@ -38,7 +38,7 @@ impl SnowflakeTestEnv {
         }
     }
 
-    fn config(&self, database: &str, schema: &str) -> CreateApiDestinationConfig {
+    fn config(&self, database: &str, schema: &str) -> ApiDestinationConfig {
         create_snowflake_config(
             &self.account,
             &self.user,
@@ -59,8 +59,8 @@ fn create_snowflake_config(
     database: &str,
     schema: &str,
     role: Option<&str>,
-) -> CreateApiDestinationConfig {
-    CreateApiDestinationConfig::Snowflake {
+) -> ApiDestinationConfig {
+    ApiDestinationConfig::Snowflake {
         account_id: account_id.to_owned(),
         user: user.to_owned(),
         private_key: SerializableSecretString::from(private_key.to_owned()),
