@@ -236,6 +236,7 @@ where
             *this.paused_for_memory = false;
         }
 
+        // We log the backpressure state changes, for better observability.
         if !was_paused && *this.paused_for_memory {
             info!(
                 stream_id = %this.stream_id,
@@ -248,6 +249,8 @@ where
             );
         }
 
+        // If the stream is paused due to memory backpressure, we want to return the
+        // accumulated data.
         if *this.paused_for_memory {
             if !this.items.is_empty() {
                 info!(
@@ -288,6 +291,8 @@ where
                         this.current_batch_bytes.saturating_add(item.size_hint());
                     this.items.push(item);
 
+                    // Check if the memory backpressure was activated in the meanwhile, in such case
+                    // we want to pause and return the accumulated data.
                     if let Some(memory_subscription) = this.memory_subscription.as_mut()
                         && memory_subscription.current_backpressure_active()
                     {
@@ -298,9 +303,8 @@ where
                         return Poll::Ready(Some(Ok(take_and_replace_items(this.items))));
                     }
 
-                    // If byte budget is reached, emit immediately.
-                    let max_batch_bytes_reached = *this.current_batch_bytes >= max_batch_size_bytes;
-                    if max_batch_bytes_reached {
+                    // If byte budget is reached we want to return the accumulated data.
+                    if *this.current_batch_bytes >= max_batch_size_bytes {
                         *this.reset_timer = true;
                         *this.current_batch_bytes = 0;
 
