@@ -729,7 +729,7 @@ impl ApplyLoopState {
     }
 
     /// Takes the events batch for further processing and leaves behind a
-    /// bounded-capacity replacement.
+    /// replacement sized for the emitted batch.
     fn take_events_batch(&mut self) -> (Vec<Event>, usize) {
         debug_assert!(self.has_pending_batch());
 
