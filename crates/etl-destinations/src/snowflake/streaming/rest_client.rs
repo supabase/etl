@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 use crate::{
     retry::{RetryDecision, RetryPolicy, retry_with_backoff},
     snowflake::{
-        Error, Result,
+        Error, Result, SnowpipeError,
         auth::TokenProvider,
         streaming::{
             ChannelStatusResponse, InsertRowsResponse, OffsetToken, OpenChannelResponse, RowBatch,
@@ -133,7 +133,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         .bearer_auth(&token)
                         .header("User-Agent", USER_AGENT)
                         .header("Content-Type", "application/json")
-                        .body("{}")
+                        .json(&ChannelLifecycleRequest::new())
                         .send()
                         .await
                         .map_err(Error::HttpTransport)?;
@@ -145,30 +145,32 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
                         }
-                        return Err(Error::HttpStatus { status, body });
+                        return Err(SnowpipeError::from_response(status, body).into());
                     }
 
                     let response: OpenChannelApiResponse = resp.json().await.map_err(|e| {
                         Error::Encoding(format!("failed to parse open_channel response: {e}"))
                     })?;
 
-                    if let Some(ref status) = response.channel_status
-                        && let Some(ref code) = status.channel_status_code
-                    {
+                    let status = response.channel_status.ok_or_else(|| {
+                        Error::Encoding("open_channel response missing channel_status".into())
+                    })?;
+
+                    if let Some(ref code) = status.channel_status_code {
                         let is_ok = code == "SUCCESS" || code == "ACTIVE" || code == "0";
                         if !is_ok {
                             let msg = format!("open_channel returned unexpected status: {code}");
-                            return Err(Error::Snowpipe { status_code: 1, message: msg });
+                            return Err(
+                                SnowpipeError::ApiStatus { status_code: 1, message: msg }.into()
+                            );
                         }
                     }
 
+                    let status = status.into_channel_status(channel)?;
                     Ok(OpenChannelResponse {
                         continuation_token: response.next_continuation_token,
-                        offset_token: response
-                            .channel_status
-                            .and_then(|cs| cs.last_committed_offset_token)
-                            .map(|s| s.parse::<OffsetToken>())
-                            .transpose()?,
+                        offset_token: status.offset_token.clone(),
+                        status,
                     })
                 }
             },
@@ -190,10 +192,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         let base_url = insert_url(host, database, schema, table, channel);
 
         let compressed = batch.bytes().clone();
-        let query_params = [
-            ("continuationToken", continuation_token.to_owned()),
-            ("offsetToken", batch.offset().as_ref().to_owned()),
-        ];
+        let query_params = insert_query_params(batch, continuation_token);
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
@@ -203,7 +202,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
             should_retry,
             |d| d,
             |attempt| {
-                if matches!(attempt.error, Error::Snowpipe { status_code: 3, .. }) {
+                if matches!(attempt.error, Error::Snowpipe(SnowpipeError::AuthenticationExpired)) {
                     debug!("auth error on insert_rows, token will be refreshed on retry");
                 }
                 warn!(
@@ -237,19 +236,15 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     let status = resp.status();
                     if status != StatusCode::OK {
                         let body = resp.text().await.unwrap_or_default();
+                        let error = SnowpipeError::from_response(status, body);
                         if status == StatusCode::UNAUTHORIZED {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
                         }
-                        if let Ok(err_resp) = serde_json::from_str::<SnowpipeErrorResponse>(&body)
-                            && let Some(code) = err_resp.status_code
-                        {
-                            if code == 3 {
-                                auth.invalidate_token().await;
-                            }
-                            return Err(Error::Snowpipe { status_code: code, message: body });
+                        if error.is_authentication_expired() {
+                            auth.invalidate_token().await;
                         }
-                        return Err(Error::HttpStatus { status, body });
+                        return Err(error.into());
                     }
 
                     let response: InsertRowsApiResponse = resp.json().await.map_err(|e| {
@@ -300,6 +295,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         .delete(&url)
                         .bearer_auth(&token)
                         .header("User-Agent", USER_AGENT)
+                        .json(&ChannelLifecycleRequest::new())
                         .send()
                         .await
                         .map_err(Error::HttpTransport)?;
@@ -311,7 +307,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
                         }
-                        return Err(Error::HttpStatus { status, body });
+                        return Err(SnowpipeError::from_response(status, body).into());
                     }
                     Ok(())
                 }
@@ -372,7 +368,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
                         }
-                        return Err(Error::HttpStatus { status, body });
+                        return Err(SnowpipeError::from_response(status, body).into());
                     }
 
                     let response: BulkStatusApiResponse = resp.json().await.map_err(|e| {
@@ -381,16 +377,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
                     response.channel_statuses.into_iter().next().map_or_else(
                         || Err(Error::Channel("channel not found in status response".into())),
-                        |(name, ch)| {
-                            Ok(ChannelStatusResponse {
-                                channel: name,
-                                status_code: ch.channel_status_code.unwrap_or_default(),
-                                offset_token: ch
-                                    .last_committed_offset_token
-                                    .map(|s| s.parse::<OffsetToken>())
-                                    .transpose()?,
-                            })
-                        },
+                        |(name, ch)| ch.into_channel_status(&name),
                     )
                 }
             },
@@ -422,34 +409,60 @@ fn channel_status_url(host: &str, db: &str, schema: &str, table: &str) -> String
     format!("{host}/v2/streaming/databases/{db}/schemas/{schema}/pipes/{pipe}:bulk-channel-status")
 }
 
+fn insert_query_params(batch: &RowBatch, continuation_token: &str) -> [(&'static str, String); 3] {
+    [
+        ("continuationToken", continuation_token.to_owned()),
+        ("startOffsetToken", batch.start_offset().as_ref().to_owned()),
+        ("endOffsetToken", batch.end_offset().as_ref().to_owned()),
+    ]
+}
+
 fn should_retry(error: &Error) -> RetryDecision {
     match error {
-        Error::Snowpipe { status_code, .. } => match *status_code {
-            0 => RetryDecision::Stop,
-            1 | 5 | 6 => RetryDecision::Retry,
-            3 => RetryDecision::Retry,
-            2 | 4 => RetryDecision::Stop,
-            _ => RetryDecision::Retry,
+        Error::Snowpipe(error) => match error {
+            SnowpipeError::AuthenticationExpired => RetryDecision::Retry,
+            SnowpipeError::StaleContinuation
+            | SnowpipeError::ChannelHasUncommittedRows
+            | SnowpipeError::ChannelNotFound => RetryDecision::Stop,
+            SnowpipeError::ApiStatus { status_code, .. } => match *status_code {
+                0 | 2 | 4 => RetryDecision::Stop,
+                1 | 3 | 5 | 6 => RetryDecision::Retry,
+                _ => RetryDecision::Retry,
+            },
+            SnowpipeError::HttpStatus { status, .. } => http_status_retry_decision(*status),
         },
         Error::HttpTransport(_) => RetryDecision::Retry,
-        Error::HttpStatus { status, .. } => {
-            if *status == StatusCode::UNAUTHORIZED
-                || *status == StatusCode::REQUEST_TIMEOUT
-                || *status == StatusCode::TOO_MANY_REQUESTS
-                || status.is_server_error()
-            {
-                RetryDecision::Retry
-            } else {
-                RetryDecision::Stop
-            }
-        }
+        Error::HttpStatus { status, .. } => http_status_retry_decision(*status),
         _ => RetryDecision::Stop,
+    }
+}
+
+fn http_status_retry_decision(status: StatusCode) -> RetryDecision {
+    if status == StatusCode::UNAUTHORIZED
+        || status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        RetryDecision::Retry
+    } else {
+        RetryDecision::Stop
     }
 }
 
 #[derive(Deserialize)]
 struct HostnameResponse {
     hostname: String,
+}
+
+#[derive(Serialize)]
+struct ChannelLifecycleRequest {
+    fail_on_uncommitted_rows: bool,
+}
+
+impl ChannelLifecycleRequest {
+    fn new() -> Self {
+        Self { fail_on_uncommitted_rows: true }
+    }
 }
 
 #[derive(Deserialize)]
@@ -462,20 +475,43 @@ struct OpenChannelApiResponse {
 #[derive(Deserialize)]
 struct ChannelStatusDetail {
     #[serde(default)]
+    channel_name: Option<String>,
+    #[serde(default)]
     channel_status_code: Option<String>,
     #[serde(default)]
     last_committed_offset_token: Option<String>,
+    #[serde(default)]
+    rows_inserted: u64,
+    #[serde(default)]
+    rows_parsed: u64,
+    #[serde(default, alias = "rows_errors")]
+    rows_error_count: u64,
+    #[serde(default)]
+    last_error_offset_upper_bound: Option<String>,
+    #[serde(default)]
+    last_error_message: Option<String>,
+}
+
+impl ChannelStatusDetail {
+    fn into_channel_status(self, fallback_channel: &str) -> Result<ChannelStatusResponse> {
+        Ok(ChannelStatusResponse {
+            channel: self.channel_name.unwrap_or_else(|| fallback_channel.to_owned()),
+            status_code: self.channel_status_code.unwrap_or_default(),
+            offset_token: parse_optional_offset_token(self.last_committed_offset_token)?,
+            rows_inserted: self.rows_inserted,
+            rows_parsed: self.rows_parsed,
+            rows_error_count: self.rows_error_count,
+            last_error_offset_upper_bound: parse_optional_offset_token(
+                self.last_error_offset_upper_bound,
+            )?,
+            last_error_message: self.last_error_message,
+        })
+    }
 }
 
 #[derive(Deserialize)]
 struct InsertRowsApiResponse {
     next_continuation_token: String,
-}
-
-#[derive(Deserialize)]
-struct SnowpipeErrorResponse {
-    #[serde(default)]
-    status_code: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -495,6 +531,39 @@ struct BulkStatusChannel {
     channel_status_code: Option<String>,
     #[serde(default)]
     last_committed_offset_token: Option<String>,
+    #[serde(default)]
+    channel_name: Option<String>,
+    #[serde(default)]
+    rows_inserted: u64,
+    #[serde(default)]
+    rows_parsed: u64,
+    #[serde(default, alias = "rows_errors")]
+    rows_error_count: u64,
+    #[serde(default)]
+    last_error_offset_upper_bound: Option<String>,
+    #[serde(default)]
+    last_error_message: Option<String>,
+}
+
+impl BulkStatusChannel {
+    fn into_channel_status(self, fallback_channel: &str) -> Result<ChannelStatusResponse> {
+        Ok(ChannelStatusResponse {
+            channel: self.channel_name.unwrap_or_else(|| fallback_channel.to_owned()),
+            status_code: self.channel_status_code.unwrap_or_default(),
+            offset_token: parse_optional_offset_token(self.last_committed_offset_token)?,
+            rows_inserted: self.rows_inserted,
+            rows_parsed: self.rows_parsed,
+            rows_error_count: self.rows_error_count,
+            last_error_offset_upper_bound: parse_optional_offset_token(
+                self.last_error_offset_upper_bound,
+            )?,
+            last_error_message: self.last_error_message,
+        })
+    }
+}
+
+fn parse_optional_offset_token(token: Option<String>) -> Result<Option<OffsetToken>> {
+    token.filter(|token| !token.is_empty()).map(|token| token.parse::<OffsetToken>()).transpose()
 }
 
 #[cfg(test)]
@@ -503,6 +572,7 @@ mod tests {
         data::{Cell, TableRow},
         schema::{ColumnSchema, Type},
     };
+    use serde_json::json;
 
     use super::*;
     use crate::snowflake::{
@@ -512,7 +582,9 @@ mod tests {
 
     #[test]
     fn should_retry_decision() {
-        let snowpipe = |code| Error::Snowpipe { status_code: code, message: "test".into() };
+        let snowpipe = |code| {
+            Error::Snowpipe(SnowpipeError::ApiStatus { status_code: code, message: "test".into() })
+        };
 
         assert_eq!(should_retry(&snowpipe(0)), RetryDecision::Stop);
         assert_eq!(should_retry(&snowpipe(1)), RetryDecision::Retry);
@@ -531,6 +603,14 @@ mod tests {
         assert_eq!(should_retry(&http(StatusCode::UNAUTHORIZED)), RetryDecision::Retry);
         assert_eq!(should_retry(&http(StatusCode::BAD_REQUEST)), RetryDecision::Stop);
 
+        assert_eq!(
+            should_retry(&Error::Snowpipe(SnowpipeError::AuthenticationExpired)),
+            RetryDecision::Retry
+        );
+        assert_eq!(
+            should_retry(&Error::Snowpipe(SnowpipeError::StaleContinuation)),
+            RetryDecision::Stop
+        );
         assert_eq!(should_retry(&Error::Auth("expired".into())), RetryDecision::Stop);
     }
 
@@ -592,5 +672,87 @@ mod tests {
         let line = text.trim();
         let val: serde_json::Value = serde_json::from_str(line).unwrap();
         assert_eq!(val["id"], 42);
+    }
+
+    #[test]
+    fn insert_query_params_include_start_and_end_offsets() {
+        let cols = [ColumnSchema::new("id".into(), Type::INT4, -1, 1, true)];
+        let start: OffsetToken = "000000000000000a/0000000000000001".parse().unwrap();
+        let end: OffsetToken = "000000000000000a/0000000000000002".parse().unwrap();
+        let mut builder = RowBatchBuilder::new();
+        builder
+            .push_row(
+                &cols,
+                &TableRow::new(vec![Cell::I32(1)]),
+                CdcMeta::new(CdcOperation::Insert, start.as_ref()),
+                &start,
+            )
+            .unwrap();
+        builder
+            .push_row(
+                &cols,
+                &TableRow::new(vec![Cell::I32(2)]),
+                CdcMeta::new(CdcOperation::Insert, end.as_ref()),
+                &end,
+            )
+            .unwrap();
+        let batch = builder.finish().unwrap().pop().unwrap();
+
+        let params = insert_query_params(&batch, "ct0");
+
+        assert_eq!(
+            params,
+            [
+                ("continuationToken", "ct0".to_owned()),
+                ("startOffsetToken", start.as_ref().to_owned()),
+                ("endOffsetToken", end.as_ref().to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn channel_status_parsers_accept_documented_status_fields() {
+        // Open Channel has row errors as `rows_error_count` in Snowflake API docs.
+        let detail: ChannelStatusDetail = serde_json::from_value(json!({
+            "channel_name": "ch0",
+            "channel_status_code": "ACTIVE",
+            "last_committed_offset_token": "000000000000000a/0000000000000002",
+            "rows_inserted": 12,
+            "rows_parsed": 13,
+            "rows_error_count": 1,
+            "last_error_offset_upper_bound": "000000000000000a/0000000000000003",
+            "last_error_message": "row rejected"
+        }))
+        .unwrap();
+
+        let status = detail.into_channel_status("fallback").unwrap();
+
+        assert_eq!(status.channel, "ch0");
+        assert_eq!(status.status_code, "ACTIVE");
+        assert_eq!(status.offset_token, Some("000000000000000a/0000000000000002".parse().unwrap()));
+        assert_eq!(status.rows_inserted, 12);
+        assert_eq!(status.rows_parsed, 13);
+        assert_eq!(status.rows_error_count, 1);
+        assert_eq!(
+            status.last_error_offset_upper_bound,
+            Some("000000000000000a/0000000000000003".parse().unwrap())
+        );
+        assert_eq!(status.last_error_message.as_deref(), Some("row rejected"));
+
+        // Bulk Get Channel Status documents the same counter as `rows_errors`.
+        let detail: BulkStatusChannel = serde_json::from_value(json!({
+            "last_committed_offset_token": "000000000000000a/0000000000000002",
+            "rows_inserted": 12,
+            "rows_parsed": 13,
+            "rows_errors": 2
+        }))
+        .unwrap();
+
+        let status = detail.into_channel_status("fallback").unwrap();
+
+        assert_eq!(status.channel, "fallback");
+        assert_eq!(status.rows_inserted, 12);
+        assert_eq!(status.rows_parsed, 13);
+        assert_eq!(status.rows_error_count, 2);
     }
 }

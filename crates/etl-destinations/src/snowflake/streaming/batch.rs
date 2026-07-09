@@ -41,11 +41,37 @@ const SCRATCH_INITIAL_CAPACITY: usize = 4096;
 /// Nice balance between compression and processor time spend compressing.
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 
+/// Inclusive `[a, b]` offset range for a non-empty row batch.
+struct OffsetRange {
+    start: OffsetToken,
+    end: OffsetToken,
+}
+
+/// Extension operations for an optional [`OffsetRange`].
+trait OffsetRangeExt {
+    /// Extends the range with `offset`, creating it when empty.
+    fn extend(&mut self, offset: &OffsetToken);
+}
+
+impl OffsetRangeExt for Option<OffsetRange> {
+    fn extend(&mut self, offset: &OffsetToken) {
+        match self {
+            Some(range) => {
+                debug_assert!(offset >= &range.end);
+                range.end = offset.clone();
+            }
+            None => {
+                *self = Some(OffsetRange { start: offset.clone(), end: offset.clone() });
+            }
+        }
+    }
+}
+
 /// Batch of rows ready to be pushed to the Streaming API.
 pub struct RowBatch {
     data: Bytes,
     row_count: usize,
-    offset: OffsetToken,
+    offset_range: OffsetRange,
 }
 
 impl RowBatch {
@@ -64,9 +90,14 @@ impl RowBatch {
         self.row_count
     }
 
+    /// Offset token of the first row in this batch.
+    pub fn start_offset(&self) -> &OffsetToken {
+        &self.offset_range.start
+    }
+
     /// Offset token of the last row in this batch.
-    pub fn offset(&self) -> &OffsetToken {
-        &self.offset
+    pub fn end_offset(&self) -> &OffsetToken {
+        &self.offset_range.end
     }
 }
 
@@ -79,7 +110,7 @@ pub struct RowBatchBuilder {
     encoder: Encoder<'static, Vec<u8>>,
     scratch: Vec<u8>,
     current_row_count: usize,
-    current_offset: OffsetToken,
+    current_offset_range: Option<OffsetRange>,
     input_since_flush: usize,
     batches: Vec<RowBatch>,
 }
@@ -96,7 +127,7 @@ impl RowBatchBuilder {
             encoder: new_encoder(),
             scratch: Vec::with_capacity(SCRATCH_INITIAL_CAPACITY),
             current_row_count: 0,
-            current_offset: OffsetToken::zero(),
+            current_offset_range: None,
             input_since_flush: 0,
             batches: Vec::new(),
         }
@@ -142,7 +173,7 @@ impl RowBatchBuilder {
             .map_err(|e| Error::Encoding(format!("zstd write: {e}")))?;
         self.input_since_flush += self.scratch.len();
         self.current_row_count += 1;
-        self.current_offset = offset.clone();
+        self.current_offset_range.extend(offset);
 
         Ok(())
     }
@@ -150,6 +181,7 @@ impl RowBatchBuilder {
     /// Wrap-up building process, produce list of batches.
     pub fn finish(mut self) -> Result<Vec<RowBatch>> {
         if self.current_row_count > 0 {
+            let offset_range = self.take_current_offset_range()?;
             let compressed =
                 self.encoder.finish().map_err(|e| Error::Encoding(format!("zstd finish: {e}")))?;
 
@@ -164,7 +196,7 @@ impl RowBatchBuilder {
             self.batches.push(RowBatch {
                 data: Bytes::from(compressed),
                 row_count: self.current_row_count,
-                offset: self.current_offset,
+                offset_range,
             });
         }
 
@@ -176,6 +208,7 @@ impl RowBatchBuilder {
     }
 
     fn next_batch(&mut self) -> Result<()> {
+        let offset_range = self.take_current_offset_range()?;
         let old_encoder = mem::replace(&mut self.encoder, new_encoder());
         let compressed =
             old_encoder.finish().map_err(|e| Error::Encoding(format!("zstd finish: {e}")))?;
@@ -183,13 +216,19 @@ impl RowBatchBuilder {
         self.batches.push(RowBatch {
             data: Bytes::from(compressed),
             row_count: self.current_row_count,
-            offset: mem::take(&mut self.current_offset),
+            offset_range,
         });
 
         self.current_row_count = 0;
         self.input_since_flush = 0;
 
         Ok(())
+    }
+
+    fn take_current_offset_range(&mut self) -> Result<OffsetRange> {
+        self.current_offset_range.take().ok_or_else(|| {
+            Error::Encoding("Non-empty Snowflake row batch is missing an offset range.".into())
+        })
     }
 }
 
@@ -305,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn offset_tracks_last_row() {
+    fn end_offset_tracks_last_row() {
         let cols = [col("id")];
         let mut builder = RowBatchBuilder::new();
 
@@ -320,6 +359,6 @@ mod tests {
 
         let batches = builder.finish().unwrap();
         assert_eq!(batches.len(), 1);
-        assert_eq!(batches.first().unwrap().offset().as_ref(), offsets[1]);
+        assert_eq!(batches.first().unwrap().end_offset().as_ref(), offsets[1]);
     }
 }
