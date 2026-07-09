@@ -118,7 +118,7 @@ where
         }
 
         let batches = builder.finish().map_err(EtlError::from)?;
-        self.client.insert_batches(table_id, batches).await.map_err(EtlError::from)?;
+        self.client.send_table_copy_batches(table_id, batches).await.map_err(EtlError::from)?;
 
         Ok(())
     }
@@ -127,22 +127,34 @@ where
     ///
     /// All events (inserts, updates, deletes, truncates, and schema changes)
     /// from the replication stream are processed here.
-    pub async fn process_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    pub async fn process_events(&self, events: Vec<Event>) -> EtlResult<DestinationWriteStatus> {
         let mut iter = events.into_iter().peekable();
+        // Schema and truncate side effects must close the pending streaming window.
+        let mut requires_durability_wait = false;
 
         while iter.peek().is_some() {
             let builders = self.accumulate_data_events(&mut iter).await?;
             self.flush_batches(builders).await?;
-            self.apply_relation_events(&mut iter).await?;
-            self.apply_truncate_events(&mut iter).await?;
+            requires_durability_wait |= self.apply_relation_events(&mut iter).await?;
+            requires_durability_wait |= self.apply_truncate_events(&mut iter).await?;
         }
 
-        Ok(())
+        if requires_durability_wait || self.client.pending_durability_limits_reached().await {
+            self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
+            Ok(DestinationWriteStatus::Durable)
+        } else if self.client.pending_durability_is_empty().await {
+            Ok(DestinationWriteStatus::Durable)
+        } else {
+            Ok(DestinationWriteStatus::Accepted)
+        }
     }
 
-    /// Last offset committed by Snowflake for this table's channel.
-    pub async fn committed_offset(&self, table_id: TableId) -> EtlResult<Option<OffsetToken>> {
-        self.client.committed_offset(table_id).await.map_err(EtlError::from)
+    /// Fetches the latest committed offset for this table's channel.
+    pub async fn fetch_committed_offset(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<OffsetToken>> {
+        self.client.fetch_committed_offset(table_id).await.map_err(EtlError::from)
     }
 
     async fn accumulate_data_events(
@@ -174,21 +186,23 @@ where
     async fn flush_batches(&self, builders: HashMap<TableId, RowBatchBuilder>) -> EtlResult<()> {
         for (table_id, builder) in builders {
             let batches = builder.finish().map_err(EtlError::from)?;
-            self.client.insert_batches(table_id, batches).await.map_err(EtlError::from)?;
+            self.client.send_streaming_batches(table_id, batches).await.map_err(EtlError::from)?;
         }
         Ok(())
     }
 
-    async fn apply_relation_events(&self, iter: &mut EventIter) -> EtlResult<()> {
+    async fn apply_relation_events(&self, iter: &mut EventIter) -> EtlResult<bool> {
+        let mut applied_schema_change = false;
         while matches!(iter.peek(), Some(Event::Relation(_))) {
             if let Some(Event::Relation(rel)) = iter.next() {
-                self.handle_relation_event(&rel.replicated_table_schema).await?;
+                applied_schema_change |=
+                    self.handle_relation_event(&rel.replicated_table_schema).await?;
             }
         }
-        Ok(())
+        Ok(applied_schema_change)
     }
 
-    async fn apply_truncate_events(&self, iter: &mut EventIter) -> EtlResult<()> {
+    async fn apply_truncate_events(&self, iter: &mut EventIter) -> EtlResult<bool> {
         // Collect and dedup tables to be truncated.
         let mut truncated: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
         while matches!(iter.peek(), Some(Event::Truncate(_))) {
@@ -198,6 +212,7 @@ where
                 }
             }
         }
+        let had_truncates = !truncated.is_empty();
 
         // Truncate tables.
         for (_, schema) in truncated {
@@ -205,7 +220,7 @@ where
             self.client.truncate_table(schema.id(), &table_name).await.map_err(EtlError::from)?;
         }
 
-        Ok(())
+        Ok(had_truncates)
     }
 
     async fn encode_insert(
@@ -219,6 +234,10 @@ where
 
         let cols = &column_cache[&table_id];
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
+        if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
+            return Ok(());
+        }
+
         builders
             .entry(table_id)
             .or_default()
@@ -244,6 +263,10 @@ where
 
         let cols = &column_cache[&table_id];
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
+        if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
+            return Ok(());
+        }
+
         builders
             .entry(table_id)
             .or_default()
@@ -259,11 +282,13 @@ where
     ) -> EtlResult<()> {
         let table_id = e.replicated_table_schema.id();
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
+        self.ensure_column_cache(column_cache, table_id, &e.replicated_table_schema).await?;
+        if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
+            return Ok(());
+        }
 
         match snowflake_delete_row(&e.replicated_table_schema, e.old_table_row)? {
             SnowflakeDeleteRow::Full(row) => {
-                self.ensure_column_cache(column_cache, table_id, &e.replicated_table_schema)
-                    .await?;
                 let cols = &column_cache[&table_id];
                 builders
                     .entry(table_id)
@@ -277,8 +302,6 @@ where
                     .map_err(EtlError::from)
             }
             SnowflakeDeleteRow::Key(key_row) => {
-                self.ensure_column_cache(column_cache, table_id, &e.replicated_table_schema)
-                    .await?;
                 let identity_cols: Vec<_> =
                     e.replicated_table_schema.identity_column_schemas().cloned().collect();
                 builders
@@ -310,7 +333,7 @@ where
         Ok(())
     }
 
-    async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
+    async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<bool> {
         let table_id = new_schema.id();
         let new_snapshot_id = new_schema.inner().snapshot_id;
 
@@ -334,7 +357,7 @@ where
             && current_replication_mask == new_replication_mask
         {
             info!(table_id = ?table_id, "schema unchanged, skipping relation event");
-            return Ok(());
+            return Ok(false);
         }
 
         info!(
@@ -363,6 +386,7 @@ where
         );
 
         let table_name = try_stringify_table_name(new_schema.name())?.to_uppercase();
+        self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
 
         let updated_metadata = DestinationTableMetadata::new_applied(
             metadata.destination_table_id.clone(),
@@ -397,7 +421,7 @@ where
         self.client.refresh_table(&table_id).await.map_err(EtlError::from)?;
 
         info!(table_id = ?table_id, "schema change applied");
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -503,7 +527,7 @@ where
         self.tasks
             .spawn(async move {
                 let result = destination.process_events(events).await;
-                async_result.send(result.map(|_| DestinationWriteStatus::Durable));
+                async_result.send(result);
             })
             .await;
 
