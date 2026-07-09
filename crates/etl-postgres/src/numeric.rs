@@ -411,14 +411,30 @@ fn convert_to_base_10000(
 
     // Calculate offset for proper alignment
     let offset = (weight + 1) * 4 - (dweight + 1);
-    let total_decimal_digits = decimal_digits.len() as i32 + offset;
-    let ndigits = (total_decimal_digits + 3) / 4; // Round up to nearest multiple of 4
+    let Some(first_nonzero_decimal_index) = decimal_digits.iter().position(|&digit| digit != 0)
+    else {
+        return Ok(PgNumeric::Value { sign: Sign::Positive, weight: 0, scale, digits: vec![] });
+    };
+    let last_nonzero_decimal_index = decimal_digits
+        .iter()
+        .rposition(|&digit| digit != 0)
+        .expect("nonzero decimal digit should have a last position");
+
+    let first_nonzero_group = (offset + first_nonzero_decimal_index as i32) / 4;
+    let last_nonzero_group = (offset + last_nonzero_decimal_index as i32) / 4;
+    let final_weight = weight - first_nonzero_group;
+    if !(POSTGRES_NUMERIC_MIN_WEIGHT..=POSTGRES_NUMERIC_MAX_WEIGHT).contains(&final_weight) {
+        return Err(ParseNumericError::ValueOutOfRange);
+    }
 
     // Convert groups of 4 decimal digits to base-10000 digits, reading each
     // decimal digit at its aligned position and treating positions outside the
-    // input as zero padding.
-    let mut base_10000_digits = Vec::with_capacity(ndigits as usize);
-    for group in 0..ndigits {
+    // input as zero padding. Leading and trailing zero groups are skipped up
+    // front, so obviously out-of-range exponents are rejected before allocating
+    // a vector sized by the exponent.
+    let retained_groups = last_nonzero_group - first_nonzero_group + 1;
+    let mut base_10000_digits = Vec::with_capacity(retained_groups as usize);
+    for group in first_nonzero_group..=last_nonzero_group {
         let mut digit = 0i16;
         for position in group * 4..group * 4 + 4 {
             let decimal_digit = usize::try_from(position - offset)
@@ -428,29 +444,6 @@ fn convert_to_base_10000(
             digit = digit * 10 + decimal_digit as i16;
         }
         base_10000_digits.push(digit);
-    }
-
-    // If all groups are zero, normalize to PostgreSQL canonical zero:
-    // weight = 0, digits = [], positive sign; preserve scale.
-    if base_10000_digits.iter().all(|&d| d == 0) {
-        return Ok(PgNumeric::Value { sign: Sign::Positive, weight: 0, scale, digits: vec![] });
-    }
-
-    // Strip leading zeros first and record how many we removed so we can
-    // adjust the weight correctly. Trailing zeros should NOT influence
-    // the weight because they are fractional groups after the decimal point.
-    // At least one group is nonzero here, so neither strip can empty the
-    // digits.
-    let leading_zeros = base_10000_digits.iter().take_while(|&&d| d == 0).count();
-    base_10000_digits.drain(..leading_zeros);
-
-    let trailing_zeros = base_10000_digits.iter().rev().take_while(|&&d| d == 0).count();
-    base_10000_digits.truncate(base_10000_digits.len() - trailing_zeros);
-
-    // Adjust weight only by the number of leading zeros that were removed.
-    let final_weight = weight - leading_zeros as i32;
-    if !(POSTGRES_NUMERIC_MIN_WEIGHT..=POSTGRES_NUMERIC_MAX_WEIGHT).contains(&final_weight) {
-        return Err(ParseNumericError::ValueOutOfRange);
     }
 
     Ok(PgNumeric::Value { sign, weight: final_weight as i16, scale, digits: base_10000_digits })
