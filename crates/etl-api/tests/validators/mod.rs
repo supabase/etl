@@ -9,7 +9,7 @@ mod pipeline;
 #[cfg(feature = "snowflake")]
 mod snowflake;
 
-use etl_api::{configs::pipeline::FullApiPipelineConfig, validation::ValidationContext};
+use etl_api::{configs::pipeline::CreateApiPipelineConfig, validation::ValidationContext};
 use etl_config::{Environment, shared::BatchConfig};
 use etl_postgres::sqlx::test_utils::create_pg_database;
 
@@ -31,8 +31,8 @@ pub(super) async fn create_validation_context_with_source()
     (ctx, pool, config)
 }
 
-pub(super) fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
-    FullApiPipelineConfig {
+pub(super) fn create_pipeline_config(publication_name: &str) -> CreateApiPipelineConfig {
+    CreateApiPipelineConfig {
         publication_name: publication_name.to_owned(),
         batch: Some(BatchConfig {
             max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,

@@ -22,7 +22,10 @@ use utoipa::ToSchema;
 
 use crate::{
     config::ApiConfig,
-    configs::{encryption::EncryptionKeyring, pipeline::FullApiPipelineConfig},
+    configs::{
+        encryption::EncryptionKeyring,
+        pipeline::{CreateApiPipelineConfig, ReadApiPipelineConfig, UpdateApiPipelineConfig},
+    },
     data,
     data::{
         destinations::{DestinationsDbError, destination_exists},
@@ -154,6 +157,9 @@ impl From<PipelinesDbError> for PipelineError {
             {
                 Self::DuplicatePipeline
             }
+            PipelinesDbError::PipelineConfigUpdate(error) => {
+                Self::InvalidPipelineRequest(error.to_string())
+            }
             e => Self::PipelinesDb(e),
         }
     }
@@ -273,7 +279,7 @@ pub struct CreatePipelineRequest {
     #[schema(example = 1, required = true)]
     pub destination_id: i64,
     #[schema(required = true)]
-    pub config: FullApiPipelineConfig,
+    pub config: CreateApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -289,7 +295,7 @@ pub struct UpdatePipelineRequest {
     #[schema(example = 1, required = true)]
     pub destination_id: i64,
     #[schema(required = true)]
-    pub config: FullApiPipelineConfig,
+    pub config: UpdateApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -308,7 +314,7 @@ pub struct ReadPipelineResponse {
     pub destination_name: String,
     #[schema(example = 1)]
     pub replicator_id: i64,
-    pub config: FullApiPipelineConfig,
+    pub config: ReadApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -574,7 +580,7 @@ pub struct ValidatePipelineRequest {
     #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
-    pub config: FullApiPipelineConfig,
+    pub config: CreateApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -587,7 +593,11 @@ pub struct ValidationFailureResponse {
     pub failure_type: FailureType,
 }
 
-fn validate_pipeline_request(config: &FullApiPipelineConfig) -> Result<(), PipelineError> {
+fn validate_create_pipeline_request(config: &CreateApiPipelineConfig) -> Result<(), PipelineError> {
+    config.validate().map_err(PipelineError::InvalidPipelineRequest)
+}
+
+fn validate_update_pipeline_request(config: &UpdateApiPipelineConfig) -> Result<(), PipelineError> {
     config.validate().map_err(PipelineError::InvalidPipelineRequest)
 }
 
@@ -629,7 +639,7 @@ pub(crate) async fn create_pipeline(
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline = pipeline.into_inner();
-    validate_pipeline_request(&pipeline.config)?;
+    validate_create_pipeline_request(&pipeline.config)?;
 
     let mut txn = pool.begin().await?;
 
@@ -754,7 +764,7 @@ pub(crate) async fn update_pipeline(
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
     let pipeline = pipeline.into_inner();
-    validate_pipeline_request(&pipeline.config)?;
+    validate_update_pipeline_request(&pipeline.config)?;
 
     let mut txn = pool.begin().await?;
 
@@ -1539,7 +1549,7 @@ pub(crate) async fn validate_pipeline(
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
     let request = request.into_inner();
-    validate_pipeline_request(&request.config)?;
+    validate_create_pipeline_request(&request.config)?;
 
     let source = data::sources::read_source(&pool, tenant_id, request.source_id, &encryption_key)
         .await?

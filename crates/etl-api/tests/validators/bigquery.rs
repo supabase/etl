@@ -1,5 +1,5 @@
 use etl_api::{
-    configs::destination::FullApiDestinationConfig,
+    configs::destination::CreateApiDestinationConfig,
     validation::{FailureType, ValidationContext, validate_destination, validate_pipeline},
 };
 use etl_config::{Environment, SerializableSecretString};
@@ -17,8 +17,8 @@ fn create_bigquery_config(
     project_id: &str,
     dataset_id: &str,
     sa_key: &str,
-) -> FullApiDestinationConfig {
-    FullApiDestinationConfig::BigQuery {
+) -> CreateApiDestinationConfig {
+    CreateApiDestinationConfig::BigQuery {
         project_id: project_id.to_owned(),
         dataset_id: dataset_id.to_owned(),
         service_account_key: SerializableSecretString::from(sa_key.to_owned()),

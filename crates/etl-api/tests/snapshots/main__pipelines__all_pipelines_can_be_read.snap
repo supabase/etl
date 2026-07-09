@@ -1,8 +1,9 @@
 ---
 source: crates/etl-api/tests/pipelines.rs
+assertion_line: 876
 expression: pipeline.config
 ---
-FullApiPipelineConfig {
+CreateApiPipelineConfig {
     publication_name: "publication",
     batch: Some(
         BatchConfig {

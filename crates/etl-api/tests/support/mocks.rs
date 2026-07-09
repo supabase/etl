@@ -2,7 +2,7 @@
 
 use etl_api::{
     configs::{
-        destination::FullApiDestinationConfig, pipeline::FullApiPipelineConfig,
+        destination::CreateApiDestinationConfig, pipeline::CreateApiPipelineConfig,
         source::FullApiSourceConfig,
     },
     routes::{
@@ -46,8 +46,8 @@ pub(crate) mod destinations {
     }
 
     /// Returns an updated destination config.
-    pub(crate) fn updated_destination_config() -> FullApiDestinationConfig {
-        FullApiDestinationConfig::BigQuery {
+    pub(crate) fn updated_destination_config() -> CreateApiDestinationConfig {
+        CreateApiDestinationConfig::BigQuery {
             project_id: "project-id-updated".to_owned(),
             dataset_id: "dataset-id-updated".to_owned(),
             service_account_key: SerializableSecretString::from(
@@ -59,8 +59,8 @@ pub(crate) mod destinations {
     }
 
     /// Returns a default destination config (BigQuery).
-    pub(crate) fn new_bigquery_destination_config() -> FullApiDestinationConfig {
-        FullApiDestinationConfig::BigQuery {
+    pub(crate) fn new_bigquery_destination_config() -> CreateApiDestinationConfig {
+        CreateApiDestinationConfig::BigQuery {
             project_id: "project-id".to_owned(),
             dataset_id: "dataset-id".to_owned(),
             service_account_key: SerializableSecretString::from("service-account-key".to_owned()),
@@ -70,8 +70,8 @@ pub(crate) mod destinations {
     }
 
     /// Returns a default DuckLake destination config.
-    pub(crate) fn new_ducklake_destination_config() -> FullApiDestinationConfig {
-        FullApiDestinationConfig::Ducklake {
+    pub(crate) fn new_ducklake_destination_config() -> CreateApiDestinationConfig {
+        CreateApiDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from(
                 "postgres://postgres:postgres@localhost:5432/postgres".to_owned(),
             ),
@@ -93,11 +93,11 @@ pub(crate) mod destinations {
     }
 
     /// Returns a default Iceberg Supabase destination config.
-    pub(crate) fn new_iceberg_supabase_destination_config() -> FullApiDestinationConfig {
-        use etl_api::configs::destination::FullApiIcebergConfig;
+    pub(crate) fn new_iceberg_supabase_destination_config() -> CreateApiDestinationConfig {
+        use etl_api::configs::destination::CreateApiIcebergConfig;
 
-        FullApiDestinationConfig::Iceberg {
-            config: FullApiIcebergConfig::Supabase {
+        CreateApiDestinationConfig::Iceberg {
+            config: CreateApiIcebergConfig::Supabase {
                 project_ref: "abcdefghijklmnopqrst".to_owned(),
                 warehouse_name: "my-warehouse".to_owned(),
                 namespace: Some("my-namespace".to_owned()),
@@ -114,11 +114,11 @@ pub(crate) mod destinations {
     }
 
     /// Returns an updated Iceberg Supabase destination config.
-    pub(crate) fn updated_iceberg_supabase_destination_config() -> FullApiDestinationConfig {
-        use etl_api::configs::destination::FullApiIcebergConfig;
+    pub(crate) fn updated_iceberg_supabase_destination_config() -> CreateApiDestinationConfig {
+        use etl_api::configs::destination::CreateApiIcebergConfig;
 
-        FullApiDestinationConfig::Iceberg {
-            config: FullApiIcebergConfig::Supabase {
+        CreateApiDestinationConfig::Iceberg {
+            config: CreateApiIcebergConfig::Supabase {
                 project_ref: "tsrqponmlkjihgfedcba".to_owned(),
                 warehouse_name: "my-updated-warehouse".to_owned(),
                 namespace: Some("my-updated-namespace".to_owned()),
@@ -140,7 +140,7 @@ pub(crate) mod destinations {
         app: &TestApp,
         tenant_id: &str,
         name: String,
-        config: FullApiDestinationConfig,
+        config: CreateApiDestinationConfig,
     ) -> i64 {
         let destination = CreateDestinationRequest { name, config };
         let response = app.create_destination(tenant_id, &destination).await;
@@ -161,8 +161,8 @@ pub(crate) mod destinations {
     }
 
     /// Returns a default Snowflake destination config.
-    pub(crate) fn new_snowflake_destination_config() -> FullApiDestinationConfig {
-        FullApiDestinationConfig::Snowflake {
+    pub(crate) fn new_snowflake_destination_config() -> CreateApiDestinationConfig {
+        CreateApiDestinationConfig::Snowflake {
             account_id: "myorg-myaccount".to_owned(),
             user: "etl_user".to_owned(),
             private_key: SerializableSecretString::from(
@@ -177,8 +177,8 @@ pub(crate) mod destinations {
     }
 
     /// Returns an updated Snowflake destination config.
-    pub(crate) fn updated_snowflake_destination_config() -> FullApiDestinationConfig {
-        FullApiDestinationConfig::Snowflake {
+    pub(crate) fn updated_snowflake_destination_config() -> CreateApiDestinationConfig {
+        CreateApiDestinationConfig::Snowflake {
             account_id: "updatedorg-updatedaccount".to_owned(),
             user: "updated_etl_user".to_owned(),
             private_key: SerializableSecretString::from(
@@ -290,8 +290,8 @@ pub(crate) mod pipelines {
     use super::*;
 
     /// Returns a default pipeline config.
-    pub(crate) fn new_pipeline_config() -> FullApiPipelineConfig {
-        FullApiPipelineConfig {
+    pub(crate) fn new_pipeline_config() -> CreateApiPipelineConfig {
+        CreateApiPipelineConfig {
             publication_name: "publication".to_owned(),
             batch: Some(BatchConfig {
                 max_fill_ms: 5,
@@ -314,8 +314,8 @@ pub(crate) mod pipelines {
     }
 
     /// Returns an updated pipeline config.
-    pub(crate) fn updated_pipeline_config() -> FullApiPipelineConfig {
-        FullApiPipelineConfig {
+    pub(crate) fn updated_pipeline_config() -> CreateApiPipelineConfig {
+        CreateApiPipelineConfig {
             publication_name: "updated_publication".to_owned(),
             batch: Some(BatchConfig {
                 max_fill_ms: 10,
@@ -343,7 +343,7 @@ pub(crate) mod pipelines {
         tenant_id: &str,
         source_id: i64,
         destination_id: i64,
-        config: FullApiPipelineConfig,
+        config: CreateApiPipelineConfig,
     ) -> i64 {
         let pipeline = CreatePipelineRequest { source_id, destination_id, config };
         let response = app.create_pipeline(tenant_id, &pipeline).await;

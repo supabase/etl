@@ -24,16 +24,16 @@ use pipeline::{
 pub(super) use source::SourceValidator;
 
 use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
-use crate::configs::pipeline::FullApiPipelineConfig;
+use crate::configs::pipeline::CreateApiPipelineConfig;
 
 /// Composite validator for pipeline prerequisites.
 #[derive(Debug)]
 pub(super) struct PipelineValidator {
-    config: FullApiPipelineConfig,
+    config: CreateApiPipelineConfig,
 }
 
 impl PipelineValidator {
-    pub(super) fn new(config: FullApiPipelineConfig) -> Self {
+    pub(super) fn new(config: CreateApiPipelineConfig) -> Self {
         Self { config }
     }
 

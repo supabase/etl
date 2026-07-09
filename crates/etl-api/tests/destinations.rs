@@ -1,4 +1,5 @@
 use etl_api::{
+    configs::{destination::UpdateApiDestinationConfig, update::UpdateField},
     k8s::PodStatus,
     routes::{
         destinations::{
@@ -7,7 +8,9 @@ use etl_api::{
         },
         pipelines::{CreatePipelineRequest, CreatePipelineResponse},
     },
+    startup::get_connection_pool,
 };
+use etl_config::shared::DestinationConfig;
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
@@ -156,6 +159,131 @@ async fn an_existing_bigquery_destination_can_be_updated() {
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, updated_config.name);
     insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_config_update_preserves_omitted_fields_and_resets_default_fields() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let destination =
+        CreateDestinationRequest { name: new_name(), config: new_bigquery_destination_config() };
+    let response = app.create_destination(tenant_id, &destination).await;
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    let destination_id = response.id;
+
+    let update_request = UpdateDestinationRequest {
+        name: updated_name(),
+        config: UpdateApiDestinationConfig::BigQuery {
+            project_id: UpdateField::Preserve,
+            dataset_id: UpdateField::Set("dataset-id-patched".to_owned()),
+            service_account_key: UpdateField::Preserve,
+            max_staleness_mins: UpdateField::Preserve,
+            connection_pool_size: UpdateField::Clear,
+        },
+    };
+    let response = app.update_destination(tenant_id, destination_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app.read_destination(tenant_id, destination_id).await;
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+
+    match response.config {
+        etl_api::configs::destination::CreateApiDestinationConfig::BigQuery {
+            project_id,
+            dataset_id,
+            connection_pool_size,
+            ..
+        } => {
+            assert_eq!(project_id, "project-id");
+            assert_eq!(dataset_id, "dataset-id-patched");
+            assert_eq!(connection_pool_size, Some(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE));
+        }
+        _ => panic!("Config types don't match"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_config_update_preserves_absent_stored_default_fields() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let destination =
+        CreateDestinationRequest { name: new_name(), config: new_bigquery_destination_config() };
+    let response = app.create_destination(tenant_id, &destination).await;
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    let destination_id = response.id;
+    let pool = get_connection_pool(app.database_config());
+
+    sqlx::query(
+        r#"
+        update app.destinations
+        set config = config #- '{big_query,connection_pool_size}'
+        where id = $1
+        "#,
+    )
+    .bind(destination_id)
+    .execute(&pool)
+    .await
+    .expect("failed to remove stored destination default field");
+
+    let update_request = UpdateDestinationRequest {
+        name: updated_name(),
+        config: UpdateApiDestinationConfig::BigQuery {
+            project_id: UpdateField::Preserve,
+            dataset_id: UpdateField::Set("dataset-id-patched".to_owned()),
+            service_account_key: UpdateField::Preserve,
+            max_staleness_mins: UpdateField::Preserve,
+            connection_pool_size: UpdateField::Preserve,
+        },
+    };
+    let response = app.update_destination(tenant_id, destination_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let stored_config = sqlx::query_scalar::<_, serde_json::Value>(
+        "select config from app.destinations where id = $1",
+    )
+    .bind(destination_id)
+    .fetch_one(&pool)
+    .await
+    .expect("failed to read stored destination config");
+    let bigquery_config =
+        stored_config.get("big_query").expect("stored destination should use BigQuery config");
+    assert_eq!(bigquery_config["dataset_id"], "dataset-id-patched");
+    assert!(bigquery_config.get("connection_pool_size").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_config_update_rejects_null_required_field() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let destination =
+        CreateDestinationRequest { name: new_name(), config: new_bigquery_destination_config() };
+    let response = app.create_destination(tenant_id, &destination).await;
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    let destination_id = response.id;
+
+    let update_request = UpdateDestinationRequest {
+        name: updated_name(),
+        config: UpdateApiDestinationConfig::BigQuery {
+            project_id: UpdateField::Clear,
+            dataset_id: UpdateField::Preserve,
+            service_account_key: UpdateField::Preserve,
+            max_staleness_mins: UpdateField::Preserve,
+            connection_pool_size: UpdateField::Preserve,
+        },
+    };
+    let response = app.update_destination(tenant_id, destination_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread")]

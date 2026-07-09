@@ -1,5 +1,5 @@
 use etl_api::{
-    configs::destination::FullApiDestinationConfig,
+    configs::destination::CreateApiDestinationConfig,
     validation::{FailureType, validate_destination},
 };
 use etl_config::{SerializableSecretString, shared::DuckLakeMaintenanceMode};
@@ -28,8 +28,8 @@ fn catalog_url_from_config(config: &etl_config::shared::PgConnectionConfig) -> U
 fn create_ducklake_config(
     catalog_url: Url,
     metadata_schema: Option<String>,
-) -> FullApiDestinationConfig {
-    FullApiDestinationConfig::Ducklake {
+) -> CreateApiDestinationConfig {
+    CreateApiDestinationConfig::Ducklake {
         catalog_url: SerializableSecretString::from(catalog_url.to_string()),
         data_path: "s3://bucket/path".to_owned(),
         pool_size: Some(1),

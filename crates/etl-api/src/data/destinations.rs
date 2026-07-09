@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::configs::{
     destination::{
-        DestinationConfigUpdateError, EncryptedStoredDestinationConfig, FullApiDestinationConfig,
+        CreateApiDestinationConfig, DestinationConfigUpdateError, EncryptedStoredDestinationConfig,
         StoredDestinationConfig, UpdateApiDestinationConfig,
     },
     encryption::EncryptionKeyring,
@@ -42,7 +42,7 @@ pub async fn create_destination<'c, E>(
     executor: E,
     tenant_id: &str,
     name: &str,
-    config: FullApiDestinationConfig,
+    config: CreateApiDestinationConfig,
     encryption_key: &EncryptionKeyring,
 ) -> Result<i64, DestinationsDbError>
 where
@@ -137,9 +137,10 @@ pub async fn update_destination(
     let stored_config = decrypt_and_deserialize_from_value::<
         EncryptedStoredDestinationConfig,
         StoredDestinationConfig,
-    >(stored_config_value, encryption_key)?;
-    let config = config.merge_into_stored(stored_config)?;
-    let config = encrypt_and_serialize(config, encryption_key)?;
+    >(stored_config_value.clone(), encryption_key)?;
+    let merged_config = config.clone().merge_into_stored(stored_config)?;
+    let mut serialized_config = encrypt_and_serialize(merged_config, encryption_key)?;
+    config.restore_preserved_fields(&stored_config_value, &mut serialized_config);
 
     let record = sqlx::query!(
         r#"
@@ -148,7 +149,7 @@ pub async fn update_destination(
         where tenant_id = $3 and id = $4
         returning id
         "#,
-        config,
+        serialized_config,
         name,
         tenant_id,
         destination_id

@@ -18,9 +18,9 @@ use super::{
 use crate::{
     config::ApiConfig,
     configs::{
-        destination::{FullApiDestinationConfig, UpdateApiDestinationConfig},
+        destination::{CreateApiDestinationConfig, UpdateApiDestinationConfig},
         encryption::EncryptionKeyring,
-        pipeline::FullApiPipelineConfig,
+        pipeline::{CreateApiPipelineConfig, UpdateApiPipelineConfig},
     },
     data,
     data::{
@@ -120,6 +120,9 @@ impl From<DestinationPipelinesDbError> for DestinationPipelineError {
             {
                 DestinationPipelineError::DuplicatePipeline
             }
+            DestinationPipelinesDbError::PipelinesDb(PipelinesDbError::PipelineConfigUpdate(
+                error,
+            )) => DestinationPipelineError::InvalidPipelineRequest(error.to_string()),
             e => DestinationPipelineError::DestinationPipelinesDb(e),
         }
     }
@@ -206,11 +209,11 @@ pub struct CreateDestinationPipelineRequest {
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub destination_name: String,
     #[schema(required = true)]
-    pub destination_config: FullApiDestinationConfig,
+    pub destination_config: CreateApiDestinationConfig,
     #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
-    pub pipeline_config: FullApiPipelineConfig,
+    pub pipeline_config: CreateApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -231,7 +234,7 @@ pub struct UpdateDestinationPipelineRequest {
     #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
-    pub pipeline_config: FullApiPipelineConfig,
+    pub pipeline_config: UpdateApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -244,8 +247,14 @@ pub struct DeleteDestinationPipelineResponse {
     pub destination_deleted: bool,
 }
 
-fn validate_pipeline_request(
-    config: &FullApiPipelineConfig,
+fn validate_create_pipeline_request(
+    config: &CreateApiPipelineConfig,
+) -> Result<(), DestinationPipelineError> {
+    config.validate().map_err(DestinationPipelineError::InvalidPipelineRequest)
+}
+
+fn validate_update_pipeline_request(
+    config: &UpdateApiPipelineConfig,
 ) -> Result<(), DestinationPipelineError> {
     config.validate().map_err(DestinationPipelineError::InvalidPipelineRequest)
 }
@@ -277,7 +286,7 @@ pub(crate) async fn create_destination_and_pipeline(
 ) -> Result<impl IntoResponse, DestinationPipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
     let destination_and_pipeline = destination_and_pipeline.into_inner();
-    validate_pipeline_request(&destination_and_pipeline.pipeline_config)?;
+    validate_create_pipeline_request(&destination_and_pipeline.pipeline_config)?;
 
     let mut txn = pool.begin().await?;
 
@@ -360,7 +369,7 @@ pub(crate) async fn update_destination_and_pipeline(
     let tenant_id = extract_tenant_id(&headers)?;
     let (destination_id, pipeline_id) = destination_and_pipeline_ids.into_inner();
     let destination_and_pipeline = destination_and_pipeline.into_inner();
-    validate_pipeline_request(&destination_and_pipeline.pipeline_config)?;
+    validate_update_pipeline_request(&destination_and_pipeline.pipeline_config)?;
 
     let mut txn = pool.begin().await?;
 

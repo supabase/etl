@@ -10,7 +10,10 @@ use thiserror::Error;
 use crate::{
     configs::{
         encryption::EncryptionKeyring,
-        pipeline::{FullApiPipelineConfig, StoredPipelineConfig},
+        pipeline::{
+            CreateApiPipelineConfig, PipelineConfigUpdateError, StoredPipelineConfig,
+            UpdateApiPipelineConfig,
+        },
         serde::{DbDeserializationError, DbSerializationError, deserialize_from_value, serialize},
     },
     data,
@@ -62,6 +65,9 @@ pub enum PipelinesDbError {
     DbDeserialization(#[from] DbDeserializationError),
 
     #[error(transparent)]
+    PipelineConfigUpdate(#[from] PipelineConfigUpdateError),
+
+    #[error(transparent)]
     ReplicatorsDb(#[from] ReplicatorsDbError),
 
     #[error("Slot operation failed: {0}")]
@@ -95,7 +101,7 @@ pub async fn create_pipeline(
     source_id: i64,
     destination_id: i64,
     image_id: i64,
-    config: FullApiPipelineConfig,
+    config: CreateApiPipelineConfig,
 ) -> Result<i64, PipelinesDbError> {
     let config = serialize(StoredPipelineConfig::from(config))?;
 
@@ -170,18 +176,35 @@ where
     Ok(pipeline)
 }
 
-pub async fn update_pipeline<'c, E>(
-    executor: E,
+pub async fn update_pipeline(
+    executor: &mut PgConnection,
     tenant_id: &str,
     pipeline_id: i64,
     source_id: i64,
     destination_id: i64,
-    config: FullApiPipelineConfig,
-) -> Result<Option<i64>, PipelinesDbError>
-where
-    E: PgExecutor<'c>,
-{
-    let pipeline_config = serialize(StoredPipelineConfig::from(config))?;
+    config: UpdateApiPipelineConfig,
+) -> Result<Option<i64>, PipelinesDbError> {
+    let stored_config_value = sqlx::query_scalar::<_, serde_json::Value>(
+        r#"
+        select config
+        from app.pipelines
+        where tenant_id = $1 and id = $2
+        for update
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(pipeline_id)
+    .fetch_optional(&mut *executor)
+    .await?;
+
+    let Some(stored_config_value) = stored_config_value else {
+        return Ok(None);
+    };
+
+    let stored_config =
+        deserialize_from_value::<StoredPipelineConfig>(stored_config_value.clone())?;
+    let mut pipeline_config = serialize(config.clone().merge_into_stored(stored_config)?)?;
+    config.restore_preserved_fields(&stored_config_value, &mut pipeline_config);
 
     let record = sqlx::query!(
         r#"
