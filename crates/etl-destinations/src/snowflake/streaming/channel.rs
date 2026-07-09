@@ -166,13 +166,6 @@ impl<C: StreamClient> ChannelHandle<C> {
         }
     }
 
-    #[cfg(test)]
-    fn with_wait_policy(mut self, poll_interval: Duration, wait_timeout: Duration) -> Self {
-        self.poll_interval = poll_interval;
-        self.wait_timeout = wait_timeout;
-        self
-    }
-
     /// Open or reopen the channel without discarding uncommitted rows.
     pub async fn open(&mut self) -> Result<ChannelStatusResponse> {
         let deadline = Instant::now() + self.wait_timeout;
