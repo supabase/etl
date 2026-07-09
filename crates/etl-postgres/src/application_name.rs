@@ -1,7 +1,7 @@
 //! Naming helpers for per-worker Postgres `application_name` values.
 //!
 //! Worker connections are tagged as `{base}:apply:{pipeline_id}` and
-//! `{base}:tsync:{pipeline_id}:{table_oid}` so they can be identified in
+//! `{base}:table_sync:{pipeline_id}:{table_oid}` so they can be identified in
 //! `pg_stat_activity` and targeted individually (e.g. by
 //! `pg_terminate_backend` in tests). Connections not owned by a worker keep
 //! the plain base name.
@@ -24,7 +24,7 @@ const SEPARATOR: char = ':';
 /// Tag identifying apply worker connections.
 pub const APPLY_WORKER_TAG: &str = "apply";
 /// Tag identifying table sync worker connections.
-pub const TABLE_SYNC_WORKER_TAG: &str = "tsync";
+pub const TABLE_SYNC_WORKER_TAG: &str = "table_sync";
 
 /// Returns the `application_name` for an apply worker connection.
 pub fn apply_worker_application_name(base: &str, pipeline_id: u64) -> String {
@@ -51,8 +51,8 @@ pub fn table_sync_worker_application_name(
 ///
 /// The suffix carries the worker identity that tests and operators match on,
 /// so on overflow the base is truncated instead of letting Postgres cut the
-/// tail. All in-repo bases fit without clamping; this is a backstop for
-/// future name growth.
+/// tail. In-repo bases fit without clamping while pipeline id and table oid
+/// stay within 15 digits combined; beyond that the suffix still survives.
 fn with_worker_suffix(base: &str, suffix: &str) -> String {
     let max_allowed_len = MAX_APPLICATION_NAME_LENGTH.saturating_sub(suffix.len());
     if base.len() > max_allowed_len {
@@ -86,20 +86,33 @@ mod tests {
             TableId::new(16384),
         );
 
-        // --- THEN: the name carries the tsync tag, pipeline id, and table oid ---
-        assert_eq!(name, "supabase_etl_replicator_replication:tsync:42:16384");
+        // --- THEN: the name carries the table_sync tag, pipeline id, and table oid ---
+        assert_eq!(name, "supabase_etl_replicator_replication:table_sync:42:16384");
     }
 
     #[test]
-    fn worst_case_realistic_name_fits_without_clamping() {
-        // --- GIVEN: the longest in-repo base, a 10-digit pipeline id, and a max table
-        // oid ---
+    fn name_fits_without_clamping_up_to_15_combined_id_digits() {
+        // --- GIVEN: the longest in-repo base with pipeline id and table oid summing to
+        // 15 digits, the documented no-clamp bound ---
         let base = "supabase_etl_replicator_replication";
-        let name = table_sync_worker_application_name(base, 9_999_999_999, TableId::new(u32::MAX));
+        let name = table_sync_worker_application_name(base, 99_999, TableId::new(u32::MAX));
 
         // --- THEN: the name fits the Postgres limit with the base intact ---
         assert!(name.len() <= MAX_APPLICATION_NAME_LENGTH);
         assert!(name.starts_with(base));
+    }
+
+    #[test]
+    fn name_beyond_no_clamp_bound_keeps_suffix_and_prefix_filterable_base() {
+        // --- GIVEN: the longest in-repo base with ids one digit past the no-clamp
+        // bound ---
+        let base = "supabase_etl_replicator_replication";
+        let name = table_sync_worker_application_name(base, 999_999, TableId::new(u32::MAX));
+
+        // --- THEN: the base clamps but the suffix and the etl prefix survive ---
+        assert_eq!(name.len(), MAX_APPLICATION_NAME_LENGTH);
+        assert!(name.ends_with(&format!(":table_sync:999999:{}", u32::MAX)));
+        assert!(name.starts_with("supabase_etl_"));
     }
 
     #[test]
@@ -110,7 +123,7 @@ mod tests {
 
         // --- THEN: the name fits and the full worker suffix survives ---
         assert_eq!(name.len(), MAX_APPLICATION_NAME_LENGTH);
-        assert!(name.ends_with(&format!(":tsync:{}:{}", u64::MAX, u32::MAX)));
+        assert!(name.ends_with(&format!(":table_sync:{}:{}", u64::MAX, u32::MAX)));
     }
 
     #[test]

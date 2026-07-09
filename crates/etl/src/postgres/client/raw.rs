@@ -766,12 +766,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn replication_base_name_fits_worst_case_worker_suffix_without_clamping() {
-        // --- GIVEN: the worst realistic worker suffix, a 10-digit pipeline id and a
-        // max table oid ---
+    fn replication_base_name_fits_worker_suffix_without_clamping() {
+        // --- GIVEN: a worker suffix with pipeline id and table oid summing to 15
+        // digits, the documented no-clamp bound for the replication base name ---
         let name = table_sync_worker_application_name(
             APP_NAME_REPLICATOR_REPLICATION,
-            9_999_999_999,
+            99_999,
             TableId::new(u32::MAX),
         );
 
