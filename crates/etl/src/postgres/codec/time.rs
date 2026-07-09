@@ -190,6 +190,7 @@ mod tests {
         assert!(parse_postgres_date("2023-13-01").is_err());
         assert!(parse_postgres_date("2023-02-30").is_err());
         assert!(parse_postgres_date("2023-12-25 BC").is_err());
+        assert!(parse_postgres_date("2023-1é-01").is_err());
         assert!(parse_postgres_date("not-a-date").is_err());
         assert!(parse_postgres_date("").is_err());
     }
@@ -227,6 +228,7 @@ mod tests {
         assert!(parse_postgres_time("12:61:00").is_err());
         assert!(parse_postgres_time("12:30:45.").is_err());
         assert!(parse_postgres_time("12:30:45extra").is_err());
+        assert!(parse_postgres_time("12:30:4é").is_err());
         assert!(parse_postgres_time("invalid").is_err());
     }
 
@@ -248,9 +250,20 @@ mod tests {
 
     #[test]
     fn timestamp_falls_back_for_non_iso_shapes() {
+        assert_eq!(
+            parse_postgres_timestamp("2023-12-25 23:59:60").unwrap(),
+            NaiveDateTime::parse_from_str("2023-12-25 23:59:60", TIMESTAMP_FORMAT).unwrap()
+        );
+        assert_eq!(
+            parse_postgres_timestamp("2023-12-25 12:30:45.1234567890").unwrap(),
+            NaiveDateTime::parse_from_str("2023-12-25 12:30:45.1234567890", TIMESTAMP_FORMAT)
+                .unwrap()
+        );
+
         assert!(parse_postgres_timestamp("2023-12-25T14:30:45").is_err());
         assert!(parse_postgres_timestamp("2023-12-25 14:30").is_err());
         assert!(parse_postgres_timestamp("2023-12-25 14:30:45 tail").is_err());
+        assert!(parse_postgres_timestamp("2023-12-25 12:30:4é").is_err());
         assert!(parse_postgres_timestamp("").is_err());
     }
 

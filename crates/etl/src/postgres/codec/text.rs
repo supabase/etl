@@ -237,8 +237,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Datelike, Timelike};
-    use etl_postgres::numeric::PgNumeric;
+    use chrono::{Datelike, NaiveDateTime, NaiveTime, Timelike};
+    use etl_postgres::{
+        numeric::PgNumeric,
+        time::{TIME_FORMAT, TIMESTAMP_FORMAT},
+    };
 
     use super::*;
 
@@ -599,6 +602,42 @@ mod tests {
             parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00:00:15")
                 .unwrap();
         assert!(matches!(cell, Cell::TimestampTz(_)));
+    }
+
+    #[test]
+    fn try_from_str_temporal_arrays() {
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::DATE_ARRAY, "{2023-12-25,NULL,2024-02-29}")
+                .unwrap(),
+            Cell::Array(ArrayCell::Date(vec![
+                Some("2023-12-25".parse().unwrap()),
+                None,
+                Some("2024-02-29".parse().unwrap()),
+            ]))
+        );
+
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::TIME_ARRAY, r#"{"14:30:45.123",NULL}"#).unwrap(),
+            Cell::Array(ArrayCell::Time(vec![
+                Some(NaiveTime::parse_from_str("14:30:45.123", TIME_FORMAT).unwrap()),
+                None,
+            ]))
+        );
+
+        assert_eq!(
+            parse_cell_from_postgres_text(
+                &Type::TIMESTAMP_ARRAY,
+                r#"{"2023-12-25 14:30:45.123",NULL}"#,
+            )
+            .unwrap(),
+            Cell::Array(ArrayCell::Timestamp(vec![
+                Some(
+                    NaiveDateTime::parse_from_str("2023-12-25 14:30:45.123", TIMESTAMP_FORMAT,)
+                        .unwrap(),
+                ),
+                None,
+            ]))
+        );
     }
 
     #[test]
