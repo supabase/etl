@@ -296,6 +296,7 @@ async fn an_existing_bigquery_destination_and_pipeline_can_be_updated() {
         response.json().await.expect("failed to deserialize response");
     let CreateDestinationPipelineResponse { destination_id, pipeline_id } = response;
     let new_source_id = create_source(&app, tenant_id).await;
+    let create_calls_before = app.k8s_state.create_calls();
 
     // Act
     let destination_pipeline = UpdateDestinationPipelineRequest {
@@ -310,6 +311,7 @@ async fn an_existing_bigquery_destination_and_pipeline_can_be_updated() {
 
     // Assert
     assert!(response.status().is_success());
+    assert!(app.k8s_state.create_calls() > create_calls_before);
 
     let response = app.read_destination(tenant_id, destination_id).await;
     let response: ReadDestinationResponse =

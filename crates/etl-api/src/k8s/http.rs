@@ -23,7 +23,7 @@ use thiserror::Error;
 use tracing::debug;
 
 use crate::{
-    config::K8sConfig,
+    config::{DefaultReplicatorResourcesConfig, DefaultVectorResourcesConfig, K8sConfig},
     configs::{
         log::LogLevel,
         pipeline::{DuckLakeMaintenanceConfig, ReplicatorResourcesConfig},
@@ -34,6 +34,8 @@ use crate::{
     },
 };
 
+/// Server-side apply field manager for resources owned by the API service.
+const FIELD_MANAGER: &str = "etl-api";
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
 /// Secret name suffix for the ClickHouse password.
@@ -86,6 +88,10 @@ const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
 const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
 /// Docker image used for the Vector sidecar.
 const VECTOR_IMAGE_NAME: &str = "public.ecr.aws/supabase/timberio/vector:0.55.0-distroless-libc";
+/// Name of the replicator container port that serves Prometheus metrics.
+const REPLICATOR_METRICS_PORT_NAME: &str = "metrics";
+/// Port the replicator listens on for Prometheus metrics.
+const REPLICATOR_METRICS_PORT: i32 = 9000;
 /// ConfigMap name containing the Vector configuration.
 const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
 /// Volume name for the replicator config file.
@@ -113,34 +119,14 @@ const DUCKLAKE_MAINTENANCE_VERSION: &str = "v1alpha1";
 /// DuckLake maintenance CRD kind.
 const DUCKLAKE_MAINTENANCE_KIND: &str = "DuckLakeMaintenance";
 
-/// Default replicator memory request in prod, in Mi.
-const REPLICATOR_MEMORY_REQUEST_PROD_DEFAULT: i32 = 500;
-/// Default replicator CPU request in prod, in millicores.
-const REPLICATOR_CPU_REQUEST_PROD_DEFAULT: i32 = 500;
-/// Default replicator memory request outside prod, in Mi.
-const REPLICATOR_MEMORY_REQUEST_NON_PROD_DEFAULT: i32 = 250;
-/// Default replicator CPU request outside prod, in millicores.
-const REPLICATOR_CPU_REQUEST_NON_PROD_DEFAULT: i32 = 125;
-/// Default Vector memory request in prod, in Mi.
-const VECTOR_MEMORY_REQUEST_PROD_DEFAULT: i32 = 256;
-/// Default Vector CPU request in prod, in millicores.
-const VECTOR_CPU_REQUEST_PROD_DEFAULT: i32 = 100;
-/// Default Vector memory request outside prod, in Mi.
-const VECTOR_MEMORY_REQUEST_NON_PROD_DEFAULT: i32 = 192;
-/// Default Vector CPU request outside prod, in millicores.
-const VECTOR_CPU_REQUEST_NON_PROD_DEFAULT: i32 = 75;
+/// Minimum Kubernetes CPU quantity emitted by the API, in millicores.
+const MIN_K8S_CPU_MILLICORES: i32 = 1;
+/// Minimum Kubernetes memory quantity emitted by the API, in Mi.
+const MIN_K8S_MEMORY_MIB: i32 = 1;
 
-/// Memory limit multiplier (request × 1.2 = limit).
-///
-/// We want to have 20% leeway in case of a memory usage spike.
-const MEMORY_LIMIT_MULTIPLIER: f32 = 1.2;
-/// CPU limit multiplier (request × 2.0 = limit).
-///
-/// CPU can be throttled, so the limits can be put higher.
-const CPU_LIMIT_MULTIPLIER: f32 = 2.0;
-
-/// Resource limits for a replicator pod.
-struct ReplicatorResourceConfig {
+/// Kubernetes resource settings for all containers in a replicator StatefulSet.
+#[derive(Debug)]
+struct ReplicatorStatefulSetResourcesConfig {
     replicator_memory_limit: String,
     replicator_memory_request: String,
     replicator_cpu_limit: String,
@@ -151,61 +137,81 @@ struct ReplicatorResourceConfig {
     vector_cpu_request: String,
 }
 
-impl ReplicatorResourceConfig {
-    /// Builds runtime limits using default config-backed sizing for the
-    /// environment.
+impl ReplicatorStatefulSetResourcesConfig {
+    /// Builds StatefulSet resources from environment-specific test defaults.
     #[cfg(test)]
-    fn load(environment: &Environment) -> Result<Self, K8sError> {
-        Self::load_with_overrides(environment, &K8sConfig::default(), None)
+    fn for_environment(environment: &Environment) -> Result<Self, K8sError> {
+        let k8s_config = test_k8s_config(environment);
+        Self::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            None,
+        )
     }
 
-    /// Builds runtime limits from environment defaults with optional config
-    /// overrides.
-    fn load_with_overrides(
-        environment: &Environment,
-        k8s_config: &K8sConfig,
-        replicator_resources: Option<&ReplicatorResourcesConfig>,
+    /// Builds StatefulSet resources from API defaults plus optional
+    /// pipeline-level replicator resource overrides.
+    ///
+    /// Request precedence is pipeline override first, then the mandatory API
+    /// default from `k8s.replicator_resources`. Limit precedence is explicit
+    /// pipeline limit first, then the final request. Vector requests come from
+    /// `k8s.vector_resources`, and Vector limits match those requests. Keeping
+    /// both CPU and memory limits equal to requests for every container lets
+    /// the pod qualify for Kubernetes Guaranteed QoS unless the pipeline opts
+    /// into different replicator limits.
+    fn from_default_resources(
+        default_replicator_resources: &DefaultReplicatorResourcesConfig,
+        default_vector_resources: &DefaultVectorResourcesConfig,
+        pipeline_replicator_resources: Option<&ReplicatorResourcesConfig>,
     ) -> Result<Self, K8sError> {
-        let (default_replicator_memory_request, default_replicator_cpu_request) = match environment
-        {
-            Environment::Prod => {
-                (REPLICATOR_MEMORY_REQUEST_PROD_DEFAULT, REPLICATOR_CPU_REQUEST_PROD_DEFAULT)
-            }
-            _ => (
-                REPLICATOR_MEMORY_REQUEST_NON_PROD_DEFAULT,
-                REPLICATOR_CPU_REQUEST_NON_PROD_DEFAULT,
-            ),
-        };
-        let (default_vector_memory_request, default_vector_cpu_request) = match environment {
-            Environment::Prod => {
-                (VECTOR_MEMORY_REQUEST_PROD_DEFAULT, VECTOR_CPU_REQUEST_PROD_DEFAULT)
-            }
-            _ => (VECTOR_MEMORY_REQUEST_NON_PROD_DEFAULT, VECTOR_CPU_REQUEST_NON_PROD_DEFAULT),
-        };
-        let replicator_memory_request = replicator_resources
-            .and_then(|config| config.memory_request_mib)
-            .or(k8s_config.replicator_resources.replicator_memory_request_mib)
-            .unwrap_or(default_replicator_memory_request);
-        let replicator_cpu_request = replicator_resources
-            .and_then(|config| config.cpu_request_millicores)
-            .or(k8s_config.replicator_resources.replicator_cpu_request_millicores)
-            .unwrap_or(default_replicator_cpu_request);
-        let vector_memory_request = k8s_config
-            .replicator_resources
-            .vector_memory_request_mib
-            .unwrap_or(default_vector_memory_request);
-        let vector_cpu_request = k8s_config
-            .replicator_resources
-            .vector_cpu_request_millicores
-            .unwrap_or(default_vector_cpu_request);
+        let replicator_memory_request = clamp_k8s_resource_quantity(
+            pipeline_replicator_resources
+                .and_then(|config| config.memory_request_mib)
+                .unwrap_or(default_replicator_resources.memory_request_mib),
+            MIN_K8S_MEMORY_MIB,
+        );
+        let replicator_cpu_request = clamp_k8s_resource_quantity(
+            pipeline_replicator_resources
+                .and_then(|config| config.cpu_request_millicores)
+                .unwrap_or(default_replicator_resources.cpu_request_millicores),
+            MIN_K8S_CPU_MILLICORES,
+        );
+        let vector_memory_request = clamp_k8s_resource_quantity(
+            default_vector_resources.memory_request_mib,
+            MIN_K8S_MEMORY_MIB,
+        );
+        let vector_cpu_request = clamp_k8s_resource_quantity(
+            default_vector_resources.cpu_request_millicores,
+            MIN_K8S_CPU_MILLICORES,
+        );
 
-        let replicator_memory_limit =
-            ((replicator_memory_request as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
-        let replicator_cpu_limit =
-            ((replicator_cpu_request as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
-        let vector_memory_limit =
-            ((vector_memory_request as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
-        let vector_cpu_limit = ((vector_cpu_request as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
+        // Keep default limits equal to requests so long-running pipelines get
+        // Guaranteed QoS. A pipeline-level limit override is an intentional
+        // opt-out for workloads that need extra replicator headroom. The
+        // replicator memory monitor reads the container cgroup limit through
+        // sysinfo, so batch budgets and memory backpressure scale with this
+        // default limit.
+        let replicator_memory_limit = pipeline_replicator_resources
+            .and_then(|config| config.memory_limit_mib)
+            .unwrap_or(replicator_memory_request);
+        let replicator_memory_limit = clamp_k8s_resource_limit(
+            replicator_memory_limit,
+            replicator_memory_request,
+            MIN_K8S_MEMORY_MIB,
+        );
+        let replicator_cpu_limit = pipeline_replicator_resources
+            .and_then(|config| config.cpu_limit_millicores)
+            .unwrap_or(replicator_cpu_request);
+        let replicator_cpu_limit = clamp_k8s_resource_limit(
+            replicator_cpu_limit,
+            replicator_cpu_request,
+            MIN_K8S_CPU_MILLICORES,
+        );
+
+        // Sidecars participate in pod QoS too, so Vector must also keep
+        // limits equal to requests for the pod to stay Guaranteed.
+        let vector_memory_limit = vector_memory_request;
+        let vector_cpu_limit = vector_cpu_request;
 
         Ok(Self {
             replicator_memory_limit: format!("{replicator_memory_limit}Mi"),
@@ -217,6 +223,34 @@ impl ReplicatorResourceConfig {
             vector_cpu_limit: format!("{vector_cpu_limit}m"),
             vector_cpu_request: format!("{vector_cpu_request}m"),
         })
+    }
+}
+
+/// Clamps a Kubernetes resource quantity to the smallest value this API emits.
+fn clamp_k8s_resource_quantity(value: i32, minimum: i32) -> i32 {
+    value.max(minimum)
+}
+
+/// Clamps a Kubernetes resource limit so it can satisfy its paired request.
+fn clamp_k8s_resource_limit(limit: i32, request: i32, minimum: i32) -> i32 {
+    limit.max(request).max(minimum)
+}
+
+#[cfg(test)]
+fn test_k8s_config(environment: &Environment) -> K8sConfig {
+    let (memory_request_mib, cpu_request_millicores) = match environment {
+        Environment::Prod => (500, 500),
+        _ => (250, 125),
+    };
+    K8sConfig {
+        replicator_resources: DefaultReplicatorResourcesConfig {
+            memory_request_mib,
+            cpu_request_millicores,
+        },
+        vector_resources: DefaultVectorResourcesConfig {
+            memory_request_mib: 192,
+            cpu_request_millicores: 75,
+        },
     }
 }
 
@@ -421,7 +455,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for credentials.
-        let pp = PatchParams::apply(&postgres_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&postgres_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -448,7 +482,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for credentials.
-        let pp = PatchParams::apply(&bq_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&bq_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -474,7 +508,7 @@ impl K8sClient for HttpK8sClient {
             // fields. If there is an override (likely during an incident or
             // SREs intervention), we want to override their changes. The API
             // database is the source of truth for credentials.
-            let pp = PatchParams::apply(&clickhouse_secret_name).force();
+            let pp = PatchParams::apply(FIELD_MANAGER).force();
             self.secrets_api.patch(&clickhouse_secret_name, &pp, &Patch::Apply(secret)).await?;
         }
 
@@ -509,7 +543,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for credentials.
-        let pp = PatchParams::apply(&iceberg_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&iceberg_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -539,7 +573,7 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(ducklake_secret_json)?;
 
-        let pp = PatchParams::apply(&ducklake_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&ducklake_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -624,7 +658,7 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(snowflake_secret_json)?;
 
-        let pp = PatchParams::apply(&snowflake_secret_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&snowflake_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
@@ -663,7 +697,7 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes. The API database is
         // the source of truth for configuration.
-        let pp = PatchParams::apply(&replicator_config_map_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.config_maps_api
             .patch(&replicator_config_map_name, &pp, &Patch::Apply(config_map))
             .await?;
@@ -691,9 +725,9 @@ impl K8sClient for HttpK8sClient {
 
         let prefix = request.prefix.as_str();
         let replicator_image = request.replicator_image.as_str();
-        let config = ReplicatorResourceConfig::load_with_overrides(
-            &request.environment,
-            &self.k8s_config,
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &self.k8s_config.replicator_resources,
+            &self.k8s_config.vector_resources,
             request.replicator_resources.as_ref(),
         )?;
 
@@ -706,19 +740,21 @@ impl K8sClient for HttpK8sClient {
             )?;
         }
 
+        let environment = Environment::load().map_err(K8sError::Config)?;
         let container_environment = create_container_environment_json(
             prefix,
-            &request.environment,
+            &environment,
             replicator_image,
             request.destination_type,
             request.ducklake_maintenance.as_ref(),
             request.log_level,
         );
 
-        let node_selector = create_node_selector_json(&request.environment);
-        let init_containers = create_init_containers_json(prefix, &request.environment, &config);
-        let volumes = create_volumes_json(prefix, &request.environment);
-        let volume_mounts = create_volume_mounts_json(&request.environment);
+        let node_selector = create_node_selector_json(&environment);
+        let init_containers =
+            create_init_containers_json(prefix, &environment, &stateful_set_resources);
+        let volumes = create_volumes_json(prefix, &environment);
+        let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             prefix,
@@ -731,7 +767,7 @@ impl K8sClient for HttpK8sClient {
             init_containers,
             volumes,
             volume_mounts,
-            &config,
+            &stateful_set_resources,
         );
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
@@ -739,7 +775,7 @@ impl K8sClient for HttpK8sClient {
         // We are forcing the update since we are the field manager that should own the
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes.
-        let pp = PatchParams::apply(&stateful_set_name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.stateful_sets_api.patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set)).await?;
 
         Ok(())
@@ -781,7 +817,7 @@ impl K8sClient for HttpK8sClient {
 
         let name = create_ducklake_maintenance_name(prefix);
         let ducklake_maintenance_json = create_ducklake_maintenance_json(prefix, &name, config);
-        let pp = PatchParams::apply(&name).force();
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.ducklake_maintenance_api
             .patch(&name, &pp, &Patch::Apply(ducklake_maintenance_json))
             .await?;
@@ -1367,7 +1403,7 @@ fn create_node_selector_json(environment: &Environment) -> serde_json::Value {
 fn create_init_containers_json(
     prefix: &str,
     environment: &Environment,
-    config: &ReplicatorResourceConfig,
+    stateful_set_resources: &ReplicatorStatefulSetResourcesConfig,
 ) -> serde_json::Value {
     let vector_container_name = create_vector_container_name(prefix);
     // In staging and prod, run vector init container to collect logs
@@ -1378,6 +1414,12 @@ fn create_init_containers_json(
             "name": vector_container_name,
             "image": VECTOR_IMAGE_NAME,
             "restartPolicy": "Always",
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": ["ALL"]
+              }
+            },
             "env": [
               {
                 "name": "LOGFLARE_API_KEY",
@@ -1391,12 +1433,12 @@ fn create_init_containers_json(
             ],
             "resources": {
               "limits": {
-                "memory": config.vector_memory_limit,
-                "cpu": config.vector_cpu_limit,
+                "memory": stateful_set_resources.vector_memory_limit,
+                "cpu": stateful_set_resources.vector_cpu_limit,
               },
               "requests": {
-                "memory": config.vector_memory_request,
-                "cpu": config.vector_cpu_request,
+                "memory": stateful_set_resources.vector_memory_request,
+                "cpu": stateful_set_resources.vector_cpu_request,
               }
             },
             "volumeMounts": [
@@ -1619,7 +1661,7 @@ fn create_replicator_stateful_set_json(
     init_containers: serde_json::Value,
     volumes: Vec<serde_json::Value>,
     volume_mounts: Vec<serde_json::Value>,
-    config: &ReplicatorResourceConfig,
+    stateful_set_resources: &ReplicatorStatefulSetResourcesConfig,
 ) -> serde_json::Value {
     let replicator_app_name = create_replicator_app_name(prefix);
     let restarted_at_annotation = get_restarted_at_annotation_value();
@@ -1653,12 +1695,17 @@ fn create_replicator_stateful_set_json(
               "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
             },
             "annotations": {
-              // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
+              // Attach template annotations (e.g., restart checksum) to trigger a rolling restart.
               "etl.supabase.com/restarted-at": restarted_at_annotation,
             }
           },
           "spec": {
             "serviceAccountName": REPLICATOR_SERVICE_ACCOUNT_NAME,
+            "securityContext": {
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
             "volumes": volumes,
             // Allow scheduling onto nodes tainted with the right node role.
             "tolerations": [
@@ -1678,10 +1725,16 @@ fn create_replicator_stateful_set_json(
               {
                 "name": replicator_container_name,
                 "image": replicator_image,
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": ["ALL"]
+                  }
+                },
                 "ports": [
                   {
-                    "name": "metrics",
-                    "containerPort": 9000,
+                    "name": REPLICATOR_METRICS_PORT_NAME,
+                    "containerPort": REPLICATOR_METRICS_PORT,
                     "protocol": "TCP"
                   }
                 ],
@@ -1689,12 +1742,12 @@ fn create_replicator_stateful_set_json(
                 "volumeMounts": volume_mounts,
                 "resources": {
                   "limits": {
-                    "memory": config.replicator_memory_limit,
-                    "cpu": config.replicator_cpu_limit,
+                    "memory": stateful_set_resources.replicator_memory_limit,
+                    "cpu": stateful_set_resources.replicator_cpu_limit,
                   },
                   "requests": {
-                    "memory": config.replicator_memory_request,
-                    "cpu": config.replicator_cpu_request,
+                    "memory": stateful_set_resources.replicator_memory_request,
+                    "cpu": stateful_set_resources.replicator_cpu_request,
                   }
                 }
               }
@@ -1850,34 +1903,150 @@ mod tests {
     }
 
     #[test]
-    fn test_replicator_resource_config_uses_environment_defaults() {
-        let prod = ReplicatorResourceConfig::load(&Environment::Prod).unwrap();
-        let staging = ReplicatorResourceConfig::load(&Environment::Staging).unwrap();
+    fn test_replicator_stateful_set_resources_uses_api_config_requests() {
+        let prod =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Prod).unwrap();
+        let staging =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Staging).unwrap();
 
         assert_eq!(prod.replicator_cpu_request, "500m");
         assert_eq!(prod.replicator_memory_request, "500Mi");
         assert_eq!(staging.replicator_cpu_request, "125m");
         assert_eq!(staging.replicator_memory_request, "250Mi");
+        assert_eq!(prod.vector_cpu_request, "75m");
+        assert_eq!(prod.vector_memory_request, "192Mi");
+        assert_eq!(prod.vector_cpu_limit, "75m");
+        assert_eq!(prod.vector_memory_limit, "192Mi");
     }
 
     #[test]
-    fn test_replicator_resource_config_uses_pipeline_overrides() {
+    fn test_replicator_stateful_set_resources_uses_pipeline_overrides() {
         let overrides = ReplicatorResourcesConfig {
             cpu_request_millicores: Some(750),
             memory_request_mib: Some(1536),
+            ..ReplicatorResourcesConfig::default()
         };
+        let k8s_config = test_k8s_config(&Environment::Prod);
 
-        let config = ReplicatorResourceConfig::load_with_overrides(
-            &Environment::Prod,
-            &K8sConfig::default(),
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
             Some(&overrides),
         )
         .unwrap();
 
-        assert_eq!(config.replicator_cpu_request, "750m");
-        assert_eq!(config.replicator_memory_request, "1536Mi");
-        assert_eq!(config.replicator_cpu_limit, "1500m");
-        assert_eq!(config.replicator_memory_limit, "1843Mi");
+        assert_eq!(stateful_set_resources.replicator_cpu_request, "750m");
+        assert_eq!(stateful_set_resources.replicator_memory_request, "1536Mi");
+        assert_eq!(stateful_set_resources.replicator_cpu_limit, "750m");
+        assert_eq!(stateful_set_resources.replicator_memory_limit, "1536Mi");
+    }
+
+    #[test]
+    fn test_replicator_stateful_set_resources_uses_pipeline_limits() {
+        let overrides = ReplicatorResourcesConfig {
+            cpu_request_millicores: Some(750),
+            memory_request_mib: Some(1536),
+            cpu_limit_millicores: Some(1000),
+            memory_limit_mib: Some(2048),
+        };
+        let k8s_config = test_k8s_config(&Environment::Prod);
+
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            Some(&overrides),
+        )
+        .unwrap();
+
+        assert_eq!(stateful_set_resources.replicator_cpu_request, "750m");
+        assert_eq!(stateful_set_resources.replicator_memory_request, "1536Mi");
+        assert_eq!(stateful_set_resources.replicator_cpu_limit, "1000m");
+        assert_eq!(stateful_set_resources.replicator_memory_limit, "2048Mi");
+    }
+
+    #[test]
+    fn test_replicator_stateful_set_resources_clamps_to_kubernetes_minimums() {
+        let overrides = ReplicatorResourcesConfig {
+            cpu_request_millicores: Some(0),
+            memory_request_mib: Some(-20),
+            cpu_limit_millicores: Some(0),
+            memory_limit_mib: Some(-1),
+        };
+        let k8s_config = K8sConfig {
+            replicator_resources: DefaultReplicatorResourcesConfig {
+                cpu_request_millicores: -10,
+                memory_request_mib: 0,
+            },
+            vector_resources: DefaultVectorResourcesConfig {
+                cpu_request_millicores: 0,
+                memory_request_mib: -20,
+            },
+        };
+
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            Some(&overrides),
+        )
+        .unwrap();
+
+        assert_eq!(stateful_set_resources.replicator_cpu_request, "1m");
+        assert_eq!(stateful_set_resources.replicator_memory_request, "1Mi");
+        assert_eq!(stateful_set_resources.replicator_cpu_limit, "1m");
+        assert_eq!(stateful_set_resources.replicator_memory_limit, "1Mi");
+        assert_eq!(stateful_set_resources.vector_cpu_request, "1m");
+        assert_eq!(stateful_set_resources.vector_memory_request, "1Mi");
+        assert_eq!(stateful_set_resources.vector_cpu_limit, "1m");
+        assert_eq!(stateful_set_resources.vector_memory_limit, "1Mi");
+    }
+
+    #[test]
+    fn test_replicator_stateful_set_resources_clamps_limits_to_requests() {
+        let overrides = ReplicatorResourcesConfig {
+            cpu_request_millicores: Some(750),
+            memory_request_mib: Some(1536),
+            cpu_limit_millicores: Some(10),
+            memory_limit_mib: Some(100),
+        };
+        let k8s_config = test_k8s_config(&Environment::Prod);
+
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            Some(&overrides),
+        )
+        .unwrap();
+
+        assert_eq!(stateful_set_resources.replicator_cpu_request, "750m");
+        assert_eq!(stateful_set_resources.replicator_memory_request, "1536Mi");
+        assert_eq!(stateful_set_resources.replicator_cpu_limit, "750m");
+        assert_eq!(stateful_set_resources.replicator_memory_limit, "1536Mi");
+    }
+
+    #[test]
+    fn test_replicator_resource_config_uses_api_vector_resources() {
+        let k8s_config = K8sConfig {
+            replicator_resources: DefaultReplicatorResourcesConfig {
+                cpu_request_millicores: 500,
+                memory_request_mib: 500,
+            },
+            vector_resources: DefaultVectorResourcesConfig {
+                cpu_request_millicores: 80,
+                memory_request_mib: 192,
+            },
+        };
+
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(stateful_set_resources.vector_cpu_request, "80m");
+        assert_eq!(stateful_set_resources.vector_memory_request, "192Mi");
+        assert_eq!(stateful_set_resources.vector_cpu_limit, "80m");
+        assert_eq!(stateful_set_resources.vector_memory_limit, "192Mi");
     }
 
     #[test]
@@ -1904,7 +2073,8 @@ mod tests {
         );
 
         let environment = Environment::Prod;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
         let replicator_image = "supabase/replicator:1.2.3";
         let container_environment = create_container_environment_json(
             &prefix,
@@ -1915,7 +2085,8 @@ mod tests {
             LogLevel::Info,
         );
         let node_selector = create_node_selector_json(&environment);
-        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let init_containers =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
@@ -2008,7 +2179,7 @@ mod tests {
                     init_containers,
                     volumes,
                     volume_mounts,
-                    &config,
+                    &stateful_set_resources,
                 ),
             ),
         ];
@@ -2041,29 +2212,32 @@ mod tests {
     }
 
     #[test]
-    fn test_replicator_resource_config_prefers_pipeline_over_api_config() {
+    fn test_replicator_stateful_set_resources_prefers_pipeline_over_api_config() {
         let overrides = ReplicatorResourcesConfig {
             cpu_request_millicores: Some(900),
             memory_request_mib: Some(1800),
+            ..ReplicatorResourcesConfig::default()
         };
         let k8s_config = K8sConfig {
-            replicator_resources: crate::config::ReplicatorResourcesConfig {
-                replicator_cpu_request_millicores: Some(300),
-                replicator_memory_request_mib: Some(400),
-                vector_cpu_request_millicores: None,
-                vector_memory_request_mib: None,
+            replicator_resources: DefaultReplicatorResourcesConfig {
+                cpu_request_millicores: 300,
+                memory_request_mib: 400,
+            },
+            vector_resources: DefaultVectorResourcesConfig {
+                cpu_request_millicores: 80,
+                memory_request_mib: 192,
             },
         };
 
-        let config = ReplicatorResourceConfig::load_with_overrides(
-            &Environment::Staging,
-            &k8s_config,
+        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &k8s_config.replicator_resources,
+            &k8s_config.vector_resources,
             Some(&overrides),
         )
         .unwrap();
 
-        assert_eq!(config.replicator_cpu_request, "900m");
-        assert_eq!(config.replicator_memory_request, "1800Mi");
+        assert_eq!(stateful_set_resources.replicator_cpu_request, "900m");
+        assert_eq!(stateful_set_resources.replicator_memory_request, "1800Mi");
     }
 
     #[test]
@@ -2569,18 +2743,24 @@ mod tests {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
 
         let environment = Environment::Dev;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
-        let node_selector = create_init_containers_json(&prefix, &environment, &config);
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let node_selector =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         assert_json_snapshot!(node_selector);
 
         let environment = Environment::Staging;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
-        let node_selector = create_init_containers_json(&prefix, &environment, &config);
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let node_selector =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         assert_json_snapshot!(node_selector);
 
         let environment = Environment::Prod;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
-        let node_selector = create_init_containers_json(&prefix, &environment, &config);
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let node_selector =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         assert_json_snapshot!(node_selector);
     }
 
@@ -2624,7 +2804,8 @@ mod tests {
 
         // Dev env
         let environment = Environment::Dev;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2636,7 +2817,8 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let init_containers =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
@@ -2651,7 +2833,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &config,
+            &stateful_set_resources,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -2664,7 +2846,8 @@ mod tests {
 
         // Staging env
         let environment = Environment::Staging;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2676,7 +2859,8 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let init_containers =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
@@ -2691,7 +2875,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &config,
+            &stateful_set_resources,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -2704,7 +2888,8 @@ mod tests {
 
         // Prod env
         let environment = Environment::Prod;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2716,7 +2901,8 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let init_containers =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
@@ -2731,7 +2917,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &config,
+            &stateful_set_resources,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -2751,7 +2937,8 @@ mod tests {
 
         // Dev env
         let environment = Environment::Dev;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2763,7 +2950,8 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let init_containers =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
@@ -2778,7 +2966,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &config,
+            &stateful_set_resources,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -2791,7 +2979,8 @@ mod tests {
 
         // Staging env
         let environment = Environment::Staging;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2803,7 +2992,8 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let init_containers =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
@@ -2818,7 +3008,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &config,
+            &stateful_set_resources,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -2831,7 +3021,8 @@ mod tests {
 
         // Prod env
         let environment = Environment::Prod;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2843,7 +3034,8 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let init_containers =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
@@ -2858,7 +3050,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &config,
+            &stateful_set_resources,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -2878,7 +3070,8 @@ mod tests {
 
         // Dev env
         let environment = Environment::Dev;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2890,7 +3083,8 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let init_containers =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
@@ -2905,7 +3099,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &config,
+            &stateful_set_resources,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -2918,7 +3112,8 @@ mod tests {
 
         // Staging env
         let environment = Environment::Staging;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2930,7 +3125,8 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let init_containers =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
@@ -2945,7 +3141,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &config,
+            &stateful_set_resources,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -2958,7 +3154,8 @@ mod tests {
 
         // Prod env
         let environment = Environment::Prod;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -2970,7 +3167,8 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let init_containers =
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
@@ -2985,7 +3183,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &config,
+            &stateful_set_resources,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);

@@ -30,7 +30,9 @@ use crate::support::{
         sources::create_source,
         tenants::{create_tenant, create_tenant_with_id_and_name},
     },
-    test_app::{TestApp, spawn_test_app, spawn_test_app_with_k8s_state},
+    test_app::{
+        TestApp, spawn_test_app, spawn_test_app_with_k8s_state, spawn_test_app_without_k8s_client,
+    },
 };
 
 /// Creates a basic pipeline setup for tests that don't need source databases.
@@ -49,6 +51,46 @@ async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {
     )
     .await;
     (app, tenant_id, source_id, destination_id, pipeline_id)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_k8s_endpoints_are_noops_without_k8s_client() {
+    init_test_tracing();
+    let app = spawn_test_app_without_k8s_client().await;
+    create_default_image(&app).await;
+    let tenant_id = create_tenant(&app).await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+    let pipeline_id = create_pipeline_with_config(
+        &app,
+        &tenant_id,
+        source_id,
+        destination_id,
+        new_pipeline_config(),
+    )
+    .await;
+
+    let response = app.start_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .api_client
+        .get(format!("{}/v1/pipelines/{pipeline_id}/status", app.address))
+        .bearer_auth(app.api_key.clone())
+        .header("tenant_id", &tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: serde_json::Value =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response["status"]["name"], "stopped");
+
+    let response = app.stop_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app.stop_all_pipelines(&tenant_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 /// Creates a pipeline setup with a real source database for table state
@@ -224,6 +266,7 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
     config.replicator_resources = Some(ReplicatorResourcesConfig {
         cpu_request_millicores: Some(750),
         memory_request_mib: Some(1536),
+        ..ReplicatorResourcesConfig::default()
     });
 
     let pipeline = CreatePipelineRequest { source_id, destination_id, config };
@@ -240,6 +283,7 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
         Some(ReplicatorResourcesConfig {
             cpu_request_millicores: Some(750),
             memory_request_mib: Some(1536),
+            ..ReplicatorResourcesConfig::default()
         })
     );
 
@@ -250,6 +294,7 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
         Some(ReplicatorResourcesConfig {
             cpu_request_millicores: Some(750),
             memory_request_mib: Some(1536),
+            ..ReplicatorResourcesConfig::default()
         })
     );
 }
@@ -453,6 +498,7 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
     updated_pipeline_config.replicator_resources = Some(ReplicatorResourcesConfig {
         cpu_request_millicores: Some(900),
         memory_request_mib: Some(2048),
+        ..ReplicatorResourcesConfig::default()
     });
     let update_request =
         UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config };
@@ -466,6 +512,7 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
         Some(ReplicatorResourcesConfig {
             cpu_request_millicores: Some(900),
             memory_request_mib: Some(2048),
+            ..ReplicatorResourcesConfig::default()
         })
     );
 }
@@ -491,6 +538,7 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
     updated_pipeline_config.replicator_resources = Some(ReplicatorResourcesConfig {
         cpu_request_millicores: Some(333),
         memory_request_mib: Some(444),
+        ..ReplicatorResourcesConfig::default()
     });
     let update_request =
         UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config };
@@ -509,6 +557,7 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
         Some(ReplicatorResourcesConfig {
             cpu_request_millicores: Some(333),
             memory_request_mib: Some(444),
+            ..ReplicatorResourcesConfig::default()
         })
     );
 }
@@ -526,6 +575,7 @@ async fn invalid_replicator_resources_are_rejected() {
     config.replicator_resources = Some(ReplicatorResourcesConfig {
         cpu_request_millicores: Some(0),
         memory_request_mib: Some(100),
+        ..ReplicatorResourcesConfig::default()
     });
     let pipeline = CreatePipelineRequest { source_id, destination_id, config };
 

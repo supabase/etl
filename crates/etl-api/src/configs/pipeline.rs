@@ -35,18 +35,39 @@ fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
     Some(MemoryBackpressureConfig::default())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
 pub struct ReplicatorResourcesConfig {
+    /// CPU request for the replicator container, in millicores.
+    ///
+    /// When unset, the replicator uses the default request from the ETL API
+    /// service configuration.
     #[schema(example = 500)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_request_millicores: Option<i32>,
+    /// Memory request for the replicator container, in MiB.
+    ///
+    /// When unset, the replicator uses the default request from the ETL API
+    /// service configuration.
     #[schema(example = 2000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_request_mib: Option<i32>,
+    /// CPU limit for the replicator container, in millicores.
+    ///
+    /// When unset, the ETL API uses the final CPU request as the CPU limit.
+    #[schema(example = 1000)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_limit_millicores: Option<i32>,
+    /// Memory limit for the replicator container, in MiB.
+    ///
+    /// When unset, the ETL API uses the final memory request as the memory
+    /// limit.
+    #[schema(example = 2400)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_limit_mib: Option<i32>,
 }
 
 impl ReplicatorResourcesConfig {
-    /// Validates that configured resource requests are positive when present.
+    /// Validates that configured resource overrides are positive.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(cpu_request_millicores) = self.cpu_request_millicores
             && cpu_request_millicores <= 0
@@ -58,6 +79,18 @@ impl ReplicatorResourcesConfig {
             && memory_request_mib <= 0
         {
             return Err("Replicator memory request must be greater than 0".to_owned());
+        }
+
+        if let Some(cpu_limit_millicores) = self.cpu_limit_millicores
+            && cpu_limit_millicores <= 0
+        {
+            return Err("Replicator cpu limit must be greater than 0".to_owned());
+        }
+
+        if let Some(memory_limit_mib) = self.memory_limit_mib
+            && memory_limit_mib <= 0
+        {
+            return Err("Replicator memory limit must be greater than 0".to_owned());
         }
 
         Ok(())
@@ -205,6 +238,7 @@ pub struct FullApiPipelineConfig {
     pub replicator_resources: Option<ReplicatorResourcesConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_level: Option<LogLevel>,
 }
 
@@ -267,10 +301,11 @@ pub struct StoredPipelineConfig {
     pub table_sync_copy: TableSyncCopyConfig,
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicator_resources: Option<ReplicatorResourcesConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_level: Option<LogLevel>,
 }
 
@@ -412,6 +447,7 @@ mod tests {
             replicator_resources: Some(ReplicatorResourcesConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
+                ..ReplicatorResourcesConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: None,
@@ -451,6 +487,7 @@ mod tests {
             replicator_resources: Some(ReplicatorResourcesConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
+                ..ReplicatorResourcesConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: Some(LogLevel::Debug),
@@ -532,6 +569,7 @@ mod tests {
             replicator_resources: Some(ReplicatorResourcesConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
+                ..ReplicatorResourcesConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: None,

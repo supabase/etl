@@ -22,7 +22,10 @@ use crate::{
     data,
     data::{
         destinations::{DestinationsDbError, destination_exists},
-        pipelines::{PipelinesDbError, read_pipelines_for_destination_for_deletion},
+        pipelines::{
+            PipelinesDbError, read_pipeline_ids_for_destination,
+            read_pipelines_for_destination_for_deletion,
+        },
         sources::SourcesDbError,
     },
     k8s::{
@@ -30,8 +33,8 @@ use crate::{
         core::{K8sCoreError, first_active_pipeline_id},
     },
     routes::{
-        ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
-        extract_tenant_id, utils,
+        ErrorMessage, IntoInner, TenantIdError, common::restart_pipeline_replicator_if_running,
+        error_response_with_internal_error, extract_tenant_id, pipelines::PipelineError, utils,
     },
     validation,
     validation::{FailureType, ValidationContext, ValidationError, ValidationFailure},
@@ -74,6 +77,9 @@ pub enum DestinationError {
 
     #[error("Invalid destination validation request: {0}")]
     InvalidValidationRequest(String),
+
+    #[error(transparent)]
+    Pipeline(#[from] PipelineError),
 }
 
 impl DestinationError {
@@ -84,7 +90,8 @@ impl DestinationError {
             | DestinationError::PipelinesDb(PipelinesDbError::Database(_))
             | DestinationError::SourcesDb(SourcesDbError::Database(_))
             | DestinationError::Environment(_)
-            | DestinationError::K8sCore(_) => "Internal server error".to_owned(),
+            | DestinationError::K8sCore(_)
+            | DestinationError::Pipeline(_) => "Internal server error".to_owned(),
             DestinationError::Validation(error) => {
                 utils::validation_error_message(error).to_owned()
             }
@@ -104,7 +111,8 @@ impl IntoResponse for DestinationError {
             | DestinationError::PipelinesDb(_)
             | DestinationError::SourcesDb(_)
             | DestinationError::Environment(_)
-            | DestinationError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | DestinationError::K8sCore(_)
+            | DestinationError::Pipeline(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationError::Validation(error) => utils::validation_error_status_code(error),
             DestinationError::DestinationNotFound(_) | DestinationError::SourceNotFound(_) => {
                 StatusCode::NOT_FOUND
@@ -165,12 +173,14 @@ pub struct ReadDestinationsResponse {
 pub struct ValidateDestinationRequest {
     /// Source identifier used for source-aware destination validation.
     #[schema(example = 1)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_id: Option<i64>,
     /// Destination configuration to validate.
     #[schema(required = true)]
     pub config: FullApiDestinationConfig,
     /// Pipeline configuration used to cross-reference source publication
     /// details.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline_config: Option<FullApiPipelineConfig>,
 }
 
@@ -293,9 +303,13 @@ pub(crate) async fn read_destination(
     ),
     tag = "Destinations"
 )]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn update_destination(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
+    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
     destination_id: Path<i64>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     destination: Json<UpdateDestinationRequest>,
@@ -315,6 +329,22 @@ pub(crate) async fn update_destination(
     )
     .await?
     .ok_or(DestinationError::DestinationNotFound(destination_id))?;
+
+    let pipeline_ids =
+        read_pipeline_ids_for_destination(txn.deref_mut(), tenant_id, destination_id).await?;
+    for pipeline_id in pipeline_ids {
+        restart_pipeline_replicator_if_running(
+            txn.deref_mut(),
+            tenant_id,
+            pipeline_id,
+            &encryption_key,
+            k8s_client.as_deref(),
+            source_tls_config.as_ref(),
+            api_config.as_ref(),
+        )
+        .await?;
+    }
+
     txn.commit().await.map_err(DestinationsDbError::from)?;
 
     Ok(StatusCode::OK)
@@ -342,7 +372,7 @@ pub(crate) async fn delete_destination(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     destination_id: Path<i64>,
-    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
+    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
 ) -> Result<impl IntoResponse, DestinationError> {
     let tenant_id = extract_tenant_id(&headers)?;
     let destination_id = destination_id.into_inner();
@@ -354,7 +384,7 @@ pub(crate) async fn delete_destination(
     let pipelines =
         read_pipelines_for_destination_for_deletion(&pool, tenant_id, destination_id).await?;
     if let Some(pipeline_id) =
-        first_active_pipeline_id(k8s_client.as_ref(), tenant_id, &pipelines).await?
+        first_active_pipeline_id(k8s_client.as_deref(), tenant_id, &pipelines).await?
     {
         return Err(DestinationError::ActivePipeline(pipeline_id));
     }
