@@ -146,7 +146,7 @@ async fn an_existing_bigquery_destination_can_be_updated() {
     // Act
     let updated_config = UpdateDestinationRequest {
         name: updated_name(),
-        config: updated_destination_config().into(),
+        config: UpdateApiDestinationConfig::from_full_config(updated_destination_config()),
     };
     let response = app.update_destination(tenant_id, destination_id, &updated_config).await;
 
@@ -300,7 +300,7 @@ async fn updating_destination_with_running_pipeline_restarts_replicator() {
     let create_calls_before = app.k8s_state.create_calls();
     let updated_config = UpdateDestinationRequest {
         name: updated_name(),
-        config: updated_destination_config().into(),
+        config: UpdateApiDestinationConfig::from_full_config(updated_destination_config()),
     };
 
     let response = app.update_destination(tenant_id, destination_id, &updated_config).await;
@@ -328,7 +328,9 @@ async fn an_existing_iceberg_supabase_destination_can_be_updated() {
     // Act
     let updated_config = UpdateDestinationRequest {
         name: "Iceberg Supabase Destination (Updated)".to_owned(),
-        config: updated_iceberg_supabase_destination_config().into(),
+        config: UpdateApiDestinationConfig::from_full_config(
+            updated_iceberg_supabase_destination_config(),
+        ),
     };
     let response = app.update_destination(tenant_id, destination_id, &updated_config).await;
 
@@ -353,7 +355,7 @@ async fn non_existing_destination_cannot_be_updated() {
     // Act
     let updated_config = UpdateDestinationRequest {
         name: updated_name(),
-        config: updated_destination_config().into(),
+        config: UpdateApiDestinationConfig::from_full_config(updated_destination_config()),
     };
     let response = app.update_destination(tenant_id, 42, &updated_config).await;
 
@@ -562,7 +564,7 @@ async fn an_existing_snowflake_destination_can_be_updated() {
     // Act
     let updated_config = UpdateDestinationRequest {
         name: "Snowflake Destination (Updated)".to_owned(),
-        config: updated_snowflake_destination_config().into(),
+        config: UpdateApiDestinationConfig::from_full_config(updated_snowflake_destination_config()),
     };
     let response = app.update_destination(tenant_id, destination_id, &updated_config).await;
 

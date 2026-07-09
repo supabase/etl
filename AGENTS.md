@@ -157,6 +157,13 @@
   conversion exists or a value was explicitly range-checked. Use `as` for
   intentionally lossy conversions or conversions that Rust does not expose via
   `From`, such as `u64` to `f64` metric values.
+- Use `From` for value-to-value conversions only when the mapping is
+  infallible, lossless in the semantic sense, value-preserving, and obvious.
+  When converting between API config shapes whose semantics are mode-specific,
+  prefer a named constructor or method that states the mode. For example,
+  converting a create-style config into an update config where omitted optional
+  fields mean `Clear` rather than `Preserve` should use an explicit helper such
+  as `from_full_config`, not `From`.
 
 ## Error Handling And Panics
 - Use typed errors and `Result` for recoverable failures.

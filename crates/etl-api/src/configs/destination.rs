@@ -468,6 +468,88 @@ pub enum UpdateApiDestinationConfig {
 }
 
 impl UpdateApiDestinationConfig {
+    /// Builds a full replacement update from a create-style destination
+    /// configuration.
+    ///
+    /// Optional fields that are absent in the full config are cleared.
+    pub fn from_full_config(value: CreateApiDestinationConfig) -> Self {
+        match value {
+            CreateApiDestinationConfig::BigQuery {
+                project_id,
+                dataset_id,
+                service_account_key,
+                max_staleness_mins,
+                connection_pool_size,
+            } => Self::BigQuery {
+                project_id: UpdateField::Set(project_id),
+                dataset_id: UpdateField::Set(dataset_id),
+                service_account_key: UpdateField::Set(service_account_key),
+                max_staleness_mins: UpdateField::from_option(max_staleness_mins),
+                connection_pool_size: UpdateField::from_option(connection_pool_size),
+            },
+            CreateApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
+                Self::ClickHouse {
+                    url: UpdateField::Set(url),
+                    user: UpdateField::Set(user),
+                    password: UpdateField::from_option(password),
+                    database: UpdateField::Set(database),
+                    engine: UpdateField::Set(engine),
+                }
+            }
+            CreateApiDestinationConfig::Iceberg { config } => {
+                Self::Iceberg { config: UpdateApiIcebergConfig::from_full_config(config) }
+            }
+            CreateApiDestinationConfig::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+                maintenance_target_file_size,
+                expire_snapshots_older_than,
+                maintenance_mode,
+            } => Self::Ducklake {
+                catalog_url: UpdateField::Set(catalog_url),
+                data_path: UpdateField::Set(data_path),
+                pool_size: UpdateField::from_option(pool_size),
+                s3_access_key_id: UpdateField::from_option(s3_access_key_id),
+                s3_secret_access_key: UpdateField::from_option(s3_secret_access_key),
+                s3_region: UpdateField::from_option(s3_region),
+                s3_endpoint: UpdateField::from_option(s3_endpoint),
+                s3_url_style: UpdateField::from_option(s3_url_style),
+                s3_use_ssl: UpdateField::from_option(s3_use_ssl),
+                metadata_schema: UpdateField::from_option(metadata_schema),
+                maintenance_target_file_size: UpdateField::from_option(
+                    maintenance_target_file_size,
+                ),
+                expire_snapshots_older_than: UpdateField::from_option(expire_snapshots_older_than),
+                maintenance_mode: UpdateField::Set(maintenance_mode),
+            },
+            CreateApiDestinationConfig::Snowflake {
+                account_id,
+                user,
+                private_key,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            } => Self::Snowflake {
+                account_id: UpdateField::Set(account_id),
+                user: UpdateField::Set(user),
+                private_key: UpdateField::Set(private_key),
+                private_key_passphrase: UpdateField::from_option(private_key_passphrase),
+                database: UpdateField::Set(database),
+                schema: UpdateField::Set(schema),
+                role: UpdateField::from_option(role),
+            },
+        }
+    }
+
     /// Merges this update into a stored destination configuration.
     pub(crate) fn merge_into_stored(
         self,
@@ -1447,125 +1529,6 @@ impl From<CreateApiDestinationConfig> for StoredDestinationConfig {
     }
 }
 
-impl From<CreateApiDestinationConfig> for UpdateApiDestinationConfig {
-    fn from(value: CreateApiDestinationConfig) -> Self {
-        match value {
-            CreateApiDestinationConfig::BigQuery {
-                project_id,
-                dataset_id,
-                service_account_key,
-                max_staleness_mins,
-                connection_pool_size,
-            } => Self::BigQuery {
-                project_id: UpdateField::Set(project_id),
-                dataset_id: UpdateField::Set(dataset_id),
-                service_account_key: UpdateField::Set(service_account_key),
-                max_staleness_mins: UpdateField::from_option(max_staleness_mins),
-                connection_pool_size: UpdateField::from_option(connection_pool_size),
-            },
-            CreateApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
-                Self::ClickHouse {
-                    url: UpdateField::Set(url),
-                    user: UpdateField::Set(user),
-                    password: UpdateField::from_option(password),
-                    database: UpdateField::Set(database),
-                    engine: UpdateField::Set(engine),
-                }
-            }
-            CreateApiDestinationConfig::Iceberg { config } => {
-                Self::Iceberg { config: config.into() }
-            }
-            CreateApiDestinationConfig::Ducklake {
-                catalog_url,
-                data_path,
-                pool_size,
-                s3_access_key_id,
-                s3_secret_access_key,
-                s3_region,
-                s3_endpoint,
-                s3_url_style,
-                s3_use_ssl,
-                metadata_schema,
-                maintenance_target_file_size,
-                expire_snapshots_older_than,
-                maintenance_mode,
-            } => Self::Ducklake {
-                catalog_url: UpdateField::Set(catalog_url),
-                data_path: UpdateField::Set(data_path),
-                pool_size: UpdateField::from_option(pool_size),
-                s3_access_key_id: UpdateField::from_option(s3_access_key_id),
-                s3_secret_access_key: UpdateField::from_option(s3_secret_access_key),
-                s3_region: UpdateField::from_option(s3_region),
-                s3_endpoint: UpdateField::from_option(s3_endpoint),
-                s3_url_style: UpdateField::from_option(s3_url_style),
-                s3_use_ssl: UpdateField::from_option(s3_use_ssl),
-                metadata_schema: UpdateField::from_option(metadata_schema),
-                maintenance_target_file_size: UpdateField::from_option(
-                    maintenance_target_file_size,
-                ),
-                expire_snapshots_older_than: UpdateField::from_option(expire_snapshots_older_than),
-                maintenance_mode: UpdateField::Set(maintenance_mode),
-            },
-            CreateApiDestinationConfig::Snowflake {
-                account_id,
-                user,
-                private_key,
-                private_key_passphrase,
-                database,
-                schema,
-                role,
-            } => Self::Snowflake {
-                account_id: UpdateField::Set(account_id),
-                user: UpdateField::Set(user),
-                private_key: UpdateField::Set(private_key),
-                private_key_passphrase: UpdateField::from_option(private_key_passphrase),
-                database: UpdateField::Set(database),
-                schema: UpdateField::Set(schema),
-                role: UpdateField::from_option(role),
-            },
-        }
-    }
-}
-
-impl From<CreateApiIcebergConfig> for UpdateApiIcebergConfig {
-    fn from(value: CreateApiIcebergConfig) -> Self {
-        match value {
-            CreateApiIcebergConfig::Supabase {
-                project_ref,
-                warehouse_name,
-                namespace,
-                catalog_token,
-                s3_access_key_id,
-                s3_secret_access_key,
-                s3_region,
-            } => Self::Supabase {
-                project_ref: UpdateField::Set(project_ref),
-                warehouse_name: UpdateField::Set(warehouse_name),
-                namespace: UpdateField::from_option(namespace),
-                catalog_token: UpdateField::Set(catalog_token),
-                s3_access_key_id: UpdateField::Set(s3_access_key_id),
-                s3_secret_access_key: UpdateField::Set(s3_secret_access_key),
-                s3_region: UpdateField::Set(s3_region),
-            },
-            CreateApiIcebergConfig::Rest {
-                catalog_uri,
-                warehouse_name,
-                namespace,
-                s3_access_key_id,
-                s3_secret_access_key,
-                s3_endpoint,
-            } => Self::Rest {
-                catalog_uri: UpdateField::Set(catalog_uri),
-                warehouse_name: UpdateField::Set(warehouse_name),
-                namespace: UpdateField::from_option(namespace),
-                s3_access_key_id: UpdateField::Set(s3_access_key_id),
-                s3_secret_access_key: UpdateField::Set(s3_secret_access_key),
-                s3_endpoint: UpdateField::Set(s3_endpoint),
-            },
-        }
-    }
-}
-
 impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
     fn encrypt(
         self,
@@ -2148,6 +2111,47 @@ pub enum UpdateApiIcebergConfig {
 }
 
 impl UpdateApiIcebergConfig {
+    /// Builds a full replacement update from a create-style Iceberg
+    /// configuration.
+    ///
+    /// Optional fields that are absent in the full config are cleared.
+    fn from_full_config(value: CreateApiIcebergConfig) -> Self {
+        match value {
+            CreateApiIcebergConfig::Supabase {
+                project_ref,
+                warehouse_name,
+                namespace,
+                catalog_token,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+            } => Self::Supabase {
+                project_ref: UpdateField::Set(project_ref),
+                warehouse_name: UpdateField::Set(warehouse_name),
+                namespace: UpdateField::from_option(namespace),
+                catalog_token: UpdateField::Set(catalog_token),
+                s3_access_key_id: UpdateField::Set(s3_access_key_id),
+                s3_secret_access_key: UpdateField::Set(s3_secret_access_key),
+                s3_region: UpdateField::Set(s3_region),
+            },
+            CreateApiIcebergConfig::Rest {
+                catalog_uri,
+                warehouse_name,
+                namespace,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_endpoint,
+            } => Self::Rest {
+                catalog_uri: UpdateField::Set(catalog_uri),
+                warehouse_name: UpdateField::Set(warehouse_name),
+                namespace: UpdateField::from_option(namespace),
+                s3_access_key_id: UpdateField::Set(s3_access_key_id),
+                s3_secret_access_key: UpdateField::Set(s3_secret_access_key),
+                s3_endpoint: UpdateField::Set(s3_endpoint),
+            },
+        }
+    }
+
     /// Restores fields that were preserved by this update from raw storage.
     fn restore_preserved_fields(
         &self,

@@ -299,6 +299,35 @@ pub struct UpdateApiPipelineConfig {
 }
 
 impl UpdateApiPipelineConfig {
+    /// Builds a full replacement update from a create-style pipeline
+    /// configuration.
+    ///
+    /// Optional fields that are absent in the full config are cleared.
+    pub fn from_full_config(value: CreateApiPipelineConfig) -> Self {
+        Self {
+            publication_name: UpdateField::Set(value.publication_name),
+            batch: UpdateField::from_option(value.batch),
+            table_error_retry_delay_ms: UpdateField::from_option(value.table_error_retry_delay_ms),
+            table_error_retry_max_attempts: UpdateField::from_option(
+                value.table_error_retry_max_attempts,
+            ),
+            max_table_sync_workers: UpdateField::from_option(value.max_table_sync_workers),
+            max_copy_connections_per_table: UpdateField::from_option(
+                value.max_copy_connections_per_table,
+            ),
+            memory_refresh_interval_ms: UpdateField::from_option(value.memory_refresh_interval_ms),
+            replication_lag_refresh_interval_ms: UpdateField::from_option(
+                value.replication_lag_refresh_interval_ms,
+            ),
+            memory_backpressure: UpdateField::from_option(value.memory_backpressure),
+            table_sync_copy: UpdateField::from_option(value.table_sync_copy),
+            invalidated_slot_behavior: UpdateField::from_option(value.invalidated_slot_behavior),
+            replicator_resources: UpdateField::from_option(value.replicator_resources),
+            ducklake_maintenance: UpdateField::from_option(value.ducklake_maintenance),
+            log_level: UpdateField::from_option(value.log_level),
+        }
+    }
+
     /// Validates API-only pipeline configuration fields.
     pub fn validate(&self) -> Result<(), String> {
         if let UpdateField::Set(replicator_resources) = &self.replicator_resources {
@@ -567,33 +596,6 @@ impl From<CreateApiPipelineConfig> for StoredPipelineConfig {
             replicator_resources: value.replicator_resources,
             ducklake_maintenance: value.ducklake_maintenance,
             log_level: value.log_level,
-        }
-    }
-}
-
-impl From<CreateApiPipelineConfig> for UpdateApiPipelineConfig {
-    fn from(value: CreateApiPipelineConfig) -> Self {
-        Self {
-            publication_name: UpdateField::Set(value.publication_name),
-            batch: UpdateField::from_option(value.batch),
-            table_error_retry_delay_ms: UpdateField::from_option(value.table_error_retry_delay_ms),
-            table_error_retry_max_attempts: UpdateField::from_option(
-                value.table_error_retry_max_attempts,
-            ),
-            max_table_sync_workers: UpdateField::from_option(value.max_table_sync_workers),
-            max_copy_connections_per_table: UpdateField::from_option(
-                value.max_copy_connections_per_table,
-            ),
-            memory_refresh_interval_ms: UpdateField::from_option(value.memory_refresh_interval_ms),
-            replication_lag_refresh_interval_ms: UpdateField::from_option(
-                value.replication_lag_refresh_interval_ms,
-            ),
-            memory_backpressure: UpdateField::from_option(value.memory_backpressure),
-            table_sync_copy: UpdateField::from_option(value.table_sync_copy),
-            invalidated_slot_behavior: UpdateField::from_option(value.invalidated_slot_behavior),
-            replicator_resources: UpdateField::from_option(value.replicator_resources),
-            ducklake_maintenance: UpdateField::from_option(value.ducklake_maintenance),
-            log_level: UpdateField::from_option(value.log_level),
         }
     }
 }
