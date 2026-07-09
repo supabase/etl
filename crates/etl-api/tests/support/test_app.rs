@@ -9,7 +9,8 @@ use aws_lc_rs::{
 use base64::prelude::*;
 use etl_api::{
     config::{
-        ApiConfig, ApplicationSettings, EncryptionKeyConfig as ConfigEncryptionKey, K8sConfig,
+        ApiConfig, ApplicationSettings, DefaultReplicatorResourcesConfig,
+        DefaultVectorResourcesConfig, EncryptionKeyConfig as ConfigEncryptionKey, K8sConfig,
         SourceConfig,
     },
     configs::encryption,
@@ -548,6 +549,10 @@ pub(crate) async fn spawn_test_app_with_k8s_state(
     spawn_test_app_with_services(trusted_source_username, Some(k8s_client), k8s_state).await
 }
 
+pub(crate) async fn spawn_test_app_without_k8s_client() -> TestApp {
+    spawn_test_app_with_services(None, None, MockK8sState::default()).await
+}
+
 async fn spawn_test_app_with_services(
     trusted_source_username: Option<String>,
     k8s_client: Option<Arc<dyn K8sClient>>,
@@ -578,7 +583,16 @@ async fn spawn_test_app_with_services(
     let config = ApiConfig {
         database: database_config,
         application: ApplicationSettings { host: base_address.to_owned(), port },
-        k8s: K8sConfig::default(),
+        k8s: K8sConfig {
+            replicator_resources: DefaultReplicatorResourcesConfig {
+                memory_request_mib: 250,
+                cpu_request_millicores: 125,
+            },
+            vector_resources: DefaultVectorResourcesConfig {
+                memory_request_mib: 192,
+                cpu_request_millicores: 75,
+            },
+        },
         encryption_keys: vec![ConfigEncryptionKey {
             id: 0,
             key: BASE64_STANDARD.encode(key_bytes),

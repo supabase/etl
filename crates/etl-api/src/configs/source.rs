@@ -149,6 +149,7 @@ pub struct EncryptedStoredSourceConfig {
     port: u16,
     name: String,
     username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<EncryptedValue>,
 }
 

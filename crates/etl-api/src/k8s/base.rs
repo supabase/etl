@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use etl_config::Environment;
 use etl_maintenance::DuckLakeMaintenancePolicy;
 use thiserror::Error;
 
@@ -15,6 +14,9 @@ use crate::configs::{
 /// error type for all Kubernetes interactions.
 #[derive(Debug, Error)]
 pub enum K8sError {
+    /// Runtime environment configuration could not be loaded.
+    #[error("Failed to load Kubernetes runtime environment")]
+    Config(#[source] std::io::Error),
     /// Serialization or deserialization failed when building or parsing
     /// Kubernetes resources.
     #[error("An error occurred in serde when dealing with K8s: {0}")]
@@ -63,8 +65,6 @@ pub struct ReplicatorStatefulSetConfig {
     pub pipeline_id: i64,
     /// Image for the replicator container.
     pub replicator_image: String,
-    /// Deployment environment.
-    pub environment: Environment,
     /// Optional resource overrides.
     pub replicator_resources: Option<ReplicatorResourcesConfig>,
     /// Destination type used to select destination-specific env/secrets.
@@ -291,8 +291,10 @@ pub trait K8sClient: Send + Sync {
     /// Creates or updates the replicator `StatefulSet`.
     ///
     /// The stateful set references secrets and config maps created by other
-    /// methods. Changing the configuration may trigger a rolling restart of
-    /// the pods.
+    /// methods. Applying this resource intentionally changes the pod template
+    /// restart annotation so the StatefulSet recreates its pods. This ensures
+    /// the replicator process observes newly materialized mounted config and
+    /// secret-backed environment values.
     async fn create_or_update_replicator_stateful_set(
         &self,
         config: ReplicatorStatefulSetConfig,

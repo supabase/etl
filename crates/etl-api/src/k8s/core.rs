@@ -111,7 +111,9 @@ pub enum Secrets {
 /// This function orchestrates the creation or update of secrets, config maps,
 /// and stateful sets needed to run a pipeline in Kubernetes. It extracts
 /// credentials from the source and destination configurations, builds the
-/// replicator configuration, and applies all resources to the cluster.
+/// replicator configuration, and applies all resources to the cluster. Updating
+/// the StatefulSet intentionally forces pod recreation so the replicator
+/// process picks up the latest mounted config and secret-backed environment.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_or_update_pipeline_resources_in_k8s(
     k8s_client: &dyn K8sClient,
@@ -185,7 +187,6 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
             tenant_id: tenant_id.to_owned(),
             pipeline_id: pipeline.id,
             replicator_image,
-            environment,
             replicator_resources,
             destination_type,
             ducklake_maintenance: ducklake_maintenance_for_kubernetes,
@@ -250,10 +251,14 @@ pub async fn should_reconcile_replicator_resources(
 
 /// Returns `true` when the replicator is active in Kubernetes.
 pub async fn is_replicator_active(
-    k8s_client: &dyn K8sClient,
+    k8s_client: Option<&dyn K8sClient>,
     tenant_id: &str,
     replicator_id: i64,
 ) -> Result<bool, K8sCoreError> {
+    let Some(k8s_client) = k8s_client else {
+        return Ok(false);
+    };
+
     let prefix = create_k8s_object_prefix(tenant_id, replicator_id);
     let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
 
@@ -270,7 +275,7 @@ pub async fn is_replicator_active(
 /// Returns the first active pipeline id, if any pipeline is currently active in
 /// Kubernetes.
 pub async fn first_active_pipeline_id(
-    k8s_client: &dyn K8sClient,
+    k8s_client: Option<&dyn K8sClient>,
     tenant_id: &str,
     pipelines: &[PipelineDeletion],
 ) -> Result<Option<i64>, K8sCoreError> {
@@ -848,7 +853,7 @@ mod tests {
         let pipeline =
             PipelineDeletion { id: 1, source_id: 2, destination_id: 3, replicator_id: 4 };
 
-        let is_active = is_replicator_active(&client, "tenant-42", pipeline.replicator_id)
+        let is_active = is_replicator_active(Some(&client), "tenant-42", pipeline.replicator_id)
             .await
             .expect("failed to inspect pipeline status");
 

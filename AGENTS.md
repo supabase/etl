@@ -60,6 +60,49 @@
   an unsupported value with an error, prefer delegating that check to the
   destination instead of duplicating expensive validation in the write path.
 
+## Public Repo Secret Safety
+- Treat this repository, every branch, every commit, every PR, and every review
+  comment as public by default. Assume anything written to tracked files, commit
+  metadata, terminal output quoted in a PR, screenshots, logs, comments, and
+  generated artifacts can become permanently visible.
+- Never include real secrets, credentials, tokens, API keys, service keys,
+  passwords, private URLs, private hostnames, customer data, personal data, raw
+  production payloads, internal incident details, or proprietary configuration
+  values in code, tests, docs, comments, examples, commit messages, branch
+  names, PR titles, PR descriptions, review comments, issue comments, logs, or
+  generated files.
+- Before writing or modifying files, scan the relevant context for suspicious
+  values. Before any git write action that the user explicitly requested, review
+  the staged diff, commit message, branch name, PR title, PR body, and any
+  comments for possible sensitive information.
+- If a value looks real, came from the user's environment, appeared in local
+  config, came from command output, or was copied from any non-public source, do
+  not commit it or repeat it in comments or PR text. Stop and ask the user
+  before proceeding, explaining the specific risk without quoting the sensitive
+  value back.
+- Use invented, clearly fake placeholders for examples and tests, such as
+  `example.com`, `127.0.0.1`, `placeholder-token`, `fake-api-key`, or
+  documented test credentials already present in the repository. Prefer
+  redacted forms such as `<redacted>` when discussing an existing sensitive
+  value.
+- Keep secrets out of source control entirely. Use environment variables,
+  ignored local files, secret managers, CI secret storage, or documented local
+  setup steps instead of tracked files.
+- Do not add secret-like material to rustdoc, inline comments, snapshots,
+  fixtures, golden files, debug output, telemetry, panic messages, error
+  details, or assertion messages. This applies even when the value is only used
+  in tests.
+- When reviewing code, explicitly flag suspected secret exposure or unsafe
+  handling of sensitive values as a high-priority finding. Include the file and
+  line location, but do not reproduce the full secret in the review text.
+- If a secret appears to have been committed or exposed, stop normal work and
+  warn the user immediately. Recommend rotation or revocation of the affected
+  credential and avoid commands that would further spread the value, such as
+  pushing, opening a PR, or pasting the diff into chat.
+- Keep user-facing updates transparent while working on sensitive areas: mention
+  when you are checking diffs, commit metadata, PR text, logs, fixtures, or
+  generated artifacts for leaks, and report what was checked.
+
 ## Rust Style
 - This section is only for project-specific judgment that is not already covered by rustfmt, rustc, or Clippy.
 - Prefer absolute crate imports for shared module items, for example `use crate::metrics::{PIPELINE_ID_LABEL, APP_TYPE_LABEL};`, instead of `use super::{...};`.

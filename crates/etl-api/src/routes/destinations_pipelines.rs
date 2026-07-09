@@ -12,10 +12,11 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use super::{
-    ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error, extract_tenant_id,
-    utils,
+    ErrorMessage, IntoInner, TenantIdError, common::restart_pipeline_replicator_if_running,
+    error_response_with_internal_error, extract_tenant_id, utils,
 };
 use crate::{
+    config::ApiConfig,
     configs::{
         destination::{FullApiDestinationConfig, UpdateApiDestinationConfig},
         encryption::EncryptionKeyring,
@@ -40,6 +41,7 @@ use crate::{
         K8sClient, SourceTlsConfig,
         core::{K8sCoreError, is_replicator_active},
     },
+    routes::pipelines::PipelineError,
     validation::ValidationError,
 };
 
@@ -104,6 +106,9 @@ pub(crate) enum DestinationPipelineError {
 
     #[error("Invalid pipeline request: {0}")]
     InvalidPipelineRequest(String),
+
+    #[error(transparent)]
+    Pipeline(#[from] PipelineError),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -133,7 +138,8 @@ impl DestinationPipelineError {
             | DestinationPipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | DestinationPipelineError::Database(_)
             | DestinationPipelineError::NoDefaultImageFound
-            | DestinationPipelineError::K8sCore(_) => "Internal server error".to_owned(),
+            | DestinationPipelineError::K8sCore(_)
+            | DestinationPipelineError::Pipeline(_) => "Internal server error".to_owned(),
             DestinationPipelineError::SourceDatabase(_)
             | DestinationPipelineError::SourcePipelineState(_) => {
                 utils::source_database_query_error_message().to_owned()
@@ -165,7 +171,8 @@ impl IntoResponse for DestinationPipelineError {
             | DestinationPipelineError::SourcesDb(_)
             | DestinationPipelineError::PipelinesDb(_)
             | DestinationPipelineError::Database(_)
-            | DestinationPipelineError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | DestinationPipelineError::K8sCore(_)
+            | DestinationPipelineError::Pipeline(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationPipelineError::SourceDatabase(error) => {
                 utils::source_database_error_status_code(error)
             }
@@ -339,9 +346,13 @@ pub(crate) async fn create_destination_and_pipeline(
     ),
     tag = "Destinations and Pipelines"
 )]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn update_destination_and_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     destination_and_pipeline: Json<UpdateDestinationPipelineRequest>,
@@ -379,7 +390,7 @@ pub(crate) async fn update_destination_and_pipeline(
     }
 
     data::destinations_pipelines::update_destination_and_pipeline(
-        txn,
+        &mut txn,
         tenant_id,
         destination_id,
         pipeline_id,
@@ -399,6 +410,19 @@ pub(crate) async fn update_destination_and_pipeline(
         }
         e => e.into(),
     })?;
+
+    restart_pipeline_replicator_if_running(
+        &mut txn,
+        tenant_id,
+        pipeline_id,
+        &encryption_key,
+        k8s_client.as_deref(),
+        source_tls_config.as_ref(),
+        api_config.as_ref(),
+    )
+    .await?;
+
+    txn.commit().await?;
 
     Ok(StatusCode::OK)
 }
@@ -429,7 +453,7 @@ pub(crate) async fn delete_destination_and_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
+    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
 ) -> Result<impl IntoResponse, DestinationPipelineError> {
@@ -447,7 +471,7 @@ pub(crate) async fn delete_destination_and_pipeline(
         ));
     }
 
-    if is_replicator_active(k8s_client.as_ref(), tenant_id, pipeline.replicator_id).await? {
+    if is_replicator_active(k8s_client.as_deref(), tenant_id, pipeline.replicator_id).await? {
         return Err(DestinationPipelineError::ActivePipeline(pipeline.id));
     }
 

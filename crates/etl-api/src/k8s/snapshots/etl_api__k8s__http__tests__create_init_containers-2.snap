@@ -19,8 +19,8 @@ expression: node_selector
     "name": "abcdefghijklmnopqrst-42-vector",
     "resources": {
       "limits": {
-        "cpu": "150m",
-        "memory": "230Mi"
+        "cpu": "75m",
+        "memory": "192Mi"
       },
       "requests": {
         "cpu": "75m",
@@ -28,6 +28,14 @@ expression: node_selector
       }
     },
     "restartPolicy": "Always",
+    "securityContext": {
+      "allowPrivilegeEscalation": false,
+      "capabilities": {
+        "drop": [
+          "ALL"
+        ]
+      }
+    },
     "volumeMounts": [
       {
         "mountPath": "/etc/vector",
