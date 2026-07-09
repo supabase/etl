@@ -1,5 +1,10 @@
 use etl_api::{
-    configs::{destination::UpdateApiDestinationConfig, update::UpdateField},
+    configs::{
+        destination::{
+            CreateApiDestinationConfig, UpdateApiDestinationConfig, UpdateApiIcebergConfig,
+        },
+        update::UpdateField,
+    },
     k8s::PodStatus,
     routes::{
         destinations::{
@@ -10,7 +15,7 @@ use etl_api::{
     },
     startup::get_connection_pool,
 };
-use etl_config::shared::DestinationConfig;
+use etl_config::{SerializableSecretString, shared::DestinationConfig};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
@@ -21,8 +26,9 @@ use crate::support::{
         create_default_image,
         destinations::{
             create_destination, create_destination_with_config, new_bigquery_destination_config,
-            new_iceberg_supabase_destination_config, new_name, new_snowflake_destination_config,
-            updated_destination_config, updated_iceberg_supabase_destination_config, updated_name,
+            new_ducklake_destination_config, new_iceberg_supabase_destination_config, new_name,
+            new_snowflake_destination_config, updated_destination_config,
+            updated_iceberg_supabase_destination_config, updated_name,
             updated_snowflake_destination_config,
         },
         pipelines::new_pipeline_config,
@@ -46,6 +52,15 @@ async fn create_destination_pipeline_for_source(
         pipeline_response.json().await.expect("failed to deserialize response");
 
     (destination_id, pipeline_response.id)
+}
+
+async fn read_stored_destination_config(app: &TestApp, destination_id: i64) -> serde_json::Value {
+    let pool = get_connection_pool(app.database_config());
+    sqlx::query_scalar::<_, serde_json::Value>("select config from app.destinations where id = $1")
+        .bind(destination_id)
+        .fetch_one(&pool)
+        .await
+        .expect("failed to read stored destination config")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -207,6 +222,59 @@ async fn destination_config_update_preserves_omitted_fields_and_resets_default_f
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn destination_config_update_preserves_and_reencrypts_secret_fields_in_storage() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let destination_id = create_destination_with_config(
+        &app,
+        tenant_id,
+        new_name(),
+        new_bigquery_destination_config(),
+    )
+    .await;
+    let stored_config = read_stored_destination_config(&app, destination_id).await;
+    let stored_service_account_key = stored_config["big_query"]["service_account_key"].clone();
+
+    let update_request = UpdateDestinationRequest {
+        name: updated_name(),
+        config: UpdateApiDestinationConfig::BigQuery {
+            project_id: UpdateField::Preserve,
+            dataset_id: UpdateField::Set("dataset-id-patched".to_owned()),
+            service_account_key: UpdateField::Preserve,
+            max_staleness_mins: UpdateField::Preserve,
+            connection_pool_size: UpdateField::Preserve,
+        },
+    };
+    let response = app.update_destination(tenant_id, destination_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let stored_config = read_stored_destination_config(&app, destination_id).await;
+    assert_eq!(stored_config["big_query"]["dataset_id"], "dataset-id-patched");
+    assert_eq!(stored_config["big_query"]["service_account_key"], stored_service_account_key);
+
+    let update_request = UpdateDestinationRequest {
+        name: updated_name(),
+        config: UpdateApiDestinationConfig::BigQuery {
+            project_id: UpdateField::Preserve,
+            dataset_id: UpdateField::Preserve,
+            service_account_key: UpdateField::Set(SerializableSecretString::from(
+                "service-account-key-updated".to_owned(),
+            )),
+            max_staleness_mins: UpdateField::Preserve,
+            connection_pool_size: UpdateField::Preserve,
+        },
+    };
+    let response = app.update_destination(tenant_id, destination_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let stored_config = read_stored_destination_config(&app, destination_id).await;
+    assert_ne!(stored_config["big_query"]["service_account_key"], stored_service_account_key);
+    assert!(!stored_config.to_string().contains("service-account-key-updated"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn destination_config_update_preserves_absent_stored_default_fields() {
     init_test_tracing();
     let app = spawn_test_app().await;
@@ -343,6 +411,88 @@ async fn an_existing_iceberg_supabase_destination_can_be_updated() {
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, updated_config.name);
     insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn iceberg_supabase_destination_update_preserves_nested_encrypted_fields() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let destination_id = create_destination_with_config(
+        &app,
+        tenant_id,
+        "Iceberg Supabase Destination".to_owned(),
+        new_iceberg_supabase_destination_config(),
+    )
+    .await;
+    let stored_config = read_stored_destination_config(&app, destination_id).await;
+    let stored_catalog_token = stored_config["iceberg"]["supabase"]["catalog_token"].clone();
+
+    let update_request = UpdateDestinationRequest {
+        name: "Iceberg Supabase Destination (Partial)".to_owned(),
+        config: UpdateApiDestinationConfig::Iceberg {
+            config: UpdateApiIcebergConfig::Supabase {
+                project_ref: UpdateField::Preserve,
+                warehouse_name: UpdateField::Set("warehouse-patched".to_owned()),
+                namespace: UpdateField::Clear,
+                catalog_token: UpdateField::Preserve,
+                s3_access_key_id: UpdateField::Preserve,
+                s3_secret_access_key: UpdateField::Preserve,
+                s3_region: UpdateField::Preserve,
+            },
+        },
+    };
+    let response = app.update_destination(tenant_id, destination_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let stored_config = read_stored_destination_config(&app, destination_id).await;
+    assert_eq!(stored_config["iceberg"]["supabase"]["warehouse_name"], "warehouse-patched");
+    assert!(stored_config["iceberg"]["supabase"].get("namespace").is_none());
+    assert_eq!(stored_config["iceberg"]["supabase"]["catalog_token"], stored_catalog_token);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_destination_update_preserves_and_clears_encrypted_fields() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let destination_id = create_destination_with_config(
+        &app,
+        tenant_id,
+        "DuckLake Destination".to_owned(),
+        new_ducklake_destination_config(),
+    )
+    .await;
+    let stored_config = read_stored_destination_config(&app, destination_id).await;
+    let stored_catalog_url = stored_config["ducklake"]["catalog_url"].clone();
+
+    let update_request = UpdateDestinationRequest {
+        name: "DuckLake Destination (Partial)".to_owned(),
+        config: UpdateApiDestinationConfig::Ducklake {
+            catalog_url: UpdateField::Preserve,
+            data_path: UpdateField::Set("s3://ducklake/patched/".to_owned()),
+            pool_size: UpdateField::Preserve,
+            s3_access_key_id: UpdateField::Clear,
+            s3_secret_access_key: UpdateField::Preserve,
+            s3_region: UpdateField::Preserve,
+            s3_endpoint: UpdateField::Preserve,
+            s3_url_style: UpdateField::Preserve,
+            s3_use_ssl: UpdateField::Preserve,
+            metadata_schema: UpdateField::Preserve,
+            maintenance_target_file_size: UpdateField::Preserve,
+            expire_snapshots_older_than: UpdateField::Preserve,
+            maintenance_mode: UpdateField::Preserve,
+        },
+    };
+    let response = app.update_destination(tenant_id, destination_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let stored_config = read_stored_destination_config(&app, destination_id).await;
+    assert_eq!(stored_config["ducklake"]["data_path"], "s3://ducklake/patched/");
+    assert_eq!(stored_config["ducklake"]["catalog_url"], stored_catalog_url);
+    assert!(stored_config["ducklake"].get("s3_access_key_id").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -577,4 +727,42 @@ async fn an_existing_snowflake_destination_can_be_updated() {
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, updated_config.name);
     insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snowflake_destination_update_preserves_and_clears_encrypted_fields() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let mut config = new_snowflake_destination_config();
+    if let CreateApiDestinationConfig::Snowflake { private_key_passphrase, .. } = &mut config {
+        *private_key_passphrase = Some(SerializableSecretString::from("passphrase".to_owned()));
+    }
+
+    let destination_id =
+        create_destination_with_config(&app, tenant_id, "Snowflake Destination".to_owned(), config)
+            .await;
+    let stored_config = read_stored_destination_config(&app, destination_id).await;
+    let stored_private_key = stored_config["snowflake"]["private_key"].clone();
+
+    let update_request = UpdateDestinationRequest {
+        name: "Snowflake Destination (Partial)".to_owned(),
+        config: UpdateApiDestinationConfig::Snowflake {
+            account_id: UpdateField::Preserve,
+            user: UpdateField::Preserve,
+            private_key: UpdateField::Preserve,
+            private_key_passphrase: UpdateField::Clear,
+            database: UpdateField::Set("patched_database".to_owned()),
+            schema: UpdateField::Preserve,
+            role: UpdateField::Preserve,
+        },
+    };
+    let response = app.update_destination(tenant_id, destination_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let stored_config = read_stored_destination_config(&app, destination_id).await;
+    assert_eq!(stored_config["snowflake"]["database"], "patched_database");
+    assert_eq!(stored_config["snowflake"]["private_key"], stored_private_key);
+    assert!(stored_config["snowflake"].get("private_key_passphrase").is_none());
 }

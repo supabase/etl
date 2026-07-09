@@ -2978,6 +2978,33 @@ mod tests {
     }
 
     #[test]
+    fn update_api_destination_config_resets_cleared_defaulted_field() {
+        let stored_config = StoredDestinationConfig::BigQuery {
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("existing-key".to_owned()),
+            max_staleness_mins: Some(15),
+            connection_pool_size: 8,
+        };
+        let update_config = UpdateApiDestinationConfig::BigQuery {
+            project_id: UpdateField::Preserve,
+            dataset_id: UpdateField::Preserve,
+            service_account_key: UpdateField::Preserve,
+            max_staleness_mins: UpdateField::Preserve,
+            connection_pool_size: UpdateField::Clear,
+        };
+
+        let updated_config = update_config.merge_into_stored(stored_config).unwrap();
+
+        match updated_config {
+            StoredDestinationConfig::BigQuery { connection_pool_size, .. } => {
+                assert_eq!(connection_pool_size, DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE);
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
     fn update_api_destination_config_replaces_provided_bigquery_secret() {
         let stored_config = StoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),

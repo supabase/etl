@@ -6,7 +6,7 @@ use utoipa::ToSchema;
 /// from an explicit JSON `null`.
 ///
 /// Omitted fields preserve the stored value, explicit `null` clears or resets
-/// it, and non-null values replace it.
+/// it to the stored default, and non-null values replace it.
 #[derive(Debug, Clone, Default, PartialEq, ToSchema)]
 pub enum UpdateField<T> {
     /// Preserve the stored value.

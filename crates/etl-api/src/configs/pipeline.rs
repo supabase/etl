@@ -864,6 +864,41 @@ mod tests {
     }
 
     #[test]
+    fn update_api_pipeline_config_resets_cleared_defaulted_field() {
+        let stored: StoredPipelineConfig = CreateApiPipelineConfig {
+            publication_name: "publication".to_owned(),
+            batch: Some(BatchConfig {
+                max_fill_ms: 5000,
+                memory_budget_ratio: 0.2,
+                max_bytes: 8 * 1024 * 1024,
+            }),
+            table_error_retry_delay_ms: None,
+            table_error_retry_max_attempts: None,
+            max_table_sync_workers: None,
+            max_copy_connections_per_table: None,
+            memory_refresh_interval_ms: None,
+            replication_lag_refresh_interval_ms: None,
+            memory_backpressure: None,
+            table_sync_copy: None,
+            invalidated_slot_behavior: None,
+            replicator_resources: None,
+            ducklake_maintenance: None,
+            log_level: None,
+        }
+        .into();
+        let update = UpdateApiPipelineConfig {
+            batch: UpdateField::Clear,
+            ..UpdateApiPipelineConfig::default()
+        };
+
+        let updated = update.merge_into_stored(stored).unwrap();
+
+        assert_eq!(updated.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
+        assert_eq!(updated.batch.memory_budget_ratio, BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO);
+        assert_eq!(updated.batch.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
+    }
+
+    #[test]
     fn stored_pipeline_config_deserializes_without_replicator_resources() {
         let config = StoredPipelineConfig {
             publication_name: "test_publication".to_owned(),
