@@ -125,22 +125,19 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes(
                     pos = special_pos + 1;
 
                     match bytes.get(pos) {
-                        // Postgres COPY TO only ever escapes ASCII bytes (the
-                        // delimiter, backslash, newline, and carriage return), so
-                        // this fast path handles every real escape without going
-                        // through the pricier `chars()` decode below.
+                        // Postgres COPY TO emits ASCII escape sequences for
+                        // delimiters, backslashes, and supported control bytes.
+                        // This fast path handles those without `chars()` decoding.
                         Some(&escaped) if escaped.is_ascii() => {
                             match escaped {
-                                // Special case: \N when escaped becomes literal \N (not NULL)
-                                b'N' => field_buffer.push_str("\\N"),
-                                // Standard Postgres escape sequences
+                                // Standard Postgres escape sequences.
                                 b'b' => field_buffer.push(8 as char), // backspace
                                 b'f' => field_buffer.push(12 as char), // form feed
                                 b'n' => field_buffer.push('\n'),
                                 b'r' => field_buffer.push('\r'),
                                 b't' => field_buffer.push('\t'),
                                 b'v' => field_buffer.push(11 as char), // vertical tab
-                                // Any other byte: strip backslash, keep the byte
+                                // Any other byte strips the backslash and keeps the byte.
                                 other => field_buffer.push(other as char),
                             }
                             pos += 1;
@@ -187,16 +184,15 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes(
         };
         column_index += 1;
 
-        let field_value =
-            if field_escaped { field_buffer.as_str() } else { &row_str[field_start..field_end] };
+        let raw_field_value = &row_str[field_start..field_end];
 
-        // Convert the parsed string value to appropriate Cell type.
-        let value = if field_value == "\\N" {
-            // Postgres NULL marker: \N represents a NULL value
-            // We preserve this as Cell::Null rather than converting to a typed null
-            // so that downstream code can handle null semantics appropriately.
+        // Postgres matches the null marker before removing backslashes, so
+        // `\\N` remains a literal `\N`.
+        let value = if raw_field_value == "\\N" {
             Cell::Null
         } else {
+            let field_value = if field_escaped { field_buffer.as_str() } else { raw_field_value };
+
             // Convert non-null field value to the appropriate Cell type based on the
             // column's Postgres type, covering all supported data types (integers,
             // floats, strings, booleans, etc.).
@@ -459,7 +455,7 @@ mod tests {
         let row_data = b"\\\\N\n";
         let result_test =
             parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
-        assert_eq!(result_test.values()[0], Cell::Null);
+        assert_eq!(result_test.values()[0], Cell::String("\\N".to_owned()));
 
         let row_data = b"\\\\A\n";
         let result_test =
@@ -581,6 +577,7 @@ mod tests {
             (b"\\!\n", "!"),   // punctuation
             (b"\\@\n", "@"),   // symbol
             (b"\\\"\n", "\""), // quote
+            (b"value\\Ntail\n", "valueNtail"),
             // Complex patterns
             ("Text\\bwith\\bbackspaces\n".as_bytes(), "Text\u{0008}with\u{0008}backspaces"),
             ("Form\\ffeed\\ftest\n".as_bytes(), "Form\u{000C}feed\u{000C}test"),
@@ -608,9 +605,9 @@ mod tests {
 
         // Test NULL marker vs empty string vs literal \N
         let test_cases: Vec<(&[u8], Cell)> = vec![
-            (b"\\N\n", Cell::Null),               // NULL marker
-            (b"\n", Cell::String("".to_owned())), // empty string
-            ("\\\\N\n".as_bytes(), Cell::Null),   // NULL marker
+            (b"\\N\n", Cell::Null),                                 // NULL marker
+            (b"\n", Cell::String("".to_owned())),                   // empty string
+            ("\\\\N\n".as_bytes(), Cell::String("\\N".to_owned())), // literal \N
         ];
 
         for (input, expected) in test_cases {

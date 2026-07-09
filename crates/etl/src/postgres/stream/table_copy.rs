@@ -20,10 +20,7 @@ use crate::{
     schema::ColumnSchema,
 };
 
-/// Number of COPY rows to aggregate before emitting counter metrics.
-///
-/// Row-size histograms are still recorded per row so their distribution keeps
-/// the same meaning.
+/// Number of COPY rows to aggregate before emitting metrics.
 const COPY_METRICS_FLUSH_ROWS: u64 = 1024;
 
 /// Pending COPY metrics waiting to be emitted.
@@ -33,15 +30,19 @@ struct CopyMetricsBatch {
     rows: u64,
     /// Number of raw COPY bytes seen since the last flush.
     bytes: u64,
+    /// Row sizes buffered for the row-size histogram.
+    ///
+    /// Buffering preserves every histogram sample while paying the
+    /// metrics-registry lookup once per flush instead of once per row.
+    row_size_samples: Vec<f64>,
 }
 
 impl CopyMetricsBatch {
-    /// Records one COPY row and flushes counters when the batch is full.
+    /// Records one COPY row and flushes metrics when the batch is full.
     fn record_row(&mut self, row_size_bytes: u64) {
         self.rows = self.rows.saturating_add(1);
         self.bytes = self.bytes.saturating_add(row_size_bytes);
-
-        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy").record(row_size_bytes as f64);
+        self.row_size_samples.push(row_size_bytes as f64);
 
         if self.rows >= COPY_METRICS_FLUSH_ROWS {
             self.flush();
@@ -71,8 +72,19 @@ impl CopyMetricsBatch {
         counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => "copy").increment(self.bytes);
         counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "copy").increment(self.bytes);
 
+        let row_size_histogram = histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy");
+        for sample in self.row_size_samples.drain(..) {
+            row_size_histogram.record(sample);
+        }
+
         self.rows = 0;
         self.bytes = 0;
+    }
+}
+
+impl Drop for CopyMetricsBatch {
+    fn drop(&mut self) {
+        self.flush();
     }
 }
 

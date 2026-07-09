@@ -1,10 +1,6 @@
 use core::str;
 
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-use etl_postgres::{
-    time::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT},
-    type_utils::is_array_type,
-};
+use etl_postgres::type_utils::is_array_type;
 use tokio_postgres::types::Type;
 use uuid::Uuid;
 
@@ -15,7 +11,10 @@ use crate::{
     postgres::codec::{
         bool::parse_bool,
         hex,
-        time::{parse_postgres_timestamptz, parse_postgres_timetz},
+        time::{
+            parse_postgres_date, parse_postgres_time, parse_postgres_timestamp,
+            parse_postgres_timestamptz, parse_postgres_timetz,
+        },
     },
 };
 
@@ -70,21 +69,21 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             ArrayCell::Bytes,
         ),
         Type::DATE => {
-            let val = NaiveDate::parse_from_str(str, DATE_FORMAT)?;
+            let val = parse_postgres_date(str)?;
             Ok(Cell::Date(val))
         }
         Type::DATE_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(NaiveDate::parse_from_str(str, DATE_FORMAT)?)),
+            |str| Ok(Some(parse_postgres_date(str)?)),
             ArrayCell::Date,
         ),
         Type::TIME => {
-            let val = NaiveTime::parse_from_str(str, TIME_FORMAT)?;
+            let val = parse_postgres_time(str)?;
             Ok(Cell::Time(val))
         }
         Type::TIME_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(NaiveTime::parse_from_str(str, TIME_FORMAT)?)),
+            |str| Ok(Some(parse_postgres_time(str)?)),
             ArrayCell::Time,
         ),
         Type::TIMETZ => {
@@ -97,12 +96,12 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             ArrayCell::TimeTz,
         ),
         Type::TIMESTAMP => {
-            let val = NaiveDateTime::parse_from_str(str, TIMESTAMP_FORMAT)?;
+            let val = parse_postgres_timestamp(str)?;
             Ok(Cell::Timestamp(val))
         }
         Type::TIMESTAMP_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(NaiveDateTime::parse_from_str(str, TIMESTAMP_FORMAT)?)),
+            |str| Ok(Some(parse_postgres_timestamp(str)?)),
             ArrayCell::Timestamp,
         ),
         Type::TIMESTAMPTZ => {

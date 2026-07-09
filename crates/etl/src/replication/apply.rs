@@ -127,6 +127,7 @@ const SCHEMA_CLEANUP_INTERVAL: Duration = Duration::from_hours(1);
 /// This keeps normal batches from reallocating on every flush while bounding
 /// the memory retained after an unusually large batch.
 const MAX_RETAINED_EVENTS_BATCH_CAPACITY: usize = 16 * 1024;
+
 /// Result type for the apply loop execution.
 ///
 /// Indicates the reason why the apply loop terminated, enabling appropriate
@@ -416,9 +417,18 @@ impl StreamingDataEventType {
     }
 }
 
+/// Maximum row-size histogram samples buffered per event type before an
+/// inline flush.
+///
+/// This bounds batch memory when many row events arrive between the normal
+/// flush points at status updates and batch dispatches.
+const MAX_BUFFERED_ROW_SIZE_SAMPLES: usize = 4096;
+
 /// Batched streaming metrics waiting to be flushed to the metrics recorder.
 #[derive(Debug, Default)]
 struct StreamingMetricsBatch {
+    /// Number of replication protocol messages received.
+    messages_received: u64,
     /// Number of logical replication messages received.
     events_received: u64,
     /// Bytes received for `INSERT` row payloads.
@@ -433,9 +443,23 @@ struct StreamingMetricsBatch {
     update_bytes_processed: u64,
     /// Bytes processed for `DELETE` row payloads after ownership filtering.
     delete_bytes_processed: u64,
+    /// Row sizes buffered for the `INSERT` row-size histogram.
+    ///
+    /// Buffering preserves every histogram sample while paying the
+    /// metrics-registry lookup once per flush instead of once per row event.
+    insert_row_size_samples: Vec<f64>,
+    /// Row sizes buffered for the `UPDATE` row-size histogram.
+    update_row_size_samples: Vec<f64>,
+    /// Row sizes buffered for the `DELETE` row-size histogram.
+    delete_row_size_samples: Vec<f64>,
 }
 
 impl StreamingMetricsBatch {
+    /// Records one replication protocol message received.
+    fn record_message_received(&mut self) {
+        self.messages_received = self.messages_received.saturating_add(1);
+    }
+
     /// Records one source event received by the table streaming path.
     fn record_event_received(&mut self) {
         self.events_received = self.events_received.saturating_add(1);
@@ -461,27 +485,37 @@ impl StreamingMetricsBatch {
 
     /// Records row payload bytes processed after table ownership filtering.
     fn record_bytes_processed(&mut self, event_type: StreamingDataEventType, payload_bytes: u64) {
-        match event_type {
+        let (bytes_processed, row_size_samples) = match event_type {
             StreamingDataEventType::Insert => {
-                self.insert_bytes_processed =
-                    self.insert_bytes_processed.saturating_add(payload_bytes);
+                (&mut self.insert_bytes_processed, &mut self.insert_row_size_samples)
             }
             StreamingDataEventType::Update => {
-                self.update_bytes_processed =
-                    self.update_bytes_processed.saturating_add(payload_bytes);
+                (&mut self.update_bytes_processed, &mut self.update_row_size_samples)
             }
             StreamingDataEventType::Delete => {
-                self.delete_bytes_processed =
-                    self.delete_bytes_processed.saturating_add(payload_bytes);
+                (&mut self.delete_bytes_processed, &mut self.delete_row_size_samples)
             }
-        }
+        };
 
-        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => event_type.as_str())
-            .record(payload_bytes as f64);
+        *bytes_processed = bytes_processed.saturating_add(payload_bytes);
+        row_size_samples.push(payload_bytes as f64);
+
+        if row_size_samples.len() >= MAX_BUFFERED_ROW_SIZE_SAMPLES {
+            Self::flush_row_size_histogram(event_type.as_str(), row_size_samples);
+        }
     }
 
     /// Flushes pending metric deltas to the metrics recorder.
     fn flush(&mut self, worker_type: WorkerType) {
+        if self.messages_received > 0 {
+            counter!(
+                ETL_REPLICATION_MESSAGES_TOTAL,
+                WORKER_TYPE_LABEL => worker_type.as_str(),
+            )
+            .increment(self.messages_received);
+            self.messages_received = 0;
+        }
+
         if self.events_received > 0 {
             counter!(
                 ETL_EVENTS_RECEIVED_TOTAL,
@@ -522,6 +556,10 @@ impl StreamingMetricsBatch {
             "delete",
             &mut self.delete_bytes_processed,
         );
+
+        Self::flush_row_size_histogram("insert", &mut self.insert_row_size_samples);
+        Self::flush_row_size_histogram("update", &mut self.update_row_size_samples);
+        Self::flush_row_size_histogram("delete", &mut self.delete_row_size_samples);
     }
 
     /// Flushes a single byte counter if it has a pending delta.
@@ -532,6 +570,18 @@ impl StreamingMetricsBatch {
 
         counter!(metric_name, EVENT_TYPE_LABEL => event_type).increment(*bytes);
         *bytes = 0;
+    }
+
+    /// Flushes buffered row-size histogram samples for one event type.
+    fn flush_row_size_histogram(event_type: &'static str, samples: &mut Vec<f64>) {
+        if samples.is_empty() {
+            return;
+        }
+
+        let row_size_histogram = histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => event_type);
+        for sample in samples.drain(..) {
+            row_size_histogram.record(sample);
+        }
     }
 }
 
@@ -789,14 +839,6 @@ struct ApplyLoopState {
     events_batch_bytes: usize,
     /// Streaming metrics accumulated between flush points.
     streaming_metrics_batch: StreamingMetricsBatch,
-    /// Replicated schemas proven ready for this worker within the current
-    /// transaction.
-    ///
-    /// The cache is cleared at transaction and table-state coordination
-    /// boundaries. It is intentionally not a cross-transaction ownership
-    /// cache, because table sync handoff and DDL can change who is allowed to
-    /// interpret a table.
-    ready_table_schemas_in_tx: HashMap<TableId, ReplicatedTableSchema>,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding
@@ -859,7 +901,6 @@ impl ApplyLoopState {
             events_batch: Vec::new(),
             events_batch_bytes: 0,
             streaming_metrics_batch: StreamingMetricsBatch::default(),
-            ready_table_schemas_in_tx: HashMap::new(),
             current_tx_begin_ts: None,
             current_tx_events: 0,
             next_tx_ordinal: 0,
@@ -901,6 +942,11 @@ impl ApplyLoopState {
         (events_batch, events_batch_bytes)
     }
 
+    /// Records one replication protocol message received.
+    fn record_streaming_message_received(&mut self) {
+        self.streaming_metrics_batch.record_message_received();
+    }
+
     /// Records one source event received by the table streaming path.
     fn record_streaming_event_received(&mut self) {
         self.streaming_metrics_batch.record_event_received();
@@ -927,30 +973,6 @@ impl ApplyLoopState {
     /// Flushes pending streaming metric deltas to the metrics recorder.
     fn flush_streaming_metrics(&mut self, worker_type: WorkerType) {
         self.streaming_metrics_batch.flush(worker_type);
-    }
-
-    /// Returns a transaction-local ready schema for `table_id`, if present.
-    fn ready_table_schema_in_tx(&self, table_id: TableId) -> Option<ReplicatedTableSchema> {
-        self.ready_table_schemas_in_tx.get(&table_id).cloned()
-    }
-
-    /// Caches a ready schema for reuse during the current transaction.
-    fn cache_ready_table_schema_in_tx(
-        &mut self,
-        table_id: TableId,
-        replicated_table_schema: ReplicatedTableSchema,
-    ) {
-        self.ready_table_schemas_in_tx.insert(table_id, replicated_table_schema);
-    }
-
-    /// Removes any transaction-local ready schema for `table_id`.
-    fn remove_ready_table_schema_in_tx(&mut self, table_id: TableId) {
-        self.ready_table_schemas_in_tx.remove(&table_id);
-    }
-
-    /// Clears all transaction-local ready schemas.
-    fn clear_ready_table_schemas_in_tx(&mut self) {
-        self.ready_table_schemas_in_tx.clear();
     }
 
     /// Returns the bootstrap snapshot used before a table has shared protocol
@@ -1338,6 +1360,8 @@ where
         start_lsn: PgLsn,
     ) -> EtlResult<ApplyLoopResult> {
         let result = self.run(replication_client, start_lsn).await;
+
+        self.flush_streaming_metrics();
 
         self.tasks
             .teardown(self.worker_context.worker_type(), &self.state.schema_cleanup_deadline)
@@ -2142,19 +2166,16 @@ where
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
-        counter!(
-            ETL_REPLICATION_MESSAGES_TOTAL,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-        )
-        .increment(1);
+        self.state.record_streaming_message_received();
 
         match message {
             ReplicationMessage::XLogData(message) => {
                 let start_lsn = PgLsn::from(message.wal_start());
-                self.state.update_last_received_lsn(start_lsn);
-
                 let end_lsn = PgLsn::from(message.wal_end());
-                self.state.update_last_received_lsn(end_lsn);
+
+                // The received LSN tracks the maximum, so one update covers
+                // both positions.
+                self.state.update_last_received_lsn(start_lsn.max(end_lsn));
 
                 debug!(
                     %start_lsn,
@@ -2334,7 +2355,6 @@ where
         let table_id = schema_change_message.table_id();
         let command_tag = schema_change_message.command_tag.clone();
         let columns_count = schema_change_message.columns.len();
-        self.state.remove_ready_table_schema_in_tx(table_id);
 
         // Exactly one worker owns protocol interpretation for a table at a time. If
         // this worker is not the owner, it must skip the DDL so the owning
@@ -2420,7 +2440,6 @@ where
         self.state.current_tx_begin_ts = Some(Instant::now());
         self.state.current_tx_events = 0;
         self.state.reset_tx_ordinal();
-        self.state.clear_ready_table_schemas_in_tx();
 
         let tx_ordinal = self.state.next_tx_ordinal();
         let event = parse_event_from_begin_message(start_lsn, final_lsn, tx_ordinal, message);
@@ -2441,7 +2460,6 @@ where
                 "Transaction must be active before processing COMMIT message"
             );
         };
-        self.state.clear_ready_table_schemas_in_tx();
 
         let commit_lsn = PgLsn::from(message.commit_lsn());
         if commit_lsn != remote_final_lsn {
@@ -2510,7 +2528,6 @@ where
 
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
-        self.state.remove_ready_table_schema_in_tx(table_id);
 
         // Exactly one worker owns protocol interpretation for a table at a time.
         // Non-owning workers skip `RELATION` handling and rely on the owner to
@@ -2564,7 +2581,6 @@ where
             ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
 
         self.shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
-        self.state.cache_ready_table_schema_in_tx(table_id, replicated_table_schema.clone());
 
         let relation_event = RelationEvent {
             start_lsn,
@@ -2762,21 +2778,11 @@ where
 
     /// Returns the replicated schema when this worker should decode a row for
     /// `table_id`.
-    ///
-    /// The transaction-local cache avoids repeating the ownership and shared
-    /// schema lookups for multiple row events from the same table in the same
-    /// transaction. It is populated only after the normal ownership check has
-    /// passed and is cleared at transaction, relation, DDL, and table-state
-    /// coordination boundaries.
     async fn get_replicated_table_schema_for_row(
         &mut self,
         table_id: TableId,
         remote_final_lsn: PgLsn,
     ) -> EtlResult<Option<ReplicatedTableSchema>> {
-        if let Some(replicated_table_schema) = self.state.ready_table_schema_in_tx(table_id) {
-            return Ok(Some(replicated_table_schema));
-        }
-
         // Exactly one worker owns protocol interpretation for a table at a
         // time, so non-owning workers skip row decoding and leave the shared
         // table state untouched.
@@ -2786,7 +2792,6 @@ where
 
         let replicated_table_schema =
             get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
-        self.state.cache_ready_table_schema_in_tx(table_id, replicated_table_schema.clone());
 
         Ok(Some(replicated_table_schema))
     }
@@ -2796,8 +2801,6 @@ where
     /// Dispatches to worker-specific implementation based on the worker
     /// context.
     async fn process_syncing_tables_after_commit_event(&mut self, lsn: PgLsn) -> EtlResult<bool> {
-        self.state.clear_ready_table_schemas_in_tx();
-
         let exit_intent = match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
                 apply_worker::process_syncing_tables_after_commit_event(ctx, lsn).await
@@ -2821,8 +2824,6 @@ where
         &mut self,
         last_commit_end_lsn: PgLsn,
     ) -> EtlResult<()> {
-        self.state.clear_ready_table_schemas_in_tx();
-
         // Store durable replication progress at commit boundaries after the
         // destination acknowledges the batch. This gives restarts a durable
         // lower-bound resume point: once startup chooses this point, no event
@@ -2905,8 +2906,6 @@ where
 
             return Ok(());
         }
-
-        self.state.clear_ready_table_schemas_in_tx();
 
         let current_lsn = self.state.last_received_lsn();
 

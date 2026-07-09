@@ -1,10 +1,6 @@
 //! Postgres `NUMERIC` value support.
 
-use std::{
-    io::Cursor,
-    iter::Peekable,
-    str::{Chars, FromStr},
-};
+use std::{io::Cursor, str::FromStr};
 
 use byteorder::{BigEndian, ReadBytesExt};
 use tokio_postgres::types::{FromSql, IsNull, ToSql, Type};
@@ -102,35 +98,34 @@ impl FromStr for PgNumeric {
     type Err = ParseNumericError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let mut chars = input.chars().peekable();
+        // Surrounding whitespace is allowed; `str::trim` uses the same Unicode
+        // whitespace predicate the previous char-based skip used. All accepted
+        // syntax beyond that is ASCII, so the value is parsed as bytes.
+        let trimmed = input.trim();
 
-        // Skip leading spaces
-        skip_whitespace(&mut chars);
-
-        if chars.peek().is_none() {
+        if trimmed.is_empty() {
             return Err(ParseNumericError::InvalidSyntax);
         }
 
+        let bytes = trimmed.as_bytes();
+
         // Handle sign
-        let (sign, has_explicit_sign) = match chars.peek() {
-            Some('+') => {
-                chars.next();
-                (Sign::Positive, true)
-            }
-            Some('-') => {
-                chars.next();
-                (Sign::Negative, true)
-            }
-            _ => (Sign::Positive, false),
+        let (sign, rest, has_explicit_sign) = match bytes[0] {
+            b'+' => (Sign::Positive, &bytes[1..], true),
+            b'-' => (Sign::Negative, &bytes[1..], true),
+            _ => (Sign::Positive, bytes, false),
         };
 
         // Check for special values (NaN, infinity)
-        if !matches!(chars.peek(), Some('0'..='9' | '.')) {
-            return parse_special_value(&mut chars, &sign, has_explicit_sign);
+        if !matches!(rest.first(), Some(b'0'..=b'9' | b'.')) {
+            // The sign byte is ASCII, so slicing past it stays on a char
+            // boundary.
+            let rest = &trimmed[trimmed.len() - rest.len()..];
+            return parse_special_value(rest, &sign, has_explicit_sign);
         }
 
         // Parse regular numeric value
-        parse_numeric_value(&mut chars, sign)
+        parse_numeric_value(rest, sign)
     }
 }
 
@@ -225,20 +220,6 @@ pub enum ParseNumericError {
     ValueOutOfRange,
 }
 
-/// Skips whitespace characters from a peekable character iterator.
-///
-/// This helper function advances the iterator past all consecutive whitespace
-/// characters, stopping at the first non-whitespace character or end of input.
-fn skip_whitespace(chars: &mut Peekable<Chars>) {
-    while let Some(&ch) = chars.peek() {
-        if ch.is_whitespace() {
-            chars.next();
-        } else {
-            break;
-        }
-    }
-}
-
 impl std::fmt::Display for ParseNumericError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -254,22 +235,23 @@ impl std::error::Error for ParseNumericError {}
 ///
 /// This function handles Postgres's special numeric values when they appear
 /// in string format. NaN cannot have a negative sign, while infinity values
-/// respect the sign parameter.
+/// respect the sign parameter. The candidates are ASCII, so case-insensitive
+/// ASCII comparison accepts and rejects the same inputs the previous
+/// Unicode-lowercasing comparison did, without allocating.
 fn parse_special_value(
-    chars: &mut Peekable<Chars>,
+    rest: &str,
     sign: &Sign,
     has_explicit_sign: bool,
 ) -> Result<PgNumeric, ParseNumericError> {
-    let remaining: String = chars.collect();
-    let remaining_lower = remaining.trim_end().to_lowercase();
+    let rest = rest.trim_end();
 
-    if remaining_lower == "nan" {
+    if rest.eq_ignore_ascii_case("nan") {
         // NaN must not have a sign.
         if has_explicit_sign {
             return Err(ParseNumericError::InvalidSyntax);
         }
         Ok(PgNumeric::NaN)
-    } else if remaining_lower == "infinity" || remaining_lower == "inf" {
+    } else if rest.eq_ignore_ascii_case("infinity") || rest.eq_ignore_ascii_case("inf") {
         match sign {
             Sign::Positive => Ok(PgNumeric::PositiveInfinity),
             Sign::Negative => Ok(PgNumeric::NegativeInfinity),
@@ -279,58 +261,58 @@ fn parse_special_value(
     }
 }
 
-/// Parses a regular numeric value from character input.
+/// Parses a regular numeric value from trimmed byte input.
 ///
 /// This function processes decimal digits, decimal points, underscores (digit
 /// separators), and scientific notation to construct a numeric value. It
-/// handles both integer and fractional parts with arbitrary precision.
-fn parse_numeric_value(
-    chars: &mut Peekable<Chars>,
-    sign: Sign,
-) -> Result<PgNumeric, ParseNumericError> {
-    let mut decimal_digits = Vec::new();
+/// handles both integer and fractional parts with arbitrary precision. All
+/// accepted syntax is ASCII, so a non-ASCII byte simply fails to match and
+/// rejects the input, exactly as the previous char-based parser did.
+fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumericError> {
+    let mut decimal_digits = Vec::with_capacity(bytes.len());
     let mut have_decimal_point = false;
     let mut dweight = -1i32; // Decimal weight (number of digits before decimal point - 1)
     let mut dscale = 0u32; // Number of digits after decimal point
+    let mut pos = 0;
 
     // Check for initial decimal point
-    if chars.peek() == Some(&'.') {
+    if bytes.first() == Some(&b'.') {
         have_decimal_point = true;
-        chars.next();
+        pos += 1;
     }
 
     // Must have at least one digit
-    if !matches!(chars.peek(), Some('0'..='9')) {
+    if !matches!(bytes.get(pos), Some(b'0'..=b'9')) {
         return Err(ParseNumericError::InvalidSyntax);
     }
 
     // Parse digits and decimal point
-    while let Some(&ch) = chars.peek() {
-        match ch {
-            '0'..='9' => {
-                chars.next();
-                decimal_digits.push(ch as u8 - b'0');
+    while let Some(&byte) = bytes.get(pos) {
+        match byte {
+            b'0'..=b'9' => {
+                pos += 1;
+                decimal_digits.push(byte - b'0');
                 if !have_decimal_point {
                     dweight += 1;
                 } else {
                     dscale += 1;
                 }
             }
-            '.' => {
+            b'.' => {
                 if have_decimal_point {
                     return Err(ParseNumericError::InvalidSyntax);
                 }
                 have_decimal_point = true;
-                chars.next();
+                pos += 1;
                 // Decimal point must not be followed by underscore
-                if chars.peek() == Some(&'_') {
+                if bytes.get(pos) == Some(&b'_') {
                     return Err(ParseNumericError::InvalidSyntax);
                 }
             }
-            '_' => {
-                chars.next();
+            b'_' => {
+                pos += 1;
                 // Underscore must be followed by more digits
-                if !matches!(chars.peek(), Some('0'..='9')) {
+                if !matches!(bytes.get(pos), Some(b'0'..=b'9')) {
                     return Err(ParseNumericError::InvalidSyntax);
                 }
             }
@@ -339,40 +321,44 @@ fn parse_numeric_value(
     }
 
     // Handle scientific notation
-    if matches!(chars.peek(), Some('e' | 'E')) {
-        chars.next();
+    if matches!(bytes.get(pos), Some(b'e' | b'E')) {
+        pos += 1;
         let mut exponent = 0i64;
         let mut exp_negative = false;
 
         // Handle exponent sign
-        match chars.peek() {
-            Some('+') => {
-                chars.next();
+        match bytes.get(pos) {
+            Some(b'+') => {
+                pos += 1;
             }
-            Some('-') => {
+            Some(b'-') => {
                 exp_negative = true;
-                chars.next();
+                pos += 1;
             }
             _ => {}
         }
 
         // Parse exponent digits
-        if !matches!(chars.peek(), Some('0'..='9')) {
+        if !matches!(bytes.get(pos), Some(b'0'..=b'9')) {
             return Err(ParseNumericError::InvalidSyntax);
         }
 
-        while let Some(&ch) = chars.peek() {
-            match ch {
-                '0'..='9' => {
-                    chars.next();
-                    exponent = exponent * 10 + (ch as u8 - b'0') as i64;
+        while let Some(&byte) = bytes.get(pos) {
+            match byte {
+                b'0'..=b'9' => {
+                    pos += 1;
+                    exponent = exponent * 10 + i64::from(byte - b'0');
+                    // This is an arithmetic overflow guard, not the Postgres
+                    // numeric range check. Weight and scale bounds are
+                    // enforced below after the exponent is applied to the
+                    // parsed decimal shape.
                     if exponent > i32::MAX as i64 / 2 {
                         return Err(ParseNumericError::ValueOutOfRange);
                     }
                 }
-                '_' => {
-                    chars.next();
-                    if !matches!(chars.peek(), Some('0'..='9')) {
+                b'_' => {
+                    pos += 1;
+                    if !matches!(bytes.get(pos), Some(b'0'..=b'9')) {
                         return Err(ParseNumericError::InvalidSyntax);
                     }
                 }
@@ -388,9 +374,8 @@ fn parse_numeric_value(
         dscale = if (dscale as i64 - exponent) < 0 { 0 } else { (dscale as i64 - exponent) as u32 };
     }
 
-    // Check for trailing whitespace/junk
-    skip_whitespace(chars);
-    if chars.peek().is_some() {
+    // The caller trims surrounding whitespace, so any remaining byte is junk.
+    if pos != bytes.len() {
         return Err(ParseNumericError::InvalidSyntax);
     }
 
@@ -399,7 +384,7 @@ fn parse_numeric_value(
     }
 
     // Convert to base-10000 representation
-    convert_to_base_10000(decimal_digits, dweight, dscale, sign)
+    convert_to_base_10000(&decimal_digits, dweight, dscale, sign)
 }
 
 /// Converts decimal digits to Postgres's base-10000 internal format.
@@ -409,7 +394,7 @@ fn parse_numeric_value(
 /// up to 10000 in decimal. This format balances storage efficiency with
 /// calculation performance.
 fn convert_to_base_10000(
-    decimal_digits: Vec<u8>,
+    decimal_digits: &[u8],
     dweight: i32,
     dscale: u32,
     sign: Sign,
@@ -429,22 +414,18 @@ fn convert_to_base_10000(
     let total_decimal_digits = decimal_digits.len() as i32 + offset;
     let ndigits = (total_decimal_digits + 3) / 4; // Round up to nearest multiple of 4
 
-    // Create padded decimal digits array
-    let mut padded_digits = vec![0u8; ndigits as usize * 4];
-    let start_idx = offset as usize;
-
-    for (i, &digit) in decimal_digits.iter().enumerate() {
-        if start_idx + i < padded_digits.len() {
-            padded_digits[start_idx + i] = digit;
-        }
-    }
-
-    // Convert groups of 4 decimal digits to base-10000 digits
-    let mut base_10000_digits = Vec::new();
-    for chunk in padded_digits.chunks(4) {
+    // Convert groups of 4 decimal digits to base-10000 digits, reading each
+    // decimal digit at its aligned position and treating positions outside the
+    // input as zero padding.
+    let mut base_10000_digits = Vec::with_capacity(ndigits as usize);
+    for group in 0..ndigits {
         let mut digit = 0i16;
-        for &d in chunk {
-            digit = digit * 10 + d as i16;
+        for position in group * 4..group * 4 + 4 {
+            let decimal_digit = usize::try_from(position - offset)
+                .ok()
+                .and_then(|index| decimal_digits.get(index).copied())
+                .unwrap_or(0);
+            digit = digit * 10 + decimal_digit as i16;
         }
         base_10000_digits.push(digit);
     }
@@ -458,47 +439,21 @@ fn convert_to_base_10000(
     // Strip leading zeros first and record how many we removed so we can
     // adjust the weight correctly. Trailing zeros should NOT influence
     // the weight because they are fractional groups after the decimal point.
-    let leading_zeros_before_strip =
-        base_10000_digits.iter().take_while(|&&d| d == 0).count() as i32;
+    // At least one group is nonzero here, so neither strip can empty the
+    // digits.
+    let leading_zeros = base_10000_digits.iter().take_while(|&&d| d == 0).count();
+    base_10000_digits.drain(..leading_zeros);
 
-    strip_leading_zeros(&mut base_10000_digits);
-    strip_trailing_zeros(&mut base_10000_digits);
+    let trailing_zeros = base_10000_digits.iter().rev().take_while(|&&d| d == 0).count();
+    base_10000_digits.truncate(base_10000_digits.len() - trailing_zeros);
 
     // Adjust weight only by the number of leading zeros that were removed.
-    let final_weight = weight - leading_zeros_before_strip;
+    let final_weight = weight - leading_zeros as i32;
     if !(POSTGRES_NUMERIC_MIN_WEIGHT..=POSTGRES_NUMERIC_MAX_WEIGHT).contains(&final_weight) {
         return Err(ParseNumericError::ValueOutOfRange);
     }
 
     Ok(PgNumeric::Value { sign, weight: final_weight as i16, scale, digits: base_10000_digits })
-}
-
-/// Removes leading zero digits from a base-10000 digit sequence.
-///
-/// This function strips unnecessary leading zeros while preserving at least
-/// one digit to represent zero values correctly.
-fn strip_leading_zeros(digits: &mut Vec<i16>) {
-    while let Some(&first) = digits.first() {
-        if first == 0 && digits.len() > 1 {
-            digits.remove(0);
-        } else {
-            break;
-        }
-    }
-}
-
-/// Removes trailing zero digits from a base-10000 digit sequence.
-///
-/// This function strips unnecessary trailing zeros while preserving at least
-/// one digit to represent zero values correctly.
-fn strip_trailing_zeros(digits: &mut Vec<i16>) {
-    while let Some(&last) = digits.last() {
-        if last == 0 && digits.len() > 1 {
-            digits.pop();
-        } else {
-            break;
-        }
-    }
 }
 
 impl std::fmt::Display for PgNumeric {
@@ -675,6 +630,14 @@ mod tests {
         );
         assert_eq!(
             PgNumeric::from_str("1e-16384").unwrap_err(),
+            ParseNumericError::ValueOutOfRange
+        );
+        assert_eq!(
+            PgNumeric::from_str("1e1000000000").unwrap_err(),
+            ParseNumericError::ValueOutOfRange
+        );
+        assert_eq!(
+            PgNumeric::from_str("1e-1000000000").unwrap_err(),
             ParseNumericError::ValueOutOfRange
         );
     }
