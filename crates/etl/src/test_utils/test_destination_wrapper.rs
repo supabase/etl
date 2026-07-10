@@ -22,7 +22,7 @@ use crate::{
     schema::{ReplicatedTableSchema, TableId},
     test_utils::{
         event::{EventCondition, check_all_events_count, group_events_by_type},
-        faults::{FaultAction, FaultInjector, FaultyOp, HoldHandle, apply_result_fault},
+        faults::{FaultAction, FaultInjector, FaultyOp, HoldHandle, apply_response_fault},
         notify::TimedNotify,
     },
 };
@@ -92,10 +92,10 @@ impl<D> Inner<D> {
 ///
 /// Faults from [`crate::test_utils::faults`] can be scripted per operation
 /// through [`TestDestinationWrapper::inject_fault`]. The wrapper records what
-/// was acknowledged to the apply loop: on an injected result failure the inner
-/// destination has applied the write but the wrapper does not record it, so
-/// ground truth for what the destination actually holds is read from the inner
-/// destination directly.
+/// was acknowledged to the apply loop: on an injected failure after write the
+/// inner destination has applied the write but the wrapper does not record it,
+/// so ground truth for what the destination actually holds is read from the
+/// inner destination directly.
 #[derive(Clone)]
 pub struct TestDestinationWrapper<D> {
     inner: Arc<RwLock<Inner<D>>>,
@@ -251,10 +251,10 @@ impl<D> TestDestinationWrapper<D> {
         handle
     }
 
-    /// Consumes the next fault for the operation, failing dispatch faults here.
+    /// Consumes the next fault for the operation, applying rejections here.
     async fn take_fault(&self, op: FaultyOp) -> EtlResult<Option<FaultAction>> {
         match self.faults.next(op).await {
-            Some(FaultAction::FailDispatch(injected)) => Err(injected.to_etl_error()),
+            Some(FaultAction::Reject(injected)) => Err(injected.to_etl_error()),
             fault => Ok(fault),
         }
     }
@@ -277,7 +277,7 @@ where
         };
         let result = destination.startup().await;
 
-        apply_result_fault(fault, result).await
+        apply_response_fault(fault, result).await
     }
 
     async fn drop_table_for_copy(
@@ -297,7 +297,7 @@ where
 
         // We send the result back before doing the internal checks for this utility, to
         // avoid checking before the apply loop received the result.
-        let result = apply_result_fault(fault, pending_drop_result.await.into_result()).await;
+        let result = apply_response_fault(fault, pending_drop_result.await.into_result()).await;
         let should_record_drop = result.is_ok();
         async_result.send(result);
 
@@ -348,7 +348,7 @@ where
 
         // We send the result back before doing the internal checks for this utility, to
         // avoid checking before the apply loop received the result.
-        let result = apply_result_fault(fault, pending_flush_result.await.into_result()).await;
+        let result = apply_response_fault(fault, pending_flush_result.await.into_result()).await;
         let should_record_table_rows = result.is_ok();
         async_result.send(result);
 
@@ -404,7 +404,7 @@ where
                 // We send the result back before doing the internal checks for this utility, to
                 // avoid checking before the apply loop received the result.
                 let result =
-                    apply_result_fault(fault, pending_flush_result.await.into_result()).await;
+                    apply_response_fault(fault, pending_flush_result.await.into_result()).await;
                 let should_record_events = result.is_ok();
                 async_result.send(result);
 
@@ -447,6 +447,6 @@ where
         }
 
         let result = if errors.is_empty() { Ok(()) } else { Err(errors.into()) };
-        apply_result_fault(fault, result).await
+        apply_response_fault(fault, result).await
     }
 }

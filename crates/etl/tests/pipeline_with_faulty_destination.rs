@@ -28,10 +28,7 @@ async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
     destination
         .inject_fault(
             FaultyOp::Shutdown,
-            FaultAction::fail_dispatch(
-                ErrorKind::DestinationQueryFailed,
-                "injected shutdown failure",
-            ),
+            FaultAction::reject(ErrorKind::DestinationQueryFailed, "injected shutdown failure"),
         )
         .await;
 
@@ -55,14 +52,14 @@ async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
     // WHEN: the pipeline shuts down
     let result = pipeline.shutdown_and_wait().await;
 
-    // THEN: the injected shutdown error is propagated and shutdown was invoked
+    // THEN: the injected shutdown error surfaces and shutdown was invoked
     let err = result.unwrap_err();
     assert!(err.kinds().contains(&ErrorKind::DestinationQueryFailed));
     assert!(destination.shutdown_called().await);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn drop_table_for_copy_dispatch_failure_keeps_table_restartable_until_retry() {
+async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
     init_test_tracing();
 
     // GIVEN: a pipeline that has copied a table to Ready
@@ -92,14 +89,11 @@ async fn drop_table_for_copy_dispatch_failure_keeps_table_restartable_until_retr
 
     users_ready.notified().await;
 
-    // WHEN: a resync starts and the destination refuses the drop at dispatch
+    // WHEN: a resync starts and the destination rejects the drop
     destination
         .inject_fault(
             FaultyOp::DropTableForCopy,
-            FaultAction::fail_dispatch(
-                ErrorKind::DestinationConnectionFailed,
-                "injected drop dispatch failure",
-            ),
+            FaultAction::reject(ErrorKind::DestinationConnectionFailed, "injected drop rejection"),
         )
         .await;
 
@@ -118,8 +112,7 @@ async fn drop_table_for_copy_dispatch_failure_keeps_table_restartable_until_retr
     assert!(!destination.was_table_dropped_for_copy(table_id).await);
     assert!(store.get_latest_table_schemas().await.contains_key(&table_id));
 
-    // The drop was refused before the inner destination ran, so its rows are
-    // untouched.
+    // The drop never ran on the inner destination, so its rows are untouched.
     assert_eq!(memory_destination.table_rows().await.get(&table_id).unwrap().len(), initial_rows);
 
     // THEN: the timed retry drops and recopies the table cleanly
@@ -135,7 +128,7 @@ async fn drop_table_for_copy_dispatch_failure_keeps_table_restartable_until_retr
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn drop_table_for_copy_result_failure_keeps_table_restartable_until_retry() {
+async fn drop_table_for_copy_failure_after_write_keeps_table_restartable_until_retry() {
     init_test_tracing();
 
     // GIVEN: a pipeline that has copied a table to Ready
@@ -165,14 +158,13 @@ async fn drop_table_for_copy_result_failure_keeps_table_restartable_until_retry(
 
     users_ready.notified().await;
 
-    // WHEN: a resync starts and the drop result fails after the inner destination
-    // applied it
+    // WHEN: a resync starts and the drop fails after being applied
     destination
         .inject_fault(
             FaultyOp::DropTableForCopy,
-            FaultAction::fail_result(
+            FaultAction::fail_after_write(
                 ErrorKind::DestinationConnectionFailed,
-                "injected drop result failure",
+                "injected drop failure after write",
             ),
         )
         .await;
@@ -191,8 +183,7 @@ async fn drop_table_for_copy_result_failure_keeps_table_restartable_until_retry(
     ));
     assert!(store.get_latest_table_schemas().await.contains_key(&table_id));
 
-    // The inner destination applied the drop, but the apply loop observed a
-    // failure.
+    // The inner destination applied the drop; the apply loop saw a failure.
     assert!(!destination.was_table_dropped_for_copy(table_id).await);
     assert!(!memory_destination.table_rows().await.contains_key(&table_id));
 

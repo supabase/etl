@@ -2,11 +2,11 @@
 //!
 //! Destinations report through two channels: the method return value
 //! (dispatch) and the async result handle (completion). Faults target either
-//! channel: [`FaultAction::FailDispatch`] rejects work before the inner
-//! destination runs, while the result actions let the inner destination run
-//! and then fail, hold, or delay what the apply loop observes. Faults are
-//! queued FIFO per operation and consumed one per call; an empty queue means
-//! fully transparent behavior.
+//! channel: [`FaultAction::Reject`] refuses work before the inner destination
+//! runs, while the response actions let the inner destination run and then
+//! fail, hold, or delay what the apply loop observes. Faults are queued FIFO
+//! per operation and consumed one per call; an empty queue means fully
+//! transparent behavior.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -62,37 +62,44 @@ impl InjectedError {
 /// Scripted fault behavior, consumed FIFO per operation.
 #[derive(Debug)]
 pub enum FaultAction {
-    /// The method returns `Err` immediately; the inner destination never runs.
-    FailDispatch(InjectedError),
-    /// The inner destination runs; its async result is replaced with `Err`.
+    /// The destination refuses the work; the method returns `Err` and the
+    /// inner destination never runs.
+    Reject(InjectedError),
+    /// The inner destination does the work, then reports failure.
     ///
     /// This models the lost-response ambiguity: the destination applied the
     /// write but the apply loop observes a failure.
-    FailResult(InjectedError),
-    /// The inner destination runs; its async result is withheld until the
-    /// paired [`HoldHandle`] releases it.
-    HoldResult(HoldGate),
-    /// The inner destination runs; its async result is delayed.
-    DelayResult(Duration),
+    FailAfterWrite(InjectedError),
+    /// The inner destination does the work, then never answers until the
+    /// paired [`HoldHandle`] releases the response.
+    HoldResponse(HoldGate),
+    /// The inner destination does the work; its response is delayed by the
+    /// duration and then passes through unchanged.
+    RespondSlowly(Duration),
 }
 
 impl FaultAction {
-    /// Creates a dispatch failure with the given error kind and message.
-    pub fn fail_dispatch(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self::FailDispatch(InjectedError::new(kind, message))
+    /// Creates a rejection with the given error kind and message.
+    pub fn reject(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self::Reject(InjectedError::new(kind, message))
     }
 
-    /// Creates a result failure with the given error kind and message.
-    pub fn fail_result(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self::FailResult(InjectedError::new(kind, message))
+    /// Creates a failure reported after the work with the given error kind and
+    /// message.
+    pub fn fail_after_write(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self::FailAfterWrite(InjectedError::new(kind, message))
     }
 
     /// Creates a hold action and the handle that releases it.
+    ///
+    /// Unlike [`FaultAction::RespondSlowly`], a hold is indefinite and
+    /// test-controlled: the handle observes when the operation is held and
+    /// chooses the outcome on release.
     pub fn hold() -> (Self, HoldHandle) {
         let (reached_tx, reached_rx) = watch::channel(false);
         let (release_tx, release_rx) = oneshot::channel();
 
-        let action = Self::HoldResult(HoldGate { reached_tx, release_rx });
+        let action = Self::HoldResponse(HoldGate { reached_tx, release_rx });
         let handle = HoldHandle { reached_rx: Mutex::new(reached_rx), release_tx };
 
         (action, handle)
@@ -171,22 +178,21 @@ impl HoldHandle {
     }
 }
 
-/// Applies a consumed fault to an operation's completion result.
+/// Applies a consumed fault to an operation's response.
 ///
-/// [`FaultAction::FailDispatch`] is normally handled before the inner
-/// destination runs; if it reaches the completion phase it fails the result
-/// defensively.
-pub async fn apply_result_fault<T>(
+/// [`FaultAction::Reject`] is normally handled before the inner destination
+/// runs; if it reaches the response phase it fails the response defensively.
+pub async fn apply_response_fault<T>(
     fault: Option<FaultAction>,
     inner_result: EtlResult<T>,
 ) -> EtlResult<T> {
     match fault {
         None => inner_result,
-        Some(FaultAction::FailDispatch(injected) | FaultAction::FailResult(injected)) => {
+        Some(FaultAction::Reject(injected) | FaultAction::FailAfterWrite(injected)) => {
             Err(injected.to_etl_error())
         }
-        Some(FaultAction::HoldResult(gate)) => gate.apply(inner_result).await,
-        Some(FaultAction::DelayResult(duration)) => {
+        Some(FaultAction::HoldResponse(gate)) => gate.apply(inner_result).await,
+        Some(FaultAction::RespondSlowly(duration)) => {
             sleep(duration).await;
             inner_result
         }
@@ -197,7 +203,7 @@ pub async fn apply_result_fault<T>(
 ///
 /// Cloning shares the underlying queues, so a clone held by a test scripts
 /// faults for the wrapper that owns the original.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct FaultInjector {
     queues: Arc<Mutex<HashMap<FaultyOp, VecDeque<FaultAction>>>>,
 }
@@ -205,7 +211,7 @@ pub struct FaultInjector {
 impl FaultInjector {
     /// Creates an injector with no scripted faults.
     pub fn new() -> Self {
-        Self::default()
+        Self { queues: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     /// Queues a fault for the next unconsumed call of the operation.
@@ -218,6 +224,12 @@ impl FaultInjector {
     pub async fn next(&self, op: FaultyOp) -> Option<FaultAction> {
         let mut queues = self.queues.lock().await;
         queues.get_mut(&op)?.pop_front()
+    }
+}
+
+impl Default for FaultInjector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -242,19 +254,19 @@ mod tests {
         injector
             .inject(
                 FaultyOp::WriteEvents,
-                FaultAction::fail_dispatch(ErrorKind::DestinationQueryFailed, "first"),
+                FaultAction::reject(ErrorKind::DestinationQueryFailed, "first"),
             )
             .await;
         injector
             .inject(
                 FaultyOp::WriteEvents,
-                FaultAction::fail_result(ErrorKind::DestinationTimeout, "second"),
+                FaultAction::fail_after_write(ErrorKind::DestinationTimeout, "second"),
             )
             .await;
         injector
             .inject(
                 FaultyOp::Shutdown,
-                FaultAction::fail_dispatch(ErrorKind::DestinationQueryFailed, "shutdown"),
+                FaultAction::reject(ErrorKind::DestinationQueryFailed, "shutdown"),
             )
             .await;
 
@@ -264,8 +276,8 @@ mod tests {
         let third = injector.next(FaultyOp::WriteEvents).await;
 
         // THEN: they fire in injection order, then the queue is empty
-        assert!(matches!(first, Some(FaultAction::FailDispatch(_))));
-        assert!(matches!(second, Some(FaultAction::FailResult(_))));
+        assert!(matches!(first, Some(FaultAction::Reject(_))));
+        assert!(matches!(second, Some(FaultAction::FailAfterWrite(_))));
         assert!(third.is_none());
 
         // THEN: the shutdown queue is independent
@@ -289,8 +301,8 @@ mod tests {
     async fn hold_gate_passes_captured_result_through_on_release_ok() {
         // GIVEN: a held operation whose inner result is Ok(42)
         let (action, handle) = FaultAction::hold();
-        let FaultAction::HoldResult(gate) = action else {
-            panic!("hold() must produce a HoldResult action");
+        let FaultAction::HoldResponse(gate) = action else {
+            panic!("hold() must produce a HoldResponse action");
         };
         let held = tokio::spawn(gate.apply(Ok::<_, EtlError>(42)));
 
@@ -306,8 +318,8 @@ mod tests {
     async fn hold_gate_replaces_result_on_release_err() {
         // GIVEN: a held operation whose inner result is Ok
         let (action, handle) = FaultAction::hold();
-        let FaultAction::HoldResult(gate) = action else {
-            panic!("hold() must produce a HoldResult action");
+        let FaultAction::HoldResponse(gate) = action else {
+            panic!("hold() must produce a HoldResponse action");
         };
         let held = tokio::spawn(gate.apply(Ok::<_, EtlError>(())));
 
@@ -322,17 +334,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_result_fault_passes_through_or_replaces_the_inner_result() {
+    async fn apply_response_fault_passes_through_or_replaces_the_inner_result() {
         // GIVEN: an inner result of Ok(7)
         // WHEN: no fault is scripted
-        let ok = apply_result_fault(None, Ok::<_, EtlError>(7)).await;
+        let ok = apply_response_fault(None, Ok::<_, EtlError>(7)).await;
 
         // THEN: the inner result passes through unchanged
         assert_eq!(ok.unwrap(), 7);
 
-        // WHEN: a result failure is scripted
-        let failed = apply_result_fault(
-            Some(FaultAction::fail_result(ErrorKind::DestinationTimeout, "late boom")),
+        // WHEN: a failure after write is scripted
+        let failed = apply_response_fault(
+            Some(FaultAction::fail_after_write(ErrorKind::DestinationTimeout, "late boom")),
             Ok::<_, EtlError>(7),
         )
         .await;
@@ -347,8 +359,8 @@ mod tests {
     async fn hold_gate_fails_loudly_when_handle_dropped_without_release() {
         // GIVEN: a hold whose handle is dropped without releasing
         let (action, handle) = FaultAction::hold();
-        let FaultAction::HoldResult(gate) = action else {
-            panic!("hold() must produce a HoldResult action");
+        let FaultAction::HoldResponse(gate) = action else {
+            panic!("hold() must produce a HoldResponse action");
         };
         drop(handle);
 
