@@ -16,7 +16,7 @@ use std::{
 
 use tokio::{
     sync::{Mutex, oneshot, watch},
-    time::timeout,
+    time::{sleep, timeout},
 };
 
 use crate::{
@@ -169,6 +169,28 @@ impl HoldHandle {
     }
 }
 
+/// Applies a consumed fault to an operation's completion result.
+///
+/// [`FaultAction::FailDispatch`] is normally handled before the inner
+/// destination runs; if it reaches the completion phase it fails the result
+/// defensively.
+pub async fn apply_result_fault<T>(
+    fault: Option<FaultAction>,
+    inner_result: EtlResult<T>,
+) -> EtlResult<T> {
+    match fault {
+        None => inner_result,
+        Some(FaultAction::FailDispatch(injected) | FaultAction::FailResult(injected)) => {
+            Err(injected.to_etl_error())
+        }
+        Some(FaultAction::HoldResult(gate)) => gate.apply(inner_result).await,
+        Some(FaultAction::DelayResult(duration)) => {
+            sleep(duration).await;
+            inner_result
+        }
+    }
+}
+
 /// Per-operation FIFO queues of scripted faults.
 ///
 /// Cloning shares the underlying queues, so a clone held by a test scripts
@@ -295,6 +317,28 @@ mod tests {
         let err = held.await.unwrap().unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationConnectionFailed);
         assert_eq!(err.detail(), Some("lost response"));
+    }
+
+    #[tokio::test]
+    async fn apply_result_fault_passes_through_or_replaces_the_inner_result() {
+        // --- GIVEN: an inner result of Ok(7) ---
+        // --- WHEN: no fault is scripted ---
+        let ok = apply_result_fault(None, Ok::<_, EtlError>(7)).await;
+
+        // --- THEN: the inner result passes through unchanged ---
+        assert_eq!(ok.unwrap(), 7);
+
+        // --- WHEN: a result failure is scripted ---
+        let failed = apply_result_fault(
+            Some(FaultAction::fail_result(ErrorKind::DestinationTimeout, "late boom")),
+            Ok::<_, EtlError>(7),
+        )
+        .await;
+
+        // --- THEN: the injected error replaces the inner result ---
+        let err = failed.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationTimeout);
+        assert_eq!(err.detail(), Some("late boom"));
     }
 
     #[tokio::test]
