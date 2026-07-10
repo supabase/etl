@@ -27,6 +27,11 @@ use crate::{
 /// Sized generously because a view dropped and recreated under the same name
 /// can serve stale NOT_FOUND responses well past the first few seconds.
 const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 120;
+/// Maximum number of times we poll for a table to report zero rows.
+///
+/// Kept short: the expected end state is observable as soon as the deletes
+/// are applied, so this only absorbs propagation noise.
+const BIGQUERY_NO_ROWS_MAX_ATTEMPTS: u32 = 30;
 /// Delay in milliseconds between verification attempts when querying BigQuery.
 const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
@@ -285,6 +290,44 @@ impl BigQueryDatabase {
                     "bigquery table query for {full_table_path}: {reason}, retrying \
                      ({attempts_remaining} attempts left)"
                 );
+            }
+
+            attempts_remaining -= 1;
+            sleep(Duration::from_millis(BIGQUERY_QUERY_RETRY_DELAY_MS)).await;
+        }
+    }
+
+    /// Polls until a query against the table reports zero visible rows.
+    ///
+    /// Returns true once an empty result is observed and false if rows are
+    /// still present when the retry budget runs out. A 404 counts as no rows
+    /// visible. Use this to assert that deletes emptied a table;
+    /// [`BigQueryDatabase::query_table`] waits for data instead.
+    pub async fn wait_for_no_rows(&self, table_name: TableName) -> bool {
+        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
+        let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
+
+        let query = format!("select * from {full_table_path}");
+        let mut attempts_remaining = BIGQUERY_NO_ROWS_MAX_ATTEMPTS;
+
+        loop {
+            let no_rows_visible = match retry_bigquery_test_operation("table no-rows check", || {
+                let request = QueryRequest::new(query.clone());
+                async { self.client.job().query(&self.project_id, request).await }
+            })
+            .await
+            {
+                Ok(response) => response.rows.is_none_or(|rows| rows.is_empty()),
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => true,
+                Err(err) => panic!("Failed to query BigQuery table: {err:?}"),
+            };
+
+            if no_rows_visible {
+                return true;
+            }
+
+            if attempts_remaining == 1 {
+                return false;
             }
 
             attempts_remaining -= 1;
