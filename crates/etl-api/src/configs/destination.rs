@@ -27,6 +27,7 @@ pub const fn default_ducklake_pool_size() -> u32 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
 }
 
+/// Non-patch API representation of a destination configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiDestinationConfig {
@@ -465,7 +466,8 @@ pub enum UpdateApiDestinationConfig {
 }
 
 impl UpdateApiDestinationConfig {
-    /// Builds a replacement update from an API destination configuration.
+    /// Builds an update that applies every field from an API destination
+    /// configuration.
     ///
     /// Optional fields that are absent in the API config are cleared.
     pub fn from_api_config(value: ApiDestinationConfig) -> Self {
@@ -979,8 +981,8 @@ impl UpdateApiDestinationConfig {
         }
     }
 
-    /// Converts this update into a new stored configuration, requiring secrets
-    /// that cannot be preserved from an existing destination of the same kind.
+    /// Converts this update when no matching stored configuration can supply
+    /// preserved values, requiring all necessary fields and secrets.
     fn into_stored_requiring_secrets(
         self,
     ) -> Result<StoredDestinationConfig, DestinationConfigUpdateError> {
@@ -1951,6 +1953,7 @@ pub enum StoredIcebergConfig {
     },
 }
 
+/// Non-patch API representation of an Iceberg configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiIcebergConfig {
@@ -2004,6 +2007,7 @@ pub enum ApiIcebergConfig {
     },
 }
 
+/// Patch-style Iceberg configuration used by update endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateApiIcebergConfig {
@@ -2107,7 +2111,8 @@ pub enum UpdateApiIcebergConfig {
 }
 
 impl UpdateApiIcebergConfig {
-    /// Builds a replacement update from an API Iceberg configuration.
+    /// Builds an update that applies every field from an API Iceberg
+    /// configuration.
     ///
     /// Optional fields that are absent in the API config are cleared.
     fn from_api_config(value: ApiIcebergConfig) -> Self {
@@ -2740,8 +2745,8 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_conversion_clickhouse() {
-        let create_config = ApiDestinationConfig::ClickHouse {
+    fn api_destination_config_conversion_clickhouse() {
+        let api_config = ApiDestinationConfig::ClickHouse {
             url: Url::parse("https://example.com:8443").unwrap(),
             user: "etl".to_owned(),
             password: Some(SerializableSecretString::from("secret".to_owned())),
@@ -2749,10 +2754,10 @@ mod tests {
             engine: ClickHouseEngine::MergeTree,
         };
 
-        let stored: StoredDestinationConfig = create_config.clone().into();
-        let back_to_create: ApiDestinationConfig = stored.into();
+        let stored: StoredDestinationConfig = api_config.clone().into();
+        let back_to_api: ApiDestinationConfig = stored.into();
 
-        match (create_config, back_to_create) {
+        match (api_config, back_to_api) {
             (
                 ApiDestinationConfig::ClickHouse {
                     url: u1,
@@ -2803,7 +2808,7 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_deserializes_clickhouse_url() {
+    fn api_destination_config_deserializes_clickhouse_url() {
         let json = r#"
         {
             "clickhouse": {
@@ -2828,7 +2833,7 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_deserializes_clickhouse_engine() {
+    fn api_destination_config_deserializes_clickhouse_engine() {
         let json = r#"
         {
             "clickhouse": {
@@ -2872,7 +2877,7 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_rejects_non_http_clickhouse_url() {
+    fn api_destination_config_rejects_non_http_clickhouse_url() {
         let json = r#"
         {
             "clickhouse": {
@@ -2888,8 +2893,8 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_conversion_bigquery() {
-        let create_config = ApiDestinationConfig::BigQuery {
+    fn api_destination_config_conversion_bigquery() {
+        let api_config = ApiDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
@@ -2897,10 +2902,10 @@ mod tests {
             connection_pool_size: None,
         };
 
-        let stored: StoredDestinationConfig = create_config.clone().into();
-        let back_to_create: ApiDestinationConfig = stored.into();
+        let stored: StoredDestinationConfig = api_config.clone().into();
+        let back_to_api: ApiDestinationConfig = stored.into();
 
-        match (create_config, back_to_create) {
+        match (api_config, back_to_api) {
             (
                 ApiDestinationConfig::BigQuery {
                     project_id: p1_project_id,
@@ -3206,8 +3211,8 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_conversion_iceberg_supabase() {
-        let create_config = ApiDestinationConfig::Iceberg {
+    fn api_destination_config_conversion_iceberg_supabase() {
+        let api_config = ApiDestinationConfig::Iceberg {
             config: ApiIcebergConfig::Supabase {
                 project_ref: "abcdefghijklmnopqrst".to_owned(),
                 warehouse_name: "my-warehouse".to_owned(),
@@ -3219,10 +3224,10 @@ mod tests {
             },
         };
 
-        let stored: StoredDestinationConfig = create_config.clone().into();
-        let back_to_create: ApiDestinationConfig = stored.into();
+        let stored: StoredDestinationConfig = api_config.clone().into();
+        let back_to_api: ApiDestinationConfig = stored.into();
 
-        match (create_config, back_to_create) {
+        match (api_config, back_to_api) {
             (
                 ApiDestinationConfig::Iceberg {
                     config:
@@ -3268,8 +3273,8 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_conversion_iceberg_rest() {
-        let create_config = ApiDestinationConfig::Iceberg {
+    fn api_destination_config_conversion_iceberg_rest() {
+        let api_config = ApiDestinationConfig::Iceberg {
             config: ApiIcebergConfig::Rest {
                 catalog_uri: "https://abcdefghijklmnopqrst.storage.supabase.com/storage/v1/iceberg"
                     .to_owned(),
@@ -3281,10 +3286,10 @@ mod tests {
             },
         };
 
-        let stored: StoredDestinationConfig = create_config.clone().into();
-        let back_to_create: ApiDestinationConfig = stored.into();
+        let stored: StoredDestinationConfig = api_config.clone().into();
+        let back_to_api: ApiDestinationConfig = stored.into();
 
-        match (create_config, back_to_create) {
+        match (api_config, back_to_api) {
             (
                 ApiDestinationConfig::Iceberg {
                     config:
@@ -3452,7 +3457,7 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_ducklake_defaults_maintenance_mode() {
+    fn api_destination_config_ducklake_defaults_maintenance_mode() {
         let config: ApiDestinationConfig = serde_json::from_value(serde_json::json!({
             "ducklake": {
                 "catalog_url": "postgres://user:pass@localhost:5432/ducklake_catalog",
@@ -3470,8 +3475,8 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_conversion_ducklake() {
-        let create_config = ApiDestinationConfig::Ducklake {
+    fn api_destination_config_conversion_ducklake() {
+        let api_config = ApiDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from(
                 "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
             ),
@@ -3489,10 +3494,10 @@ mod tests {
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
-        let stored: StoredDestinationConfig = create_config.clone().into();
-        let back_to_create: ApiDestinationConfig = stored.into();
+        let stored: StoredDestinationConfig = api_config.clone().into();
+        let back_to_api: ApiDestinationConfig = stored.into();
 
-        match (create_config, back_to_create) {
+        match (api_config, back_to_api) {
             (
                 ApiDestinationConfig::Ducklake {
                     catalog_url: c1,
@@ -3526,8 +3531,8 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_serialization_ducklake() {
-        let create_config = ApiDestinationConfig::Ducklake {
+    fn api_destination_config_serialization_ducklake() {
+        let api_config = ApiDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from(
                 "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
             ),
@@ -3545,11 +3550,11 @@ mod tests {
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
-        assert_json_snapshot!(create_config);
+        assert_json_snapshot!(api_config);
 
-        let json = serde_json::to_string_pretty(&create_config).unwrap();
+        let json = serde_json::to_string_pretty(&api_config).unwrap();
         let deserialized: ApiDestinationConfig = serde_json::from_str(&json).unwrap();
-        match (&create_config, deserialized) {
+        match (&api_config, deserialized) {
             (
                 ApiDestinationConfig::Ducklake {
                     catalog_url: c1,
@@ -3607,8 +3612,8 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_serialization_iceberg_supabase() {
-        let create_config = ApiDestinationConfig::Iceberg {
+    fn api_destination_config_serialization_iceberg_supabase() {
+        let api_config = ApiDestinationConfig::Iceberg {
             config: ApiIcebergConfig::Supabase {
                 project_ref: "abcdefghijklmnopqrst".to_owned(),
                 warehouse_name: "my-warehouse".to_owned(),
@@ -3621,12 +3626,12 @@ mod tests {
         };
 
         // Use snapshot testing to verify the exact JSON structure
-        assert_json_snapshot!(create_config);
+        assert_json_snapshot!(api_config);
 
         // Test that we can deserialize it back and all fields match
-        let json = serde_json::to_string_pretty(&create_config).unwrap();
+        let json = serde_json::to_string_pretty(&api_config).unwrap();
         let deserialized: ApiDestinationConfig = serde_json::from_str(&json).unwrap();
-        match (&create_config, deserialized) {
+        match (&api_config, deserialized) {
             (
                 ApiDestinationConfig::Iceberg {
                     config:
@@ -3672,8 +3677,8 @@ mod tests {
     }
 
     #[test]
-    fn create_api_destination_config_serialization_iceberg_rest() {
-        let create_config = ApiDestinationConfig::Iceberg {
+    fn api_destination_config_serialization_iceberg_rest() {
+        let api_config = ApiDestinationConfig::Iceberg {
             config: ApiIcebergConfig::Rest {
                 catalog_uri: "https://catalog.example.com/iceberg".to_owned(),
                 warehouse_name: "my-warehouse".to_owned(),
@@ -3685,12 +3690,12 @@ mod tests {
         };
 
         // Use snapshot testing to verify the exact JSON structure
-        assert_json_snapshot!(create_config);
+        assert_json_snapshot!(api_config);
 
         // Test that we can deserialize it back and all fields match
-        let json = serde_json::to_string_pretty(&create_config).unwrap();
+        let json = serde_json::to_string_pretty(&api_config).unwrap();
         let deserialized: ApiDestinationConfig = serde_json::from_str(&json).unwrap();
-        match (&create_config, deserialized) {
+        match (&api_config, deserialized) {
             (
                 ApiDestinationConfig::Iceberg {
                     config:

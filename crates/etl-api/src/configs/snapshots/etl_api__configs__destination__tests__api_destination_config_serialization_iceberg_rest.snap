@@ -1,6 +1,6 @@
 ---
 source: crates/etl-api/src/configs/destination.rs
-expression: create_config
+expression: api_config
 ---
 {
   "iceberg": {

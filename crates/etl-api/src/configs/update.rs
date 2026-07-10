@@ -9,8 +9,9 @@ use utoipa::{
 /// Represents an update field where the API distinguishes an omitted field
 /// from an explicit JSON `null`.
 ///
-/// Omitted fields preserve the stored value, explicit `null` clears or resets
-/// it to the stored default, and non-null values replace it.
+/// Omitted fields preserve the stored value, explicit `null` clears optional
+/// values or resets defaulted values, and non-null values replace the stored
+/// value.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum UpdateField<T> {
     /// Preserve the stored value.
@@ -22,6 +23,8 @@ pub enum UpdateField<T> {
     Set(T),
 }
 
+// Model the wire value as `null | T`; omission is represented by the enclosing
+// object's absent field.
 impl<T> ComposeSchema for UpdateField<T>
 where
     T: ComposeSchema,
@@ -31,6 +34,7 @@ where
     }
 }
 
+// Forward nested schema registration for composed `T` values.
 impl<T> ToSchema for UpdateField<T>
 where
     T: ComposeSchema + ToSchema,

@@ -1,7 +1,7 @@
 ---
 source: crates/etl-api/src/configs/destination.rs
 assertion_line: 1303
-expression: create_config
+expression: api_config
 ---
 {
   "ducklake": {

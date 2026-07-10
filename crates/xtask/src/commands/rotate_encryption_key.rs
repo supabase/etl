@@ -164,10 +164,8 @@ impl RotationStats {
         self.failed_row_ids.push(row_id);
     }
 
-    fn record_rotation_reasons(&mut self, reasons: RotationReasons) {
-        if reasons.outdated_encrypted_values {
-            self.rows_with_outdated_encrypted_values += 1;
-        }
+    fn record_outdated_encrypted_values_row(&mut self) {
+        self.rows_with_outdated_encrypted_values += 1;
     }
 
     fn print(&self, label: &str, dry_run: bool, print_row_ids: bool) {
@@ -240,17 +238,6 @@ fn format_row_ids(row_ids: &[i64]) -> String {
     row_ids.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
 }
 
-#[derive(Clone, Copy, Default)]
-struct RotationReasons {
-    outdated_encrypted_values: bool,
-}
-
-impl RotationReasons {
-    fn needs_rotation(self) -> bool {
-        self.outdated_encrypted_values
-    }
-}
-
 async fn connect_to_database(config: &ApiConfig) -> Result<PgPool> {
     let pool = get_connection_pool(&config.database);
     pool.acquire().await.context("Connecting to API metadata database from config")?;
@@ -289,12 +276,11 @@ async fn rotate_sources(
             let key_ids = encrypted_value_key_ids(&record.config);
             stats.record_key_ids(&key_ids);
 
-            let reasons = config_rotation_reasons(&record.config, latest_key_id);
-            if !reasons.needs_rotation() {
+            if !config_needs_rotation(&record.config, latest_key_id) {
                 stats.unchanged_rows += 1;
                 continue;
             }
-            stats.record_rotation_reasons(reasons);
+            stats.record_outdated_encrypted_values_row();
 
             let Ok(new_config) = rotate_source_config(record.config.clone(), encryption_keyring)
             else {
@@ -374,12 +360,11 @@ async fn rotate_destinations(
             let key_ids = encrypted_value_key_ids(&record.config);
             stats.record_key_ids(&key_ids);
 
-            let reasons = config_rotation_reasons(&record.config, latest_key_id);
-            if !reasons.needs_rotation() {
+            if !config_needs_rotation(&record.config, latest_key_id) {
                 stats.unchanged_rows += 1;
                 continue;
             }
-            stats.record_rotation_reasons(reasons);
+            stats.record_outdated_encrypted_values_row();
 
             let Ok(new_config) =
                 rotate_destination_config(record.config.clone(), encryption_keyring)
@@ -456,12 +441,8 @@ fn rotate_destination_config(
     .map_err(Into::into)
 }
 
-fn config_rotation_reasons(config: &Value, latest_key_id: u32) -> RotationReasons {
-    RotationReasons {
-        outdated_encrypted_values: encrypted_value_key_ids(config)
-            .iter()
-            .any(|key_id| *key_id != latest_key_id),
-    }
+fn config_needs_rotation(config: &Value, latest_key_id: u32) -> bool {
+    encrypted_value_key_ids(config).iter().any(|key_id| *key_id != latest_key_id)
 }
 
 fn encrypted_value_key_ids(value: &Value) -> Vec<u32> {
@@ -538,8 +519,8 @@ mod tests {
     use serde_json::json;
 
     use crate::commands::rotate_encryption_key::{
-        RotationReasons, RotationStats, config_rotation_reasons, format_key_id_counts,
-        format_row_ids, rotate_destination_config,
+        RotationStats, config_needs_rotation, format_key_id_counts, format_row_ids,
+        rotate_destination_config,
     };
 
     #[test]
@@ -559,16 +540,7 @@ mod tests {
         let mut stats = RotationStats::default();
 
         stats.record_key_ids(&[2, 1, 2]);
-        stats.record_rotation_reasons(config_rotation_reasons(
-            &json!({
-                "password": {
-                    "id": 1,
-                    "nonce": "nonce",
-                    "value": "value"
-                }
-            }),
-            2,
-        ));
+        stats.record_outdated_encrypted_values_row();
         stats.record_failure(41);
         stats.record_concurrently_changed(42);
 
@@ -589,13 +561,13 @@ mod tests {
             ..RotationStats::default()
         };
         total.record_key_ids(&[1]);
-        total.record_rotation_reasons(RotationReasons { outdated_encrypted_values: true });
+        total.record_outdated_encrypted_values_row();
         total.record_failure(10);
 
         let mut destinations =
             RotationStats { scanned_rows: 4, rotated_rows: 2, ..RotationStats::default() };
         destinations.record_key_ids(&[1, 2]);
-        destinations.record_rotation_reasons(RotationReasons { outdated_encrypted_values: true });
+        destinations.record_outdated_encrypted_values_row();
         destinations.record_failure(20);
         destinations.record_concurrently_changed(21);
 
@@ -613,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn source_config_rotation_reasons_detects_old_key_ids() {
+    fn config_needs_rotation_detects_old_key_ids() {
         let config = json!({
             "host": "localhost",
             "port": 5432,
@@ -626,11 +598,8 @@ mod tests {
             }
         });
 
-        let old_key_reasons = config_rotation_reasons(&config, 2);
-        assert!(old_key_reasons.needs_rotation());
-        assert!(old_key_reasons.outdated_encrypted_values);
-
-        assert!(!config_rotation_reasons(&config, 1).needs_rotation());
+        assert!(config_needs_rotation(&config, 2));
+        assert!(!config_needs_rotation(&config, 1));
     }
 
     #[test]

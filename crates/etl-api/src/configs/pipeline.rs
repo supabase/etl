@@ -204,6 +204,7 @@ impl DuckLakeMaintenanceConfig {
     }
 }
 
+/// Non-patch API representation of a pipeline configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiPipelineConfig {
     #[schema(example = "my_publication")]
@@ -296,7 +297,8 @@ pub struct UpdateApiPipelineConfig {
 }
 
 impl UpdateApiPipelineConfig {
-    /// Builds a replacement update from an API pipeline configuration.
+    /// Builds an update that applies every field from an API pipeline
+    /// configuration.
     ///
     /// Optional fields that are absent in the API config are cleared.
     pub fn from_api_config(value: ApiPipelineConfig) -> Self {
@@ -715,8 +717,8 @@ mod tests {
     }
 
     #[test]
-    fn create_api_pipeline_config_conversion() {
-        let create_config = ApiPipelineConfig {
+    fn api_pipeline_config_conversion() {
+        let api_config = ApiPipelineConfig {
             publication_name: "test_publication".to_owned(),
             batch: None,
             table_error_retry_delay_ms: None,
@@ -737,15 +739,15 @@ mod tests {
             log_level: Some(LogLevel::Debug),
         };
 
-        let stored: StoredPipelineConfig = create_config.clone().into();
-        let back_to_create: ApiPipelineConfig = stored.into();
+        let stored: StoredPipelineConfig = api_config.clone().into();
+        let back_to_api: ApiPipelineConfig = stored.into();
 
-        assert_eq!(create_config.publication_name, back_to_create.publication_name);
+        assert_eq!(api_config.publication_name, back_to_api.publication_name);
     }
 
     #[test]
-    fn create_api_pipeline_config_defaults() {
-        let create_config = ApiPipelineConfig {
+    fn api_pipeline_config_defaults() {
+        let api_config = ApiPipelineConfig {
             publication_name: "test_publication".to_owned(),
             batch: None,
             table_error_retry_delay_ms: None,
@@ -762,7 +764,7 @@ mod tests {
             log_level: None,
         };
 
-        let stored: StoredPipelineConfig = create_config.into();
+        let stored: StoredPipelineConfig = api_config.into();
 
         assert_eq!(stored.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
         assert_eq!(

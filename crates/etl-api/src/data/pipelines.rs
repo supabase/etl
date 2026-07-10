@@ -203,8 +203,9 @@ pub async fn update_pipeline(
 
     let stored_config =
         deserialize_from_value::<StoredPipelineConfig>(stored_config_value.clone())?;
-    let mut pipeline_config = serialize(config.clone().merge_into_stored(stored_config)?)?;
-    config.restore_preserved_fields(&stored_config_value, &mut pipeline_config);
+    let merged_config = config.clone().merge_into_stored(stored_config)?;
+    let mut serialized_config = serialize(merged_config)?;
+    config.restore_preserved_fields(&stored_config_value, &mut serialized_config);
 
     let record = sqlx::query!(
         r#"
@@ -215,7 +216,7 @@ pub async fn update_pipeline(
         "#,
         source_id,
         destination_id,
-        pipeline_config,
+        serialized_config,
         tenant_id,
         pipeline_id
     )
