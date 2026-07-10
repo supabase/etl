@@ -1,5 +1,5 @@
 use etl_api::{
-    configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig},
+    configs::destination::{ApiDestinationConfig, ApiIcebergConfig},
     validation::{FailureType, validate_destination},
 };
 use etl_config::SerializableSecretString;
@@ -10,9 +10,9 @@ use etl_destinations::iceberg::test_utils::{
 
 use super::create_validation_context;
 
-fn create_iceberg_config(warehouse_name: &str) -> FullApiDestinationConfig {
-    FullApiDestinationConfig::Iceberg {
-        config: FullApiIcebergConfig::Rest {
+fn create_iceberg_config(warehouse_name: &str) -> ApiDestinationConfig {
+    ApiDestinationConfig::Iceberg {
+        config: ApiIcebergConfig::Rest {
             catalog_uri: format!("{LAKEKEEPER_URL}/catalog"),
             warehouse_name: warehouse_name.to_owned(),
             s3_access_key_id: SerializableSecretString::from(MINIO_USERNAME.to_owned()),

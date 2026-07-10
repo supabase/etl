@@ -9,20 +9,20 @@ use super::{
     primary_key::PrimaryKeyValidator,
     replica_identity::ReplicaIdentityValidator,
 };
-use crate::configs::destination::FullApiDestinationConfig;
+use crate::configs::destination::ApiDestinationConfig;
 
 /// Composite validator for destination prerequisites.
 #[derive(Debug)]
 pub(crate) struct DestinationValidator {
     /// Destination configuration to validate.
-    config: FullApiDestinationConfig,
+    config: ApiDestinationConfig,
     /// Publication name of the pipeline that will be used for table checks.
     publication_name: Option<String>,
 }
 
 impl DestinationValidator {
     /// Creates a destination validator for the provided configuration.
-    pub(crate) fn new(config: FullApiDestinationConfig, publication_name: Option<String>) -> Self {
+    pub(crate) fn new(config: ApiDestinationConfig, publication_name: Option<String>) -> Self {
         Self { config, publication_name }
     }
 
@@ -31,31 +31,31 @@ impl DestinationValidator {
         let publication_name = self.publication_name.clone()?;
 
         Some(match &self.config {
-            FullApiDestinationConfig::BigQuery { .. } => ReplicaIdentityValidator::new(
+            ApiDestinationConfig::BigQuery { .. } => ReplicaIdentityValidator::new(
                 publication_name,
                 "BigQuery",
                 &[IdentityType::PrimaryKey, IdentityType::Full],
                 &[IdentityType::PrimaryKey, IdentityType::Full],
             ),
-            FullApiDestinationConfig::ClickHouse { .. } => ReplicaIdentityValidator::new(
+            ApiDestinationConfig::ClickHouse { .. } => ReplicaIdentityValidator::new(
                 publication_name,
                 "ClickHouse",
                 &[IdentityType::PrimaryKey, IdentityType::Full],
                 &[IdentityType::PrimaryKey, IdentityType::Full],
             ),
-            FullApiDestinationConfig::Iceberg { .. } => ReplicaIdentityValidator::new(
+            ApiDestinationConfig::Iceberg { .. } => ReplicaIdentityValidator::new(
                 publication_name,
                 "Iceberg",
                 &[IdentityType::Full],
                 &[IdentityType::Full],
             ),
-            FullApiDestinationConfig::Ducklake { .. } => ReplicaIdentityValidator::new(
+            ApiDestinationConfig::Ducklake { .. } => ReplicaIdentityValidator::new(
                 publication_name,
                 "DuckLake",
                 &[IdentityType::PrimaryKey, IdentityType::AlternativeKey, IdentityType::Full],
                 &[IdentityType::PrimaryKey, IdentityType::AlternativeKey, IdentityType::Full],
             ),
-            FullApiDestinationConfig::Snowflake { .. } => ReplicaIdentityValidator::new(
+            ApiDestinationConfig::Snowflake { .. } => ReplicaIdentityValidator::new(
                 publication_name,
                 "Snowflake",
                 &[IdentityType::Full],
@@ -70,14 +70,14 @@ impl DestinationValidator {
         let publication_name = self.publication_name.clone()?;
 
         match &self.config {
-            FullApiDestinationConfig::BigQuery { .. } => Some(PrimaryKeyValidator::new(
+            ApiDestinationConfig::BigQuery { .. } => Some(PrimaryKeyValidator::new(
                 publication_name,
                 "BigQuery",
                 "BigQuery uses the source primary key to match rows during initial loads, \
                  upserts, deletes, and updates that change primary-key values.",
                 true,
             )),
-            FullApiDestinationConfig::ClickHouse {
+            ApiDestinationConfig::ClickHouse {
                 engine: ClickHouseEngine::ReplacingMergeTree,
                 ..
             } => Some(PrimaryKeyValidator::new(
@@ -87,15 +87,15 @@ impl DestinationValidator {
                  deduplication key.",
                 true,
             )),
-            FullApiDestinationConfig::ClickHouse {
-                engine: ClickHouseEngine::MergeTree, ..
-            } => Some(PrimaryKeyValidator::new(
-                publication_name,
-                "ClickHouse MergeTree",
-                "ClickHouse uses replicated source primary-key columns to apply row-level updates \
-                 and deletes when a source primary key exists.",
-                false,
-            )),
+            ApiDestinationConfig::ClickHouse { engine: ClickHouseEngine::MergeTree, .. } => {
+                Some(PrimaryKeyValidator::new(
+                    publication_name,
+                    "ClickHouse MergeTree",
+                    "ClickHouse uses replicated source primary-key columns to apply row-level \
+                     updates and deletes when a source primary key exists.",
+                    false,
+                ))
+            }
             _ => None,
         }
     }
@@ -108,19 +108,13 @@ impl Validator for DestinationValidator {
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
         let mut failures = match &self.config {
-            FullApiDestinationConfig::BigQuery { .. } => {
-                bigquery::validate(&self.config, ctx).await
-            }
-            FullApiDestinationConfig::ClickHouse { .. } => {
+            ApiDestinationConfig::BigQuery { .. } => bigquery::validate(&self.config, ctx).await,
+            ApiDestinationConfig::ClickHouse { .. } => {
                 clickhouse::validate(&self.config, ctx).await
             }
-            FullApiDestinationConfig::Iceberg { .. } => iceberg::validate(&self.config, ctx).await,
-            FullApiDestinationConfig::Ducklake { .. } => {
-                ducklake::validate(&self.config, ctx).await
-            }
-            FullApiDestinationConfig::Snowflake { .. } => {
-                snowflake::validate(&self.config, ctx).await
-            }
+            ApiDestinationConfig::Iceberg { .. } => iceberg::validate(&self.config, ctx).await,
+            ApiDestinationConfig::Ducklake { .. } => ducklake::validate(&self.config, ctx).await,
+            ApiDestinationConfig::Snowflake { .. } => snowflake::validate(&self.config, ctx).await,
         }?;
 
         if let Some(validator) = self.replica_identity_validator() {
@@ -142,12 +136,12 @@ macro_rules! disabled_destination {
         #[cfg(not(feature = $feature))]
         mod $module {
             use super::{
-                FullApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure,
+                ApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure,
             };
 
             /// Returns a validation failure for disabled destination support.
             pub(super) fn validate(
-                _config: &FullApiDestinationConfig,
+                _config: &ApiDestinationConfig,
                 _ctx: &ValidationContext,
             ) -> std::future::Ready<Result<Vec<ValidationFailure>, ValidationError>> {
                 std::future::ready(Ok(vec![ValidationFailure::critical(
@@ -167,17 +161,16 @@ macro_rules! disabled_destination {
 mod bigquery {
     use secrecy::ExposeSecret;
 
-    use super::{FullApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
+    use super::{ApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
     use crate::validation::{Validator, validators::bigquery::BigQueryValidator};
 
     /// Validates a BigQuery destination configuration.
     pub(super) async fn validate(
-        config: &FullApiDestinationConfig,
+        config: &ApiDestinationConfig,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let FullApiDestinationConfig::BigQuery {
-            project_id, dataset_id, service_account_key, ..
-        } = config
+        let ApiDestinationConfig::BigQuery { project_id, dataset_id, service_account_key, .. } =
+            config
         else {
             unreachable!("Destination config should match BigQuery.");
         };
@@ -197,16 +190,15 @@ disabled_destination!(bigquery, "bigquery", "BigQuery");
 /// ClickHouse validation adapter.
 #[cfg(feature = "clickhouse")]
 mod clickhouse {
-    use super::{FullApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
+    use super::{ApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
     use crate::validation::{Validator, validators::clickhouse::ClickHouseValidator};
 
     /// Validates a ClickHouse destination configuration.
     pub(super) async fn validate(
-        config: &FullApiDestinationConfig,
+        config: &ApiDestinationConfig,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let FullApiDestinationConfig::ClickHouse { url, user, password, database, .. } = config
-        else {
+        let ApiDestinationConfig::ClickHouse { url, user, password, database, .. } = config else {
             unreachable!("Destination config should match ClickHouse.");
         };
 
@@ -223,15 +215,15 @@ disabled_destination!(clickhouse, "clickhouse", "ClickHouse");
 mod ducklake {
     use secrecy::ExposeSecret;
 
-    use super::{FullApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
+    use super::{ApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
     use crate::validation::{Validator, validators::ducklake::DucklakeValidator};
 
     /// Validates a DuckLake destination configuration.
     pub(super) async fn validate(
-        config: &FullApiDestinationConfig,
+        config: &ApiDestinationConfig,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let FullApiDestinationConfig::Ducklake {
+        let ApiDestinationConfig::Ducklake {
             catalog_url,
             data_path,
             pool_size,
@@ -274,15 +266,15 @@ disabled_destination!(ducklake, "ducklake", "DuckLake");
 /// Iceberg validation adapter.
 #[cfg(feature = "iceberg")]
 mod iceberg {
-    use super::{FullApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
+    use super::{ApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
     use crate::validation::{Validator, validators::iceberg::IcebergValidator};
 
     /// Validates an Iceberg destination configuration.
     pub(super) async fn validate(
-        config: &FullApiDestinationConfig,
+        config: &ApiDestinationConfig,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let FullApiDestinationConfig::Iceberg { config } = config else {
+        let ApiDestinationConfig::Iceberg { config } = config else {
             unreachable!("Destination config should match Iceberg.");
         };
 
@@ -295,15 +287,15 @@ disabled_destination!(iceberg, "iceberg", "Iceberg");
 /// Snowflake validation adapter.
 #[cfg(feature = "snowflake")]
 mod snowflake {
-    use super::{FullApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
+    use super::{ApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
     use crate::validation::{Validator, validators::snowflake::SnowflakeValidator};
 
     /// Validates a Snowflake destination configuration.
     pub(super) async fn validate(
-        config: &FullApiDestinationConfig,
+        config: &ApiDestinationConfig,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let FullApiDestinationConfig::Snowflake {
+        let ApiDestinationConfig::Snowflake {
             account_id,
             user,
             private_key,
