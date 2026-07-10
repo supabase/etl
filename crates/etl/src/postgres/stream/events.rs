@@ -66,15 +66,20 @@ impl StatusUpdateType {
             Self::ShutdownFlush => true,
         }
     }
+
+    /// Returns the metric label for this status update type.
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::KeepAlive => "keep_alive",
+            Self::PeriodicKeepAlive => "periodic_keep_alive",
+            Self::ShutdownFlush => "shutdown_flush",
+        }
+    }
 }
 
 impl Display for StatusUpdateType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::KeepAlive => write!(f, "keep_alive"),
-            Self::PeriodicKeepAlive => write!(f, "periodic_keep_alive"),
-            Self::ShutdownFlush => write!(f, "shutdown_flush"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -161,7 +166,7 @@ impl EventsStream {
             if flush_lsn == *last_flush && last_update.elapsed() < STATUS_UPDATE_INTERVAL {
                 counter!(
                     ETL_STATUS_UPDATES_SKIPPED_TOTAL,
-                    STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
+                    STATUS_UPDATE_TYPE_LABEL => status_update_type.as_str(),
                 )
                 .increment(1);
 
@@ -197,8 +202,8 @@ impl EventsStream {
 
         counter!(
             ETL_STATUS_UPDATES_TOTAL,
-            FORCED_LABEL => force.to_string(),
-            STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
+            FORCED_LABEL => if force { "true" } else { "false" },
+            STATUS_UPDATE_TYPE_LABEL => status_update_type.as_str(),
         )
         .increment(1);
 

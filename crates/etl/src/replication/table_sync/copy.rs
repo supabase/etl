@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::VecDeque,
     pin::Pin,
     sync::Arc,
@@ -73,6 +74,8 @@ struct CopyPartition {
     filter_table_id: TableId,
     /// The physical ctid range for `source_table_id`.
     ctid_partition: CtidPartition,
+    /// Estimated heap blocks covered by this range.
+    planned_blocks: u64,
 }
 
 /// Rows copied by a completed worker.
@@ -496,9 +499,14 @@ async fn plan_copy_partitions(
                 source_table_id,
                 filter_table_id: table_id,
                 ctid_partition,
+                planned_blocks,
             });
         }
     }
+
+    // Start larger estimated ranges first so long copy tasks overlap while all
+    // workers are active, leaving smaller ranges to drain at the tail.
+    copy_partitions.sort_unstable_by_key(|partition| Reverse(partition.planned_blocks));
 
     histogram!(ETL_TABLE_COPY_PLANNED_PARTITIONS).record(f64::from(target_partitions));
     histogram!(ETL_TABLE_COPY_EFFECTIVE_PARTITIONS).record(copy_partitions.len() as f64);
@@ -608,7 +616,7 @@ where
         )
         .await?;
 
-    let table_copy_stream = TableCopyStream::wrap(copy_stream, replicated_column_schemas.iter());
+    let table_copy_stream = TableCopyStream::wrap(copy_stream, replicated_column_schemas);
     let connection_updates_rx = child_replication_transaction.connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
