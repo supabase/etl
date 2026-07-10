@@ -7,7 +7,10 @@ mod rest_client;
 use std::future::Future;
 
 pub use batch::{RowBatch, RowBatchBuilder};
-pub(crate) use channel::ChannelHandle;
+pub(crate) use channel::{
+    AcceptedRowBatch, ChannelHandle, DEFAULT_COMMIT_POLL_INTERVAL, DEFAULT_COMMIT_WAIT_TIMEOUT,
+    validate_committed_status,
+};
 pub use offset_token::OffsetToken;
 pub use rest_client::RestStreamClient;
 
@@ -25,6 +28,9 @@ pub struct OpenChannelResponse {
     ///
     /// `None` if the channel has never committed data.
     pub offset_token: Option<OffsetToken>,
+
+    /// Channel status returned by Snowflake when the channel was opened.
+    pub status: ChannelStatusResponse,
 }
 
 /// Response from inserting rows into a channel.
@@ -35,7 +41,7 @@ pub struct InsertRowsResponse {
 }
 
 /// Per-channel status from a bulk status check.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChannelStatusResponse {
     /// Channel name.
     pub channel: String,
@@ -45,6 +51,21 @@ pub struct ChannelStatusResponse {
 
     /// Last committed offset token, or `None` if no data has been committed.
     pub offset_token: Option<OffsetToken>,
+
+    /// Total rows successfully inserted through this channel.
+    pub rows_inserted: u64,
+
+    /// Total rows parsed through this channel.
+    pub rows_parsed: u64,
+
+    /// Total rows rejected by this channel.
+    pub rows_error_count: u64,
+
+    /// Upper bound of the offset range containing the latest row error.
+    pub last_error_offset_upper_bound: Option<OffsetToken>,
+
+    /// Message for the latest row error, when Snowflake reports one.
+    pub last_error_message: Option<String>,
 }
 
 /// Abstraction over Snowpipe Streaming ingestion backends.
