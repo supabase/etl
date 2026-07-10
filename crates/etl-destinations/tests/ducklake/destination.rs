@@ -3309,6 +3309,144 @@ async fn concurrent_writes_with_single_slot_complete() {
     assert_eq!(count_rows(&conn, &table_name_b), 50);
 }
 
+/// Concurrent first writes with the production default pool size should not
+/// expose DuckLake catalog transaction conflicts.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_first_writes_with_default_pool_complete() {
+    let lake = create_test_lake("concurrent_first_writes_default_pool").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schemas = (0..8)
+        .map(|index| make_schema(100 + index, "public", &format!("table_{index}")))
+        .collect::<Vec<_>>();
+    let replicated_table_schemas =
+        schemas.iter().map(make_replicated_table_schema).collect::<Vec<_>>();
+    let table_names = schemas
+        .iter()
+        .map(|schema| table_name_to_ducklake_table_name(&schema.name).unwrap())
+        .collect::<Vec<_>>();
+
+    let store = MemoryStore::new();
+    for schema in schemas {
+        store.store_table_schema(schema).await.unwrap();
+    }
+
+    let destination = Arc::new(
+        DuckLakeDestination::new(
+            catalog_url.clone(),
+            data_url.clone(),
+            4,
+            None,
+            None,
+            None,
+            None,
+            store,
+        )
+        .await
+        .unwrap(),
+    );
+
+    let mut tasks = Vec::new();
+    for (index, replicated_table_schema) in replicated_table_schemas.into_iter().enumerate() {
+        let destination = Arc::clone(&destination);
+        tasks.push(tokio::spawn(async move {
+            let rows = (0..25)
+                .map(|id| {
+                    TableRow::new(vec![
+                        Cell::I32(id),
+                        Cell::String(format!("table-{index}-row-{id}")),
+                    ])
+                })
+                .collect::<Vec<_>>();
+
+            destination.write_table_rows(&replicated_table_schema, rows).await
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    let visible_table_names = table_names.iter().collect::<Vec<_>>();
+    let conn =
+        open_lake_conn_when_tables_visible(&catalog_url, &data_url, &visible_table_names).await;
+
+    for table_name in table_names {
+        assert_eq!(count_rows(&conn, &table_name), 25);
+    }
+}
+
+/// Concurrent table truncations with the production default pool size should
+/// not expose DuckLake catalog transaction conflicts.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_truncates_with_default_pool_complete() {
+    let lake = create_test_lake("concurrent_truncates_default_pool").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schemas = (0..8)
+        .map(|index| make_schema(200 + index, "public", &format!("truncate_table_{index}")))
+        .collect::<Vec<_>>();
+    let replicated_table_schemas =
+        schemas.iter().map(make_replicated_table_schema).collect::<Vec<_>>();
+    let table_names = schemas
+        .iter()
+        .map(|schema| table_name_to_ducklake_table_name(&schema.name).unwrap())
+        .collect::<Vec<_>>();
+
+    let store = MemoryStore::new();
+    for schema in schemas {
+        store.store_table_schema(schema).await.unwrap();
+    }
+
+    let destination = Arc::new(
+        DuckLakeDestination::new(
+            catalog_url.clone(),
+            data_url.clone(),
+            4,
+            None,
+            None,
+            None,
+            None,
+            store,
+        )
+        .await
+        .unwrap(),
+    );
+
+    for (index, replicated_table_schema) in replicated_table_schemas.iter().enumerate() {
+        let row_id = i32::try_from(index).unwrap();
+        destination
+            .write_table_rows(
+                replicated_table_schema,
+                vec![TableRow::new(vec![
+                    Cell::I32(row_id),
+                    Cell::String(format!("truncate-table-{index}")),
+                ])],
+            )
+            .await
+            .unwrap();
+    }
+
+    let visible_table_names = table_names.iter().collect::<Vec<_>>();
+    let conn =
+        open_lake_conn_when_tables_visible(&catalog_url, &data_url, &visible_table_names).await;
+    drop(conn);
+
+    let mut tasks = Vec::new();
+    for replicated_table_schema in replicated_table_schemas {
+        let destination = Arc::clone(&destination);
+        tasks.push(tokio::spawn(async move {
+            destination.truncate_table(&replicated_table_schema).await
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+}
+
 /// Verifies that common Postgres types survive the write → read cycle.
 #[tokio::test(flavor = "multi_thread")]
 async fn type_mapping_round_trip() {

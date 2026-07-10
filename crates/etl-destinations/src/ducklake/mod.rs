@@ -94,7 +94,7 @@ impl fmt::Display for DuckLakeTableName {
 /// This applies to every DuckDB connection in the destination pool so small
 /// writes inline into the DuckLake metadata first and can later be
 /// materialized to Parquet by an external maintenance job.
-const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 1000_000;
+const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 1_000_000;
 
 pub use core::{
     DuckLakeDestination, DuckLakeExternalMaintenanceConfig, DuckLakeExternalMaintenancePause,
