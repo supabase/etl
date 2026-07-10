@@ -115,25 +115,22 @@ impl FromStr for PgNumeric {
             return Err(ParseNumericError::InvalidSyntax);
         }
 
-        let bytes = trimmed.as_bytes();
-
         // Handle sign.
-        let (sign, rest, has_explicit_sign) = match bytes[0] {
-            b'+' => (Sign::Positive, &bytes[1..], true),
-            b'-' => (Sign::Negative, &bytes[1..], true),
-            _ => (Sign::Positive, bytes, false),
+        let (sign, rest, has_explicit_sign) = if let Some(rest) = trimmed.strip_prefix('+') {
+            (Sign::Positive, rest, true)
+        } else if let Some(rest) = trimmed.strip_prefix('-') {
+            (Sign::Negative, rest, true)
+        } else {
+            (Sign::Positive, trimmed, false)
         };
 
         // Check for special values (NaN, infinity).
-        if !matches!(rest.first(), Some(b'0'..=b'9' | b'.')) {
-            // The sign byte is ASCII, so slicing past it stays on a char
-            // boundary.
-            let rest = &trimmed[trimmed.len() - rest.len()..];
+        if !matches!(rest.as_bytes().first(), Some(b'0'..=b'9' | b'.')) {
             return parse_special_value(rest, &sign, has_explicit_sign);
         }
 
         // Parse regular numeric value.
-        parse_numeric_value(rest, sign)
+        parse_numeric_value(rest.as_bytes(), sign)
     }
 }
 

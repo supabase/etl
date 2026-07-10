@@ -72,9 +72,9 @@ pub(crate) fn parse_postgres_timestamptz(
 
 /// Parses two ASCII decimal digits into a number.
 #[inline]
-fn parse_two_digits(bytes: &[u8]) -> Option<u32> {
-    let high = bytes[0].wrapping_sub(b'0');
-    let low = bytes[1].wrapping_sub(b'0');
+fn parse_two_digits([high, low]: [u8; 2]) -> Option<u32> {
+    let high = high.wrapping_sub(b'0');
+    let low = low.wrapping_sub(b'0');
     if high > 9 || low > 9 {
         return None;
     }
@@ -91,9 +91,10 @@ fn parse_iso_date_fast(bytes: &[u8]) -> Option<NaiveDate> {
         return None;
     }
 
-    let year = parse_two_digits(&bytes[0..2])? * 100 + parse_two_digits(&bytes[2..4])?;
-    let month = parse_two_digits(&bytes[5..7])?;
-    let day = parse_two_digits(&bytes[8..10])?;
+    let year =
+        parse_two_digits([bytes[0], bytes[1]])? * 100 + parse_two_digits([bytes[2], bytes[3]])?;
+    let month = parse_two_digits([bytes[5], bytes[6]])?;
+    let day = parse_two_digits([bytes[8], bytes[9]])?;
 
     NaiveDate::from_ymd_opt(year as i32, month, day)
 }
@@ -108,9 +109,9 @@ fn parse_iso_time_fast(bytes: &[u8]) -> Option<NaiveTime> {
         return None;
     }
 
-    let hour = parse_two_digits(&bytes[0..2])?;
-    let minute = parse_two_digits(&bytes[3..5])?;
-    let second = parse_two_digits(&bytes[6..8])?;
+    let hour = parse_two_digits([bytes[0], bytes[1]])?;
+    let minute = parse_two_digits([bytes[3], bytes[4]])?;
+    let second = parse_two_digits([bytes[6], bytes[7]])?;
 
     let nanos = if bytes.len() == 8 {
         0
