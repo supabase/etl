@@ -23,7 +23,10 @@ use crate::{
 };
 
 /// Maximum number of times we re-run a verification query.
-const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 30;
+///
+/// Sized generously because a view dropped and recreated under the same name
+/// can serve stale NOT_FOUND responses well past the first few seconds.
+const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 120;
 /// Delay in milliseconds between verification attempts when querying BigQuery.
 const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
@@ -248,11 +251,11 @@ impl BigQueryDatabase {
     /// Executes a SELECT * query against the specified table.
     ///
     /// Returns all rows from the table in the test dataset, polling until
-    /// BigQuery surfaces the streamed data or a short retry budget is
-    /// exhausted. A 404 is retried within the same budget because a table
-    /// queried right after being dropped and recreated can return a stale
-    /// NOT_FOUND while BigQuery metadata propagates; a table that stays
-    /// missing for the whole budget yields `None`.
+    /// BigQuery surfaces the streamed data or the retry budget is exhausted.
+    /// A 404 is retried within the same budget because a table queried right
+    /// after being dropped and recreated can return a stale NOT_FOUND while
+    /// BigQuery metadata propagates. Use [`BigQueryDatabase::table_exists`]
+    /// to assert absence; this method treats absence as not-yet-visible.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
         let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
         let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
@@ -261,14 +264,14 @@ impl BigQueryDatabase {
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
-            let rows = match retry_bigquery_test_operation("table query", || {
+            let (rows, not_found) = match retry_bigquery_test_operation("table query", || {
                 let request = QueryRequest::new(query.clone());
                 async { self.client.job().query(&self.project_id, request).await }
             })
             .await
             {
-                Ok(response) => response.rows,
-                Err(BQError::ResponseError { error }) if error.error.code == 404 => None,
+                Ok(response) => (response.rows, false),
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => (None, true),
                 Err(err) => panic!("Failed to query BigQuery table: {err:?}"),
             };
 
@@ -276,9 +279,36 @@ impl BigQueryDatabase {
                 return rows;
             }
 
+            if attempts_remaining.is_multiple_of(10) {
+                let reason = if not_found { "table not found" } else { "no rows" };
+                eprintln!(
+                    "bigquery table query for {full_table_path}: {reason}, retrying \
+                     ({attempts_remaining} attempts left)"
+                );
+            }
+
             attempts_remaining -= 1;
             sleep(Duration::from_millis(BIGQUERY_QUERY_RETRY_DELAY_MS)).await;
         }
+    }
+
+    /// Returns whether the table or view with the base name currently exists.
+    ///
+    /// Uses the tables metadata API, which answers existence consistently,
+    /// unlike query results for recently dropped or recreated names.
+    pub async fn table_exists(&self, table_name: TableName) -> bool {
+        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
+
+        retry_bigquery_test_operation("table existence check", || async {
+            match self.client.table().get(&self.project_id, &self.dataset_id, &table_id, None).await
+            {
+                Ok(_) => Ok(true),
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => Ok(false),
+                Err(err) => Err(err),
+            }
+        })
+        .await
+        .unwrap_or_else(|err| panic!("Failed to check BigQuery table existence: {err:?}"))
     }
 
     /// Queries the schema (column metadata) for a table.
