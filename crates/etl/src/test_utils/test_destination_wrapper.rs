@@ -22,6 +22,7 @@ use crate::{
     schema::{ReplicatedTableSchema, TableId},
     test_utils::{
         event::{EventCondition, check_all_events_count, group_events_by_type},
+        faults::{FaultAction, FaultInjector, FaultyOp, HoldHandle, apply_response_fault},
         notify::TimedNotify,
     },
 };
@@ -88,10 +89,18 @@ impl<D> Inner<D> {
 /// Notification helpers only observe writes that happen after registration.
 /// Register the returned [`TimedNotify`] before starting the producer that is
 /// expected to satisfy it.
+///
+/// Faults from [`crate::test_utils::faults`] can be scripted per operation
+/// through [`TestDestinationWrapper::inject_fault`]. The wrapper records what
+/// was acknowledged to the apply loop: on an injected failure after write the
+/// inner destination has applied the write but the wrapper does not record it,
+/// so ground truth for what the destination actually holds is read from the
+/// inner destination directly.
 #[derive(Clone)]
 pub struct TestDestinationWrapper<D> {
     inner: Arc<RwLock<Inner<D>>>,
     tasks: TaskSet,
+    faults: FaultInjector,
 }
 
 impl<D: fmt::Debug> fmt::Debug for TestDestinationWrapper<D> {
@@ -125,7 +134,11 @@ impl<D> TestDestinationWrapper<D> {
             shutdown_called: false,
         };
 
-        Self { inner: Arc::new(RwLock::new(inner)), tasks: TaskSet::new() }
+        Self {
+            inner: Arc::new(RwLock::new(inner)),
+            tasks: TaskSet::new(),
+            faults: FaultInjector::new(),
+        }
     }
 
     /// Returns all table rows written through the wrapper.
@@ -224,6 +237,27 @@ impl<D> TestDestinationWrapper<D> {
     pub async fn shutdown_called(&self) -> bool {
         self.inner.read().await.shutdown_called
     }
+
+    /// Queues a fault for the next call of the given destination operation.
+    pub async fn inject_fault(&self, op: FaultyOp, action: FaultAction) {
+        self.faults.inject(op, action).await;
+    }
+
+    /// Holds the next call of the given operation and returns the handle that
+    /// observes and releases it.
+    pub async fn hold_next(&self, op: FaultyOp) -> HoldHandle {
+        let (action, handle) = FaultAction::hold();
+        self.faults.inject(op, action).await;
+        handle
+    }
+
+    /// Consumes the next fault for the operation, applying rejections here.
+    async fn take_fault(&self, op: FaultyOp) -> EtlResult<Option<FaultAction>> {
+        match self.faults.next(op).await {
+            Some(FaultAction::Reject(injected)) => Err(injected.to_etl_error()),
+            fault => Ok(fault),
+        }
+    }
 }
 
 impl<D> Destination for TestDestinationWrapper<D>
@@ -234,11 +268,25 @@ where
         "wrapper"
     }
 
+    async fn startup(&self) -> EtlResult<()> {
+        let fault = self.take_fault(FaultyOp::Startup).await?;
+
+        let destination = {
+            let inner = self.inner.read().await;
+            inner.wrapped_destination.clone()
+        };
+        let result = destination.startup().await;
+
+        apply_response_fault(fault, result).await
+    }
+
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
+        let fault = self.take_fault(FaultyOp::DropTableForCopy).await?;
+
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
@@ -249,7 +297,7 @@ where
 
         // We send the result back before doing the internal checks for this utility, to
         // avoid checking before the apply loop received the result.
-        let result = pending_drop_result.await.into_result();
+        let result = apply_response_fault(fault, pending_drop_result.await.into_result()).await;
         let should_record_drop = result.is_ok();
         async_result.send(result);
 
@@ -285,6 +333,8 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
+        let fault = self.take_fault(FaultyOp::WriteTableRows).await?;
+
         let destination = {
             let mut inner = self.inner.write().await;
             inner.write_table_rows_called += 1;
@@ -298,7 +348,7 @@ where
 
         // We send the result back before doing the internal checks for this utility, to
         // avoid checking before the apply loop received the result.
-        let result = pending_flush_result.await.into_result();
+        let result = apply_response_fault(fault, pending_flush_result.await.into_result()).await;
         let should_record_table_rows = result.is_ok();
         async_result.send(result);
 
@@ -321,6 +371,8 @@ where
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
+
+        let fault = self.take_fault(FaultyOp::WriteEvents).await?;
 
         let destination = {
             let inner = self.inner.read().await;
@@ -351,7 +403,8 @@ where
             .spawn(async move {
                 // We send the result back before doing the internal checks for this utility, to
                 // avoid checking before the apply loop received the result.
-                let result = pending_flush_result.await.into_result();
+                let result =
+                    apply_response_fault(fault, pending_flush_result.await.into_result()).await;
                 let should_record_events = result.is_ok();
                 async_result.send(result);
 
@@ -370,6 +423,15 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
+        // Record the invocation before applying faults so tests can assert the
+        // pipeline called shutdown even when the shutdown itself fails.
+        {
+            let mut inner = self.inner.write().await;
+            inner.shutdown_called = true;
+        }
+
+        let fault = self.take_fault(FaultyOp::Shutdown).await?;
+
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
@@ -384,11 +446,7 @@ where
             errors.push(err);
         }
 
-        {
-            let mut inner = self.inner.write().await;
-            inner.shutdown_called = true;
-        }
-
-        if errors.is_empty() { Ok(()) } else { Err(errors.into()) }
+        let result = if errors.is_empty() { Ok(()) } else { Err(errors.into()) };
+        apply_response_fault(fault, result).await
     }
 }
