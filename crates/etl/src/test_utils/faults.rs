@@ -28,17 +28,19 @@ use crate::{
 /// Destination operation a fault applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FaultyOp {
+    /// The `startup` hook during pipeline startup.
     Startup,
+    /// The `drop_table_for_copy` call before a table copy restarts.
     DropTableForCopy,
+    /// The `write_table_rows` calls of the initial table copy.
     WriteTableRows,
+    /// The `write_events` calls of streaming replication.
     WriteEvents,
+    /// The `shutdown` call at pipeline shutdown.
     Shutdown,
 }
 
 /// Error details injected by a fault, materialized at fire time.
-///
-/// Stored as kind plus message because [`EtlError`] is not reusable across
-/// firings. The kind matters: retry policy derives from it.
 #[derive(Debug, Clone)]
 pub struct InjectedError {
     kind: ErrorKind,
@@ -225,17 +227,17 @@ mod tests {
 
     #[tokio::test]
     async fn injector_returns_none_without_scripted_faults() {
-        // --- GIVEN: an injector with no faults ---
+        // GIVEN: an injector with no faults
         let injector = FaultInjector::new();
 
-        // --- THEN: every operation passes through ---
+        // THEN: every operation passes through
         assert!(injector.next(FaultyOp::WriteEvents).await.is_none());
         assert!(injector.next(FaultyOp::Shutdown).await.is_none());
     }
 
     #[tokio::test]
     async fn injector_consumes_faults_in_fifo_order_per_operation() {
-        // --- GIVEN: two faults on write_events and one on shutdown ---
+        // GIVEN: two faults on write_events and one on shutdown
         let injector = FaultInjector::new();
         injector
             .inject(
@@ -256,64 +258,64 @@ mod tests {
             )
             .await;
 
-        // --- WHEN: write_events faults are consumed ---
+        // WHEN: write_events faults are consumed
         let first = injector.next(FaultyOp::WriteEvents).await;
         let second = injector.next(FaultyOp::WriteEvents).await;
         let third = injector.next(FaultyOp::WriteEvents).await;
 
-        // --- THEN: they fire in injection order, then the queue is empty ---
+        // THEN: they fire in injection order, then the queue is empty
         assert!(matches!(first, Some(FaultAction::FailDispatch(_))));
         assert!(matches!(second, Some(FaultAction::FailResult(_))));
         assert!(third.is_none());
 
-        // --- THEN: the shutdown queue is independent ---
+        // THEN: the shutdown queue is independent
         assert!(injector.next(FaultyOp::Shutdown).await.is_some());
     }
 
     #[tokio::test]
     async fn injected_error_carries_kind_and_message() {
-        // --- GIVEN: an injected error ---
+        // GIVEN: an injected error
         let injected = InjectedError::new(ErrorKind::DestinationTimeout, "boom");
 
-        // --- WHEN: it fires ---
+        // WHEN: it fires
         let err = injected.to_etl_error();
 
-        // --- THEN: the error carries the injected kind and message ---
+        // THEN: the error carries the injected kind and message
         assert_eq!(err.kind(), ErrorKind::DestinationTimeout);
         assert_eq!(err.detail(), Some("boom"));
     }
 
     #[tokio::test]
     async fn hold_gate_passes_captured_result_through_on_release_ok() {
-        // --- GIVEN: a held operation whose inner result is Ok(42) ---
+        // GIVEN: a held operation whose inner result is Ok(42)
         let (action, handle) = FaultAction::hold();
         let FaultAction::HoldResult(gate) = action else {
             panic!("hold() must produce a HoldResult action");
         };
         let held = tokio::spawn(gate.apply(Ok::<_, EtlError>(42)));
 
-        // --- WHEN: the test observes the hold and releases it ---
+        // WHEN: the test observes the hold and releases it
         handle.wait_reached().await;
         handle.release_ok();
 
-        // --- THEN: the captured inner result passes through unchanged ---
+        // THEN: the captured inner result passes through unchanged
         assert_eq!(held.await.unwrap().unwrap(), 42);
     }
 
     #[tokio::test]
     async fn hold_gate_replaces_result_on_release_err() {
-        // --- GIVEN: a held operation whose inner result is Ok ---
+        // GIVEN: a held operation whose inner result is Ok
         let (action, handle) = FaultAction::hold();
         let FaultAction::HoldResult(gate) = action else {
             panic!("hold() must produce a HoldResult action");
         };
         let held = tokio::spawn(gate.apply(Ok::<_, EtlError>(())));
 
-        // --- WHEN: the test releases it with an injected error ---
+        // WHEN: the test releases it with an injected error
         handle.wait_reached().await;
         handle.release_err(ErrorKind::DestinationConnectionFailed, "lost response");
 
-        // --- THEN: the injected error replaces the inner result ---
+        // THEN: the injected error replaces the inner result
         let err = held.await.unwrap().unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationConnectionFailed);
         assert_eq!(err.detail(), Some("lost response"));
@@ -321,21 +323,21 @@ mod tests {
 
     #[tokio::test]
     async fn apply_result_fault_passes_through_or_replaces_the_inner_result() {
-        // --- GIVEN: an inner result of Ok(7) ---
-        // --- WHEN: no fault is scripted ---
+        // GIVEN: an inner result of Ok(7)
+        // WHEN: no fault is scripted
         let ok = apply_result_fault(None, Ok::<_, EtlError>(7)).await;
 
-        // --- THEN: the inner result passes through unchanged ---
+        // THEN: the inner result passes through unchanged
         assert_eq!(ok.unwrap(), 7);
 
-        // --- WHEN: a result failure is scripted ---
+        // WHEN: a result failure is scripted
         let failed = apply_result_fault(
             Some(FaultAction::fail_result(ErrorKind::DestinationTimeout, "late boom")),
             Ok::<_, EtlError>(7),
         )
         .await;
 
-        // --- THEN: the injected error replaces the inner result ---
+        // THEN: the injected error replaces the inner result
         let err = failed.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationTimeout);
         assert_eq!(err.detail(), Some("late boom"));
@@ -343,17 +345,17 @@ mod tests {
 
     #[tokio::test]
     async fn hold_gate_fails_loudly_when_handle_dropped_without_release() {
-        // --- GIVEN: a hold whose handle is dropped without releasing ---
+        // GIVEN: a hold whose handle is dropped without releasing
         let (action, handle) = FaultAction::hold();
         let FaultAction::HoldResult(gate) = action else {
             panic!("hold() must produce a HoldResult action");
         };
         drop(handle);
 
-        // --- WHEN: the held operation applies ---
+        // WHEN: the held operation applies
         let result = gate.apply(Ok::<_, EtlError>(())).await;
 
-        // --- THEN: it fails instead of unblocking silently ---
+        // THEN: it fails instead of unblocking silently
         assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidState);
     }
 }

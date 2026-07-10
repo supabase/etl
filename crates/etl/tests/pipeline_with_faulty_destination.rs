@@ -19,7 +19,7 @@ use rand::random;
 async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
     init_test_tracing();
 
-    // --- GIVEN: a healthy pipeline whose destination fails on shutdown ---
+    // GIVEN: a healthy pipeline whose destination fails on shutdown
     let database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
@@ -52,11 +52,10 @@ async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
 
     users_ready.notified().await;
 
-    // --- WHEN: the pipeline shuts down ---
+    // WHEN: the pipeline shuts down
     let result = pipeline.shutdown_and_wait().await;
 
-    // --- THEN: the injected destination shutdown error is propagated and shutdown
-    // was still invoked ---
+    // THEN: the injected shutdown error is propagated and shutdown was invoked
     let err = result.unwrap_err();
     assert!(err.kinds().contains(&ErrorKind::DestinationQueryFailed));
     assert!(destination.shutdown_called().await);
@@ -66,7 +65,7 @@ async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
 async fn drop_table_for_copy_dispatch_failure_keeps_table_restartable_until_retry() {
     init_test_tracing();
 
-    // --- GIVEN: a pipeline that has copied a table to Ready ---
+    // GIVEN: a pipeline that has copied a table to Ready
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = database_schema.users_schema().id;
@@ -93,8 +92,7 @@ async fn drop_table_for_copy_dispatch_failure_keeps_table_restartable_until_retr
 
     users_ready.notified().await;
 
-    // --- WHEN: a resync starts and the destination refuses the drop at dispatch
-    // ---
+    // WHEN: a resync starts and the destination refuses the drop at dispatch
     destination
         .inject_fault(
             FaultyOp::DropTableForCopy,
@@ -111,7 +109,7 @@ async fn drop_table_for_copy_dispatch_failure_keeps_table_restartable_until_retr
 
     users_errored.notified().await;
 
-    // --- THEN: the table errors with a timed retry and nothing was torn down ---
+    // THEN: the table errors with a timed retry and nothing was torn down
     let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
     assert!(matches!(
         table_state,
@@ -124,7 +122,7 @@ async fn drop_table_for_copy_dispatch_failure_keeps_table_restartable_until_retr
     // untouched.
     assert_eq!(memory_destination.table_rows().await.get(&table_id).unwrap().len(), initial_rows);
 
-    // --- THEN: the timed retry drops and recopies the table cleanly ---
+    // THEN: the timed retry drops and recopies the table cleanly
     let users_ready_again = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     users_ready_again.notified().await;
@@ -140,7 +138,7 @@ async fn drop_table_for_copy_dispatch_failure_keeps_table_restartable_until_retr
 async fn drop_table_for_copy_result_failure_keeps_table_restartable_until_retry() {
     init_test_tracing();
 
-    // --- GIVEN: a pipeline that has copied a table to Ready ---
+    // GIVEN: a pipeline that has copied a table to Ready
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = database_schema.users_schema().id;
@@ -167,8 +165,8 @@ async fn drop_table_for_copy_result_failure_keeps_table_restartable_until_retry(
 
     users_ready.notified().await;
 
-    // --- WHEN: a resync starts and the drop result reports failure after the inner
-    // destination applied it ---
+    // WHEN: a resync starts and the drop result fails after the inner destination
+    // applied it
     destination
         .inject_fault(
             FaultyOp::DropTableForCopy,
@@ -185,8 +183,7 @@ async fn drop_table_for_copy_result_failure_keeps_table_restartable_until_retry(
 
     users_errored.notified().await;
 
-    // --- THEN: the table errors with a timed retry and ETL state was not cleared
-    // ---
+    // THEN: the table errors with a timed retry and ETL state was not cleared
     let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
     assert!(matches!(
         table_state,
@@ -194,12 +191,12 @@ async fn drop_table_for_copy_result_failure_keeps_table_restartable_until_retry(
     ));
     assert!(store.get_latest_table_schemas().await.contains_key(&table_id));
 
-    // Lost-response semantics: the inner destination applied the drop, but the
-    // apply loop observed a failure, so the wrapper acknowledged nothing.
+    // The inner destination applied the drop, but the apply loop observed a
+    // failure.
     assert!(!destination.was_table_dropped_for_copy(table_id).await);
     assert!(!memory_destination.table_rows().await.contains_key(&table_id));
 
-    // --- THEN: the timed retry replays the drop and recopies the table cleanly ---
+    // THEN: the timed retry replays the drop and recopies the table cleanly
     let users_ready_again = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     users_ready_again.notified().await;
