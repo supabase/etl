@@ -140,7 +140,6 @@ struct RotationStats {
     unchanged_rows: u64,
     rotated_rows: u64,
     rows_with_outdated_encrypted_values: u64,
-    rows_with_legacy_plaintext_values: u64,
     concurrently_changed_rows: u64,
     failed_rows: u64,
     failed_row_ids: Vec<i64>,
@@ -169,10 +168,6 @@ impl RotationStats {
         if reasons.outdated_encrypted_values {
             self.rows_with_outdated_encrypted_values += 1;
         }
-
-        if reasons.legacy_plaintext_values {
-            self.rows_with_legacy_plaintext_values += 1;
-        }
     }
 
     fn print(&self, label: &str, dry_run: bool, print_row_ids: bool) {
@@ -186,7 +181,6 @@ impl RotationStats {
             "  rows with outdated encrypted values: {}",
             self.rows_with_outdated_encrypted_values
         );
-        println!("  rows with legacy plaintext values: {}", self.rows_with_legacy_plaintext_values);
         println!("  failed rows: {}", self.failed_rows);
 
         if !dry_run {
@@ -219,7 +213,6 @@ impl std::ops::AddAssign for RotationStats {
         self.unchanged_rows += rhs.unchanged_rows;
         self.rotated_rows += rhs.rotated_rows;
         self.rows_with_outdated_encrypted_values += rhs.rows_with_outdated_encrypted_values;
-        self.rows_with_legacy_plaintext_values += rhs.rows_with_legacy_plaintext_values;
         self.concurrently_changed_rows += rhs.concurrently_changed_rows;
         self.failed_rows += rhs.failed_rows;
         self.failed_row_ids.extend(rhs.failed_row_ids);
@@ -250,12 +243,11 @@ fn format_row_ids(row_ids: &[i64]) -> String {
 #[derive(Clone, Copy, Default)]
 struct RotationReasons {
     outdated_encrypted_values: bool,
-    legacy_plaintext_values: bool,
 }
 
 impl RotationReasons {
     fn needs_rotation(self) -> bool {
-        self.outdated_encrypted_values || self.legacy_plaintext_values
+        self.outdated_encrypted_values
     }
 }
 
@@ -297,7 +289,7 @@ async fn rotate_sources(
             let key_ids = encrypted_value_key_ids(&record.config);
             stats.record_key_ids(&key_ids);
 
-            let reasons = source_config_rotation_reasons(&record.config, latest_key_id);
+            let reasons = config_rotation_reasons(&record.config, latest_key_id);
             if !reasons.needs_rotation() {
                 stats.unchanged_rows += 1;
                 continue;
@@ -382,7 +374,7 @@ async fn rotate_destinations(
             let key_ids = encrypted_value_key_ids(&record.config);
             stats.record_key_ids(&key_ids);
 
-            let reasons = destination_config_rotation_reasons(&record.config, latest_key_id);
+            let reasons = config_rotation_reasons(&record.config, latest_key_id);
             if !reasons.needs_rotation() {
                 stats.unchanged_rows += 1;
                 continue;
@@ -464,27 +456,12 @@ fn rotate_destination_config(
     .map_err(Into::into)
 }
 
-fn source_config_rotation_reasons(config: &Value, latest_key_id: u32) -> RotationReasons {
+fn config_rotation_reasons(config: &Value, latest_key_id: u32) -> RotationReasons {
     RotationReasons {
         outdated_encrypted_values: encrypted_value_key_ids(config)
             .iter()
             .any(|key_id| *key_id != latest_key_id),
-        legacy_plaintext_values: false,
     }
-}
-
-fn destination_config_rotation_reasons(config: &Value, latest_key_id: u32) -> RotationReasons {
-    let mut reasons = source_config_rotation_reasons(config, latest_key_id);
-    reasons.legacy_plaintext_values = has_legacy_ducklake_catalog_url(config);
-    reasons
-}
-
-fn has_legacy_ducklake_catalog_url(config: &Value) -> bool {
-    config
-        .get("ducklake")
-        .and_then(Value::as_object)
-        .and_then(|ducklake| ducklake.get("catalog_url"))
-        .is_some_and(Value::is_string)
 }
 
 fn encrypted_value_key_ids(value: &Value) -> Vec<u32> {
@@ -561,9 +538,8 @@ mod tests {
     use serde_json::json;
 
     use crate::commands::rotate_encryption_key::{
-        RotationReasons, RotationStats, destination_config_rotation_reasons,
-        encrypted_value_key_ids, format_key_id_counts, format_row_ids, rotate_destination_config,
-        source_config_rotation_reasons,
+        RotationReasons, RotationStats, config_rotation_reasons, format_key_id_counts,
+        format_row_ids, rotate_destination_config,
     };
 
     #[test]
@@ -583,7 +559,7 @@ mod tests {
         let mut stats = RotationStats::default();
 
         stats.record_key_ids(&[2, 1, 2]);
-        stats.record_rotation_reasons(source_config_rotation_reasons(
+        stats.record_rotation_reasons(config_rotation_reasons(
             &json!({
                 "password": {
                     "id": 1,
@@ -597,7 +573,6 @@ mod tests {
         stats.record_concurrently_changed(42);
 
         assert_eq!(stats.rows_with_outdated_encrypted_values, 1);
-        assert_eq!(stats.rows_with_legacy_plaintext_values, 0);
         assert_eq!(stats.failed_rows, 1);
         assert_eq!(stats.failed_row_ids, vec![41]);
         assert_eq!(stats.concurrently_changed_rows, 1);
@@ -614,19 +589,13 @@ mod tests {
             ..RotationStats::default()
         };
         total.record_key_ids(&[1]);
-        total.record_rotation_reasons(RotationReasons {
-            outdated_encrypted_values: true,
-            legacy_plaintext_values: false,
-        });
+        total.record_rotation_reasons(RotationReasons { outdated_encrypted_values: true });
         total.record_failure(10);
 
         let mut destinations =
             RotationStats { scanned_rows: 4, rotated_rows: 2, ..RotationStats::default() };
         destinations.record_key_ids(&[1, 2]);
-        destinations.record_rotation_reasons(RotationReasons {
-            outdated_encrypted_values: true,
-            legacy_plaintext_values: true,
-        });
+        destinations.record_rotation_reasons(RotationReasons { outdated_encrypted_values: true });
         destinations.record_failure(20);
         destinations.record_concurrently_changed(21);
 
@@ -636,7 +605,6 @@ mod tests {
         assert_eq!(total.unchanged_rows, 1);
         assert_eq!(total.rotated_rows, 3);
         assert_eq!(total.rows_with_outdated_encrypted_values, 2);
-        assert_eq!(total.rows_with_legacy_plaintext_values, 1);
         assert_eq!(total.failed_rows, 2);
         assert_eq!(total.failed_row_ids, vec![10, 20]);
         assert_eq!(total.concurrently_changed_rows, 1);
@@ -658,49 +626,29 @@ mod tests {
             }
         });
 
-        let old_key_reasons = source_config_rotation_reasons(&config, 2);
+        let old_key_reasons = config_rotation_reasons(&config, 2);
         assert!(old_key_reasons.needs_rotation());
         assert!(old_key_reasons.outdated_encrypted_values);
-        assert!(!old_key_reasons.legacy_plaintext_values);
 
-        assert!(!source_config_rotation_reasons(&config, 1).needs_rotation());
+        assert!(!config_rotation_reasons(&config, 1).needs_rotation());
     }
 
     #[test]
-    fn destination_config_rotation_reasons_detects_legacy_ducklake_catalog_url() {
-        let config = json!({
-            "ducklake": {
-                "catalog_url": "legacy-ducklake-catalog-url",
-                "data_path": "s3://bucket/path",
-                "pool_size": 8
-            }
-        });
-
-        let reasons = destination_config_rotation_reasons(&config, 1);
-
-        assert!(reasons.needs_rotation());
-        assert!(!reasons.outdated_encrypted_values);
-        assert!(reasons.legacy_plaintext_values);
-    }
-
-    #[test]
-    fn rotate_destination_config_encrypts_legacy_ducklake_catalog_url_with_latest_key() {
+    fn rotate_destination_config_rejects_plaintext_ducklake_catalog_url() {
         let keyring = EncryptionKeyring::from(EncryptionKey {
-            id: 2,
+            id: 1,
             key: generate_random_key::<32>().unwrap(),
         });
         let config = json!({
             "ducklake": {
-                "catalog_url": "legacy-ducklake-catalog-url",
-                "data_path": "s3://bucket/path",
+                "catalog_url": "plaintext-catalog-url",
+                "data_path": "s3://example-bucket/path",
                 "pool_size": 8
             }
         });
 
-        let rotated = rotate_destination_config(config, &keyring).unwrap();
+        let error = rotate_destination_config(config, &keyring).unwrap_err();
 
-        assert_eq!(encrypted_value_key_ids(&rotated), vec![2]);
-        assert!(!destination_config_rotation_reasons(&rotated, 2).needs_rotation());
-        assert!(rotated["ducklake"]["catalog_url"].is_object());
+        assert!(error.to_string().contains("expected struct EncryptedValue"));
     }
 }

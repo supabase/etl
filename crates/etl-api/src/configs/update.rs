@@ -1,13 +1,17 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use utoipa::ToSchema;
+use utoipa::{
+    __dev::ComposeSchema,
+    ToSchema,
+    openapi::{RefOr, schema::Schema},
+};
 
 /// Represents an update field where the API distinguishes an omitted field
 /// from an explicit JSON `null`.
 ///
 /// Omitted fields preserve the stored value, explicit `null` clears or resets
 /// it to the stored default, and non-null values replace it.
-#[derive(Debug, Clone, Default, PartialEq, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum UpdateField<T> {
     /// Preserve the stored value.
     #[default]
@@ -16,6 +20,24 @@ pub enum UpdateField<T> {
     Clear,
     /// Replace the stored value.
     Set(T),
+}
+
+impl<T> ComposeSchema for UpdateField<T>
+where
+    T: ComposeSchema,
+{
+    fn compose(schemas: Vec<RefOr<Schema>>) -> RefOr<Schema> {
+        <Option<T>>::compose(schemas)
+    }
+}
+
+impl<T> ToSchema for UpdateField<T>
+where
+    T: ComposeSchema + ToSchema,
+{
+    fn schemas(schemas: &mut Vec<(String, RefOr<Schema>)>) {
+        T::schemas(schemas);
+    }
 }
 
 impl<T> UpdateField<T> {
@@ -110,6 +132,8 @@ where
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
+    use serde_json::json;
+    use utoipa::{OpenApi, ToSchema};
 
     use super::*;
 
@@ -119,25 +143,42 @@ mod tests {
         value: UpdateField<String>,
     }
 
+    #[allow(dead_code)]
+    #[derive(ToSchema)]
+    struct PatchSchema {
+        value: UpdateField<String>,
+    }
+
+    #[derive(OpenApi)]
+    #[openapi(components(schemas(PatchSchema)))]
+    struct ApiDoc;
+
     #[test]
     fn update_field_deserializes_missing_as_preserve() {
-        let patch: Patch = serde_json::from_value(serde_json::json!({})).unwrap();
+        let patch: Patch = serde_json::from_value(json!({})).unwrap();
 
         assert_eq!(patch.value, UpdateField::Preserve);
     }
 
     #[test]
     fn update_field_deserializes_null_as_clear() {
-        let patch: Patch = serde_json::from_value(serde_json::json!({ "value": null })).unwrap();
+        let patch: Patch = serde_json::from_value(json!({ "value": null })).unwrap();
 
         assert_eq!(patch.value, UpdateField::Clear);
     }
 
     #[test]
     fn update_field_deserializes_value_as_set() {
-        let patch: Patch =
-            serde_json::from_value(serde_json::json!({ "value": "updated" })).unwrap();
+        let patch: Patch = serde_json::from_value(json!({ "value": "updated" })).unwrap();
 
         assert_eq!(patch.value, UpdateField::Set("updated".to_owned()));
+    }
+
+    #[test]
+    fn update_field_schema_matches_wire_format() {
+        let openapi = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let schema = &openapi["components"]["schemas"]["UpdateField_String"];
+
+        assert_eq!(schema, &json!({ "oneOf": [{ "type": "null" }, { "type": "string" }] }));
     }
 }
