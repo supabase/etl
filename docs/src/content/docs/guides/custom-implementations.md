@@ -327,9 +327,9 @@ Create `src/http_destination.rs`. A destination implements the `Destination` tra
 
 There are also optional `startup()` and `shutdown()` methods with default no-op implementations. Override `startup()` if your destination needs to reconcile active durable ETL metadata with physical destination objects after a restart. Override `shutdown()` if your destination needs cleanup when the pipeline shuts down.
 
-ETL clears its own schema versions, destination metadata, and table-sync progress **only after `drop_table_for_copy()` succeeds**. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. If the object is already gone, return success.
+ETL clears its own schema versions, destination metadata, and table-sync progress **only after `drop_table_for_copy()` succeeds**. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. Before returning success, also drain or invalidate writes accepted by an earlier copy attempt so stale work cannot mutate the recreated object. If the object is already gone and no stale write can recreate or mutate it, return success.
 
-All write-like methods must complete their async result handle. Treat the method return value as the place for immediate dispatch or setup failures, and send the final write result through `async_result`. Immediate streaming destinations should send `DestinationWriteStatus::Durable` after a successful `write_events()` call. ETL is **at least once**, so make row and event writes idempotent. `write_events()` preserves per-table ordering, but batches can include multiple tables and transaction markers are not a complete all-tables boundary during initial copy and catch-up.
+All write-like methods must complete their async result handle. Treat the method return value as the place for immediate dispatch or setup failures, and send the final write result through `async_result`. Immediate destinations should send `DestinationWriteStatus::Durable` after successful `write_table_rows()` and `write_events()` calls. A copy destination that returns `DestinationWriteStatus::Accepted` must take ownership of the rows, bound its accepted-but-not-durable backlog, and delay `Accepted` until it has capacity. It must later treat an empty `write_table_rows()` call as a same-table durability barrier: return `Durable` only when every row accepted during that copy attempt is durable. ETL is **at least once**, so make row and event writes idempotent. `write_events()` preserves per-table ordering, but batches can include multiple tables and transaction markers are not a complete all-tables boundary during initial copy and catch-up.
 
 ```rust
 use reqwest::Client;
@@ -403,10 +403,10 @@ impl Destination for HttpDestination {
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         if rows.is_empty() {
-            async_result.send(Ok(()));
+            async_result.send(Ok(DestinationWriteStatus::Durable));
             return Ok(());
         }
         let table_name = replicated_table_schema.name().to_string();
@@ -419,7 +419,10 @@ impl Destination for HttpDestination {
             }).collect::<Vec<_>>()
         });
 
-        let result = self.post("rows", payload).await;
+        let result = self
+            .post("rows", payload)
+            .await
+            .map(|_| DestinationWriteStatus::Durable);
         async_result.send(result);
         Ok(())
     }
