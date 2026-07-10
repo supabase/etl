@@ -302,8 +302,9 @@ where
                         *this.reset_timer = true;
                         *this.current_batch_bytes = 0;
 
-                        // If we are paused for memory, we don't want to reallocate a batch of the same
-                        // size as before, to avoid increasing memory usage even more.
+                        // If we are paused for memory, we don't want to reallocate a batch of the
+                        // same size as before, to avoid increasing memory
+                        // usage even more.
                         return Poll::Ready(Some(Ok(std::mem::take(this.items))));
                     }
 
