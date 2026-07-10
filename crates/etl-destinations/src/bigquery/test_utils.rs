@@ -249,7 +249,10 @@ impl BigQueryDatabase {
     ///
     /// Returns all rows from the table in the test dataset, polling until
     /// BigQuery surfaces the streamed data or a short retry budget is
-    /// exhausted.
+    /// exhausted. A 404 is retried within the same budget because a table
+    /// queried right after being dropped and recreated can return a stale
+    /// NOT_FOUND while BigQuery metadata propagates; a table that stays
+    /// missing for the whole budget yields `None`.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
         let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
         let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
@@ -265,7 +268,7 @@ impl BigQueryDatabase {
             .await
             {
                 Ok(response) => response.rows,
-                Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => None,
                 Err(err) => panic!("Failed to query BigQuery table: {err:?}"),
             };
 
