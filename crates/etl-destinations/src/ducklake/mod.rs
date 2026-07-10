@@ -6,6 +6,7 @@ mod encoding;
 mod external_maintenance;
 mod inline_size;
 mod metrics;
+mod replay_epoch;
 mod schema;
 mod sql;
 
