@@ -137,10 +137,9 @@ pub async fn update_destination(
     let stored_config = decrypt_and_deserialize_from_value::<
         EncryptedStoredDestinationConfig,
         StoredDestinationConfig,
-    >(stored_config_value.clone(), encryption_key)?;
-    let merged_config = config.clone().merge_into_stored(stored_config)?;
-    let mut serialized_config = encrypt_and_serialize(merged_config, encryption_key)?;
-    config.restore_preserved_fields(&stored_config_value, &mut serialized_config);
+    >(stored_config_value, encryption_key)?;
+    let merged_config = config.merge_into_stored(stored_config)?;
+    let serialized_config = encrypt_and_serialize(merged_config, encryption_key)?;
 
     let record = sqlx::query!(
         r#"

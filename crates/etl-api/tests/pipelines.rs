@@ -15,7 +15,9 @@ use etl_api::{
     },
     startup::get_connection_pool,
 };
-use etl_config::shared::{BatchConfig, PgConnectionConfig};
+use etl_config::shared::{
+    BatchConfig, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig,
+};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
@@ -510,7 +512,7 @@ async fn pipeline_config_update_preserves_omitted_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_config_update_preserves_absent_stored_default_fields() {
+async fn pipeline_config_update_materializes_stored_defaults() {
     init_test_tracing();
     let (app, tenant_id, source_id, destination_id, pipeline_id) = setup_basic_pipeline().await;
     let pool = get_connection_pool(app.database_config());
@@ -552,11 +554,23 @@ async fn pipeline_config_update_preserves_absent_stored_default_fields() {
     .expect("failed to read stored pipeline config");
     assert_eq!(stored_config["publication_name"], "renamed_publication");
     assert_eq!(stored_config["batch"]["max_fill_ms"], 42);
-    assert!(stored_config["batch"].get("memory_budget_ratio").is_none());
-    assert!(stored_config["batch"].get("max_bytes").is_none());
-    assert!(stored_config.get("table_error_retry_delay_ms").is_none());
-    assert!(stored_config.get("max_table_sync_workers").is_none());
-    assert!(stored_config.get("memory_backpressure").is_none());
+    assert_eq!(
+        stored_config["batch"]["memory_budget_ratio"],
+        BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO
+    );
+    assert_eq!(stored_config["batch"]["max_bytes"], BatchConfig::DEFAULT_MAX_BYTES);
+    assert_eq!(
+        stored_config["table_error_retry_delay_ms"],
+        PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
+    );
+    assert_eq!(
+        stored_config["max_table_sync_workers"],
+        PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
+    );
+    assert_eq!(
+        stored_config["memory_backpressure"]["activate_threshold"],
+        MemoryBackpressureConfig::default().activate_threshold
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -564,12 +578,27 @@ async fn pipeline_config_update_clears_optional_fields_and_resets_default_fields
     init_test_tracing();
     let (app, tenant_id, source_id, destination_id, pipeline_id) = setup_basic_pipeline().await;
 
+    let set_request = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig {
+            memory_backpressure: UpdateField::Set(MemoryBackpressureConfig {
+                activate_threshold: 0.95,
+                resume_threshold: 0.9,
+            }),
+            ..UpdateApiPipelineConfig::default()
+        },
+    };
+    let response = app.update_pipeline(&tenant_id, pipeline_id, &set_request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
     let update_request = UpdatePipelineRequest {
         source_id,
         destination_id,
         config: UpdateApiPipelineConfig {
             log_level: UpdateField::Clear,
             batch: UpdateField::Clear,
+            memory_backpressure: UpdateField::Clear,
             ..UpdateApiPipelineConfig::default()
         },
     };
@@ -583,6 +612,7 @@ async fn pipeline_config_update_clears_optional_fields_and_resets_default_fields
     let batch = response.config.batch.expect("batch config should be present");
     assert_eq!(batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
     assert_eq!(batch.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
+    assert_eq!(response.config.memory_backpressure, Some(MemoryBackpressureConfig::default()));
 }
 
 #[tokio::test(flavor = "multi_thread")]

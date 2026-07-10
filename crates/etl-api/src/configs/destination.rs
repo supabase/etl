@@ -266,6 +266,13 @@ where
 }
 
 /// Patch-style destination configuration used by update endpoints.
+///
+/// Omission preserves values only for fields explicitly modeled as
+/// [`UpdateField`]. A structured value contained by one of those fields is an
+/// atomic replacement: omitted members use that value type's deserialization
+/// defaults rather than members from the stored configuration. A nested config
+/// is patchable member by member only when it has a dedicated update type, such
+/// as [`UpdateApiIcebergConfig`].
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateApiDestinationConfig {
@@ -570,23 +577,17 @@ impl UpdateApiDestinationConfig {
                     connection_pool_size: stored_connection_pool_size,
                 },
             ) => Ok(StoredDestinationConfig::BigQuery {
-                project_id: apply_required_field(
-                    project_id,
+                project_id: project_id.apply_to_required(
                     stored_project_id,
-                    "BigQuery",
-                    "project_id",
+                    required_field_cleared("BigQuery", "project_id"),
                 )?,
-                dataset_id: apply_required_field(
-                    dataset_id,
+                dataset_id: dataset_id.apply_to_required(
                     stored_dataset_id,
-                    "BigQuery",
-                    "dataset_id",
+                    required_field_cleared("BigQuery", "dataset_id"),
                 )?,
-                service_account_key: apply_required_secret(
-                    service_account_key,
+                service_account_key: service_account_key.apply_to_required(
                     stored_key,
-                    "BigQuery",
-                    "service_account_key",
+                    required_field_cleared("BigQuery", "service_account_key"),
                 )?,
                 max_staleness_mins: max_staleness_mins.apply_to_option(stored_max_staleness_mins),
                 connection_pool_size: connection_pool_size
@@ -602,14 +603,14 @@ impl UpdateApiDestinationConfig {
                     engine: stored_engine,
                 },
             ) => Ok(StoredDestinationConfig::ClickHouse {
-                url: apply_required_field(url, stored_url, "ClickHouse", "url")?,
-                user: apply_required_field(user, stored_user, "ClickHouse", "user")?,
+                url: url
+                    .apply_to_required(stored_url, required_field_cleared("ClickHouse", "url"))?,
+                user: user
+                    .apply_to_required(stored_user, required_field_cleared("ClickHouse", "user"))?,
                 password: password.apply_to_option(stored_password),
-                database: apply_required_field(
-                    database,
+                database: database.apply_to_required(
                     stored_database,
-                    "ClickHouse",
-                    "database",
+                    required_field_cleared("ClickHouse", "database"),
                 )?,
                 engine: engine.apply_to_value(stored_engine, ClickHouseEngine::default),
             }),
@@ -651,17 +652,13 @@ impl UpdateApiDestinationConfig {
                     maintenance_mode: stored_maintenance_mode,
                 },
             ) => Ok(StoredDestinationConfig::Ducklake {
-                catalog_url: apply_required_secret(
-                    catalog_url,
+                catalog_url: catalog_url.apply_to_required(
                     stored_catalog_url,
-                    "DuckLake",
-                    "catalog_url",
+                    required_field_cleared("DuckLake", "catalog_url"),
                 )?,
-                data_path: apply_required_field(
-                    data_path,
+                data_path: data_path.apply_to_required(
                     stored_data_path,
-                    "DuckLake",
-                    "data_path",
+                    required_field_cleared("DuckLake", "data_path"),
                 )?,
                 pool_size: pool_size.apply_to_value(stored_pool_size, default_ducklake_pool_size),
                 s3_access_key_id: s3_access_key_id.apply_to_option(stored_s3_access_key_id),
@@ -699,285 +696,29 @@ impl UpdateApiDestinationConfig {
                     role: stored_role,
                 },
             ) => Ok(StoredDestinationConfig::Snowflake {
-                account_id: apply_required_field(
-                    account_id,
+                account_id: account_id.apply_to_required(
                     stored_account_id,
-                    "Snowflake",
-                    "account_id",
+                    required_field_cleared("Snowflake", "account_id"),
                 )?,
-                user: apply_required_field(user, stored_user, "Snowflake", "user")?,
-                private_key: apply_required_secret(
-                    private_key,
+                user: user
+                    .apply_to_required(stored_user, required_field_cleared("Snowflake", "user"))?,
+                private_key: private_key.apply_to_required(
                     stored_private_key,
-                    "Snowflake",
-                    "private_key",
+                    required_field_cleared("Snowflake", "private_key"),
                 )?,
                 private_key_passphrase: private_key_passphrase
                     .apply_to_option(stored_private_key_passphrase),
-                database: apply_required_field(database, stored_database, "Snowflake", "database")?,
-                schema: apply_required_field(schema, stored_schema, "Snowflake", "schema")?,
+                database: database.apply_to_required(
+                    stored_database,
+                    required_field_cleared("Snowflake", "database"),
+                )?,
+                schema: schema.apply_to_required(
+                    stored_schema,
+                    required_field_cleared("Snowflake", "schema"),
+                )?,
                 role: role.apply_to_option(stored_role),
             }),
             (config, _) => config.into_stored_requiring_secrets(),
-        }
-    }
-
-    /// Restores fields that were preserved by this update from raw storage.
-    pub(crate) fn restore_preserved_fields(
-        &self,
-        stored_config: &serde_json::Value,
-        updated_config: &mut serde_json::Value,
-    ) {
-        match self {
-            Self::BigQuery {
-                project_id,
-                dataset_id,
-                service_account_key,
-                max_staleness_mins,
-                connection_pool_size,
-            } => {
-                restore_preserved_destination_field(
-                    project_id,
-                    stored_config,
-                    updated_config,
-                    "big_query",
-                    "project_id",
-                );
-                restore_preserved_destination_field(
-                    dataset_id,
-                    stored_config,
-                    updated_config,
-                    "big_query",
-                    "dataset_id",
-                );
-                restore_preserved_destination_field(
-                    service_account_key,
-                    stored_config,
-                    updated_config,
-                    "big_query",
-                    "service_account_key",
-                );
-                restore_preserved_destination_field(
-                    max_staleness_mins,
-                    stored_config,
-                    updated_config,
-                    "big_query",
-                    "max_staleness_mins",
-                );
-                restore_preserved_destination_field(
-                    connection_pool_size,
-                    stored_config,
-                    updated_config,
-                    "big_query",
-                    "connection_pool_size",
-                );
-            }
-            Self::ClickHouse { url, user, password, database, engine } => {
-                restore_preserved_destination_field(
-                    url,
-                    stored_config,
-                    updated_config,
-                    "click_house",
-                    "url",
-                );
-                restore_preserved_destination_field(
-                    user,
-                    stored_config,
-                    updated_config,
-                    "click_house",
-                    "user",
-                );
-                restore_preserved_destination_field(
-                    password,
-                    stored_config,
-                    updated_config,
-                    "click_house",
-                    "password",
-                );
-                restore_preserved_destination_field(
-                    database,
-                    stored_config,
-                    updated_config,
-                    "click_house",
-                    "database",
-                );
-                restore_preserved_destination_field(
-                    engine,
-                    stored_config,
-                    updated_config,
-                    "click_house",
-                    "engine",
-                );
-            }
-            Self::Ducklake {
-                catalog_url,
-                data_path,
-                pool_size,
-                s3_access_key_id,
-                s3_secret_access_key,
-                s3_region,
-                s3_endpoint,
-                s3_url_style,
-                s3_use_ssl,
-                metadata_schema,
-                maintenance_target_file_size,
-                expire_snapshots_older_than,
-                maintenance_mode,
-            } => {
-                restore_preserved_destination_field(
-                    catalog_url,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "catalog_url",
-                );
-                restore_preserved_destination_field(
-                    data_path,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "data_path",
-                );
-                restore_preserved_destination_field(
-                    pool_size,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "pool_size",
-                );
-                restore_preserved_destination_field(
-                    s3_access_key_id,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "s3_access_key_id",
-                );
-                restore_preserved_destination_field(
-                    s3_secret_access_key,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "s3_secret_access_key",
-                );
-                restore_preserved_destination_field(
-                    s3_region,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "s3_region",
-                );
-                restore_preserved_destination_field(
-                    s3_endpoint,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "s3_endpoint",
-                );
-                restore_preserved_destination_field(
-                    s3_url_style,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "s3_url_style",
-                );
-                restore_preserved_destination_field(
-                    s3_use_ssl,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "s3_use_ssl",
-                );
-                restore_preserved_destination_field(
-                    metadata_schema,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "metadata_schema",
-                );
-                restore_preserved_destination_field(
-                    maintenance_target_file_size,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "maintenance_target_file_size",
-                );
-                restore_preserved_destination_field(
-                    expire_snapshots_older_than,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "expire_snapshots_older_than",
-                );
-                restore_preserved_destination_field(
-                    maintenance_mode,
-                    stored_config,
-                    updated_config,
-                    "ducklake",
-                    "maintenance_mode",
-                );
-            }
-            Self::Iceberg { config } => {
-                config.restore_preserved_fields(stored_config, updated_config);
-            }
-            Self::Snowflake {
-                account_id,
-                user,
-                private_key,
-                private_key_passphrase,
-                database,
-                schema,
-                role,
-            } => {
-                restore_preserved_destination_field(
-                    account_id,
-                    stored_config,
-                    updated_config,
-                    "snowflake",
-                    "account_id",
-                );
-                restore_preserved_destination_field(
-                    user,
-                    stored_config,
-                    updated_config,
-                    "snowflake",
-                    "user",
-                );
-                restore_preserved_destination_field(
-                    private_key,
-                    stored_config,
-                    updated_config,
-                    "snowflake",
-                    "private_key",
-                );
-                restore_preserved_destination_field(
-                    private_key_passphrase,
-                    stored_config,
-                    updated_config,
-                    "snowflake",
-                    "private_key_passphrase",
-                );
-                restore_preserved_destination_field(
-                    database,
-                    stored_config,
-                    updated_config,
-                    "snowflake",
-                    "database",
-                );
-                restore_preserved_destination_field(
-                    schema,
-                    stored_config,
-                    updated_config,
-                    "snowflake",
-                    "schema",
-                );
-                restore_preserved_destination_field(
-                    role,
-                    stored_config,
-                    updated_config,
-                    "snowflake",
-                    "role",
-                );
-            }
         }
     }
 
@@ -994,23 +735,37 @@ impl UpdateApiDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size,
             } => Ok(StoredDestinationConfig::BigQuery {
-                project_id: require_field(project_id, "BigQuery", "project_id")?,
-                dataset_id: require_field(dataset_id, "BigQuery", "dataset_id")?,
-                service_account_key: require_secret_update(
-                    service_account_key,
-                    "BigQuery",
-                    "service_account_key",
+                project_id: project_id.into_required(
+                    missing_required_field("BigQuery", "project_id"),
+                    required_field_cleared("BigQuery", "project_id"),
                 )?,
-                max_staleness_mins: max_staleness_mins.into_option(),
+                dataset_id: dataset_id.into_required(
+                    missing_required_field("BigQuery", "dataset_id"),
+                    required_field_cleared("BigQuery", "dataset_id"),
+                )?,
+                service_account_key: service_account_key.into_required(
+                    missing_required_secret("BigQuery", "service_account_key"),
+                    required_field_cleared("BigQuery", "service_account_key"),
+                )?,
+                max_staleness_mins: max_staleness_mins.apply_to_option(None),
                 connection_pool_size: connection_pool_size
                     .apply_to_value(default_connection_pool_size(), default_connection_pool_size),
             }),
             Self::ClickHouse { url, user, password, database, engine } => {
                 Ok(StoredDestinationConfig::ClickHouse {
-                    url: require_field(url, "ClickHouse", "url")?,
-                    user: require_field(user, "ClickHouse", "user")?,
-                    password: password.into_option(),
-                    database: require_field(database, "ClickHouse", "database")?,
+                    url: url.into_required(
+                        missing_required_field("ClickHouse", "url"),
+                        required_field_cleared("ClickHouse", "url"),
+                    )?,
+                    user: user.into_required(
+                        missing_required_field("ClickHouse", "user"),
+                        required_field_cleared("ClickHouse", "user"),
+                    )?,
+                    password: password.apply_to_option(None),
+                    database: database.into_required(
+                        missing_required_field("ClickHouse", "database"),
+                        required_field_cleared("ClickHouse", "database"),
+                    )?,
                     engine: engine
                         .apply_to_value(ClickHouseEngine::default(), ClickHouseEngine::default),
                 })
@@ -1033,19 +788,25 @@ impl UpdateApiDestinationConfig {
                 expire_snapshots_older_than,
                 maintenance_mode,
             } => Ok(StoredDestinationConfig::Ducklake {
-                catalog_url: require_secret_update(catalog_url, "DuckLake", "catalog_url")?,
-                data_path: require_field(data_path, "DuckLake", "data_path")?,
+                catalog_url: catalog_url.into_required(
+                    missing_required_secret("DuckLake", "catalog_url"),
+                    required_field_cleared("DuckLake", "catalog_url"),
+                )?,
+                data_path: data_path.into_required(
+                    missing_required_field("DuckLake", "data_path"),
+                    required_field_cleared("DuckLake", "data_path"),
+                )?,
                 pool_size: pool_size
                     .apply_to_value(default_ducklake_pool_size(), default_ducklake_pool_size),
-                s3_access_key_id: s3_access_key_id.into_option(),
-                s3_secret_access_key: s3_secret_access_key.into_option(),
-                s3_region: s3_region.into_option(),
-                s3_endpoint: s3_endpoint.into_option(),
-                s3_url_style: s3_url_style.into_option(),
-                s3_use_ssl: s3_use_ssl.into_option(),
-                metadata_schema: metadata_schema.into_option(),
-                maintenance_target_file_size: maintenance_target_file_size.into_option(),
-                expire_snapshots_older_than: expire_snapshots_older_than.into_option(),
+                s3_access_key_id: s3_access_key_id.apply_to_option(None),
+                s3_secret_access_key: s3_secret_access_key.apply_to_option(None),
+                s3_region: s3_region.apply_to_option(None),
+                s3_endpoint: s3_endpoint.apply_to_option(None),
+                s3_url_style: s3_url_style.apply_to_option(None),
+                s3_use_ssl: s3_use_ssl.apply_to_option(None),
+                metadata_schema: metadata_schema.apply_to_option(None),
+                maintenance_target_file_size: maintenance_target_file_size.apply_to_option(None),
+                expire_snapshots_older_than: expire_snapshots_older_than.apply_to_option(None),
                 maintenance_mode: maintenance_mode.apply_to_value(
                     DuckLakeMaintenanceMode::default(),
                     DuckLakeMaintenanceMode::default,
@@ -1060,98 +821,55 @@ impl UpdateApiDestinationConfig {
                 schema,
                 role,
             } => Ok(StoredDestinationConfig::Snowflake {
-                account_id: require_field(account_id, "Snowflake", "account_id")?,
-                user: require_field(user, "Snowflake", "user")?,
-                private_key: require_secret_update(private_key, "Snowflake", "private_key")?,
-                private_key_passphrase: private_key_passphrase.into_option(),
-                database: require_field(database, "Snowflake", "database")?,
-                schema: require_field(schema, "Snowflake", "schema")?,
-                role: role.into_option(),
+                account_id: account_id.into_required(
+                    missing_required_field("Snowflake", "account_id"),
+                    required_field_cleared("Snowflake", "account_id"),
+                )?,
+                user: user.into_required(
+                    missing_required_field("Snowflake", "user"),
+                    required_field_cleared("Snowflake", "user"),
+                )?,
+                private_key: private_key.into_required(
+                    missing_required_secret("Snowflake", "private_key"),
+                    required_field_cleared("Snowflake", "private_key"),
+                )?,
+                private_key_passphrase: private_key_passphrase.apply_to_option(None),
+                database: database.into_required(
+                    missing_required_field("Snowflake", "database"),
+                    required_field_cleared("Snowflake", "database"),
+                )?,
+                schema: schema.into_required(
+                    missing_required_field("Snowflake", "schema"),
+                    required_field_cleared("Snowflake", "schema"),
+                )?,
+                role: role.apply_to_option(None),
             }),
         }
     }
 }
 
-fn restore_preserved_destination_field<T>(
-    field: &UpdateField<T>,
-    stored_config: &serde_json::Value,
-    updated_config: &mut serde_json::Value,
-    variant: &str,
-    field_name: &str,
-) {
-    let Some(updated_variant) =
-        updated_config.as_object_mut().and_then(|object| object.get_mut(variant))
-    else {
-        return;
-    };
-
-    if let Some(stored_variant) = stored_config.as_object().and_then(|object| object.get(variant)) {
-        field.restore_preserved_value(stored_variant, updated_variant, field_name);
-    } else {
-        field.restore_preserved_value(&serde_json::Value::Null, updated_variant, field_name);
-    }
-}
-
-fn apply_required_field<T>(
-    update: UpdateField<T>,
-    stored: T,
+/// Creates the error for an omitted required destination field.
+fn missing_required_field(
     destination: &'static str,
     field: &'static str,
-) -> Result<T, DestinationConfigUpdateError> {
-    match update {
-        UpdateField::Preserve => Ok(stored),
-        UpdateField::Clear => {
-            Err(DestinationConfigUpdateError::RequiredFieldCleared { destination, field })
-        }
-        UpdateField::Set(value) => Ok(value),
-    }
+) -> DestinationConfigUpdateError {
+    DestinationConfigUpdateError::MissingRequiredField { destination, field }
 }
 
-fn apply_required_secret<T>(
-    update: UpdateField<T>,
-    stored: T,
+/// Creates the error for an omitted required destination secret.
+fn missing_required_secret(
     destination: &'static str,
     field: &'static str,
-) -> Result<T, DestinationConfigUpdateError> {
-    match update {
-        UpdateField::Preserve => Ok(stored),
-        UpdateField::Clear => {
-            Err(DestinationConfigUpdateError::RequiredFieldCleared { destination, field })
-        }
-        UpdateField::Set(value) => Ok(value),
-    }
+) -> DestinationConfigUpdateError {
+    DestinationConfigUpdateError::MissingRequiredSecret { destination, field }
 }
 
-fn require_field<T>(
-    value: UpdateField<T>,
+/// Creates the error for an explicitly cleared required destination field.
+fn required_field_cleared(
     destination: &'static str,
     field: &'static str,
-) -> Result<T, DestinationConfigUpdateError> {
-    match value {
-        UpdateField::Set(value) => Ok(value),
-        UpdateField::Preserve => {
-            Err(DestinationConfigUpdateError::MissingRequiredField { destination, field })
-        }
-        UpdateField::Clear => {
-            Err(DestinationConfigUpdateError::RequiredFieldCleared { destination, field })
-        }
-    }
-}
-
-fn require_secret_update<T>(
-    value: UpdateField<T>,
-    destination: &'static str,
-    field: &'static str,
-) -> Result<T, DestinationConfigUpdateError> {
-    match value {
-        UpdateField::Set(value) => Ok(value),
-        UpdateField::Preserve => {
-            Err(DestinationConfigUpdateError::MissingRequiredSecret { destination, field })
-        }
-        UpdateField::Clear => {
-            Err(DestinationConfigUpdateError::RequiredFieldCleared { destination, field })
-        }
-    }
+) -> DestinationConfigUpdateError {
+    DestinationConfigUpdateError::RequiredFieldCleared { destination, field }
 }
 
 impl From<StoredDestinationConfig> for ApiDestinationConfig {
@@ -2008,6 +1726,9 @@ pub enum ApiIcebergConfig {
 }
 
 /// Patch-style Iceberg configuration used by update endpoints.
+///
+/// This dedicated nested update type makes its [`UpdateField`] members
+/// independently patchable.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateApiIcebergConfig {
@@ -2152,126 +1873,6 @@ impl UpdateApiIcebergConfig {
         }
     }
 
-    /// Restores fields that were preserved by this update from raw storage.
-    fn restore_preserved_fields(
-        &self,
-        stored_config: &serde_json::Value,
-        updated_config: &mut serde_json::Value,
-    ) {
-        match self {
-            Self::Supabase {
-                project_ref,
-                warehouse_name,
-                namespace,
-                catalog_token,
-                s3_access_key_id,
-                s3_secret_access_key,
-                s3_region,
-            } => {
-                restore_preserved_iceberg_field(
-                    project_ref,
-                    stored_config,
-                    updated_config,
-                    "supabase",
-                    "project_ref",
-                );
-                restore_preserved_iceberg_field(
-                    warehouse_name,
-                    stored_config,
-                    updated_config,
-                    "supabase",
-                    "warehouse_name",
-                );
-                restore_preserved_iceberg_field(
-                    namespace,
-                    stored_config,
-                    updated_config,
-                    "supabase",
-                    "namespace",
-                );
-                restore_preserved_iceberg_field(
-                    catalog_token,
-                    stored_config,
-                    updated_config,
-                    "supabase",
-                    "catalog_token",
-                );
-                restore_preserved_iceberg_field(
-                    s3_access_key_id,
-                    stored_config,
-                    updated_config,
-                    "supabase",
-                    "s3_access_key_id",
-                );
-                restore_preserved_iceberg_field(
-                    s3_secret_access_key,
-                    stored_config,
-                    updated_config,
-                    "supabase",
-                    "s3_secret_access_key",
-                );
-                restore_preserved_iceberg_field(
-                    s3_region,
-                    stored_config,
-                    updated_config,
-                    "supabase",
-                    "s3_region",
-                );
-            }
-            Self::Rest {
-                catalog_uri,
-                warehouse_name,
-                namespace,
-                s3_access_key_id,
-                s3_secret_access_key,
-                s3_endpoint,
-            } => {
-                restore_preserved_iceberg_field(
-                    catalog_uri,
-                    stored_config,
-                    updated_config,
-                    "rest",
-                    "catalog_uri",
-                );
-                restore_preserved_iceberg_field(
-                    warehouse_name,
-                    stored_config,
-                    updated_config,
-                    "rest",
-                    "warehouse_name",
-                );
-                restore_preserved_iceberg_field(
-                    namespace,
-                    stored_config,
-                    updated_config,
-                    "rest",
-                    "namespace",
-                );
-                restore_preserved_iceberg_field(
-                    s3_access_key_id,
-                    stored_config,
-                    updated_config,
-                    "rest",
-                    "s3_access_key_id",
-                );
-                restore_preserved_iceberg_field(
-                    s3_secret_access_key,
-                    stored_config,
-                    updated_config,
-                    "rest",
-                    "s3_secret_access_key",
-                );
-                restore_preserved_iceberg_field(
-                    s3_endpoint,
-                    stored_config,
-                    updated_config,
-                    "rest",
-                    "s3_endpoint",
-                );
-            }
-        }
-    }
-
     fn merge_into_stored(
         self,
         stored: StoredIcebergConfig,
@@ -2297,42 +1898,30 @@ impl UpdateApiIcebergConfig {
                     s3_region: stored_s3_region,
                 },
             ) => Ok(StoredIcebergConfig::Supabase {
-                project_ref: apply_required_field(
-                    project_ref,
+                project_ref: project_ref.apply_to_required(
                     stored_project_ref,
-                    "Iceberg",
-                    "project_ref",
+                    required_field_cleared("Iceberg", "project_ref"),
                 )?,
-                warehouse_name: apply_required_field(
-                    warehouse_name,
+                warehouse_name: warehouse_name.apply_to_required(
                     stored_warehouse_name,
-                    "Iceberg",
-                    "warehouse_name",
+                    required_field_cleared("Iceberg", "warehouse_name"),
                 )?,
                 namespace: namespace.apply_to_option(stored_namespace),
-                catalog_token: apply_required_secret(
-                    catalog_token,
+                catalog_token: catalog_token.apply_to_required(
                     stored_catalog_token,
-                    "Iceberg",
-                    "catalog_token",
+                    required_field_cleared("Iceberg", "catalog_token"),
                 )?,
-                s3_access_key_id: apply_required_secret(
-                    s3_access_key_id,
+                s3_access_key_id: s3_access_key_id.apply_to_required(
                     stored_s3_access_key_id,
-                    "Iceberg",
-                    "s3_access_key_id",
+                    required_field_cleared("Iceberg", "s3_access_key_id"),
                 )?,
-                s3_secret_access_key: apply_required_secret(
-                    s3_secret_access_key,
+                s3_secret_access_key: s3_secret_access_key.apply_to_required(
                     stored_s3_secret_access_key,
-                    "Iceberg",
-                    "s3_secret_access_key",
+                    required_field_cleared("Iceberg", "s3_secret_access_key"),
                 )?,
-                s3_region: apply_required_field(
-                    s3_region,
+                s3_region: s3_region.apply_to_required(
                     stored_s3_region,
-                    "Iceberg",
-                    "s3_region",
+                    required_field_cleared("Iceberg", "s3_region"),
                 )?,
             }),
             (
@@ -2353,36 +1942,26 @@ impl UpdateApiIcebergConfig {
                     s3_endpoint: stored_s3_endpoint,
                 },
             ) => Ok(StoredIcebergConfig::Rest {
-                catalog_uri: apply_required_field(
-                    catalog_uri,
+                catalog_uri: catalog_uri.apply_to_required(
                     stored_catalog_uri,
-                    "Iceberg",
-                    "catalog_uri",
+                    required_field_cleared("Iceberg", "catalog_uri"),
                 )?,
-                warehouse_name: apply_required_field(
-                    warehouse_name,
+                warehouse_name: warehouse_name.apply_to_required(
                     stored_warehouse_name,
-                    "Iceberg",
-                    "warehouse_name",
+                    required_field_cleared("Iceberg", "warehouse_name"),
                 )?,
                 namespace: namespace.apply_to_option(stored_namespace),
-                s3_access_key_id: apply_required_secret(
-                    s3_access_key_id,
+                s3_access_key_id: s3_access_key_id.apply_to_required(
                     stored_s3_access_key_id,
-                    "Iceberg",
-                    "s3_access_key_id",
+                    required_field_cleared("Iceberg", "s3_access_key_id"),
                 )?,
-                s3_secret_access_key: apply_required_secret(
-                    s3_secret_access_key,
+                s3_secret_access_key: s3_secret_access_key.apply_to_required(
                     stored_s3_secret_access_key,
-                    "Iceberg",
-                    "s3_secret_access_key",
+                    required_field_cleared("Iceberg", "s3_secret_access_key"),
                 )?,
-                s3_endpoint: apply_required_field(
-                    s3_endpoint,
+                s3_endpoint: s3_endpoint.apply_to_required(
                     stored_s3_endpoint,
-                    "Iceberg",
-                    "s3_endpoint",
+                    required_field_cleared("Iceberg", "s3_endpoint"),
                 )?,
             }),
             (config, _) => config.into_stored_requiring_secrets(),
@@ -2402,21 +1981,31 @@ impl UpdateApiIcebergConfig {
                 s3_secret_access_key,
                 s3_region,
             } => Ok(StoredIcebergConfig::Supabase {
-                project_ref: require_field(project_ref, "Iceberg", "project_ref")?,
-                warehouse_name: require_field(warehouse_name, "Iceberg", "warehouse_name")?,
-                namespace: namespace.into_option(),
-                catalog_token: require_secret_update(catalog_token, "Iceberg", "catalog_token")?,
-                s3_access_key_id: require_secret_update(
-                    s3_access_key_id,
-                    "Iceberg",
-                    "s3_access_key_id",
+                project_ref: project_ref.into_required(
+                    missing_required_field("Iceberg", "project_ref"),
+                    required_field_cleared("Iceberg", "project_ref"),
                 )?,
-                s3_secret_access_key: require_secret_update(
-                    s3_secret_access_key,
-                    "Iceberg",
-                    "s3_secret_access_key",
+                warehouse_name: warehouse_name.into_required(
+                    missing_required_field("Iceberg", "warehouse_name"),
+                    required_field_cleared("Iceberg", "warehouse_name"),
                 )?,
-                s3_region: require_field(s3_region, "Iceberg", "s3_region")?,
+                namespace: namespace.apply_to_option(None),
+                catalog_token: catalog_token.into_required(
+                    missing_required_secret("Iceberg", "catalog_token"),
+                    required_field_cleared("Iceberg", "catalog_token"),
+                )?,
+                s3_access_key_id: s3_access_key_id.into_required(
+                    missing_required_secret("Iceberg", "s3_access_key_id"),
+                    required_field_cleared("Iceberg", "s3_access_key_id"),
+                )?,
+                s3_secret_access_key: s3_secret_access_key.into_required(
+                    missing_required_secret("Iceberg", "s3_secret_access_key"),
+                    required_field_cleared("Iceberg", "s3_secret_access_key"),
+                )?,
+                s3_region: s3_region.into_required(
+                    missing_required_field("Iceberg", "s3_region"),
+                    required_field_cleared("Iceberg", "s3_region"),
+                )?,
             }),
             Self::Rest {
                 catalog_uri,
@@ -2426,51 +2015,29 @@ impl UpdateApiIcebergConfig {
                 s3_secret_access_key,
                 s3_endpoint,
             } => Ok(StoredIcebergConfig::Rest {
-                catalog_uri: require_field(catalog_uri, "Iceberg", "catalog_uri")?,
-                warehouse_name: require_field(warehouse_name, "Iceberg", "warehouse_name")?,
-                namespace: namespace.into_option(),
-                s3_access_key_id: require_secret_update(
-                    s3_access_key_id,
-                    "Iceberg",
-                    "s3_access_key_id",
+                catalog_uri: catalog_uri.into_required(
+                    missing_required_field("Iceberg", "catalog_uri"),
+                    required_field_cleared("Iceberg", "catalog_uri"),
                 )?,
-                s3_secret_access_key: require_secret_update(
-                    s3_secret_access_key,
-                    "Iceberg",
-                    "s3_secret_access_key",
+                warehouse_name: warehouse_name.into_required(
+                    missing_required_field("Iceberg", "warehouse_name"),
+                    required_field_cleared("Iceberg", "warehouse_name"),
                 )?,
-                s3_endpoint: require_field(s3_endpoint, "Iceberg", "s3_endpoint")?,
+                namespace: namespace.apply_to_option(None),
+                s3_access_key_id: s3_access_key_id.into_required(
+                    missing_required_secret("Iceberg", "s3_access_key_id"),
+                    required_field_cleared("Iceberg", "s3_access_key_id"),
+                )?,
+                s3_secret_access_key: s3_secret_access_key.into_required(
+                    missing_required_secret("Iceberg", "s3_secret_access_key"),
+                    required_field_cleared("Iceberg", "s3_secret_access_key"),
+                )?,
+                s3_endpoint: s3_endpoint.into_required(
+                    missing_required_field("Iceberg", "s3_endpoint"),
+                    required_field_cleared("Iceberg", "s3_endpoint"),
+                )?,
             }),
         }
-    }
-}
-
-/// Restores one preserved Iceberg field from raw storage.
-fn restore_preserved_iceberg_field<T>(
-    field: &UpdateField<T>,
-    stored_config: &serde_json::Value,
-    updated_config: &mut serde_json::Value,
-    variant: &str,
-    field_name: &str,
-) {
-    let Some(updated_variant) = updated_config
-        .as_object_mut()
-        .and_then(|object| object.get_mut("iceberg"))
-        .and_then(|iceberg| iceberg.as_object_mut())
-        .and_then(|iceberg| iceberg.get_mut(variant))
-    else {
-        return;
-    };
-
-    if let Some(stored_variant) = stored_config
-        .as_object()
-        .and_then(|object| object.get("iceberg"))
-        .and_then(|iceberg| iceberg.as_object())
-        .and_then(|iceberg| iceberg.get(variant))
-    {
-        field.restore_preserved_value(stored_variant, updated_variant, field_name);
-    } else {
-        field.restore_preserved_value(&serde_json::Value::Null, updated_variant, field_name);
     }
 }
 

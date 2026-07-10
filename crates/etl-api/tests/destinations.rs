@@ -250,7 +250,9 @@ async fn destination_config_update_preserves_and_reencrypts_secret_fields_in_sto
     assert_eq!(response.status(), StatusCode::OK);
     let stored_config = read_stored_destination_config(&app, destination_id).await;
     assert_eq!(stored_config["big_query"]["dataset_id"], "dataset-id-patched");
-    assert_eq!(stored_config["big_query"]["service_account_key"], stored_service_account_key);
+    assert_ne!(stored_config["big_query"]["service_account_key"], stored_service_account_key);
+    assert!(!stored_config.to_string().contains("service-account-key"));
+    let preserved_service_account_key = stored_config["big_query"]["service_account_key"].clone();
 
     let update_request = UpdateDestinationRequest {
         name: updated_name(),
@@ -268,12 +270,12 @@ async fn destination_config_update_preserves_and_reencrypts_secret_fields_in_sto
 
     assert_eq!(response.status(), StatusCode::OK);
     let stored_config = read_stored_destination_config(&app, destination_id).await;
-    assert_ne!(stored_config["big_query"]["service_account_key"], stored_service_account_key);
+    assert_ne!(stored_config["big_query"]["service_account_key"], preserved_service_account_key);
     assert!(!stored_config.to_string().contains("service-account-key-updated"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn destination_config_update_preserves_absent_stored_default_fields() {
+async fn destination_config_update_materializes_stored_defaults() {
     init_test_tracing();
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -321,7 +323,10 @@ async fn destination_config_update_preserves_absent_stored_default_fields() {
     let bigquery_config =
         stored_config.get("big_query").expect("stored destination should use BigQuery config");
     assert_eq!(bigquery_config["dataset_id"], "dataset-id-patched");
-    assert!(bigquery_config.get("connection_pool_size").is_none());
+    assert_eq!(
+        bigquery_config["connection_pool_size"],
+        DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -447,7 +452,7 @@ async fn iceberg_supabase_destination_update_preserves_nested_encrypted_fields()
     let stored_config = read_stored_destination_config(&app, destination_id).await;
     assert_eq!(stored_config["iceberg"]["supabase"]["warehouse_name"], "warehouse-patched");
     assert!(stored_config["iceberg"]["supabase"].get("namespace").is_none());
-    assert_eq!(stored_config["iceberg"]["supabase"]["catalog_token"], stored_catalog_token);
+    assert_ne!(stored_config["iceberg"]["supabase"]["catalog_token"], stored_catalog_token);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -489,7 +494,7 @@ async fn ducklake_destination_update_preserves_and_clears_encrypted_fields() {
     assert_eq!(response.status(), StatusCode::OK);
     let stored_config = read_stored_destination_config(&app, destination_id).await;
     assert_eq!(stored_config["ducklake"]["data_path"], "s3://ducklake/patched/");
-    assert_eq!(stored_config["ducklake"]["catalog_url"], stored_catalog_url);
+    assert_ne!(stored_config["ducklake"]["catalog_url"], stored_catalog_url);
     assert!(stored_config["ducklake"].get("s3_access_key_id").is_none());
 }
 
@@ -761,6 +766,6 @@ async fn snowflake_destination_update_preserves_and_clears_encrypted_fields() {
     assert_eq!(response.status(), StatusCode::OK);
     let stored_config = read_stored_destination_config(&app, destination_id).await;
     assert_eq!(stored_config["snowflake"]["database"], "patched_database");
-    assert_eq!(stored_config["snowflake"]["private_key"], stored_private_key);
+    assert_ne!(stored_config["snowflake"]["private_key"], stored_private_key);
     assert!(stored_config["snowflake"].get("private_key_passphrase").is_none());
 }

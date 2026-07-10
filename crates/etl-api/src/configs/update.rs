@@ -1,5 +1,4 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
 use utoipa::{
     __dev::ComposeSchema,
     ToSchema,
@@ -12,6 +11,13 @@ use utoipa::{
 /// Omitted fields preserve the stored value, explicit `null` clears optional
 /// values or resets defaulted values, and non-null values replace the stored
 /// value.
+///
+/// These semantics apply only at the field containing [`UpdateField`]. When
+/// `T` is a structured configuration, a non-null value is deserialized as a
+/// complete `T` and replaces the complete stored value. Members omitted inside
+/// that value use `T`'s deserialization defaults; they do not preserve members
+/// from the stored value. Nested member-by-member patching requires a dedicated
+/// update type whose members are themselves [`UpdateField`] values.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum UpdateField<T> {
     /// Preserve the stored value.
@@ -67,6 +73,20 @@ impl<T> UpdateField<T> {
         }
     }
 
+    /// Applies this update to an optional stored value that has a default when
+    /// omitted during creation.
+    pub(crate) fn apply_to_defaulted_option(
+        self,
+        stored: Option<T>,
+        default: impl FnOnce() -> T,
+    ) -> Option<T> {
+        match self {
+            Self::Preserve => stored,
+            Self::Clear => Some(default()),
+            Self::Set(value) => Some(value),
+        }
+    }
+
     /// Applies this update to a concrete stored value, using a default when
     /// the field is cleared.
     pub(crate) fn apply_to_value(self, stored: T, default: impl FnOnce() -> T) -> T {
@@ -77,31 +97,22 @@ impl<T> UpdateField<T> {
         }
     }
 
-    /// Extracts a set value, treating preserve and clear as absent.
-    pub(crate) fn into_option(self) -> Option<T> {
+    /// Applies this update to a required stored value, returning an error when
+    /// the field is cleared.
+    pub(crate) fn apply_to_required<E>(self, stored: T, cleared: E) -> Result<T, E> {
         match self {
-            Self::Set(value) => Some(value),
-            Self::Preserve | Self::Clear => None,
+            Self::Preserve => Ok(stored),
+            Self::Clear => Err(cleared),
+            Self::Set(value) => Ok(value),
         }
     }
 
-    /// Restores `key` from the original object when this field preserves it.
-    pub(crate) fn restore_preserved_value(&self, original: &Value, updated: &mut Value, key: &str) {
-        if !self.is_preserve() {
-            return;
-        }
-
-        let Some(updated) = updated.as_object_mut() else {
-            return;
-        };
-
-        match original.as_object().and_then(|object| object.get(key)) {
-            Some(value) => {
-                updated.insert(key.to_owned(), value.clone());
-            }
-            None => {
-                updated.remove(key);
-            }
+    /// Resolves this update into a required value when no stored value exists.
+    pub(crate) fn into_required<E>(self, missing: E, cleared: E) -> Result<T, E> {
+        match self {
+            Self::Preserve => Err(missing),
+            Self::Clear => Err(cleared),
+            Self::Set(value) => Ok(value),
         }
     }
 }
@@ -184,5 +195,25 @@ mod tests {
         let schema = &openapi["components"]["schemas"]["UpdateField_String"];
 
         assert_eq!(schema, &json!({ "oneOf": [{ "type": "null" }, { "type": "string" }] }));
+    }
+
+    #[test]
+    fn update_field_applies_to_required_stored_value() {
+        assert_eq!(UpdateField::Preserve.apply_to_required("stored", "cleared"), Ok("stored"));
+        assert_eq!(UpdateField::Clear.apply_to_required("stored", "cleared"), Err("cleared"));
+        assert_eq!(
+            UpdateField::Set("updated").apply_to_required("stored", "cleared"),
+            Ok("updated")
+        );
+    }
+
+    #[test]
+    fn update_field_resolves_required_value_without_stored_value() {
+        assert_eq!(
+            UpdateField::<&str>::Preserve.into_required("missing", "cleared"),
+            Err("missing")
+        );
+        assert_eq!(UpdateField::<&str>::Clear.into_required("missing", "cleared"), Err("cleared"));
+        assert_eq!(UpdateField::Set("updated").into_required("missing", "cleared"), Ok("updated"));
     }
 }

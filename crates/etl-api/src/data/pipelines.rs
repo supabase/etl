@@ -201,11 +201,9 @@ pub async fn update_pipeline(
         return Ok(None);
     };
 
-    let stored_config =
-        deserialize_from_value::<StoredPipelineConfig>(stored_config_value.clone())?;
-    let merged_config = config.clone().merge_into_stored(stored_config)?;
-    let mut serialized_config = serialize(merged_config)?;
-    config.restore_preserved_fields(&stored_config_value, &mut serialized_config);
+    let stored_config = deserialize_from_value::<StoredPipelineConfig>(stored_config_value)?;
+    let merged_config = config.merge_into_stored(stored_config)?;
+    let serialized_config = serialize(merged_config)?;
 
     let record = sqlx::query!(
         r#"
