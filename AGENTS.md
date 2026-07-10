@@ -236,6 +236,8 @@
 - Do not add imports solely to make rustdoc links shorter.
 - Keep comments and docs precise, short, and punctuated.
 - Normal comments should always end with `.`.
+- Prefer normal comments on the line above the code they explain instead of
+  trailing comments at the end of a code line.
 - Do not add code examples in rustdoc for this repository.
 
 ## Metrics And Observability
