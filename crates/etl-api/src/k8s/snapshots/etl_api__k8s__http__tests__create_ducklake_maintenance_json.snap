@@ -30,6 +30,7 @@ expression: "serde_json::to_string_pretty(&ducklake_maintenance_json).unwrap()"
         "enabled": true
       },
       "inlineFlush": {
+        "copyMinInlinedBytes": 100000000,
         "enabled": true,
         "minInlinedBytes": 10000000
       },

@@ -21,6 +21,9 @@ pub struct DuckLakeMaintenancePolicy {
     pub max_pause_seconds: u64,
     /// Minimum inlined bytes required before inline flush runs.
     pub min_inlined_bytes: u64,
+    /// Minimum inlined bytes required before inline flush runs during table
+    /// copy.
+    pub copy_min_inlined_bytes: u64,
     /// Maximum number of adjacent files compacted by one merge operation.
     pub max_compacted_files: u32,
     /// Maximum number of tables processed by each operation in one run.
@@ -47,6 +50,7 @@ impl Default for DuckLakeMaintenancePolicy {
             min_interval_seconds: 3600,
             max_pause_seconds: 2700,
             min_inlined_bytes: 10_000_000,
+            copy_min_inlined_bytes: 100_000_000,
             max_compacted_files: 40,
             max_tables_per_run: 8,
             target_file_size: "500MB".to_owned(),

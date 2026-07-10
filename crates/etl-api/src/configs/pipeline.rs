@@ -113,6 +113,11 @@ pub struct DuckLakeMaintenanceConfig {
     #[schema(example = 10000000)]
     #[serde(default = "default_ducklake_maintenance_min_inlined_bytes")]
     pub min_inlined_bytes: u64,
+    /// Minimum inlined bytes required before inline flush runs during table
+    /// copy.
+    #[schema(example = 100000000)]
+    #[serde(default = "default_ducklake_maintenance_copy_min_inlined_bytes")]
+    pub copy_min_inlined_bytes: u64,
     /// Maximum number of adjacent files compacted by one merge operation.
     #[schema(example = 40)]
     #[serde(default = "default_ducklake_maintenance_max_compacted_files")]
@@ -153,6 +158,7 @@ impl Default for DuckLakeMaintenanceConfig {
             min_interval_seconds: default_ducklake_maintenance_min_interval_seconds(),
             max_pause_seconds: default_ducklake_maintenance_max_pause_seconds(),
             min_inlined_bytes: default_ducklake_maintenance_min_inlined_bytes(),
+            copy_min_inlined_bytes: default_ducklake_maintenance_copy_min_inlined_bytes(),
             max_compacted_files: default_ducklake_maintenance_max_compacted_files(),
             max_tables_per_run: default_ducklake_maintenance_max_tables_per_run(),
             target_file_size: default_ducklake_maintenance_target_file_size(),
@@ -384,6 +390,10 @@ fn default_ducklake_maintenance_max_pause_seconds() -> u64 {
 
 fn default_ducklake_maintenance_min_inlined_bytes() -> u64 {
     10_000_000
+}
+
+fn default_ducklake_maintenance_copy_min_inlined_bytes() -> u64 {
+    100_000_000
 }
 
 fn default_ducklake_maintenance_max_compacted_files() -> u32 {

@@ -20,7 +20,7 @@ use etl::{
         ColumnModification, ColumnSchema, ReplicatedTableSchema, ReplicationMask, SchemaDiff,
         SnapshotId, TableId, TableName, TableSchema,
     },
-    store::DestinationStore,
+    store::{DestinationStore, TableStateType},
 };
 use etl_config::ducklake_catalog_metadata_connect_options;
 use metrics::gauge;
@@ -32,9 +32,7 @@ use tokio::signal::unix::{SignalKind, signal};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
 use tokio::{
-    sync::{
-        OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore, TryAcquireError,
-    },
+    sync::{OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore, TryAcquireError},
     task::JoinSet,
 };
 use tracing::{debug, info, warn};
@@ -120,6 +118,15 @@ fn expire_snapshots_retention_seconds(value: &str) -> Option<i64> {
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
 }
 
+/// Returns the inline flush threshold for the current replication phase.
+fn inline_flush_min_inlined_bytes_for_phase(
+    streaming_min_inlined_bytes: u64,
+    copy_min_inlined_bytes: u64,
+    copy_phase_active: bool,
+) -> u64 {
+    if copy_phase_active { copy_min_inlined_bytes } else { streaming_min_inlined_bytes }
+}
+
 // ── destination
 // ───────────────────────────────────────────────────────────────
 
@@ -163,6 +170,16 @@ pub struct DuckLakeDestination<S> {
 /// mutations must be quiesced.
 pub struct DuckLakeExternalMaintenancePause {
     _guard: OwnedRwLockWriteGuard<()>,
+}
+
+/// Maintenance operations sampled from DuckLake catalog state.
+pub(super) struct ExternalMaintenanceOperationSample {
+    /// Operations the replicator should request.
+    pub operations: ExternalMaintenanceOperations,
+    /// Inline flush threshold used while sampling.
+    pub inline_flush_min_inlined_bytes: u64,
+    /// Whether any table is currently in initial copy.
+    pub copy_phase_active: bool,
 }
 
 /// Runtime backend used for DuckLake external maintenance coordination.
@@ -2431,12 +2448,19 @@ where
     pub(super) async fn sample_external_maintenance_operations(
         &self,
         inline_flush_min_inlined_bytes: u64,
+        inline_flush_copy_min_inlined_bytes: u64,
         rewrite_data_files_min_active_data_files: i64,
-    ) -> EtlResult<ExternalMaintenanceOperations> {
+    ) -> EtlResult<ExternalMaintenanceOperationSample> {
         let table_names = self.list_active_ducklake_tables().await?;
         let inline_sampler = DuckLakePendingInlineSizeSampler::new(
             self.metadata_schema.to_string(),
             self.metadata_pg_pool.clone(),
+        );
+        let copy_phase_active = self.has_active_table_copy().await?;
+        let inline_flush_min_inlined_bytes = inline_flush_min_inlined_bytes_for_phase(
+            inline_flush_min_inlined_bytes,
+            inline_flush_copy_min_inlined_bytes,
+            copy_phase_active,
         );
         let mut operations = ExternalMaintenanceOperations::default();
         let catalog_metrics = query_catalog_maintenance_metrics(
@@ -2510,7 +2534,17 @@ where
             operations.cleanup_old_files = true;
         }
 
-        Ok(operations)
+        Ok(ExternalMaintenanceOperationSample {
+            operations,
+            inline_flush_min_inlined_bytes,
+            copy_phase_active,
+        })
+    }
+
+    /// Returns whether any table is currently in initial copy.
+    async fn has_active_table_copy(&self) -> EtlResult<bool> {
+        let table_states = self.store.get_table_states().await?;
+        Ok(table_states.values().any(|state| state.as_type() == TableStateType::DataSync))
     }
 
     /// Lists active DuckLake table names from the metadata catalog.
@@ -2686,6 +2720,20 @@ mod tests {
     };
 
     const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
+
+    #[test]
+    fn inline_flush_threshold_uses_streaming_value_outside_copy() {
+        let threshold = inline_flush_min_inlined_bytes_for_phase(10_000_000, 100_000_000, false);
+
+        assert_eq!(threshold, 10_000_000);
+    }
+
+    #[test]
+    fn inline_flush_threshold_uses_copy_value_during_copy() {
+        let threshold = inline_flush_min_inlined_bytes_for_phase(10_000_000, 100_000_000, true);
+
+        assert_eq!(threshold, 100_000_000);
+    }
 
     #[test]
     fn expire_snapshots_retention_seconds_uses_humantime_duration_syntax() {

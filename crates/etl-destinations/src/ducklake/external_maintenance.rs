@@ -118,6 +118,8 @@ where
         poll_interval_ms = config.poll_interval.as_millis() as u64,
         request_cooldown_ms = config.request_cooldown.as_millis() as u64,
         store_timeout_ms = config.store_timeout.as_millis() as u64,
+        inline_flush_min_inlined_bytes = config.inline_flush_min_inlined_bytes,
+        inline_flush_copy_min_inlined_bytes = config.inline_flush_copy_min_inlined_bytes,
         "ducklake external maintenance watcher started"
     );
 
@@ -473,24 +475,26 @@ async fn maybe_request_operations<S, M>(
         return;
     }
 
-    let requested = match destination
+    let (requested, inline_flush_min_inlined_bytes, copy_phase_active) = match destination
         .sample_external_maintenance_operations(
             config.inline_flush_min_inlined_bytes,
+            config.inline_flush_copy_min_inlined_bytes,
             config.rewrite_data_files_min_active_data_files,
         )
         .await
     {
-        Ok(mut operations) => {
-            operations.inline_flush &= state.operation_policy.inline_flush_enabled;
-            operations.merge_adjacent_files &= state.operation_policy.merge_adjacent_files_enabled;
-            operations.rewrite_data_files &= state.operation_policy.rewrite_data_files_enabled;
-            operations.expire_snapshots &= state.operation_policy.expire_snapshots_enabled;
-            operations.cleanup_old_files &= state.operation_policy.cleanup_old_files_enabled;
-            if operations.expire_snapshots && expire_snapshots_gate.is_suppressed(Utc::now()) {
+        Ok(sample) => {
+            let mut requested = sample.operations;
+            requested.inline_flush &= state.operation_policy.inline_flush_enabled;
+            requested.merge_adjacent_files &= state.operation_policy.merge_adjacent_files_enabled;
+            requested.rewrite_data_files &= state.operation_policy.rewrite_data_files_enabled;
+            requested.expire_snapshots &= state.operation_policy.expire_snapshots_enabled;
+            requested.cleanup_old_files &= state.operation_policy.cleanup_old_files_enabled;
+            if requested.expire_snapshots && expire_snapshots_gate.is_suppressed(Utc::now()) {
                 debug!("ducklake expire-snapshots request suppressed by local daily gate");
-                operations.expire_snapshots = false;
+                requested.expire_snapshots = false;
             }
-            operations
+            (requested, sample.inline_flush_min_inlined_bytes, sample.copy_phase_active)
         }
         Err(error) => {
             warn!(
@@ -508,7 +512,8 @@ async fn maybe_request_operations<S, M>(
             rewrite_data_files = requested.rewrite_data_files,
             expire_snapshots = requested.expire_snapshots,
             cleanup_old_files = requested.cleanup_old_files,
-            inline_flush_min_inlined_bytes = config.inline_flush_min_inlined_bytes,
+            inline_flush_min_inlined_bytes,
+            copy_phase_active,
             rewrite_data_files_min_active_data_files =
                 config.rewrite_data_files_min_active_data_files,
             "ducklake external maintenance sampled no requested operations"
@@ -538,14 +543,15 @@ async fn maybe_request_operations<S, M>(
         rewrite_data_files = requested.rewrite_data_files,
         expire_snapshots = requested.expire_snapshots,
         cleanup_old_files = requested.cleanup_old_files,
-        inline_flush_min_inlined_bytes = config.inline_flush_min_inlined_bytes,
+        inline_flush_min_inlined_bytes,
+        copy_phase_active,
         rewrite_data_files_min_active_data_files = config.rewrite_data_files_min_active_data_files,
         "ducklake external maintenance requesting operations"
     );
 
     let request = ExternalMaintenanceOperationRequest {
         operations: requested,
-        inline_flush_min_inlined_bytes: Some(config.inline_flush_min_inlined_bytes),
+        inline_flush_min_inlined_bytes: Some(inline_flush_min_inlined_bytes),
         rewrite_data_files_min_active_data_files: Some(
             config.rewrite_data_files_min_active_data_files,
         ),

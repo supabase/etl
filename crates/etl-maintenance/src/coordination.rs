@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_POLL_SECONDS: u64 = 5;
 const DEFAULT_INLINE_FLUSH_MIN_INLINED_BYTES: u64 = 10_000_000;
+const DEFAULT_INLINE_FLUSH_COPY_MIN_INLINED_BYTES: u64 = 100_000_000;
 const DEFAULT_REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES: i64 = 40;
 const DEFAULT_REQUEST_COOLDOWN_SECONDS: u64 = 300;
 const DEFAULT_STORE_TIMEOUT_SECONDS: u64 = 10;
@@ -297,6 +298,8 @@ pub struct ExternalMaintenanceWatcherConfig {
     pub store_timeout: Duration,
     /// Inline flush trigger threshold.
     pub inline_flush_min_inlined_bytes: u64,
+    /// Inline flush trigger threshold while table copy is active.
+    pub inline_flush_copy_min_inlined_bytes: u64,
     /// Rewrite trigger threshold.
     pub rewrite_data_files_min_active_data_files: i64,
 }
@@ -308,6 +311,7 @@ impl Default for ExternalMaintenanceWatcherConfig {
             request_cooldown: Duration::from_secs(DEFAULT_REQUEST_COOLDOWN_SECONDS),
             store_timeout: Duration::from_secs(DEFAULT_STORE_TIMEOUT_SECONDS),
             inline_flush_min_inlined_bytes: DEFAULT_INLINE_FLUSH_MIN_INLINED_BYTES,
+            inline_flush_copy_min_inlined_bytes: DEFAULT_INLINE_FLUSH_COPY_MIN_INLINED_BYTES,
             rewrite_data_files_min_active_data_files:
                 DEFAULT_REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES,
         }
@@ -320,6 +324,8 @@ impl ExternalMaintenanceWatcherConfig {
         const POLL_SECONDS_ENV: &str = "ETL_DUCKLAKE_MAINTENANCE_POLL_SECONDS";
         const INLINE_FLUSH_MIN_INLINED_BYTES_ENV: &str =
             "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_INLINE_FLUSH_MIN_INLINED_BYTES";
+        const INLINE_FLUSH_COPY_MIN_INLINED_BYTES_ENV: &str =
+            "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_COPY_INLINE_FLUSH_MIN_INLINED_BYTES";
         const REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES_ENV: &str =
             "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES";
         const REQUEST_COOLDOWN_SECONDS_ENV: &str =
@@ -332,6 +338,8 @@ impl ExternalMaintenanceWatcherConfig {
             .unwrap_or(DEFAULT_POLL_SECONDS);
         let inline_flush_min_inlined_bytes = env_u64(INLINE_FLUSH_MIN_INLINED_BYTES_ENV)
             .unwrap_or(DEFAULT_INLINE_FLUSH_MIN_INLINED_BYTES);
+        let inline_flush_copy_min_inlined_bytes = env_u64(INLINE_FLUSH_COPY_MIN_INLINED_BYTES_ENV)
+            .unwrap_or(DEFAULT_INLINE_FLUSH_COPY_MIN_INLINED_BYTES);
         let rewrite_data_files_min_active_data_files =
             std::env::var(REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES_ENV)
                 .ok()
@@ -348,6 +356,7 @@ impl ExternalMaintenanceWatcherConfig {
             request_cooldown: Duration::from_secs(request_cooldown),
             store_timeout: Duration::from_secs(store_timeout),
             inline_flush_min_inlined_bytes,
+            inline_flush_copy_min_inlined_bytes,
             rewrite_data_files_min_active_data_files,
         }
     }

@@ -1184,6 +1184,7 @@ fn create_ducklake_maintenance_json(
           "inlineFlush": {
             "enabled": config.policy.operation_policy.inline_flush_enabled,
             "minInlinedBytes": config.policy.min_inlined_bytes,
+            "copyMinInlinedBytes": config.policy.copy_min_inlined_bytes,
           },
           "mergeAdjacentFiles": {
             "enabled": config.policy.operation_policy.merge_adjacent_files_enabled,
@@ -1365,6 +1366,10 @@ fn create_container_environment_json(
                 container_environment.push(json!({
                     "name": "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_INLINE_FLUSH_MIN_INLINED_BYTES",
                     "value": ducklake_maintenance.min_inlined_bytes.to_string()
+                }));
+                container_environment.push(json!({
+                    "name": "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_COPY_INLINE_FLUSH_MIN_INLINED_BYTES",
+                    "value": ducklake_maintenance.copy_min_inlined_bytes.to_string()
                 }));
                 container_environment.push(json!({
                     "name": "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES",
@@ -1858,6 +1863,17 @@ mod tests {
         container_environment
             .iter()
             .any(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
+    }
+
+    fn container_environment_var_value<'a>(
+        container_environment: &'a [serde_json::Value],
+        name: &str,
+    ) -> Option<&'a str> {
+        container_environment.iter().find_map(|entry| {
+            (entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
+                .then(|| entry.get("value").and_then(serde_json::Value::as_str))
+                .flatten()
+        })
     }
 
     fn collect_kubernetes_label_values(
@@ -2392,6 +2408,7 @@ mod tests {
                     min_interval_seconds: 3600,
                     max_pause_seconds: 2700,
                     min_inlined_bytes: 10_000_000,
+                    copy_min_inlined_bytes: 100_000_000,
                     max_compacted_files: 40,
                     max_tables_per_run: 8,
                     target_file_size: "500MB".to_owned(),
@@ -2573,6 +2590,37 @@ mod tests {
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
+    }
+
+    #[test]
+    fn ducklake_maintenance_environment_includes_copy_inline_flush_threshold() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+        let maintenance = DuckLakeMaintenanceConfig::default();
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Prod,
+            replicator_image,
+            DestinationType::Ducklake,
+            Some(&maintenance),
+            LogLevel::Info,
+        );
+
+        assert_eq!(
+            container_environment_var_value(
+                &container_environment,
+                "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_INLINE_FLUSH_MIN_INLINED_BYTES",
+            ),
+            Some("10000000")
+        );
+        assert_eq!(
+            container_environment_var_value(
+                &container_environment,
+                "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_COPY_INLINE_FLUSH_MIN_INLINED_BYTES",
+            ),
+            Some("100000000")
+        );
     }
 
     #[test]
