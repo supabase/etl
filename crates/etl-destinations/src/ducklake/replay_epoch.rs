@@ -24,7 +24,8 @@ fn new_replay_epoch() -> String {
     format!("{:032x}", rand::rng().random::<u128>())
 }
 
-/// Ensures the Postgres-backed replay epoch table exists in the DuckLake metadata schema.
+/// Ensures the Postgres-backed replay epoch table exists in the DuckLake
+/// metadata schema.
 pub(super) async fn ensure_replay_epoch_table_exists(
     pool: &PgPool,
     metadata_schema: &str,

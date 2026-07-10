@@ -79,9 +79,9 @@ const SQL_DELETE_BATCH_SIZE: usize = 16;
 const CDC_MUTATION_BATCH_SIZE: usize = 16;
 /// ETL-managed marker table storing per-table applied copy batches.
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
-/// Disable helper-table data inlining. These tables are shared by all replicated
-/// tables, so keeping their writes out of DuckLake inline metadata avoids a
-/// catalog-level conflict hotspot.
+/// Disable helper-table data inlining. These tables are shared by all
+/// replicated tables, so keeping their writes out of DuckLake inline metadata
+/// avoids a catalog-level conflict hotspot.
 const APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT: usize = 0;
 /// Replay epoch column shared by ETL helper tables.
 const REPLAY_EPOCH_COLUMN: &str = "replay_epoch";
@@ -523,8 +523,8 @@ fn helper_table_has_column(
     column_name: &str,
 ) -> EtlResult<bool> {
     let sql = format!(
-        "SELECT 1 FROM information_schema.columns WHERE table_catalog = {} AND table_name = {} AND \
-         column_name = {} LIMIT 1;",
+        "SELECT 1 FROM information_schema.columns WHERE table_catalog = {} AND table_name = {} \
+         AND column_name = {} LIMIT 1;",
         quote_literal(LAKE_CATALOG),
         quote_literal(table_name),
         quote_literal(column_name)

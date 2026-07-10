@@ -2484,8 +2484,8 @@ fn ducklake_helper_table_has_column(
     column_name: &str,
 ) -> EtlResult<bool> {
     let sql = format!(
-        "SELECT 1 FROM information_schema.columns WHERE table_catalog = {} AND table_name = {} AND \
-         column_name = {} LIMIT 1;",
+        "SELECT 1 FROM information_schema.columns WHERE table_catalog = {} AND table_name = {} \
+         AND column_name = {} LIMIT 1;",
         quote_literal(LAKE_CATALOG),
         quote_literal(helper_table_name),
         quote_literal(column_name),

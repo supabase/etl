@@ -32,7 +32,10 @@ use tokio::signal::unix::{SignalKind, signal};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
 use tokio::{
-    sync::{OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore, TryAcquireError},
+    sync::{
+        OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore,
+        TryAcquireError,
+    },
     task::JoinSet,
 };
 use tracing::{debug, info, warn};
@@ -148,8 +151,8 @@ pub struct DuckLakeDestination<S> {
     manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
-    /// Shared gate that serializes DuckLake catalog mutations and keeps
-    /// external maintenance pauses from overlapping active foreground writes.
+    /// Shared gate that keeps external maintenance pauses from overlapping
+    /// active foreground or table-scoped mutations.
     checkpoint_gate: Arc<RwLock<()>>,
     tasks: TaskSet,
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
@@ -1309,7 +1312,8 @@ where
         .await
     }
 
-    /// Drops the destination table and rotates replay state before restarting a copy.
+    /// Drops the destination table and rotates replay state before restarting a
+    /// copy.
     async fn drop_table_for_copy_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -1922,7 +1926,7 @@ where
                                 .await?;
                             let checkpoint_wait_started = tokio::time::Instant::now();
                             let _checkpoint_guard =
-                                Arc::clone(&destination.checkpoint_gate).write_owned().await;
+                                Arc::clone(&destination.checkpoint_gate).read_owned().await;
                             let checkpoint_wait = checkpoint_wait_started.elapsed();
                             if checkpoint_wait > Duration::from_secs(1) {
                                 info!(
@@ -2033,7 +2037,7 @@ where
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
-                        let _checkpoint_guard = checkpoint_gate.write_owned().await;
+                        let _checkpoint_guard = checkpoint_gate.read_owned().await;
                         let last_sequence_key =
                             read_table_streaming_progress_sequence_key_blocking(
                                 Arc::clone(&pool),
@@ -2424,10 +2428,10 @@ where
         }
     }
 
-    /// Acquires exclusive mutation access so DuckLake catalog commits do not
-    /// overlap foreground writes or external maintenance.
-    async fn acquire_mutation_guard(&self) -> OwnedRwLockWriteGuard<()> {
-        Arc::clone(&self.checkpoint_gate).write_owned().await
+    /// Acquires shared mutation access so exclusive external maintenance cannot
+    /// start in the middle of a foreground write sequence.
+    async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
+        Arc::clone(&self.checkpoint_gate).read_owned().await
     }
 
     async fn read_table_replay_epoch(&self, table_name: &DuckLakeTableName) -> EtlResult<String> {

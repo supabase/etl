@@ -810,10 +810,28 @@ async fn concurrent_same_table_copy_batches_complete() {
         )
         .unwrap_or(-1);
 
-    let marker_detail: Vec<(String, Option<u64>, Option<u64>)> = {
+    let marker_counts_by_epoch: Vec<i64> = {
         let sql = format!(
-            "SELECT batch_id, first_start_lsn, last_commit_lsn FROM {}.{} WHERE table_name = {} \
-             AND batch_kind = {}",
+            "SELECT COUNT(*) AS marker_count FROM {}.{} WHERE table_name = {} AND batch_kind = {} \
+             GROUP BY COALESCE(replay_epoch, {}) ORDER BY marker_count",
+            quote_identifier("lake"),
+            quote_identifier("__etl_applied_table_batches"),
+            quote_literal(&table_name.id()),
+            quote_literal("copy"),
+            quote_literal("__legacy__"),
+        );
+        let mut stmt = conn.prepare(&sql).expect("marker count by epoch prepare failed");
+        stmt.query_map([], |row| row.get::<_, i64>(0))
+            .expect("marker count by epoch query failed")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("marker count by epoch collect failed")
+    };
+
+    let marker_detail: Vec<(String, String, Option<u64>, Option<u64>)> = {
+        let sql = format!(
+            "SELECT COALESCE(replay_epoch, {}), batch_id, first_start_lsn, last_commit_lsn FROM \
+             {}.{} WHERE table_name = {} AND batch_kind = {}",
+            quote_literal("__legacy__"),
             quote_identifier("lake"),
             quote_identifier("__etl_applied_table_batches"),
             quote_literal(&table_name.id()),
@@ -823,8 +841,9 @@ async fn concurrent_same_table_copy_batches_complete() {
         stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, Option<u64>>(1)?,
+                row.get::<_, String>(1)?,
                 row.get::<_, Option<u64>>(2)?,
+                row.get::<_, Option<u64>>(3)?,
             ))
         })
         .expect("marker detail query failed")
@@ -835,14 +854,18 @@ async fn concurrent_same_table_copy_batches_complete() {
     eprintln!(
         "[concurrent_same_table_copy_batches_complete] diagnostics:\n  catalog rows      : \
          {rows}\n  applied markers   : {markers}\n  parquet rows      : {parquet_rows}\n  marker \
-         detail     : {marker_detail:?}"
+         counts/epoch: {marker_counts_by_epoch:?}\n  marker detail     : {marker_detail:?}"
     );
 
+    // The seed write before truncate remains as an old-epoch marker until
+    // maintenance cleanup. The two concurrent copy batches should land in the
+    // same current epoch.
     assert_eq!(
-        (rows, markers),
-        (100, 2),
-        "expected (rows, markers) = (100, 2), got ({rows}, {markers}); parquet rows = \
-         {parquet_rows}, marker detail = {marker_detail:?}"
+        (rows, markers, marker_counts_by_epoch.as_slice()),
+        (100, 3, [1, 2].as_slice()),
+        "expected rows = 100 with one retained old marker and two current markers, got rows = \
+         {rows}, markers = {markers}; parquet rows = {parquet_rows}, marker counts/epoch = \
+         {marker_counts_by_epoch:?}, marker detail = {marker_detail:?}"
     );
 }
 
