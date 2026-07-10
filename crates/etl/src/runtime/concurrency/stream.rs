@@ -262,7 +262,7 @@ where
                 *this.reset_timer = true;
                 *this.current_batch_bytes = 0;
 
-                return Poll::Ready(Some(Ok(take_and_replace_items(this.items))));
+                return Poll::Ready(Some(Ok(std::mem::take(this.items))));
             }
 
             return Poll::Pending;
@@ -300,7 +300,7 @@ where
                         *this.reset_timer = true;
                         *this.current_batch_bytes = 0;
 
-                        return Poll::Ready(Some(Ok(take_and_replace_items(this.items))));
+                        return Poll::Ready(Some(Ok(std::mem::take(this.items))));
                     }
 
                     // If byte budget is reached we want to return the accumulated data.
@@ -506,7 +506,6 @@ mod tests {
         assert_eq!(apply_worker_apply_stream_id(), "apply_worker_apply_stream");
     }
 
-    // BackpressureStream tests.
     #[tokio::test]
     async fn backpressure_stream_pauses_while_blocked_then_resumes() {
         let memory = MemoryMonitor::new_for_test();
@@ -591,7 +590,6 @@ mod tests {
         unblocker.await.unwrap();
     }
 
-    // TryBatchBackpressureStream tests.
     #[tokio::test]
     async fn flushes_buffered_items_immediately_when_memory_blocks() {
         let memory = MemoryMonitor::new_for_test();
