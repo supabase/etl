@@ -7,6 +7,7 @@
 
 pub mod database;
 pub mod event;
+pub mod faults;
 pub mod materialize;
 pub mod memory_destination;
 pub mod notify;
