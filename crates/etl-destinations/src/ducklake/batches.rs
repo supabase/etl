@@ -46,7 +46,8 @@ use crate::{
         },
         core::is_create_table_conflict,
         encoding::{
-            PreparedRows, cell_to_sql_literal_ref, prepare_rows, table_row_to_sql_literal_ref,
+            PreparedRows, cell_to_sql_literal_ref, prepare_copy_rows, prepare_rows,
+            table_row_to_sql_literal_ref,
         },
         metrics::{
             BATCH_KIND_LABEL, DELETE_ORIGIN_LABEL, ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,
@@ -696,7 +697,7 @@ pub(super) fn prepare_copy_table_batch(
         last_sequence_key: None,
         insert_column_names: replicated_column_names(replicated_table_schema),
         action: PreparedDuckLakeTableBatchAction::Mutation(vec![PreparedTableMutation::Upsert(
-            prepare_rows(table_rows),
+            prepare_copy_rows(replicated_table_schema, table_rows)?,
         )]),
     })
 }
@@ -1762,6 +1763,32 @@ impl ReusableStagingTable {
                     )
                 })?;
             }
+            PreparedRows::ArrowRecordBatch(record_batch) => {
+                let mut appender = conn.appender(&self.staging_name).map_err(|error| {
+                    tracing::error!(error = %error, "error appender");
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake staging appender creation failed",
+                        source: error
+                    )
+                })?;
+                appender.append_record_batch(record_batch.clone()).map_err(|err| {
+                    tracing::error!(error = %err, "error append record batch");
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake staging append_record_batch failed",
+                        source: err
+                    )
+                })?;
+                appender.flush().map_err(|err| {
+                    tracing::error!(error = %err, "error flush");
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake staging appender flush failed",
+                        source: err
+                    )
+                })?;
+            }
             PreparedRows::SqlLiterals(row_literals) => {
                 insert_rows_into_staging_with_sql(
                     conn,
@@ -1937,10 +1964,7 @@ fn apply_upsert_mutation(
     prepared_rows: &PreparedRows,
     reusable_staging_table: &mut ReusableStagingTable,
 ) -> EtlResult<()> {
-    let row_count = match prepared_rows {
-        PreparedRows::Appender(values) => values.len(),
-        PreparedRows::SqlLiterals(values) => values.len(),
-    };
+    let row_count = prepared_rows_count(prepared_rows);
 
     if row_count == 0 {
         return Ok(());
@@ -2040,6 +2064,7 @@ fn apply_update_mutation(
 fn prepared_rows_count(prepared_rows: &PreparedRows) -> usize {
     match prepared_rows {
         PreparedRows::Appender(values) => values.len(),
+        PreparedRows::ArrowRecordBatch(record_batch) => record_batch.num_rows(),
         PreparedRows::SqlLiterals(values) => values.len(),
     }
 }
@@ -2048,6 +2073,7 @@ fn prepared_rows_count(prepared_rows: &PreparedRows) -> usize {
 fn prepared_rows_kind(prepared_rows: &PreparedRows) -> &'static str {
     match prepared_rows {
         PreparedRows::Appender(_) => "appender",
+        PreparedRows::ArrowRecordBatch(_) => "arrow_record_batch",
         PreparedRows::SqlLiterals(_) => "sql_literals",
     }
 }
@@ -2071,10 +2097,7 @@ fn apply_sub_batch_rows(batch: &PreparedDuckLakeTableBatch) -> Option<usize> {
     }
 
     match &prepared_mutations[0] {
-        PreparedTableMutation::Upsert(prepared_rows) => Some(match prepared_rows {
-            PreparedRows::Appender(values) => values.len(),
-            PreparedRows::SqlLiterals(values) => values.len(),
-        }),
+        PreparedTableMutation::Upsert(prepared_rows) => Some(prepared_rows_count(prepared_rows)),
         PreparedTableMutation::Delete { .. } | PreparedTableMutation::Update { .. } => None,
     }
 }
@@ -2235,6 +2258,14 @@ mod tests {
         ReplicatedTableSchema::all(Arc::new(make_schema()))
     }
 
+    fn make_replicated_schema_with_columns(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
+        ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            columns,
+        )))
+    }
+
     fn ducklake_table_name() -> DuckLakeTableName {
         DuckLakeTableName::new("public", "users")
     }
@@ -2265,6 +2296,55 @@ mod tests {
         let source = error.source().expect("expected sanitized source");
         assert!(!source.to_string().contains(sensitive_value));
         assert!(source.to_string().contains("omitted because it may contain row values"));
+    }
+
+    #[test]
+    fn staging_load_rows_appends_arrow_record_batch() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table staging_arrow_copy (id integer, name varchar, created_at timestamp);",
+        )
+        .unwrap();
+        let replicated_table_schema = make_replicated_schema_with_columns(vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("created_at".to_owned(), PgType::TIMESTAMP, -1, 3, true),
+        ]);
+        let prepared_rows = prepare_copy_rows(
+            &replicated_table_schema,
+            vec![
+                TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("alice".to_owned()),
+                    Cell::Timestamp(
+                        chrono::NaiveDate::from_ymd_opt(2026, 1, 2)
+                            .unwrap()
+                            .and_hms_opt(3, 4, 5)
+                            .unwrap(),
+                    ),
+                ]),
+                TableRow::new(vec![Cell::I32(2), Cell::Null, Cell::Null]),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(prepared_rows, PreparedRows::ArrowRecordBatch(_)));
+
+        let staging_table = ReusableStagingTable {
+            table_name: ducklake_table_name(),
+            staging_name: "staging_arrow_copy".to_owned(),
+            created: true,
+            insert_column_names: vec!["id".to_owned(), "name".to_owned(), "created_at".to_owned()],
+        };
+
+        staging_table.load_rows(&conn, &prepared_rows).unwrap();
+
+        let count: i64 = conn
+            .query_row("select count(*) from staging_arrow_copy", [], |row| row.get(0))
+            .unwrap();
+        let id_sum: i64 =
+            conn.query_row("select sum(id) from staging_arrow_copy", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(id_sum, 3);
     }
 
     #[test]
@@ -2430,6 +2510,9 @@ mod tests {
                 assert_eq!(rows.len(), 1);
             }
             PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
+                panic!("expected appender payload")
+            }
+            PreparedTableMutation::Upsert(PreparedRows::ArrowRecordBatch(_)) => {
                 panic!("expected appender payload")
             }
             PreparedTableMutation::Delete { .. } | PreparedTableMutation::Update { .. } => {
@@ -2627,6 +2710,9 @@ mod tests {
                         assert_eq!(rows.len(), 2);
                     }
                     PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
+                        panic!("expected appender payload")
+                    }
+                    PreparedTableMutation::Upsert(PreparedRows::ArrowRecordBatch(_)) => {
                         panic!("expected appender payload")
                     }
                     PreparedTableMutation::Delete { .. } | PreparedTableMutation::Update { .. } => {
