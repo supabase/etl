@@ -92,6 +92,7 @@ where
 /// including data copying, state management, and coordination with the apply
 /// worker.
 #[expect(clippy::too_many_arguments)]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) async fn start_table_sync<S, D>(
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,

@@ -1,0 +1,101 @@
+name: Benchmark Comment
+
+on:
+  workflow_run:
+    workflows: ["Benchmark CI"]
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  comment:
+    name: Benchmark Comment
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: benchmark-comment
+
+      - name: Download benchmark profile artifacts
+        id: download-metrics
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: benchmark-profile-artifacts
+          path: /tmp/metrics/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Check benchmark metadata
+        id: profile-metadata
+        run: |
+          set -euo pipefail
+          if [[ -f /tmp/metrics/pr_number.txt ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ -f /tmp/metrics/head/table_copy.json && -f /tmp/metrics/base/table_copy.json ]]; then
+            echo "table_copy_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "table_copy_available=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ -f /tmp/metrics/head/table_streaming.json && -f /tmp/metrics/base/table_streaming.json ]]; then
+            echo "table_streaming_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "table_streaming_available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Profile Comment Tool
+        if: >
+          steps.profile-metadata.outputs.table_copy_available == 'true' ||
+          steps.profile-metadata.outputs.table_streaming_available == 'true'
+        run: cargo install hotpath --version 0.21.1 --bin hotpath-utils --features utils --locked
+
+      - name: Post Table Copy Profile Comment
+        if: steps.profile-metadata.outputs.table_copy_available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          github_base_ref="$(cat /tmp/metrics/base_ref.txt)"
+          github_head_ref="$(cat /tmp/metrics/head_ref.txt)"
+          export GITHUB_BASE_REF="$github_base_ref"
+          export GITHUB_HEAD_REF="$github_head_ref"
+          hotpath-utils profile-pr \
+            --head-metrics /tmp/metrics/head/table_copy.json \
+            --base-metrics /tmp/metrics/base/table_copy.json \
+            --github-token "$GH_TOKEN" \
+            --pr-number "$(cat /tmp/metrics/pr_number.txt)" \
+            --benchmark-id "table_copy_null"
+
+      - name: Post Table Streaming Profile Comment
+        if: steps.profile-metadata.outputs.table_streaming_available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          github_base_ref="$(cat /tmp/metrics/base_ref.txt)"
+          github_head_ref="$(cat /tmp/metrics/head_ref.txt)"
+          export GITHUB_BASE_REF="$github_base_ref"
+          export GITHUB_HEAD_REF="$github_head_ref"
+          hotpath-utils profile-pr \
+            --head-metrics /tmp/metrics/head/table_streaming.json \
+            --base-metrics /tmp/metrics/base/table_streaming.json \
+            --github-token "$GH_TOKEN" \
+            --pr-number "$(cat /tmp/metrics/pr_number.txt)" \
+            --benchmark-id "table_streaming_null"

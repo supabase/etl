@@ -107,6 +107,7 @@ impl EventsStream {
     /// need for progress information with network efficiency and system
     /// performance. It handles multiple error scenarios and edge cases
     /// related to time synchronization and network communication.
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "EventsStream"))]
     pub(crate) async fn send_status_update(
         self: Pin<&mut Self>,
         mut write_lsn: PgLsn,

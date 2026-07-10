@@ -21,10 +21,11 @@ use tracing_log::{LogTracer, NormalizeEvent, log_tracer::SetLoggerError};
 use tracing_subscriber::{
     EnvFilter,
     fmt::{
-        self as tracing_fmt, FmtContext, FormattedFields, MakeWriter, fmt,
+        self as tracing_fmt, FmtContext, FormattedFields, MakeWriter,
         format::{self, FormatEvent, FormatFields, Writer},
         time::FormatTime,
     },
+    prelude::*,
     registry::{LookupSpan, SpanRef},
 };
 
@@ -335,14 +336,24 @@ fn configure_prod_tracing(filter: EnvFilter, app_name: &str) -> Result<LogFlushe
     // when writing to the file. This is important for performance.
     let (file_appender, guard) = tracing_appender::non_blocking(file_appender);
 
-    let subscriber = fmt()
-        .with_env_filter(filter)
+    let fmt_layer = tracing_fmt::layer()
         .fmt_fields(format::JsonFields::new())
         .event_format(JsonContextFormatter::new(tracing_fmt::time::SystemTime))
-        .with_writer(move || file_appender.make_writer())
-        .finish();
+        .with_writer(move || file_appender.make_writer());
 
-    set_global_default(subscriber)?;
+    #[cfg(feature = "hotpath")]
+    {
+        let subscriber = tracing_subscriber::registry()
+            .with(fmt_layer.with_filter(filter))
+            .with(hotpath::sqlx_tracing_layer());
+        set_global_default(subscriber)?;
+    }
+
+    #[cfg(not(feature = "hotpath"))]
+    {
+        let subscriber = tracing_subscriber::registry().with(filter).with(fmt_layer);
+        set_global_default(subscriber)?;
+    }
 
     Ok(LogFlusher::Flusher(guard))
 }
@@ -359,10 +370,21 @@ fn configure_dev_tracing(filter: EnvFilter) -> Result<LogFlusher, TracingError> 
         .with_file(false)
         .with_target(true);
 
-    let subscriber =
-        fmt().with_env_filter(filter).event_format(format).with_writer(io::stdout).finish();
+    let fmt_layer = tracing_fmt::layer().event_format(format).with_writer(io::stdout);
 
-    set_global_default(subscriber)?;
+    #[cfg(feature = "hotpath")]
+    {
+        let subscriber = tracing_subscriber::registry()
+            .with(fmt_layer.with_filter(filter))
+            .with(hotpath::sqlx_tracing_layer());
+        set_global_default(subscriber)?;
+    }
+
+    #[cfg(not(feature = "hotpath"))]
+    {
+        let subscriber = tracing_subscriber::registry().with(filter).with(fmt_layer);
+        set_global_default(subscriber)?;
+    }
 
     Ok(LogFlusher::NullFlusher)
 }

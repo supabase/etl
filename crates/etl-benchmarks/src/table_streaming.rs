@@ -17,9 +17,10 @@ use tracing::info;
 
 use crate::common::{
     BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
-    PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_replication_slots, duration_millis,
-    format_decimal, format_duration_ms, format_integer, mib_per_second, per_second,
-    pipeline_config, run_etl_migrations, write_report,
+    PgConnectionArgs, PipelineTuningArgs, TokioRuntimeStatsSnapshot, bytes_to_mib,
+    cleanup_replication_slots, duration_millis, format_decimal, format_duration_ms, format_integer,
+    mib_per_second, per_second, pipeline_config, run_etl_migrations, tokio_runtime_stats,
+    write_report,
 };
 
 /// Command-line arguments for the table-streaming benchmark.
@@ -124,10 +125,14 @@ struct TableStreamingReport {
     batch_max_fill_ms: u64,
     memory_budget_ratio: f32,
     memory_backpressure_enabled: bool,
+    null_flush_delay_min_ms: u64,
+    null_flush_delay_max_ms: u64,
     destination_stats: DestinationStatsSnapshot,
+    tokio_runtime_stats: TokioRuntimeStatsSnapshot,
 }
 
 /// Runs the table-streaming benchmark binary.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn main() -> Result<()> {
     let args = Args::parse();
     let _log_flusher = crate::common::init_benchmark_tracing(args.log_target, "table_streaming")?;
@@ -137,6 +142,7 @@ pub async fn main() -> Result<()> {
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn run(args: RunArgs) -> Result<()> {
     validate_args(&args)?;
     info!("starting table-streaming benchmark");
@@ -162,32 +168,39 @@ async fn run(args: RunArgs) -> Result<()> {
     let mut pipeline = Pipeline::new(config, store, destination.clone());
 
     let start_started = Instant::now();
-    pipeline.start().await.context("failed to start pipeline")?;
+    crate::profile_future!("table_streaming_pipeline_start", pipeline.start())
+        .context("failed to start pipeline")?;
     let pipeline_start_ms = duration_millis(start_started.elapsed());
 
     let ready_started = Instant::now();
-    wait_for_tables_ready(notifications).await?;
+    crate::profile_future!(
+        "table_streaming_wait_for_tables_ready",
+        wait_for_tables_ready(notifications)
+    )?;
     let ready_wait_ms = duration_millis(ready_started.elapsed());
 
     destination.reset_cdc_stats();
 
     let end_to_end_started = Instant::now();
     let producer_started = Instant::now();
-    run_tpcc_workload(&args).await?;
+    crate::profile_future!("table_streaming_run_tpcc_workload", run_tpcc_workload(&args))?;
     let producer_duration = producer_started.elapsed();
 
     let drain_started = Instant::now();
-    wait_for_cdc_quiescence(
-        &destination,
-        Duration::from_millis(args.drain_quiet_ms),
-        Duration::from_millis(args.drain_poll_ms),
-    )
-    .await;
+    crate::profile_future!(
+        "table_streaming_wait_for_cdc_quiescence",
+        wait_for_cdc_quiescence(
+            &destination,
+            Duration::from_millis(args.drain_quiet_ms),
+            Duration::from_millis(args.drain_poll_ms),
+        )
+    );
     let drain_duration = drain_started.elapsed();
     let end_to_end_duration = end_to_end_started.elapsed();
 
     let shutdown_started = Instant::now();
-    pipeline.shutdown_and_wait().await.context("failed to shut down pipeline")?;
+    crate::profile_future!("table_streaming_pipeline_shutdown", pipeline.shutdown_and_wait())
+        .context("failed to shut down pipeline")?;
     let shutdown_duration = shutdown_started.elapsed();
     let end_to_end_with_shutdown_duration = end_to_end_started.elapsed();
 
@@ -255,7 +268,10 @@ async fn run(args: RunArgs) -> Result<()> {
         batch_max_fill_ms: args.tuning.batch_max_fill_ms,
         memory_budget_ratio: args.tuning.memory_budget_ratio,
         memory_backpressure_enabled: !args.tuning.disable_memory_backpressure,
+        null_flush_delay_min_ms: args.destination.null_flush_delay_min_ms,
+        null_flush_delay_max_ms: args.destination.null_flush_delay_max_ms,
         destination_stats,
+        tokio_runtime_stats: tokio_runtime_stats(),
     };
 
     print_summary(&report);
@@ -327,6 +343,8 @@ fn destination_label(destination: DestinationType) -> &'static str {
 }
 
 fn validate_args(args: &RunArgs) -> Result<()> {
+    args.destination.validate()?;
+
     if args.tpcc_warehouses == 0 {
         bail!("--tpcc-warehouses must be greater than 0");
     }
@@ -383,6 +401,7 @@ async fn register_table_ready_notifications(
     Ok(notifications)
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn wait_for_tables_ready(notifications: Vec<TableReadyNotifications>) -> Result<()> {
     let mut tasks = JoinSet::new();
     for notification in notifications {
@@ -404,6 +423,7 @@ async fn wait_for_tables_ready(notifications: Vec<TableReadyNotifications>) -> R
     Ok(())
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn run_tpcc_workload(args: &RunArgs) -> Result<u64> {
     let duration_seconds = args.duration_seconds.context("TPC-C duration was not configured")?;
     let password = args.pg.password.clone().unwrap_or_default();
@@ -442,6 +462,7 @@ async fn run_tpcc_workload(args: &RunArgs) -> Result<u64> {
     Ok(0)
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn wait_for_cdc_quiescence(
     destination: &BenchDestination,
     quiet_duration: Duration,

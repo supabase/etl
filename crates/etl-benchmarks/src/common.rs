@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -15,7 +15,7 @@ use clap::{Args, ValueEnum};
 use etl::{
     data::{SizeHint, TableRow},
     destination::{
-        Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
+        Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination, TaskSet,
         WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
@@ -42,6 +42,7 @@ use etl_destinations::snowflake::{
     Destination as SnowflakeDestination,
 };
 use etl_telemetry::tracing::{LogFlusher, init_tracing};
+use rand::Rng;
 use serde::Serialize;
 use sqlx::{
     Connection, Executor, PgConnection, PgPool,
@@ -54,10 +55,41 @@ use url::Url;
 
 /// Default batch fill time for benchmark runs.
 pub const BENCHMARK_DEFAULT_BATCH_MAX_FILL_MS: u64 = 1_000;
+/// Default minimum artificial flush delay for the null destination.
+pub const BENCHMARK_DEFAULT_NULL_FLUSH_DELAY_MIN_MS: u64 = 10;
+/// Default maximum artificial flush delay for the null destination.
+pub const BENCHMARK_DEFAULT_NULL_FLUSH_DELAY_MAX_MS: u64 = 100;
 
 /// Ensures crypto provider is only initialized once.
 #[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
 static INIT_CRYPTO: Once = Once::new();
+
+/// Initializes Tokio runtime profiling metrics when profiling is enabled.
+pub fn init_hotpath_tokio_runtime() {
+    #[cfg(feature = "hotpath")]
+    hotpath::tokio_runtime!();
+}
+
+/// Captures Tokio runtime scheduler metrics for benchmark reports.
+pub fn tokio_runtime_stats() -> TokioRuntimeStatsSnapshot {
+    let metrics = tokio::runtime::Handle::current().metrics();
+    let workers = metrics.num_workers();
+    let mut worker_park_counts = Vec::with_capacity(workers);
+    let mut worker_busy_ms = Vec::with_capacity(workers);
+
+    for worker in 0..workers {
+        worker_park_counts.push(metrics.worker_park_count(worker));
+        worker_busy_ms.push(metrics.worker_total_busy_duration(worker).as_millis());
+    }
+
+    TokioRuntimeStatsSnapshot {
+        workers,
+        alive_tasks: metrics.num_alive_tasks(),
+        global_queue_depth: metrics.global_queue_depth(),
+        worker_park_counts,
+        worker_busy_ms,
+    }
+}
 
 /// Where benchmark logs should be written.
 #[derive(ValueEnum, Debug, Clone, Copy, Serialize)]
@@ -165,6 +197,12 @@ pub struct DestinationArgs {
     /// Destination type to use.
     #[arg(long, value_enum, default_value = "null")]
     pub destination: DestinationType,
+    /// Minimum artificial null-destination flush delay in milliseconds.
+    #[arg(long, default_value_t = BENCHMARK_DEFAULT_NULL_FLUSH_DELAY_MIN_MS)]
+    pub null_flush_delay_min_ms: u64,
+    /// Maximum artificial null-destination flush delay in milliseconds.
+    #[arg(long, default_value_t = BENCHMARK_DEFAULT_NULL_FLUSH_DELAY_MAX_MS)]
+    pub null_flush_delay_max_ms: u64,
     /// BigQuery project ID.
     #[arg(long)]
     pub bq_project_id: Option<String>,
@@ -227,6 +265,50 @@ pub struct DestinationStatsSnapshot {
     pub event_batches: u64,
     /// Largest event batch observed.
     pub max_event_batch_size: u64,
+    /// Distribution of rows per table-copy batch.
+    pub table_row_batch_rows: MetricSummarySnapshot,
+    /// Distribution of estimated bytes per table-copy batch.
+    pub table_row_batch_bytes: MetricSummarySnapshot,
+    /// Distribution of destination table-row write durations in milliseconds.
+    pub table_row_write_ms: MetricSummarySnapshot,
+    /// Distribution of total logical replication events per event batch.
+    pub event_batch_total_events: MetricSummarySnapshot,
+    /// Distribution of row-level CDC mutation events per event batch.
+    pub event_batch_data_events: MetricSummarySnapshot,
+    /// Distribution of estimated bytes per logical replication event batch.
+    pub event_batch_bytes: MetricSummarySnapshot,
+    /// Distribution of destination event write durations in milliseconds.
+    pub event_write_ms: MetricSummarySnapshot,
+}
+
+/// Snapshot of a compact numeric distribution.
+#[derive(Debug, Clone, Serialize)]
+pub struct MetricSummarySnapshot {
+    /// Number of recorded values.
+    pub count: u64,
+    /// Sum of all recorded values.
+    pub total: u64,
+    /// Smallest recorded value.
+    pub min: Option<u64>,
+    /// Largest recorded value.
+    pub max: Option<u64>,
+    /// Arithmetic mean of recorded values.
+    pub avg: f64,
+}
+
+/// Snapshot of Tokio runtime scheduler metrics captured by a benchmark.
+#[derive(Debug, Clone, Serialize)]
+pub struct TokioRuntimeStatsSnapshot {
+    /// Number of runtime worker threads.
+    pub workers: usize,
+    /// Number of currently alive Tokio tasks.
+    pub alive_tasks: usize,
+    /// Number of tasks waiting in the global injection queue.
+    pub global_queue_depth: usize,
+    /// Number of times each worker parked while waiting for work.
+    pub worker_park_counts: Vec<u64>,
+    /// Total busy time for each worker in milliseconds.
+    pub worker_busy_ms: Vec<u128>,
 }
 
 #[derive(Debug, Default)]
@@ -246,7 +328,53 @@ struct DestinationStats {
     total_event_bytes: AtomicU64,
     event_batches: AtomicU64,
     max_event_batch_size: AtomicU64,
+    table_row_batch_rows: AtomicMetricSummary,
+    table_row_batch_bytes: AtomicMetricSummary,
+    table_row_write_ms: AtomicMetricSummary,
+    event_batch_total_events: AtomicMetricSummary,
+    event_batch_data_events: AtomicMetricSummary,
+    event_batch_bytes: AtomicMetricSummary,
+    event_write_ms: AtomicMetricSummary,
     cdc_target: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct AtomicMetricSummary {
+    count: AtomicU64,
+    total: AtomicU64,
+    min: AtomicU64,
+    max: AtomicU64,
+}
+
+impl AtomicMetricSummary {
+    fn snapshot(&self) -> MetricSummarySnapshot {
+        let count = self.count.load(Ordering::Relaxed);
+        let total = self.total.load(Ordering::Relaxed);
+        let min = self.min.load(Ordering::Relaxed);
+        let max = self.max.load(Ordering::Relaxed);
+
+        MetricSummarySnapshot {
+            count,
+            total,
+            min: (count > 0).then_some(min),
+            max: (count > 0).then_some(max),
+            avg: if count > 0 { total as f64 / count as f64 } else { 0.0 },
+        }
+    }
+
+    fn record(&self, value: u64) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.total.fetch_add(value, Ordering::Relaxed);
+        update_atomic_min(&self.min, value);
+        update_atomic_max(&self.max, value);
+    }
+
+    fn reset(&self) {
+        self.count.store(0, Ordering::Relaxed);
+        self.total.store(0, Ordering::Relaxed);
+        self.min.store(0, Ordering::Relaxed);
+        self.max.store(0, Ordering::Relaxed);
+    }
 }
 
 impl DestinationStats {
@@ -267,6 +395,13 @@ impl DestinationStats {
             total_event_bytes: self.total_event_bytes.load(Ordering::Relaxed),
             event_batches: self.event_batches.load(Ordering::Relaxed),
             max_event_batch_size: self.max_event_batch_size.load(Ordering::Relaxed),
+            table_row_batch_rows: self.table_row_batch_rows.snapshot(),
+            table_row_batch_bytes: self.table_row_batch_bytes.snapshot(),
+            table_row_write_ms: self.table_row_write_ms.snapshot(),
+            event_batch_total_events: self.event_batch_total_events.snapshot(),
+            event_batch_data_events: self.event_batch_data_events.snapshot(),
+            event_batch_bytes: self.event_batch_bytes.snapshot(),
+            event_write_ms: self.event_write_ms.snapshot(),
         }
     }
 
@@ -283,6 +418,10 @@ impl DestinationStats {
         self.total_event_bytes.store(0, Ordering::Relaxed);
         self.event_batches.store(0, Ordering::Relaxed);
         self.max_event_batch_size.store(0, Ordering::Relaxed);
+        self.event_batch_total_events.reset();
+        self.event_batch_data_events.reset();
+        self.event_batch_bytes.reset();
+        self.event_write_ms.reset();
     }
 }
 
@@ -348,9 +487,13 @@ impl<D> CountingDestination<D> {
         }
     }
 
-    fn count_events(stats: &DestinationStats, counts: &EventBatchCounts) {
+    fn count_events(stats: &DestinationStats, counts: &EventBatchCounts, write_ms: u64) {
         if counts.total_events > 0 {
             stats.event_batches.fetch_add(1, Ordering::Relaxed);
+            stats.event_batch_total_events.record(counts.total_events);
+            stats.event_batch_data_events.record(counts.data_events);
+            stats.event_batch_bytes.record(counts.total_event_bytes);
+            stats.event_write_ms.record(write_ms);
         }
         stats.total_events.fetch_add(counts.total_events, Ordering::Relaxed);
         stats.total_event_bytes.fetch_add(counts.total_event_bytes, Ordering::Relaxed);
@@ -386,6 +529,7 @@ where
         self.inner.drop_table_for_copy(replicated_table_schema, async_result).await
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "CountingDestination<D>"))]
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -394,26 +538,34 @@ where
     ) -> EtlResult<()> {
         let row_count = table_rows.len() as u64;
         let row_bytes = table_rows.iter().map(SizeHint::size_hint).sum::<usize>() as u64;
+        let write_started = Instant::now();
         self.inner.write_table_rows(replicated_table_schema, table_rows, async_result).await?;
+        let write_ms = duration_to_u64_millis(write_started.elapsed());
 
         self.stats.table_rows.fetch_add(row_count, Ordering::Relaxed);
         self.stats.table_row_bytes.fetch_add(row_bytes, Ordering::Relaxed);
         if row_count > 0 {
             self.stats.table_row_batches.fetch_add(1, Ordering::Relaxed);
+            self.stats.table_row_batch_rows.record(row_count);
+            self.stats.table_row_batch_bytes.record(row_bytes);
+            self.stats.table_row_write_ms.record(write_ms);
         }
 
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "CountingDestination<D>"))]
     async fn write_events(
         &self,
         events: Vec<Event>,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         let counts = classify_events(&events);
+        let write_started = Instant::now();
         self.inner.write_events(events, async_result).await?;
+        let write_ms = duration_to_u64_millis(write_started.elapsed());
 
-        Self::count_events(&self.stats, &counts);
+        Self::count_events(&self.stats, &counts, write_ms);
         let target = self.stats.cdc_target.load(Ordering::Acquire);
         if self.stats.cdc_data_events.load(Ordering::Acquire) >= target {
             self.notify.notify_waiters();
@@ -425,11 +577,32 @@ where
 
 /// Destination that acknowledges and discards all writes.
 #[derive(Clone)]
-pub struct NullDestination;
+pub struct NullDestination {
+    tasks: TaskSet,
+    flush_delay: NullFlushDelay,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NullFlushDelay {
+    min_ms: u64,
+    max_ms: u64,
+}
+
+impl NullDestination {
+    /// Creates a null destination.
+    fn new(flush_delay: NullFlushDelay) -> Self {
+        Self { tasks: TaskSet::new(), flush_delay }
+    }
+}
 
 impl Destination for NullDestination {
     fn name() -> &'static str {
         "null"
+    }
+
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "NullDestination"))]
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.tasks.drain().await
     }
 
     async fn drop_table_for_copy(
@@ -441,24 +614,50 @@ impl Destination for NullDestination {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "NullDestination"))]
     async fn write_table_rows(
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
-        _table_rows: Vec<TableRow>,
+        table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
+        sleep_random_null_flush_delay(self.flush_delay).await;
+        drop(table_rows);
         async_result.send(Ok(()));
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "NullDestination"))]
     async fn write_events(
         &self,
-        _events: Vec<Event>,
+        events: Vec<Event>,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        async_result.send(Ok(DestinationWriteStatus::Durable));
+        self.tasks.try_reap().await?;
+        let flush_delay = self.flush_delay;
+        self.tasks
+            .spawn(async move {
+                sleep_random_null_flush_delay(flush_delay).await;
+                drop(events);
+                async_result.send(Ok(DestinationWriteStatus::Durable));
+            })
+            .await;
+
         Ok(())
     }
+}
+
+/// Sleeps for a randomized null-destination batch flush delay.
+async fn sleep_random_null_flush_delay(flush_delay: NullFlushDelay) {
+    let delay_ms = match (flush_delay.min_ms, flush_delay.max_ms) {
+        (0, 0) => return,
+        (min_ms, max_ms) if min_ms == max_ms => min_ms,
+        (min_ms, max_ms) => {
+            let mut rng = rand::rng();
+            rng.random_range(min_ms..=max_ms)
+        }
+    };
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 }
 
 /// Benchmark destination variants.
@@ -493,8 +692,15 @@ impl BenchDestination {
         pipeline_id: u64,
         store: NotifyingStore,
     ) -> Result<Self> {
+        destination_args.validate()?;
+
         match destination_args.destination {
-            DestinationType::Null => Ok(Self::Null(CountingDestination::new(NullDestination))),
+            DestinationType::Null => {
+                Ok(Self::Null(CountingDestination::new(NullDestination::new(NullFlushDelay {
+                    min_ms: destination_args.null_flush_delay_min_ms,
+                    max_ms: destination_args.null_flush_delay_max_ms,
+                }))))
+            }
             #[cfg(feature = "bigquery")]
             DestinationType::BigQuery => {
                 install_crypto_provider();
@@ -643,6 +849,19 @@ impl BenchDestination {
     }
 }
 
+impl DestinationArgs {
+    /// Validates destination-specific benchmark arguments.
+    pub fn validate(&self) -> Result<()> {
+        if self.null_flush_delay_min_ms > self.null_flush_delay_max_ms {
+            bail!(
+                "--null-flush-delay-min-ms must be less than or equal to --null-flush-delay-max-ms"
+            );
+        }
+
+        Ok(())
+    }
+}
+
 impl Destination for BenchDestination {
     fn name() -> &'static str {
         "bench_destination"
@@ -725,9 +944,13 @@ impl Destination for BenchDestination {
         match self {
             Self::Null(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "bigquery")]
-            Self::BigQuery(destination) => {
-                Box::pin(destination.write_events(events, async_result)).await
-            }
+            #[allow(
+                clippy::large_futures,
+                reason = "The BigQuery benchmark write future is large under all-features \
+                          profiling checks; keep it stack-allocated to avoid per-batch heap \
+                          boxing."
+            )]
+            Self::BigQuery(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "snowflake")]
@@ -775,6 +998,7 @@ pub async fn pg_pool(args: &PgConnectionArgs) -> Result<PgPool> {
 }
 
 /// Applies ETL source-side migrations required by replication triggers/state.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn run_etl_migrations(args: &PgConnectionArgs) -> Result<()> {
     let mut connection = PgConnection::connect_with(&pg_connect_options(args))
         .await
@@ -804,6 +1028,7 @@ pub async fn run_etl_migrations(args: &PgConnectionArgs) -> Result<()> {
 }
 
 /// Builds an ETL pipeline config for a benchmark.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn pipeline_config(
     pipeline_id: u64,
     publication_name: String,
@@ -849,6 +1074,7 @@ pub fn pipeline_config(
 }
 
 /// Drops replication slots created by a benchmark pipeline.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn cleanup_replication_slots(
     pg: &PgConnectionArgs,
     pipeline_id: u64,
@@ -988,6 +1214,7 @@ pub fn split_table_name(table_name: &str) -> Result<(String, String)> {
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn classify_events(events: &[Event]) -> EventBatchCounts {
     let mut counts = EventBatchCounts { total_events: events.len() as u64, ..Default::default() };
     for event in events {
@@ -1034,6 +1261,21 @@ fn update_atomic_max(value: &AtomicU64, candidate: u64) {
             Err(next) => current = next,
         }
     }
+}
+
+fn update_atomic_min(value: &AtomicU64, candidate: u64) {
+    let mut current = value.load(Ordering::Relaxed);
+    while current == 0 || candidate < current {
+        match value.compare_exchange_weak(current, candidate, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return,
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn duration_to_u64_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 async fn drop_replication_slot(pool: &PgPool, slot_name: &str) {

@@ -1,0 +1,301 @@
+name: Benchmark CI
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: postgres
+  POSTGRES_DB: bench
+  POSTGRES_PORT: 5430
+  POSTGRES_HOST: localhost
+
+jobs:
+  profile:
+    name: Benchmarks
+    runs-on: blacksmith-16vcpu-ubuntu-2404-arm
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'benchmark')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: benchmark-ci-arm
+
+      - name: Install system tools
+        run: |
+          set -euo pipefail
+          missing_packages=()
+          if ! command -v go >/dev/null 2>&1; then
+            missing_packages+=(golang-go)
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            missing_packages+=(postgresql-client)
+          fi
+          if (( ${#missing_packages[@]} > 0 )); then
+            sudo apt-get update
+            sudo apt-get install -y "${missing_packages[@]}"
+          fi
+          go install github.com/pingcap/go-tpc/cmd/go-tpc@v1.0.12
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Start Postgres
+        run: |
+          POSTGRES_IMAGE=postgres:18 \
+          POSTGRES_VERSION=18 \
+            cargo xtask postgres start --shards 1 --base-port "$POSTGRES_PORT" --source-only
+
+      - name: Create metrics directory
+        run: mkdir -p /tmp/metrics/head /tmp/metrics/base
+
+      - name: Record benchmark environment
+        run: |
+          set -euo pipefail
+          host_memory="$(awk '/MemTotal/ { printf "%.2f GiB", $2 / 1024 / 1024 }' /proc/meminfo || true)"
+          if [[ -z "${host_memory}" ]]; then
+            host_memory="unavailable"
+          fi
+
+          cgroup_memory_limit="unavailable"
+          if [[ -r /sys/fs/cgroup/memory.max ]]; then
+            cgroup_memory_limit="$(cat /sys/fs/cgroup/memory.max)"
+          elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+            cgroup_memory_limit="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+          fi
+
+          {
+            echo "## Benchmark environment"
+            echo
+            echo "| Setting | Value |"
+            echo "| --- | --- |"
+            echo "| Runner | ${RUNNER_NAME} |"
+            echo "| Runner OS | ${RUNNER_OS} |"
+            echo "| Runner arch | ${RUNNER_ARCH} |"
+            echo "| Runner class | Blacksmith Ubuntu 24.04 ARM, 16 vCPU |"
+            echo "| CPUs | $(nproc) |"
+            echo "| Host memory | ${host_memory} |"
+            echo "| Cgroup memory limit | ${cgroup_memory_limit} |"
+            echo "| Destination | null |"
+            echo "| Warehouses | 4 |"
+            echo "| TPC-C threads | 32 |"
+            echo "| TPC-C tables | default replicated set |"
+            echo "| Streaming duration | 60 seconds |"
+            echo "| Table-sync workers | 4 |"
+            echo "| Copy connections/table | 4 |"
+            echo "| Memory backpressure | disabled |"
+            echo "| Batch max fill | 1000 ms |"
+            echo "| Null flush delay | 10-100 ms |"
+            echo "| Measured samples | 1 |"
+            echo "| Warmup samples | 0 |"
+            echo "| Profiling modes | timing, allocation |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create benchmark summary renderer
+        run: |
+          cat > /tmp/render-benchmark-summary.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          title="$1"
+          benchmark_dir="$2"
+          artifacts_note="$3"
+          artifacts_json="${benchmark_dir}/benchmark_artifacts.json"
+
+          echo "## ${title} benchmark summary"
+          echo
+          echo "${artifacts_note}"
+          echo
+
+          if [[ ! -f "${artifacts_json}" ]]; then
+            echo "Benchmark artifact summary was not generated."
+            exit 0
+          fi
+
+          jq -r '
+            def display_number:
+              if . == null then "n/a"
+              elif type == "number" then
+                if . == floor then tostring
+                else (. * 100 | round / 100 | tostring)
+                end
+              else tostring
+              end;
+
+            def distribution_row($stats; $key; $label):
+              if ($stats[$key]? and (($stats[$key].count // 0) > 0)) then
+                "| `\($label)` | `\($stats[$key].count | display_number)` | `\($stats[$key].min | display_number)` | `\($stats[$key].avg | display_number)` | `\($stats[$key].max | display_number)` |"
+              else empty end;
+
+            .benchmarks[]
+            | select(.benchmark_report.status == "ok")
+            | . as $benchmark
+            | ($benchmark.benchmark_report.destination_stats // {}) as $stats
+            | "### \($benchmark.benchmark)\n"
+              + "\n| Metric | Value |\n| --- | ---: |\n"
+              + (
+                  if $benchmark.benchmark == "table_copy" then
+                    "| Rows copied | `\($benchmark.benchmark_report.rows_copied | display_number)` |\n"
+                    + "| Rows/s | `\($benchmark.benchmark_report.rows_per_second | display_number)` |\n"
+                    + "| Decoded MiB/s | `\($benchmark.benchmark_report.decoded_mib_per_second | display_number)` |\n"
+                  else
+                    "| Produced events | `\($benchmark.benchmark_report.produced_events | display_number)` |\n"
+                    + "| Observed CDC events | `\($benchmark.benchmark_report.observed_cdc_events | display_number)` |\n"
+                    + "| Events/s | `\($benchmark.benchmark_report.events_per_second | display_number)` |\n"
+                    + "| Decoded MiB/s | `\($benchmark.benchmark_report.decoded_mib_per_second | display_number)` |\n"
+                  end
+                )
+              + "| Total ms | `\($benchmark.benchmark_report.total_ms | display_number)` |\n"
+              + "\n**Stage breakdown:** "
+              + (($benchmark.benchmark_report.stage_breakdown // {}) | to_entries | map("`\(.key)`=\(.value | display_number)ms") | join(", "))
+              + "\n\n**Destination distributions:**\n\n"
+              + "| Distribution | Count | Min | Avg | Max |\n| --- | ---: | ---: | ---: | ---: |\n"
+              + ([
+                  distribution_row($stats; "table_row_batch_rows"; "row batch rows"),
+                  distribution_row($stats; "table_row_batch_bytes"; "row batch bytes"),
+                  distribution_row($stats; "table_row_write_ms"; "row write ms"),
+                  distribution_row($stats; "event_batch_total_events"; "event batch events"),
+                  distribution_row($stats; "event_batch_data_events"; "event batch CDC events"),
+                  distribution_row($stats; "event_batch_bytes"; "event batch bytes"),
+                  distribution_row($stats; "event_write_ms"; "event write ms")
+                ] | map(select(. != null and . != "")) | if length == 0 then "_No destination distributions were recorded._" else join("\n") end)
+              + "\n\n**Profile section rows:** "
+              + (($benchmark.hotpath_report.sections // {}) | to_entries | map("`\(.key)`=\(.value.count)") | join(", "))
+              + "\n"
+          ' "${artifacts_json}"
+          EOF
+          chmod +x /tmp/render-benchmark-summary.sh
+
+      - name: Head Benchmarks
+        run: |
+          set -euo pipefail
+          cargo xtask benchmark \
+            --host "$POSTGRES_HOST" \
+            --port "$POSTGRES_PORT" \
+            --database "$POSTGRES_DB" \
+            --username "$POSTGRES_USER" \
+            --password "$POSTGRES_PASSWORD" \
+            --force-prepare \
+            --warehouses 4 \
+            --tpcc-threads 32 \
+            --streaming-duration-seconds 60 \
+            --streaming-drain-quiet-ms 1000 \
+            --batch-max-fill-ms 1000 \
+            --null-flush-delay-min-ms 10 \
+            --null-flush-delay-max-ms 100 \
+            --max-table-sync-workers 4 \
+            --max-copy-connections-per-table 4 \
+            --destination null \
+            --samples 1 \
+            --warmup-samples 0 \
+            --output-dir /tmp/metrics/head-benchmark \
+            --hotpath \
+            --hotpath-alloc \
+            --hotpath-output-dir /tmp/metrics/head
+
+      - name: Summarize Head Artifacts
+        run: |
+          set -euo pipefail
+          if [[ -f /tmp/metrics/head-benchmark/benchmark_artifacts.md ]]; then
+            /tmp/render-benchmark-summary.sh \
+              "Head" \
+              /tmp/metrics/head-benchmark \
+              "Full machine-readable benchmark and profile artifacts are available in the uploaded \`benchmark-profile-artifacts\` artifact." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Checkout Base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git checkout "$BASE_SHA"
+
+      - name: Base Benchmarks
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+
+          if ! cargo xtask benchmark --help | grep -q -- '--hotpath'; then
+            echo "false" > /tmp/metrics/base_profile_compatible.txt
+            {
+              echo
+              echo "## Base profile artifacts"
+              echo
+              echo "Base commit does not support profiling benchmark flags yet, so base profiling was skipped."
+              echo "This is expected for the PR that introduces the benchmark profiling suite."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "true" > /tmp/metrics/base_profile_compatible.txt
+          cargo xtask benchmark \
+            --host "$POSTGRES_HOST" \
+            --port "$POSTGRES_PORT" \
+            --database "$POSTGRES_DB" \
+            --username "$POSTGRES_USER" \
+            --password "$POSTGRES_PASSWORD" \
+            --force-prepare \
+            --warehouses 4 \
+            --tpcc-threads 32 \
+            --streaming-duration-seconds 60 \
+            --streaming-drain-quiet-ms 1000 \
+            --batch-max-fill-ms 1000 \
+            --null-flush-delay-min-ms 10 \
+            --null-flush-delay-max-ms 100 \
+            --max-table-sync-workers 4 \
+            --max-copy-connections-per-table 4 \
+            --destination null \
+            --samples 1 \
+            --warmup-samples 0 \
+            --output-dir /tmp/metrics/base-benchmark \
+            --hotpath \
+            --hotpath-alloc \
+            --hotpath-output-dir /tmp/metrics/base
+
+      - name: Summarize Base Artifacts
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          if [[ -f /tmp/metrics/base-benchmark/benchmark_artifacts.md ]]; then
+            /tmp/render-benchmark-summary.sh \
+              "Base" \
+              /tmp/metrics/base-benchmark \
+              "Full machine-readable benchmark and profile artifacts are available in the uploaded \`benchmark-profile-artifacts\` artifact." \
+              >> "$GITHUB_STEP_SUMMARY"
+          elif [[ -f /tmp/metrics/base_profile_compatible.txt ]] && [[ "$(cat /tmp/metrics/base_profile_compatible.txt)" == "false" ]]; then
+            echo "base profile artifacts were skipped because the base commit lacks benchmark profiling support"
+          fi
+
+      - name: Save PR Metadata
+        if: github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          echo "$PR_NUMBER" > /tmp/metrics/pr_number.txt
+          echo "$BASE_REF" > /tmp/metrics/base_ref.txt
+          echo "$HEAD_REF" > /tmp/metrics/head_ref.txt
+
+      - name: Upload Benchmark Profile Artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-profile-artifacts
+          path: /tmp/metrics/
+          retention-days: 1

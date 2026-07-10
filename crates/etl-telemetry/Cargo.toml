@@ -12,8 +12,13 @@ homepage.workspace = true
 test = false
 doctest = false
 
+[features]
+default = []
+hotpath = ["dep:hotpath", "hotpath/hotpath", "hotpath/sqlx"]
+
 [dependencies]
 etl-config = { workspace = true }
+hotpath = { workspace = true, optional = true }
 
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 serde = { workspace = true }
