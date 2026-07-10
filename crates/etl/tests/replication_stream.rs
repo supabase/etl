@@ -198,6 +198,9 @@ async fn create_type_matrix_table_in(
                 ("varchar_col", "varchar(16) not null"),
                 ("name_col", "name not null"),
                 ("text_col", "text not null"),
+                ("text_null_col", "text"),
+                ("text_null_marker_literal_col", "text not null"),
+                ("text_embedded_null_marker_col", "text not null"),
                 ("money_col", "money not null"),
                 ("int2_col", "smallint not null"),
                 ("int4_col", "integer not null"),
@@ -312,6 +315,9 @@ async fn insert_type_matrix_row(
                 'varchar',
                 'pg_name'::name,
                 'hello world',
+                null::text,
+                $$\N$$::text,
+                $$value\Ntail$$::text,
                 '12.34'::money,
                 -123::smallint,
                 456::integer,
@@ -612,6 +618,9 @@ fn assert_type_matrix_row(row: &TableRow, column_schemas: &[ColumnSchema]) {
     assert_string_cell(row, column_schemas, "varchar_col", "varchar");
     assert_string_cell(row, column_schemas, "name_col", "pg_name");
     assert_string_cell(row, column_schemas, "text_col", "hello world");
+    assert_eq!(cell(row, column_schemas, "text_null_col"), &Cell::Null);
+    assert_string_cell(row, column_schemas, "text_null_marker_literal_col", "\\N");
+    assert_string_cell(row, column_schemas, "text_embedded_null_marker_col", "value\\Ntail");
     assert_money_cell(row, column_schemas);
     assert_eq!(cell(row, column_schemas, "int2_col"), &Cell::I16(-123));
     assert_eq!(cell(row, column_schemas, "int4_col"), &Cell::I32(456));
