@@ -2644,12 +2644,11 @@ where
     /// Dispatches to worker-specific implementation based on the worker
     /// context.
     ///
-    /// Idle syncing uses the last received LSN so table handoff can make
-    /// progress even when no new transactions arrive. This is made possible
-    /// thanks to the keep alive messages that carry an ever-growing LSN that
-    /// follows the WAL growth on the main database and allows the apply loop to
-    /// progress even if there are no events for the tables in the publication
-    /// that this instance is interested in.
+    /// Idle syncing uses the last durable flush LSN. Keepalive and accepted
+    /// destination writes may advance the received LSN without proving that the
+    /// destination can recover the corresponding table data after a crash.
+    /// Table sync completion (`SyncDone`) is a durable handoff boundary, so
+    /// it must only be driven by durable destination progress.
     async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
         if !self.state.is_idle() {
             debug!("skipping table sync processing because apply loop is not idle");
@@ -2657,7 +2656,7 @@ where
             return Ok(());
         }
 
-        let current_lsn = self.state.last_received_lsn();
+        let current_lsn = self.state.replication_progress.last_flush_lsn();
 
         debug!(
             worker_type = %self.worker_context.worker_type(),
