@@ -54,9 +54,11 @@ These explain the pressure your writer is putting on DuckLake:
 - `etl_ducklake_inline_flush_rows`
 - `etl_ducklake_inline_flush_duration_seconds`
 
-The destination attaches DuckLake with `DATA_INLINING_ROW_LIMIT = 10000`.
-External maintenance jobs flush inlined data during coordinated pauses. These
-metrics tell you whether that strategy is helping.
+The destination attaches DuckLake with `DATA_INLINING_ROW_LIMIT = 1000000` for
+streaming writes. Initial copies temporarily set a table-scoped limit of `0`,
+so their batches are materialized as Parquet instead of accumulating in the
+metadata catalog. External maintenance jobs flush streaming inlined data during
+coordinated pauses. These metrics tell you whether that strategy is helping.
 
 The `result` label on these metrics uses:
 
@@ -133,6 +135,11 @@ How to read them:
   masked by delete files. If this stays elevated, lowering
   `rewrite_delete_threshold` or running `rewrite_data_files` more often is
   usually justified.
+
+File rewrite and merge requests are deferred while any initial table copy is
+active. Initial copies intentionally create Parquet files per batch; waiting
+until they finish avoids compaction competing with the writer or repeatedly
+rewriting a growing table.
 
 ### Catalog backlog gauges
 

@@ -90,12 +90,18 @@ impl fmt::Display for DuckLakeTableName {
     }
 }
 
-/// Attach-level DuckLake data inlining limit for ETL-managed connections.
+/// Attach-level DuckLake data inlining limit for streaming ETL writes.
 ///
 /// This applies to every DuckDB connection in the destination pool so small
 /// writes inline into the DuckLake metadata first and can later be
 /// materialized to Parquet by an external maintenance job.
-const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 1_000_000;
+pub(super) const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 1_000_000;
+
+/// Table-level DuckLake data inlining limit during initial copies.
+///
+/// Zero disables inline writes, ensuring initial-copy batches become Parquet
+/// files instead of accumulating in the catalog.
+pub(super) const COPY_DATA_INLINING_ROW_LIMIT: u64 = 0;
 
 pub use core::{
     DuckLakeDestination, DuckLakeExternalMaintenanceConfig, DuckLakeExternalMaintenancePause,
