@@ -143,8 +143,8 @@ fn format_update_mutation_error_detail(
 /// ETL-managed per-table streaming replay progress for steady-state CDC
 /// retries.
 const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
-/// Disable helper-table data inlining for the same reason as the copy marker
-/// table.
+/// Disable helper-table data inlining for the same reason as
+/// [`APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT`].
 const STREAMING_PROGRESS_TABLE_DATA_INLINING_ROW_LIMIT: usize = 0;
 /// Maximum number of times a failed write attempt is retried before giving up.
 const MAX_COMMIT_RETRIES: u32 = 10;

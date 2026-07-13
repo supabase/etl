@@ -1559,6 +1559,10 @@ where
 
     /// Applies a schema diff while serializing with table-local writes and
     /// external maintenance.
+    ///
+    /// A table that was copied with data inlining disabled must restore its
+    /// streaming setting before DuckLake applies a later schema change. This
+    /// lets DuckLake update its inlined-data representation with the DDL.
     async fn apply_schema_diff(
         &self,
         table_name: &DuckLakeTableName,
@@ -1578,6 +1582,7 @@ where
         );
 
         let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        self.ensure_streaming_data_inlining_limit(table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         let table_name = table_name.clone();
         let diff = diff.clone();

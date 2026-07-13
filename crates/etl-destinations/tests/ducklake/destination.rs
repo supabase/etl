@@ -386,10 +386,10 @@ async fn write_table_rows_basic() {
     assert_eq!(name.as_deref(), Some("Alice"));
 }
 
-/// Small copy batches should remain inlined after the caller returns.
+/// Small copy batches should write a Parquet file before the caller returns.
 #[tokio::test(flavor = "multi_thread")]
-async fn write_table_rows_small_batch_stays_inlined_after_return() {
-    let lake = create_test_lake("write_table_rows_small_batch_stays_inlined_after_return").await;
+async fn write_table_rows_small_batch_writes_parquet_before_return() {
+    let lake = create_test_lake("write_table_rows_small_batch_writes_parquet_before_return").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
     let data = lake.data_dir.clone();
@@ -428,8 +428,8 @@ async fn write_table_rows_small_batch_stays_inlined_after_return() {
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
     assert_eq!(
         count_table_files(&data, &table_name),
-        0,
-        "small copy batch should remain inlined until background maintenance"
+        1,
+        "small copy batch should write a Parquet file"
     );
 }
 
@@ -965,10 +965,10 @@ async fn truncate_clears_rows() {
     assert_eq!(col_count, 2, "table should still have 2 columns after truncate");
 }
 
-/// Truncation should clear copy markers so the same rows can be copied again.
+/// Truncation should rotate replay state so the same rows can be copied again.
 #[tokio::test(flavor = "multi_thread")]
-async fn truncate_clears_copy_markers_for_recopy() {
-    let lake = create_test_lake("truncate_clears_copy_markers_for_recopy").await;
+async fn truncate_rotates_replay_state_for_recopy() {
+    let lake = create_test_lake("truncate_rotates_replay_state_for_recopy").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
@@ -1004,7 +1004,7 @@ async fn truncate_clears_copy_markers_for_recopy() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
-    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 2);
 }
 
 /// `write_events` applies inserts, updates, and deletes to the current table
@@ -2895,11 +2895,11 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
     reset_ducklake_test_hooks();
 }
 
-/// Marker-table rows should stay in the DuckLake catalog instead of creating
-/// Parquet files.
+/// Marker-table rows should write Parquet files to avoid catalog-level
+/// contention.
 #[tokio::test(flavor = "multi_thread")]
-async fn applied_batches_table_uses_data_inlining() {
-    let lake = create_test_lake("applied_batches_table_uses_data_inlining").await;
+async fn applied_batches_table_writes_parquet() {
+    let lake = create_test_lake("applied_batches_table_writes_parquet").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
     let data = lake.data_dir.clone();
@@ -2936,7 +2936,7 @@ async fn applied_batches_table_uses_data_inlining() {
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
-    assert_eq!(count_internal_table_files(&data, "__etl_applied_table_batches"), 0);
+    assert_eq!(count_internal_table_files(&data, "__etl_applied_table_batches"), 1);
 }
 
 /// Mixed table batches remain correct when multiple tables are written in one
