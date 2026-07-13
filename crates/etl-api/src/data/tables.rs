@@ -9,44 +9,61 @@ pub enum TablesDbError {
     Database(#[from] sqlx::Error),
 }
 
+/// A schema-qualified table supplied in publication write requests.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Table {
+    /// The Postgres schema containing the table.
     pub schema: String,
+    /// The unqualified Postgres table name.
     pub name: String,
 }
 
+/// A table discovered in a source database.
+///
+/// The `id` is the table's Postgres OID. It is stable across renames for the
+/// lifetime of the relation, but it is scoped to this source database and may
+/// change if the table is dropped and recreated. Callers should use `schema`
+/// and `name` for display and `id` for selective table-copy configuration.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SourceTable {
+    /// The table's Postgres OID in this source database.
     pub id: u32,
+    /// The Postgres schema containing the table.
     pub schema: String,
+    /// The unqualified Postgres table name.
     pub name: String,
 }
 
 /// A table referenced by a pipeline's table-sync-copy configuration.
 ///
-/// `schema` and `name` are `None` when the table id no longer resolves to a
-/// table in the source database, for example because the table was dropped
-/// after being selected. Callers can render the table as missing directly
-/// from this shape instead of treating an unresolved id as an error.
+/// `schema` and `name` are either both populated or both `None`. They are
+/// `None` when the table id no longer resolves in the source database, for
+/// example because the table was dropped after being selected. Callers can
+/// render the table as missing directly from this shape instead of treating an
+/// unresolved id as an error.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ConfiguredTable {
+    /// The configured Postgres table OID.
     pub id: u32,
+    /// The current schema, or `None` when the OID cannot be resolved.
     pub schema: Option<String>,
+    /// The current table name, or `None` when the OID cannot be resolved.
     pub name: Option<String>,
 }
 
+/// Returns the ordinary and partitioned tables available for replication.
 pub async fn get_tables(pool: &PgPool) -> Result<Vec<SourceTable>, TablesDbError> {
     let query = r#"
         select
-			c.oid::bigint as id,
-           	n.nspname as schema,
-           	c.relname as name
+            c.oid::bigint as id,
+            n.nspname as schema,
+            c.relname as name
         from pg_catalog.pg_class c
-           	left join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+            left join pg_catalog.pg_namespace n on n.oid = c.relnamespace
             left join pg_catalog.pg_am am on am.oid = c.relam
         where
-           	c.relkind = 'r'
-           	and n.nspname not in ('pg_catalog', 'information_schema', 'auth', 'etl', 'extensions', 'graphql', 'pgtle', 'pgsodium', 'realtime', 'storage', 'vault')
+            c.relkind in ('r', 'p')
+            and n.nspname not in ('pg_catalog', 'information_schema', 'auth', 'etl', 'extensions', 'graphql', 'pgtle', 'pgsodium', 'realtime', 'storage', 'vault')
             and n.nspname !~ '^pg_toast'
         order by schema, name;
         "#;

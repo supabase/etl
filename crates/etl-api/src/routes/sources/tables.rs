@@ -57,8 +57,10 @@ impl TableError {
     }
 }
 
-#[derive(Serialize, Deserialize, ToSchema)]
+/// Response containing the tables discovered in a source database.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReadTablesResponse {
+    /// Source tables ordered by schema and name.
     #[schema(required = true)]
     pub tables: Vec<SourceTable>,
 }

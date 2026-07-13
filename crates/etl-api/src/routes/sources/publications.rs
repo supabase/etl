@@ -79,23 +79,31 @@ impl IntoResponse for PublicationError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
+/// Request to create a publication from schema-qualified table names.
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePublicationRequest {
+    /// The publication name to create.
     #[schema(example = "my_publication", required = true)]
     #[serde(deserialize_with = "crate::utils::trim_string")]
     name: String,
+    /// Schema-qualified tables to publish.
     #[schema(required = true)]
     tables: Vec<Table>,
 }
 
-#[derive(Deserialize, ToSchema)]
+/// Request to change a publication's schema-qualified table list.
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdatePublicationRequest {
+    /// Schema-qualified tables to add, remove, or set.
     #[schema(required = true)]
     tables: Vec<Table>,
 }
 
+/// Response containing all publications in a source database.
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ReadPublicationsResponse {
+    /// Publications ordered by name, with each table list ordered by schema and
+    /// name.
     pub publications: Vec<Publication>,
 }
 

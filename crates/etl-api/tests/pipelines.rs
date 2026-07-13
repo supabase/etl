@@ -7,7 +7,7 @@ use etl_api::{
             CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
             GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
             RollbackTablesRequest, RollbackTablesResponse, RollbackTablesTarget, RollbackType,
-            SimpleTableState, UpdatePipelineRequest, UpdatePipelineVersionRequest,
+            SimpleTableState, TableStatus, UpdatePipelineRequest, UpdatePipelineVersionRequest,
         },
     },
 };
@@ -17,6 +17,7 @@ use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
 use reqwest::StatusCode;
 use sqlx::{AssertSqlSafe, Executor, PgPool, postgres::types::Oid};
+use utoipa::OpenApi;
 
 use crate::support::{
     database::{create_test_source_database, run_etl_migrations_on_source_database},
@@ -34,6 +35,55 @@ use crate::support::{
         TestApp, spawn_test_app, spawn_test_app_with_k8s_state, spawn_test_app_without_k8s_client,
     },
 };
+
+/// Finds a named property in a possibly composed OpenAPI schema.
+fn find_schema_property<'a>(
+    schema: &'a serde_json::Value,
+    name: &str,
+) -> Option<&'a serde_json::Value> {
+    match schema {
+        serde_json::Value::Array(values) => {
+            values.iter().find_map(|value| find_schema_property(value, name))
+        }
+        serde_json::Value::Object(values) => {
+            if let Some(property) =
+                values.get("properties").and_then(|properties| properties.get(name))
+            {
+                return Some(property);
+            }
+
+            values.values().find_map(|value| find_schema_property(value, name))
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn table_status_openapi_schema_is_flat_and_deprecates_legacy_fields() {
+    #[derive(OpenApi)]
+    #[openapi(components(schemas(TableStatus)))]
+    struct TestApi;
+
+    let openapi = serde_json::to_value(TestApi::openapi()).unwrap();
+    let schemas = &openapi["components"]["schemas"];
+    let source_table = &schemas["SourceTable"];
+
+    for property in ["id", "schema", "name"] {
+        assert!(find_schema_property(source_table, property).is_some());
+    }
+
+    let table_status = &schemas["TableStatus"];
+    assert_eq!(
+        find_schema_property(table_status, "table_id")
+            .and_then(|value| value["deprecated"].as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        find_schema_property(table_status, "table_name")
+            .and_then(|value| value["deprecated"].as_bool()),
+        Some(true)
+    );
+}
 
 /// Creates a basic pipeline setup for tests that don't need source databases.
 async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {
@@ -1242,7 +1292,10 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
 
     // Test the endpoint
     let response = app.get_pipeline_replication_status(&tenant_id, pipeline_id).await;
-    let response: GetPipelineReplicationStatusResponse = response.json().await.unwrap();
+    let response_body = response.text().await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+    let response: GetPipelineReplicationStatusResponse =
+        serde_json::from_str(&response_body).unwrap();
 
     assert_eq!(response.pipeline_id, pipeline_id);
     assert_eq!(response.table_statuses.len(), 2);
@@ -1257,7 +1310,22 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
             .expect("Table not found in response");
 
         assert_eq!(table_status.table_id, table_oid.0);
+        assert_eq!(table_status.table.id, table_oid.0);
+        assert_eq!(table_status.table.schema, "test");
+        assert_eq!(table_status.table.name, table_name.trim_start_matches("test."));
         assert!(table_status.table_sync_lag.is_none());
+
+        let table_json = response_json["table_statuses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|status| status["table_name"] == *table_name)
+            .expect("Table not found in JSON response");
+        assert_eq!(table_json["id"], table_oid.0);
+        assert_eq!(table_json["schema"], "test");
+        assert_eq!(table_json["name"], table_name.trim_start_matches("test."));
+        assert_eq!(table_json["table_id"], table_oid.0);
+        assert_eq!(table_json["table_name"], *table_name);
 
         match table_name.as_str() {
             "test.test_table_users" => {

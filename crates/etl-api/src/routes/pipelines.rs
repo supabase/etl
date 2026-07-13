@@ -43,7 +43,7 @@ use crate::{
         replicators::ReplicatorsDbError,
         source_database,
         sources::SourcesDbError,
-        tables::ConfiguredTable,
+        tables::{ConfiguredTable, SourceTable},
     },
     feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant},
     k8s::{
@@ -393,16 +393,58 @@ impl From<TableState> for SimpleTableState {
     }
 }
 
+/// Converts an internal table ID and name into the shared API table shape.
+fn source_table(table_id: TableId, table_name: &TableName) -> SourceTable {
+    SourceTable {
+        id: table_id.into_inner(),
+        schema: table_name.schema.clone(),
+        name: table_name.name.clone(),
+    }
+}
+
+/// Replication state and table-sync lag for one source table.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TableStatus {
-    #[schema(example = 1)]
+    /// The table's structured identity.
+    ///
+    /// This field is flattened to the top-level `id`, `schema`, and `name`
+    /// response properties.
+    #[serde(flatten)]
+    pub table: SourceTable,
+    // TODO: Remove the legacy fields after all platform consumers use `id`,
+    // `schema`, and `name`.
+    /// Deprecated compatibility alias for `id`.
+    #[schema(example = 1, deprecated)]
     pub table_id: u32,
-    #[schema(example = "public.users")]
+    /// Deprecated unquoted `schema.name` compatibility representation.
+    #[schema(example = "public.users", deprecated)]
     pub table_name: String,
+    /// The table's current replication state.
     pub state: SimpleTableState,
+    /// Lag for the table-sync worker assigned to this table, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = true)]
     pub table_sync_lag: Option<SlotLagMetricsResponse>,
+}
+
+impl TableStatus {
+    /// Creates a status whose canonical and legacy table fields cannot diverge.
+    fn new(
+        table_id: TableId,
+        table_name: &TableName,
+        state: SimpleTableState,
+        table_sync_lag: Option<SlotLagMetricsResponse>,
+    ) -> Self {
+        let id = table_id.into_inner();
+
+        Self {
+            table: source_table(table_id, table_name),
+            table_id: id,
+            table_name: table_name.to_string(),
+            state,
+            table_sync_lag,
+        }
+    }
 }
 
 /// WAL availability status reported by Postgres for a replication slot.
@@ -629,6 +671,7 @@ fn render_pipeline_config(
     ReadApiPipelineConfig::from_stored(config, tables)
 }
 
+/// Loads the current names for selected table OIDs from one pipeline source.
 async fn load_table_names_for_source(
     pool: &PgPool,
     tenant_id: &str,
@@ -1357,12 +1400,12 @@ pub(crate) async fn get_pipeline_replication_status(
             .ok_or(PipelineError::MissingTableState)
             .and_then(|m| serde_json::from_value(m).map_err(PipelineError::InvalidTableState))?;
 
-        tables.push(TableStatus {
-            table_id: table_id.into_inner(),
-            table_name: table_name.to_string(),
-            state: state.into(),
-            table_sync_lag: lag_metrics.table_sync.remove(&table_id).map(Into::into),
-        });
+        tables.push(TableStatus::new(
+            table_id,
+            table_name,
+            state.into(),
+            lag_metrics.table_sync.remove(&table_id).map(Into::into),
+        ));
     }
 
     let response =

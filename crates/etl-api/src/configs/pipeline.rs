@@ -1,6 +1,6 @@
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig as EtlTableSyncCopyConfig,
+    PipelineConfig, TableSyncCopyConfig,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -234,7 +234,7 @@ pub struct FullApiPipelineConfig {
     #[serde(default = "default_memory_backpressure", skip_serializing_if = "Option::is_none")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_sync_copy: Option<EtlTableSyncCopyConfig>,
+    pub table_sync_copy: Option<TableSyncCopyConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invalidated_slot_behavior: Option<InvalidatedSlotBehavior>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,54 +281,87 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
     }
 }
 
+/// Table-copy selection returned by pipeline read endpoints.
+///
+/// Write requests use [`TableSyncCopyConfig`] and provide Postgres table OIDs
+/// in `table_ids`. Read responses preserve those OIDs in [`ConfiguredTable`]
+/// values and add the current schema and table name when they can be resolved.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ApiTableSyncCopyConfig {
+    /// Copies every table during initial synchronization.
     IncludeAllTables,
+    /// Skips initial synchronization for every table.
     SkipAllTables,
-    IncludeTables { tables: Vec<ConfiguredTable> },
-    SkipTables { tables: Vec<ConfiguredTable> },
+    /// Copies only the listed tables during initial synchronization.
+    IncludeTables {
+        /// Tables selected by their source Postgres OIDs.
+        tables: Vec<ConfiguredTable>,
+    },
+    /// Skips initial synchronization for the listed tables.
+    SkipTables {
+        /// Tables selected by their source Postgres OIDs.
+        tables: Vec<ConfiguredTable>,
+    },
 }
 
+/// Fully materialized pipeline configuration returned by read endpoints.
+///
+/// Unlike [`FullApiPipelineConfig`], which is the write shape and keeps fields
+/// optional for defaulting, this type contains the effective stored values and
+/// enriches table-copy OIDs with source table names when possible.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReadApiPipelineConfig {
+    /// The publication consumed by the pipeline.
     #[schema(example = "my_publication")]
     pub publication_name: String,
+    /// Effective batching settings.
     pub batch: BatchConfig,
+    /// Delay between table-error retries, in milliseconds.
     #[schema(example = 1000)]
     pub table_error_retry_delay_ms: u64,
+    /// Maximum attempts for retryable table errors.
     #[schema(example = 5)]
     pub table_error_retry_max_attempts: u32,
+    /// Maximum tables copied concurrently.
     #[schema(example = 4)]
     pub max_table_sync_workers: u16,
+    /// Maximum copy connections used per table.
     #[schema(example = 2)]
     pub max_copy_connections_per_table: u16,
+    /// Interval between memory measurements, in milliseconds.
     #[schema(example = 100)]
     pub memory_refresh_interval_ms: u64,
+    /// Interval between replication-lag measurements, in milliseconds.
     #[schema(example = 10000)]
     pub replication_lag_refresh_interval_ms: u64,
+    /// Effective memory-backpressure settings, when enabled.
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
+    /// Effective initial table-copy selection with resolved table metadata.
     pub table_sync_copy: ApiTableSyncCopyConfig,
+    /// Behavior used when Postgres invalidates the replication slot.
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
+    /// Replicator resource overrides, when configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    /// DuckLake maintenance settings, when configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
+    /// Pipeline log-level override, when configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_level: Option<LogLevel>,
 }
 
 impl ReadApiPipelineConfig {
+    /// Builds a read response from stored values and resolved table metadata.
     pub fn from_stored(value: StoredPipelineConfig, tables: Vec<ConfiguredTable>) -> Self {
         let table_sync_copy = match value.table_sync_copy {
-            EtlTableSyncCopyConfig::IncludeAllTables => ApiTableSyncCopyConfig::IncludeAllTables,
-            EtlTableSyncCopyConfig::SkipAllTables => ApiTableSyncCopyConfig::SkipAllTables,
-            EtlTableSyncCopyConfig::IncludeTables { .. } => {
+            TableSyncCopyConfig::IncludeAllTables => ApiTableSyncCopyConfig::IncludeAllTables,
+            TableSyncCopyConfig::SkipAllTables => ApiTableSyncCopyConfig::SkipAllTables,
+            TableSyncCopyConfig::IncludeTables { .. } => {
                 ApiTableSyncCopyConfig::IncludeTables { tables }
             }
-            EtlTableSyncCopyConfig::SkipTables { .. } => {
-                ApiTableSyncCopyConfig::SkipTables { tables }
-            }
+            TableSyncCopyConfig::SkipTables { .. } => ApiTableSyncCopyConfig::SkipTables { tables },
         };
 
         Self {
@@ -370,7 +403,7 @@ pub struct StoredPipelineConfig {
     #[serde(default = "default_memory_backpressure")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(default)]
-    pub table_sync_copy: EtlTableSyncCopyConfig,
+    pub table_sync_copy: TableSyncCopyConfig,
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -382,11 +415,12 @@ pub struct StoredPipelineConfig {
 }
 
 impl StoredPipelineConfig {
+    /// Returns the table OIDs configured for selective initial copy.
     pub fn table_sync_copy_ids(&self) -> &[u32] {
         match &self.table_sync_copy {
-            EtlTableSyncCopyConfig::IncludeAllTables | EtlTableSyncCopyConfig::SkipAllTables => &[],
-            EtlTableSyncCopyConfig::IncludeTables { table_ids }
-            | EtlTableSyncCopyConfig::SkipTables { table_ids } => table_ids,
+            TableSyncCopyConfig::IncludeAllTables | TableSyncCopyConfig::SkipAllTables => &[],
+            TableSyncCopyConfig::IncludeTables { table_ids }
+            | TableSyncCopyConfig::SkipTables { table_ids } => table_ids,
         }
     }
 
@@ -523,7 +557,7 @@ mod tests {
                 activate_threshold: 0.8,
                 resume_threshold: 0.7,
             }),
-            table_sync_copy: EtlTableSyncCopyConfig::IncludeAllTables,
+            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             replicator_resources: Some(ReplicatorResourcesConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
@@ -645,7 +679,7 @@ mod tests {
                 activate_threshold: 0.8,
                 resume_threshold: 0.7,
             }),
-            table_sync_copy: EtlTableSyncCopyConfig::IncludeAllTables,
+            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             replicator_resources: Some(ReplicatorResourcesConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),

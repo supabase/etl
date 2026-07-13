@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use pg_escape::quote_identifier;
 use serde::{Deserialize, Serialize};
@@ -14,14 +14,21 @@ pub enum PublicationsDbError {
     Database(#[from] sqlx::Error),
 }
 
+/// A source publication and the tables it currently exposes.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Publication {
+    /// The publication name in the source database.
     pub name: String,
+    /// Tables currently exposed by the publication.
     pub tables: Vec<SourceTable>,
 }
 
+/// A schema-qualified publication definition used by write operations.
+#[derive(Debug)]
 pub struct PublicationDefinition {
+    /// The publication name in the source database.
     pub name: String,
+    /// Tables to add, remove, or set on the publication.
     pub tables: Vec<Table>,
 }
 
@@ -108,8 +115,9 @@ pub async fn read_publication(
         left join pg_publication_tables pt on p.pubname = pt.pubname
         left join pg_namespace n on n.nspname = pt.schemaname
         left join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
-        where p.pubname = $1;
-	   "#;
+        where p.pubname = $1
+        order by pt.schemaname, pt.tablename;
+        "#;
 
     let mut tables = vec![];
     let mut name: Option<String> = None;
@@ -146,10 +154,11 @@ pub async fn read_all_publications(pool: &PgPool) -> Result<Vec<Publication>, Pu
         from pg_publication p
         left join pg_publication_tables pt on p.pubname = pt.pubname
         left join pg_namespace n on n.nspname = pt.schemaname
-        left join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename;
-	   "#;
+        left join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
+        order by p.pubname, pt.schemaname, pt.tablename;
+        "#;
 
-    let mut pub_name_to_tables: HashMap<String, Vec<SourceTable>> = HashMap::new();
+    let mut pub_name_to_tables: BTreeMap<String, Vec<SourceTable>> = BTreeMap::new();
 
     for row in sqlx::query(query).fetch_all(pool).await? {
         let pub_name: String = row.get("pubname");

@@ -96,9 +96,24 @@ async fn source_table_and_publication_responses_include_table_ids() {
         .await
         .expect("failed to create source table");
     source_pool
+        .execute(
+            "create table public.partitioned_copy_selection_test (id bigint) partition by range \
+             (id)",
+        )
+        .await
+        .expect("failed to create partitioned source table");
+    source_pool
         .execute("create publication copy_selection_pub for table public.copy_selection_test")
         .await
         .expect("failed to create source publication");
+    source_pool
+        .execute("create publication z_empty_copy_selection_pub")
+        .await
+        .expect("failed to create trailing source publication");
+    source_pool
+        .execute("create publication a_empty_copy_selection_pub")
+        .await
+        .expect("failed to create leading source publication");
 
     let expected_table_id: i64 =
         sqlx::query_scalar("select 'public.copy_selection_test'::regclass::oid::bigint")
@@ -111,17 +126,28 @@ async fn source_table_and_publication_responses_include_table_ids() {
     assert!(tables_response.status().is_success());
     let tables_response: ReadTablesResponse =
         tables_response.json().await.expect("failed to deserialize table response");
+    assert!(tables_response.tables.is_sorted_by(|left, right| {
+        (&left.schema, &left.name) <= (&right.schema, &right.name)
+    }));
     let table = tables_response
         .tables
         .iter()
         .find(|table| table.schema == "public" && table.name == "copy_selection_test")
         .expect("source table missing from response");
     assert_eq!(table.id, expected_table_id);
+    assert!(tables_response.tables.iter().any(|table| {
+        table.schema == "public" && table.name == "partitioned_copy_selection_test"
+    }));
 
     let publications_response = app.read_source_publications(tenant_id, source_id).await;
     assert!(publications_response.status().is_success());
     let publications_response: ReadPublicationsResponse =
         publications_response.json().await.expect("failed to deserialize publication response");
+    assert!(
+        publications_response
+            .publications
+            .is_sorted_by(|left, right| left.name.as_str() <= right.name.as_str())
+    );
     let publication = publications_response
         .publications
         .iter()
