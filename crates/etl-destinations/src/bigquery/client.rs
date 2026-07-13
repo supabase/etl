@@ -232,7 +232,7 @@ fn storage_write_retry_delay_with_jitter(delay: Duration) -> Duration {
 fn process_single_batch_append_result(
     batch_append_result: BatchAppendResult,
 ) -> BatchProcessResult {
-    let bytes_sent = batch_append_result.bytes_sent;
+    let successful_bytes_sent = batch_append_result.successful_bytes_sent;
     let mut total_bytes_received = 0;
     let mut row_errors = Vec::new();
 
@@ -255,7 +255,10 @@ fn process_single_batch_append_result(
     if !row_errors.is_empty() {
         BatchProcessResult::RowErrors { errors: row_errors }
     } else {
-        BatchProcessResult::Success { bytes_sent, bytes_received: total_bytes_received }
+        BatchProcessResult::Success {
+            bytes_sent: successful_bytes_sent,
+            bytes_received: total_bytes_received,
+        }
     }
 }
 
@@ -1519,10 +1522,31 @@ mod tests {
                 Ok(successful_append_response()),
                 Err(tonic::Status::invalid_argument("schema_mismatch_extra_fields")),
             ],
-            bytes_sent: 128,
+            total_bytes_sent: 128,
+            successful_bytes_sent: 0,
         });
 
         assert!(matches!(result, BatchProcessResult::RequestError { .. }));
+    }
+
+    #[test]
+    fn process_single_batch_append_result_uses_only_successful_byte_counts() {
+        let response = successful_append_response();
+        let successful_bytes_received = response.encoded_len();
+        let result = process_single_batch_append_result(BatchAppendResult {
+            batch_index: 0,
+            responses: vec![Ok(response)],
+            total_bytes_sent: 128,
+            successful_bytes_sent: 64,
+        });
+
+        assert!(matches!(
+            result,
+            BatchProcessResult::Success {
+                bytes_sent: 64,
+                bytes_received,
+            } if bytes_received == successful_bytes_received
+        ));
     }
 
     #[test]
@@ -1563,7 +1587,8 @@ mod tests {
             responses: vec![Err(tonic::Status::not_found(
                 "Table 123:dataset.test_users_0 was not found.",
             ))],
-            bytes_sent: 128,
+            total_bytes_sent: 128,
+            successful_bytes_sent: 0,
         });
 
         assert!(matches!(result, BatchProcessResult::RequestError { .. }));
