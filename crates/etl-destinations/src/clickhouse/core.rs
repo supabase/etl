@@ -1466,10 +1466,10 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         let result = self.write_table_rows_inner(replicated_table_schema, table_rows).await;
-        async_result.send(result);
+        async_result.send(result.map(|_| DestinationWriteStatus::Durable));
         Ok(())
     }
 

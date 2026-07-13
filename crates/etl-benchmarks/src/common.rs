@@ -390,7 +390,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         let row_count = table_rows.len() as u64;
         let row_bytes = table_rows.iter().map(SizeHint::size_hint).sum::<usize>() as u64;
@@ -445,9 +445,9 @@ impl Destination for NullDestination {
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
         _table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        async_result.send(Ok(()));
+        async_result.send(Ok(DestinationWriteStatus::Durable));
         Ok(())
     }
 
@@ -688,7 +688,7 @@ impl Destination for BenchDestination {
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         match self {
             Self::Null(destination) => {

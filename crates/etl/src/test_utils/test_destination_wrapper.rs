@@ -331,7 +331,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         let fault = self.take_fault(FaultyOp::WriteTableRows).await?;
 
