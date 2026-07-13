@@ -18,7 +18,8 @@ use crate::failpoints::{
 use crate::{
     bail,
     destination::{
-        DestinationTableMetadata, DropTableForCopyResult, PipelineDestination, WriteTableRowsResult,
+        DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
+        PipelineDestination, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -297,6 +298,7 @@ where
 
             let mut total_table_copy_rows = 0;
             let mut total_table_copy_duration_secs = 0.0;
+            let mut table_copy_barrier_required = false;
 
             // We check if the table should be copied, or we can skip it.
             if config.table_sync_copy.should_copy_table(table_id.into_inner()) {
@@ -318,9 +320,14 @@ where
                 .await?;
 
                 match result {
-                    TableCopyResult::Completed { total_rows, total_duration_secs } => {
+                    TableCopyResult::Completed {
+                        total_rows,
+                        total_duration_secs,
+                        barrier_required,
+                    } => {
                         total_table_copy_rows = total_rows as usize;
                         total_table_copy_duration_secs = total_duration_secs;
+                        table_copy_barrier_required = barrier_required;
                     }
                     TableCopyResult::Shutdown => {
                         info!(
@@ -340,14 +347,22 @@ where
             // started.
             replication_transaction.commit().await?;
 
-            // If no table rows were written, we call the method nonetheless with no rows,
-            // to kickstart table creation.
-            if total_table_copy_rows == 0 {
+            // If no table rows were written, call the method nonetheless to kickstart
+            // table creation. Additionally, if any copy write was only accepted (and not
+            // durably committed), the empty write is also the terminal table-wide
+            // durability barrier.
+            if total_table_copy_rows == 0 || table_copy_barrier_required {
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
                 destination
                     .write_table_rows(&replicated_table_schema, vec![], flush_result)
                     .await?;
-                pending_flush_result.await.into_result()?;
+                match pending_flush_result.await.into_result()? {
+                    DestinationWriteStatus::Durable => {}
+                    DestinationWriteStatus::Accepted => bail!(
+                        ErrorKind::DestinationError,
+                        "Table copy durability barrier did not confirm durability"
+                    ),
+                }
             }
 
             info!(
