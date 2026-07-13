@@ -157,6 +157,13 @@
   conversion exists or a value was explicitly range-checked. Use `as` for
   intentionally lossy conversions or conversions that Rust does not expose via
   `From`, such as `u64` to `f64` metric values.
+- Use `From` for value-to-value conversions only when the mapping is
+  infallible, lossless in the semantic sense, value-preserving, and obvious.
+- Model patch-style API updates so omitted fields preserve stored values,
+  explicit `null` clears optional values or resets defaulted values, and
+  non-null values replace stored values. When converting a non-patch API config
+  into an update config, use an explicit helper such as `from_api_config`, not
+  `From`, because absent optional fields become `Clear`, not `Preserve`.
 
 ## Error Handling And Panics
 - Use typed errors and `Result` for recoverable failures.
@@ -236,6 +243,8 @@
 - Do not add imports solely to make rustdoc links shorter.
 - Keep comments and docs precise, short, and punctuated.
 - Normal comments should always end with `.`.
+- Prefer normal comments on the line above the code they explain instead of
+  trailing comments at the end of a code line.
 - Do not add code examples in rustdoc for this repository.
 
 ## Metrics And Observability

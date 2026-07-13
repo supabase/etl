@@ -1,5 +1,5 @@
 use etl_api::{
-    configs::destination::FullApiDestinationConfig,
+    configs::destination::ApiDestinationConfig,
     validation::{FailureType, validate_destination},
 };
 use etl_config::{SerializableSecretString, shared::ClickHouseEngine};
@@ -9,8 +9,8 @@ use url::Url;
 
 use super::{create_pipeline_config, create_validation_context_with_source};
 
-fn create_bigquery_config() -> FullApiDestinationConfig {
-    FullApiDestinationConfig::BigQuery {
+fn create_bigquery_config() -> ApiDestinationConfig {
+    ApiDestinationConfig::BigQuery {
         project_id: "project-id".to_owned(),
         dataset_id: "dataset-id".to_owned(),
         service_account_key: SerializableSecretString::from("service-account-key".to_owned()),
@@ -19,8 +19,8 @@ fn create_bigquery_config() -> FullApiDestinationConfig {
     }
 }
 
-fn create_clickhouse_config(engine: ClickHouseEngine) -> FullApiDestinationConfig {
-    FullApiDestinationConfig::ClickHouse {
+fn create_clickhouse_config(engine: ClickHouseEngine) -> ApiDestinationConfig {
+    ApiDestinationConfig::ClickHouse {
         url: Url::parse("http://clickhouse.example.com:8123").unwrap(),
         user: "etl".to_owned(),
         password: None,
@@ -29,8 +29,8 @@ fn create_clickhouse_config(engine: ClickHouseEngine) -> FullApiDestinationConfi
     }
 }
 
-fn create_snowflake_config() -> FullApiDestinationConfig {
-    FullApiDestinationConfig::Snowflake {
+fn create_snowflake_config() -> ApiDestinationConfig {
+    ApiDestinationConfig::Snowflake {
         account_id: String::new(),
         user: "etl".to_owned(),
         private_key: SerializableSecretString::from(

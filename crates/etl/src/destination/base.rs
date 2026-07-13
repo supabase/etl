@@ -57,6 +57,11 @@ pub trait Destination {
     /// object and any destination-private replay markers for the table so the
     /// next copy can recreate it from the fresh source schema.
     ///
+    /// Before reporting success, the destination must ensure that writes
+    /// accepted during an earlier copy attempt can no longer modify the
+    /// destination table. It may do this by waiting for them, cancelling
+    /// them, or rejecting them as stale.
+    ///
     /// The supplied schema describes the previously known destination table and
     /// exists only so the destination can locate what should be removed. ETL
     /// clears its own destination metadata and stored schemas only after this
@@ -81,23 +86,43 @@ pub trait Destination {
     /// batches; it just provides the data that should be written for the
     /// initial snapshot.
     ///
-    /// Implementations report asynchronous completion through `async_result`.
+    /// Implementations report asynchronous write status through `async_result`.
     /// The method return value is reserved for immediate dispatch/setup
     /// failures before the work has been accepted.
     ///
     /// ETL waits for each table-copy batch to finish before reading the next
     /// batch for the same copy partition. When multiple copy workers are
     /// configured, this method can still run concurrently across different
-    /// partitions, so the asynchronous result is mostly an API consistency tool
-    /// rather than a way to queue all copy batches and wait at the end.
+    /// partitions.
     ///
-    /// This immediate waiting is intentional: it preserves backpressure and
-    /// avoids accumulating too many in-flight row batches in memory.
+    /// [`crate::destination::DestinationWriteStatus::Durable`] means the batch
+    /// and all earlier accepted writes it covers are durable.
+    /// [`crate::destination::DestinationWriteStatus::Accepted`] transfers
+    /// ownership of the batch to the destination and permits ETL to continue
+    /// copying, but does not permit ETL to complete the table copy.
+    ///
+    /// If any nonempty batch returns
+    /// [`crate::destination::DestinationWriteStatus::Accepted`], ETL calls this
+    /// method once more with an empty batch after every copy worker has
+    /// finished and the source copy transaction has committed. That empty
+    /// write is a table-wide durability barrier: it must return
+    /// [`crate::destination::DestinationWriteStatus::Durable`] and cumulatively
+    /// cover every accepted write for the table copy. Returning
+    /// [`crate::destination::DestinationWriteStatus::Accepted`] from the
+    /// barrier fails the copy without advancing its durable state. Empty
+    /// and skipped tables also receive an empty write so the destination
+    /// can prepare their initial state.
+    ///
+    /// Awaiting each result before requesting the next batch bounds ETL-owned
+    /// row batches per copy partition. A deferred destination must separately
+    /// bound its accepted-but-not-durable work and delay reporting
+    /// [`crate::destination::DestinationWriteStatus::Accepted`] until it has
+    /// reserved ownership and capacity for the batch.
     fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        async_result: WriteTableRowsResult,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
     /// Writes streaming replication events to the destination.

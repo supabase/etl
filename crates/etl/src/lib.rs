@@ -101,9 +101,9 @@
 //!         &self,
 //!         _replicated_table_schema: &ReplicatedTableSchema,
 //!         _table_rows: Vec<TableRow>,
-//!         async_result: WriteTableRowsResult<()>,
+//!         async_result: WriteTableRowsResult,
 //!     ) -> EtlResult<()> {
-//!         async_result.send(Ok(()));
+//!         async_result.send(Ok(DestinationWriteStatus::Durable));
 //!         Ok(())
 //!     }
 //!     async fn write_events(
