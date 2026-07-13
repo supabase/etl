@@ -119,7 +119,6 @@ where
         request_cooldown_ms = config.request_cooldown.as_millis() as u64,
         store_timeout_ms = config.store_timeout.as_millis() as u64,
         inline_flush_min_inlined_bytes = config.inline_flush_min_inlined_bytes,
-        inline_flush_copy_min_inlined_bytes = config.inline_flush_copy_min_inlined_bytes,
         "ducklake external maintenance watcher started"
     );
 
@@ -475,10 +474,9 @@ async fn maybe_request_operations<S, M>(
         return;
     }
 
-    let (requested, inline_flush_min_inlined_bytes, copy_phase_active) = match destination
+    let (requested, copy_phase_active) = match destination
         .sample_external_maintenance_operations(
             config.inline_flush_min_inlined_bytes,
-            config.inline_flush_copy_min_inlined_bytes,
             config.rewrite_data_files_min_active_data_files,
         )
         .await
@@ -494,7 +492,7 @@ async fn maybe_request_operations<S, M>(
                 debug!("ducklake expire-snapshots request suppressed by local daily gate");
                 requested.expire_snapshots = false;
             }
-            (requested, sample.inline_flush_min_inlined_bytes, sample.copy_phase_active)
+            (requested, sample.copy_phase_active)
         }
         Err(error) => {
             warn!(
@@ -512,7 +510,7 @@ async fn maybe_request_operations<S, M>(
             rewrite_data_files = requested.rewrite_data_files,
             expire_snapshots = requested.expire_snapshots,
             cleanup_old_files = requested.cleanup_old_files,
-            inline_flush_min_inlined_bytes,
+            inline_flush_min_inlined_bytes = config.inline_flush_min_inlined_bytes,
             copy_phase_active,
             rewrite_data_files_min_active_data_files =
                 config.rewrite_data_files_min_active_data_files,
@@ -543,7 +541,7 @@ async fn maybe_request_operations<S, M>(
         rewrite_data_files = requested.rewrite_data_files,
         expire_snapshots = requested.expire_snapshots,
         cleanup_old_files = requested.cleanup_old_files,
-        inline_flush_min_inlined_bytes,
+        inline_flush_min_inlined_bytes = config.inline_flush_min_inlined_bytes,
         copy_phase_active,
         rewrite_data_files_min_active_data_files = config.rewrite_data_files_min_active_data_files,
         "ducklake external maintenance requesting operations"
@@ -551,7 +549,7 @@ async fn maybe_request_operations<S, M>(
 
     let request = ExternalMaintenanceOperationRequest {
         operations: requested,
-        inline_flush_min_inlined_bytes: Some(inline_flush_min_inlined_bytes),
+        inline_flush_min_inlined_bytes: Some(config.inline_flush_min_inlined_bytes),
         rewrite_data_files_min_active_data_files: Some(
             config.rewrite_data_files_min_active_data_files,
         ),

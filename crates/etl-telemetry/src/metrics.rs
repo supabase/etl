@@ -1,5 +1,4 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Mutex, PoisonError},
     time::Duration,
 };
@@ -23,12 +22,6 @@ use tracing::trace;
 static PROMETHEUS_HANDLE: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
 /// Global handle for the Prometheus upkeep task.
 static PROMETHEUS_UPKEEP_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
-
-/// Prometheus listener address used by standalone replicator processes.
-///
-/// Binding IPv4 explicitly keeps the endpoint reachable through Kubernetes
-/// port-forward, which connects to the Pod network namespace over IPv4.
-const PROMETHEUS_LISTEN_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 9000);
 
 /// Initializes metrics with manual endpoint management and returns a handle for
 /// rendering.
@@ -91,7 +84,7 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 /// This function is designed for standalone services where metrics should be
 /// exposed automatically without manual endpoint management. It installs a
 /// global metrics recorder and starts an HTTP server that listens on
-/// `0.0.0.0:9000/metrics`, making metrics available for Prometheus scraping.
+/// `[::]:9000/metrics`, making metrics available for Prometheus scraping.
 ///
 /// When provided, `project_ref`, `pipeline_id`, and `destination` are attached
 /// as global labels to all exported metrics for the current process.
@@ -107,7 +100,10 @@ pub fn init_metrics(
     pipeline_id: Option<u64>,
     destination: Option<&str>,
 ) -> Result<(), BuildError> {
-    let mut builder = PrometheusBuilder::new().with_http_listener(PROMETHEUS_LISTEN_ADDR);
+    let mut builder = PrometheusBuilder::new().with_http_listener(std::net::SocketAddr::new(
+        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+        9000,
+    ));
 
     if let Some(project_ref) = project_ref {
         builder = builder.add_global_label("project", project_ref);
@@ -124,15 +120,4 @@ pub fn init_metrics(
     builder.install()?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PROMETHEUS_LISTEN_ADDR;
-
-    /// Keeps the standalone endpoint compatible with Kubernetes port-forward.
-    #[test]
-    fn prometheus_listener_uses_ipv4() {
-        assert_eq!(PROMETHEUS_LISTEN_ADDR.to_string(), "0.0.0.0:9000");
-    }
 }
