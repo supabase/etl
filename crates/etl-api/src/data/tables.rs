@@ -15,9 +15,30 @@ pub struct Table {
     pub name: String,
 }
 
-pub async fn get_tables(pool: &PgPool) -> Result<Vec<Table>, TablesDbError> {
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct SourceTable {
+    pub id: u32,
+    pub schema: String,
+    pub name: String,
+}
+
+/// A table referenced by a pipeline's table-sync-copy configuration.
+///
+/// `schema` and `name` are `None` when the table id no longer resolves to a
+/// table in the source database, for example because the table was dropped
+/// after being selected. Callers can render the table as missing directly
+/// from this shape instead of treating an unresolved id as an error.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ConfiguredTable {
+    pub id: u32,
+    pub schema: Option<String>,
+    pub name: Option<String>,
+}
+
+pub async fn get_tables(pool: &PgPool) -> Result<Vec<SourceTable>, TablesDbError> {
     let query = r#"
         select
+			c.oid::bigint as id,
            	n.nspname as schema,
            	c.relname as name
         from pg_catalog.pg_class c
@@ -34,7 +55,11 @@ pub async fn get_tables(pool: &PgPool) -> Result<Vec<Table>, TablesDbError> {
         .fetch_all(query)
         .await?
         .iter()
-        .map(|r| Table { schema: r.get("schema"), name: r.get("name") })
+        .map(|r| SourceTable {
+            id: u32::try_from(r.get::<i64, _>("id")).expect("Postgres OIDs fit in u32"),
+            schema: r.get("schema"),
+            name: r.get("name"),
+        })
         .collect();
 
     Ok(tables)

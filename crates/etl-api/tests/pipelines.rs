@@ -1,5 +1,5 @@
 use etl_api::{
-    configs::pipeline::ReplicatorResourcesConfig,
+    configs::pipeline::{ApiTableSyncCopyConfig, ReplicatorResourcesConfig},
     k8s::PodStatus,
     routes::{
         ErrorMessage,
@@ -11,12 +11,12 @@ use etl_api::{
         },
     },
 };
-use etl_config::shared::PgConnectionConfig;
+use etl_config::shared::{PgConnectionConfig, TableSyncCopyConfig};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
 use reqwest::StatusCode;
-use sqlx::{AssertSqlSafe, PgPool, postgres::types::Oid};
+use sqlx::{AssertSqlSafe, Executor, PgPool, postgres::types::Oid};
 
 use crate::support::{
     database::{create_test_source_database, run_etl_migrations_on_source_database},
@@ -425,6 +425,138 @@ async fn an_existing_pipeline_can_be_read() {
     assert_eq!(response.destination_id, destination_id);
     assert_ne!(response.replicator_id, 0);
     insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selective_table_copy_reads_return_complete_tables_after_publication_removal() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    source_pool
+        .execute("create table public.copy_selection_test (id bigint primary key)")
+        .await
+        .expect("failed to create source table");
+    source_pool
+        .execute("create publication copy_selection_pub for table public.copy_selection_test")
+        .await
+        .expect("failed to create source publication");
+    let table_id: i64 =
+        sqlx::query_scalar("select 'public.copy_selection_test'::regclass::oid::bigint")
+            .fetch_one(&source_pool)
+            .await
+            .expect("failed to read source table oid");
+    let table_id = u32::try_from(table_id).expect("Postgres OIDs fit in u32");
+
+    let mut config = new_pipeline_config();
+    config.publication_name = "copy_selection_pub".to_owned();
+    config.table_sync_copy = Some(TableSyncCopyConfig::SkipTables { table_ids: vec![table_id] });
+    let pipeline_id =
+        create_pipeline_with_config(&app, tenant_id, source_id, destination_id, config).await;
+
+    source_pool
+        .execute("alter publication copy_selection_pub drop table public.copy_selection_test")
+        .await
+        .expect("failed to remove source table from publication");
+
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert!(response.status().is_success());
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize pipeline response");
+    let ApiTableSyncCopyConfig::SkipTables { tables } = response.config.table_sync_copy else {
+        panic!("expected skip_tables read config");
+    };
+    assert_eq!(tables.len(), 1);
+    assert_eq!(tables[0].id, table_id);
+    assert_eq!(tables[0].schema.as_deref(), Some("public"));
+    assert_eq!(tables[0].name.as_deref(), Some("copy_selection_test"));
+
+    let response = app.read_all_pipelines(tenant_id).await;
+    assert!(response.status().is_success());
+    let response: ReadPipelinesResponse =
+        response.json().await.expect("failed to deserialize pipelines response");
+    let ApiTableSyncCopyConfig::SkipTables { tables } =
+        &response.pipelines[0].config.table_sync_copy
+    else {
+        panic!("expected skip_tables read config");
+    };
+    assert_eq!(tables.len(), 1);
+    assert_eq!(tables[0].id, table_id);
+    assert_eq!(tables[0].schema.as_deref(), Some("public"));
+    assert_eq!(tables[0].name.as_deref(), Some("copy_selection_test"));
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selective_table_copy_reads_render_dropped_tables_as_missing() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    source_pool
+        .execute("create table public.copy_selection_test (id bigint primary key)")
+        .await
+        .expect("failed to create source table");
+    source_pool
+        .execute("create publication copy_selection_pub for table public.copy_selection_test")
+        .await
+        .expect("failed to create source publication");
+    let table_id: i64 =
+        sqlx::query_scalar("select 'public.copy_selection_test'::regclass::oid::bigint")
+            .fetch_one(&source_pool)
+            .await
+            .expect("failed to read source table oid");
+    let table_id = u32::try_from(table_id).expect("Postgres OIDs fit in u32");
+
+    let mut config = new_pipeline_config();
+    config.publication_name = "copy_selection_pub".to_owned();
+    config.table_sync_copy = Some(TableSyncCopyConfig::SkipTables { table_ids: vec![table_id] });
+    let pipeline_id =
+        create_pipeline_with_config(&app, tenant_id, source_id, destination_id, config).await;
+
+    source_pool
+        .execute("drop table public.copy_selection_test")
+        .await
+        .expect("failed to drop source table");
+
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert!(response.status().is_success());
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize pipeline response");
+    let ApiTableSyncCopyConfig::SkipTables { tables } = response.config.table_sync_copy else {
+        panic!("expected skip_tables read config");
+    };
+    assert_eq!(tables.len(), 1);
+    assert_eq!(tables[0].id, table_id);
+    assert_eq!(tables[0].schema, None);
+    assert_eq!(tables[0].name, None);
+
+    let response = app.read_all_pipelines(tenant_id).await;
+    assert!(response.status().is_success());
+    let response: ReadPipelinesResponse =
+        response.json().await.expect("failed to deserialize pipelines response");
+    let ApiTableSyncCopyConfig::SkipTables { tables } =
+        &response.pipelines[0].config.table_sync_copy
+    else {
+        panic!("expected skip_tables read config");
+    };
+    assert_eq!(tables.len(), 1);
+    assert_eq!(tables[0].id, table_id);
+    assert_eq!(tables[0].schema, None);
+    assert_eq!(tables[0].name, None);
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,4 +1,8 @@
-use std::{ops::DerefMut, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::DerefMut,
+    sync::Arc,
+};
 
 use axum::{
     Extension, Json,
@@ -12,6 +16,7 @@ use etl::{
 };
 use etl_postgres::{
     lag,
+    schema::TableName,
     source::{TableLookupError, get_table_names_from_table_ids},
     store::{health, table_state},
 };
@@ -22,7 +27,10 @@ use utoipa::ToSchema;
 
 use crate::{
     config::ApiConfig,
-    configs::{encryption::EncryptionKeyring, pipeline::FullApiPipelineConfig},
+    configs::{
+        encryption::EncryptionKeyring,
+        pipeline::{FullApiPipelineConfig, ReadApiPipelineConfig, StoredPipelineConfig},
+    },
     data,
     data::{
         destinations::{DestinationsDbError, destination_exists},
@@ -35,6 +43,7 @@ use crate::{
         replicators::ReplicatorsDbError,
         source_database,
         sources::SourcesDbError,
+        tables::ConfiguredTable,
     },
     feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant},
     k8s::{
@@ -308,7 +317,7 @@ pub struct ReadPipelineResponse {
     pub destination_name: String,
     #[schema(example = 1)]
     pub replicator_id: i64,
-    pub config: FullApiPipelineConfig,
+    pub config: ReadApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -591,6 +600,58 @@ fn validate_pipeline_request(config: &FullApiPipelineConfig) -> Result<(), Pipel
     config.validate().map_err(PipelineError::InvalidPipelineRequest)
 }
 
+/// Renders a stored pipeline config for an API read response.
+///
+/// Table ids in `table_sync_copy` that no longer resolve to a table in
+/// `table_names` (for example, because the table was dropped after being
+/// selected) are rendered with `schema`/`name` set to `None` rather than
+/// failing the whole read, so a single stale table id cannot break reading a
+/// pipeline or the pipeline list.
+fn render_pipeline_config(
+    config: StoredPipelineConfig,
+    table_names: &HashMap<TableId, TableName>,
+) -> ReadApiPipelineConfig {
+    let tables = config
+        .table_sync_copy_ids()
+        .iter()
+        .map(|table_id| {
+            let table_id = TableId::new(*table_id);
+            let table_name = table_names.get(&table_id);
+
+            ConfiguredTable {
+                id: table_id.into_inner(),
+                schema: table_name.map(|table_name| table_name.schema.clone()),
+                name: table_name.map(|table_name| table_name.name.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    ReadApiPipelineConfig::from_stored(config, tables)
+}
+
+async fn load_table_names_for_source(
+    pool: &PgPool,
+    tenant_id: &str,
+    source_id: i64,
+    table_ids: &[TableId],
+    encryption_key: &EncryptionKeyring,
+    source_tls_config: &SourceTlsConfig,
+) -> Result<HashMap<TableId, TableName>, PipelineError> {
+    if table_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let source = data::sources::read_source(pool, tenant_id, source_id, encryption_key)
+        .await?
+        .ok_or(PipelineError::SourceNotFound(source_id))?;
+    let tls_config = source_tls_config.get_tls_config();
+    let source_pool = source_database::connect(&source.config.into_connection_config(tls_config))
+        .await
+        .map_err(PipelineError::SourceDatabase)?;
+
+    Ok(get_table_names_from_table_ids(&source_pool, table_ids).await?)
+}
+
 impl From<ValidationFailure> for ValidationFailureResponse {
     fn from(failure: ValidationFailure) -> Self {
         Self { name: failure.name, reason: failure.reason, failure_type: failure.failure_type }
@@ -687,6 +748,9 @@ pub(crate) async fn create_pipeline(
         (status = 200, description = "Pipeline retrieved successfully", body = ReadPipelineResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -694,27 +758,39 @@ pub(crate) async fn create_pipeline(
 pub(crate) async fn read_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     pipeline_id: Path<i64>,
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let response = data::pipelines::read_pipeline(&pool, tenant_id, pipeline_id)
+    let pipeline = data::pipelines::read_pipeline(&pool, tenant_id, pipeline_id)
         .await?
-        .map(|pipeline| {
-            Ok::<ReadPipelineResponse, serde_json::Error>(ReadPipelineResponse {
-                id: pipeline.id,
-                tenant_id: pipeline.tenant_id,
-                source_id: pipeline.source_id,
-                source_name: pipeline.source_name,
-                destination_id: pipeline.destination_id,
-                destination_name: pipeline.destination_name,
-                replicator_id: pipeline.replicator_id,
-                config: pipeline.config.into(),
-            })
-        })
-        .transpose()?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+    let table_ids =
+        pipeline.config.table_sync_copy_ids().iter().copied().map(TableId::new).collect::<Vec<_>>();
+    let table_names = load_table_names_for_source(
+        &pool,
+        tenant_id,
+        pipeline.source_id,
+        &table_ids,
+        &encryption_key,
+        &source_tls_config,
+    )
+    .await?;
+    let config = render_pipeline_config(pipeline.config, &table_names);
+
+    let response = ReadPipelineResponse {
+        id: pipeline.id,
+        tenant_id: pipeline.tenant_id,
+        source_id: pipeline.source_id,
+        source_name: pipeline.source_name,
+        destination_id: pipeline.destination_id,
+        destination_name: pipeline.destination_name,
+        replicator_id: pipeline.replicator_id,
+        config,
+    };
 
     Ok(Json(response))
 }
@@ -892,6 +968,9 @@ pub(crate) async fn delete_pipeline(
     responses(
         (status = 200, description = "Pipelines listed successfully", body = ReadPipelinesResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -899,12 +978,42 @@ pub(crate) async fn delete_pipeline(
 pub(crate) async fn read_all_pipelines(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
 
-    let mut pipelines = vec![];
-    for pipeline in data::pipelines::read_all_pipelines(&pool, tenant_id).await? {
-        let pipeline = ReadPipelineResponse {
+    let stored_pipelines = data::pipelines::read_all_pipelines(&pool, tenant_id).await?;
+    let mut table_ids_by_source = HashMap::<i64, HashSet<TableId>>::new();
+    for pipeline in &stored_pipelines {
+        table_ids_by_source
+            .entry(pipeline.source_id)
+            .or_default()
+            .extend(pipeline.config.table_sync_copy_ids().iter().copied().map(TableId::new));
+    }
+
+    let mut table_names_by_source = HashMap::with_capacity(table_ids_by_source.len());
+    for (source_id, table_ids) in table_ids_by_source {
+        let table_ids = table_ids.into_iter().collect::<Vec<_>>();
+        let table_names = load_table_names_for_source(
+            &pool,
+            tenant_id,
+            source_id,
+            &table_ids,
+            &encryption_key,
+            &source_tls_config,
+        )
+        .await?;
+        table_names_by_source.insert(source_id, table_names);
+    }
+
+    let mut pipelines = Vec::with_capacity(stored_pipelines.len());
+    for pipeline in stored_pipelines {
+        let table_names = table_names_by_source
+            .get(&pipeline.source_id)
+            .expect("every pipeline source has a table-name map");
+        let config = render_pipeline_config(pipeline.config, table_names);
+        pipelines.push(ReadPipelineResponse {
             id: pipeline.id,
             tenant_id: pipeline.tenant_id,
             source_id: pipeline.source_id,
@@ -912,9 +1021,8 @@ pub(crate) async fn read_all_pipelines(
             destination_id: pipeline.destination_id,
             destination_name: pipeline.destination_name,
             replicator_id: pipeline.replicator_id,
-            config: pipeline.config.into(),
-        };
-        pipelines.push(pipeline);
+            config,
+        });
     }
 
     let response = ReadPipelinesResponse { pipelines };

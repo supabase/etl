@@ -2,45 +2,27 @@
 source: crates/etl-api/tests/destinations_pipelines.rs
 expression: response.config
 ---
-FullApiPipelineConfig {
+ReadApiPipelineConfig {
     publication_name: "updated_publication",
-    batch: Some(
-        BatchConfig {
-            max_fill_ms: 10,
-            memory_budget_ratio: 0.2,
-            max_bytes: 8388608,
-        },
-    ),
-    table_error_retry_delay_ms: Some(
-        20000,
-    ),
-    table_error_retry_max_attempts: Some(
-        10,
-    ),
-    max_table_sync_workers: Some(
-        4,
-    ),
-    max_copy_connections_per_table: Some(
-        8,
-    ),
-    memory_refresh_interval_ms: Some(
-        100,
-    ),
-    replication_lag_refresh_interval_ms: Some(
-        10000,
-    ),
+    batch: BatchConfig {
+        max_fill_ms: 10,
+        memory_budget_ratio: 0.2,
+        max_bytes: 8388608,
+    },
+    table_error_retry_delay_ms: 20000,
+    table_error_retry_max_attempts: 10,
+    max_table_sync_workers: 4,
+    max_copy_connections_per_table: 8,
+    memory_refresh_interval_ms: 100,
+    replication_lag_refresh_interval_ms: 10000,
     memory_backpressure: Some(
         MemoryBackpressureConfig {
             activate_threshold: 0.85,
             resume_threshold: 0.75,
         },
     ),
-    table_sync_copy: Some(
-        IncludeAllTables,
-    ),
-    invalidated_slot_behavior: Some(
-        Error,
-    ),
+    table_sync_copy: IncludeAllTables,
+    invalidated_slot_behavior: Error,
     replicator_resources: None,
     ducklake_maintenance: None,
     log_level: Some(

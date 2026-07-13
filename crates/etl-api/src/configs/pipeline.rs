@@ -1,11 +1,14 @@
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig,
+    PipelineConfig, TableSyncCopyConfig as EtlTableSyncCopyConfig,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::configs::{log::LogLevel, store::Store};
+use crate::{
+    configs::{log::LogLevel, store::Store},
+    data::tables::ConfiguredTable,
+};
 
 const fn default_table_error_retry_max_attempts() -> u32 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
@@ -231,7 +234,7 @@ pub struct FullApiPipelineConfig {
     #[serde(default = "default_memory_backpressure", skip_serializing_if = "Option::is_none")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_sync_copy: Option<TableSyncCopyConfig>,
+    pub table_sync_copy: Option<EtlTableSyncCopyConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invalidated_slot_behavior: Option<InvalidatedSlotBehavior>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -278,6 +281,75 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ApiTableSyncCopyConfig {
+    IncludeAllTables,
+    SkipAllTables,
+    IncludeTables { tables: Vec<ConfiguredTable> },
+    SkipTables { tables: Vec<ConfiguredTable> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReadApiPipelineConfig {
+    #[schema(example = "my_publication")]
+    pub publication_name: String,
+    pub batch: BatchConfig,
+    #[schema(example = 1000)]
+    pub table_error_retry_delay_ms: u64,
+    #[schema(example = 5)]
+    pub table_error_retry_max_attempts: u32,
+    #[schema(example = 4)]
+    pub max_table_sync_workers: u16,
+    #[schema(example = 2)]
+    pub max_copy_connections_per_table: u16,
+    #[schema(example = 100)]
+    pub memory_refresh_interval_ms: u64,
+    #[schema(example = 10000)]
+    pub replication_lag_refresh_interval_ms: u64,
+    pub memory_backpressure: Option<MemoryBackpressureConfig>,
+    pub table_sync_copy: ApiTableSyncCopyConfig,
+    pub invalidated_slot_behavior: InvalidatedSlotBehavior,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<LogLevel>,
+}
+
+impl ReadApiPipelineConfig {
+    pub fn from_stored(value: StoredPipelineConfig, tables: Vec<ConfiguredTable>) -> Self {
+        let table_sync_copy = match value.table_sync_copy {
+            EtlTableSyncCopyConfig::IncludeAllTables => ApiTableSyncCopyConfig::IncludeAllTables,
+            EtlTableSyncCopyConfig::SkipAllTables => ApiTableSyncCopyConfig::SkipAllTables,
+            EtlTableSyncCopyConfig::IncludeTables { .. } => {
+                ApiTableSyncCopyConfig::IncludeTables { tables }
+            }
+            EtlTableSyncCopyConfig::SkipTables { .. } => {
+                ApiTableSyncCopyConfig::SkipTables { tables }
+            }
+        };
+
+        Self {
+            publication_name: value.publication_name,
+            batch: value.batch,
+            table_error_retry_delay_ms: value.table_error_retry_delay_ms,
+            table_error_retry_max_attempts: value.table_error_retry_max_attempts,
+            max_table_sync_workers: value.max_table_sync_workers,
+            max_copy_connections_per_table: value.max_copy_connections_per_table,
+            memory_refresh_interval_ms: value.memory_refresh_interval_ms,
+            replication_lag_refresh_interval_ms: value.replication_lag_refresh_interval_ms,
+            memory_backpressure: value.memory_backpressure,
+            table_sync_copy,
+            invalidated_slot_behavior: value.invalidated_slot_behavior,
+            replicator_resources: value.replicator_resources,
+            ducklake_maintenance: value.ducklake_maintenance,
+            log_level: value.log_level,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredPipelineConfig {
     pub publication_name: String,
@@ -298,7 +370,7 @@ pub struct StoredPipelineConfig {
     #[serde(default = "default_memory_backpressure")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(default)]
-    pub table_sync_copy: TableSyncCopyConfig,
+    pub table_sync_copy: EtlTableSyncCopyConfig,
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -310,6 +382,14 @@ pub struct StoredPipelineConfig {
 }
 
 impl StoredPipelineConfig {
+    pub fn table_sync_copy_ids(&self) -> &[u32] {
+        match &self.table_sync_copy {
+            EtlTableSyncCopyConfig::IncludeAllTables | EtlTableSyncCopyConfig::SkipAllTables => &[],
+            EtlTableSyncCopyConfig::IncludeTables { table_ids }
+            | EtlTableSyncCopyConfig::SkipTables { table_ids } => table_ids,
+        }
+    }
+
     pub fn into_etl_config(
         self,
         pipeline_id: u64,
@@ -443,7 +523,7 @@ mod tests {
                 activate_threshold: 0.8,
                 resume_threshold: 0.7,
             }),
-            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+            table_sync_copy: EtlTableSyncCopyConfig::IncludeAllTables,
             replicator_resources: Some(ReplicatorResourcesConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
@@ -565,7 +645,7 @@ mod tests {
                 activate_threshold: 0.8,
                 resume_threshold: 0.7,
             }),
-            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+            table_sync_copy: EtlTableSyncCopyConfig::IncludeAllTables,
             replicator_resources: Some(ReplicatorResourcesConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),

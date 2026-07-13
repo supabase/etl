@@ -6,6 +6,7 @@ use etl_api::{
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
             UpdateSourceRequest, ValidateSourceRequest, ValidateSourceResponse,
+            publications::ReadPublicationsResponse, tables::ReadTablesResponse,
         },
     },
 };
@@ -80,6 +81,59 @@ async fn source_can_be_created() {
     let response: CreateSourceResponse =
         response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_table_and_publication_responses_include_table_ids() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+
+    source_pool
+        .execute("create table public.copy_selection_test (id bigint primary key)")
+        .await
+        .expect("failed to create source table");
+    source_pool
+        .execute("create publication copy_selection_pub for table public.copy_selection_test")
+        .await
+        .expect("failed to create source publication");
+
+    let expected_table_id: i64 =
+        sqlx::query_scalar("select 'public.copy_selection_test'::regclass::oid::bigint")
+            .fetch_one(&source_pool)
+            .await
+            .expect("failed to read source table oid");
+    let expected_table_id = u32::try_from(expected_table_id).expect("Postgres OIDs fit in u32");
+
+    let tables_response = app.read_source_tables(tenant_id, source_id).await;
+    assert!(tables_response.status().is_success());
+    let tables_response: ReadTablesResponse =
+        tables_response.json().await.expect("failed to deserialize table response");
+    let table = tables_response
+        .tables
+        .iter()
+        .find(|table| table.schema == "public" && table.name == "copy_selection_test")
+        .expect("source table missing from response");
+    assert_eq!(table.id, expected_table_id);
+
+    let publications_response = app.read_source_publications(tenant_id, source_id).await;
+    assert!(publications_response.status().is_success());
+    let publications_response: ReadPublicationsResponse =
+        publications_response.json().await.expect("failed to deserialize publication response");
+    let publication = publications_response
+        .publications
+        .iter()
+        .find(|publication| publication.name == "copy_selection_pub")
+        .expect("publication missing from response");
+    assert_eq!(publication.tables.len(), 1);
+    assert_eq!(publication.tables[0].id, expected_table_id);
+    assert_eq!(publication.tables[0].schema, "public");
+    assert_eq!(publication.tables[0].name, "copy_selection_test");
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

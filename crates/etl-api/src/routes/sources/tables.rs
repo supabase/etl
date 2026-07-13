@@ -16,7 +16,7 @@ use crate::{
     data::{
         self, source_database,
         sources::SourcesDbError,
-        tables::{Table, TablesDbError},
+        tables::{SourceTable, TablesDbError},
     },
     k8s::SourceTlsConfig,
     routes::{
@@ -60,7 +60,7 @@ impl TableError {
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ReadTablesResponse {
     #[schema(required = true)]
-    pub tables: Vec<Table>,
+    pub tables: Vec<SourceTable>,
 }
 
 impl IntoResponse for TableError {

@@ -15,7 +15,7 @@ use crate::{
     configs::encryption::EncryptionKeyring,
     data::{
         self,
-        publications::{Publication, PublicationsDbError},
+        publications::{Publication, PublicationDefinition, PublicationsDbError},
         source_database,
         sources::SourcesDbError,
         tables::Table,
@@ -94,7 +94,7 @@ pub struct UpdatePublicationRequest {
     tables: Vec<Table>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ReadPublicationsResponse {
     pub publications: Vec<Publication>,
 }
@@ -140,7 +140,7 @@ pub(crate) async fn create_publication(
     let source_pool =
         source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     let publication = publication.0;
-    let publication = Publication { name: publication.name, tables: publication.tables };
+    let publication = PublicationDefinition { name: publication.name, tables: publication.tables };
     data::publications::create_publication(&publication, &source_pool).await?;
 
     Ok(StatusCode::OK)
@@ -239,7 +239,7 @@ pub(crate) async fn update_publication(
     }
 
     let publication = publication.0;
-    let publication = Publication { name: publication_name, tables: publication.tables };
+    let publication = PublicationDefinition { name: publication_name, tables: publication.tables };
     data::publications::update_publication(&publication, &source_pool).await?;
 
     Ok(StatusCode::OK)
@@ -378,7 +378,7 @@ pub(crate) async fn add_tables_to_publication(
     }
 
     let publication = publication.0;
-    let publication = Publication { name: publication_name, tables: publication.tables };
+    let publication = PublicationDefinition { name: publication_name, tables: publication.tables };
     data::publications::add_tables_to_publication(&publication, &source_pool).await?;
 
     Ok(StatusCode::OK)
@@ -429,7 +429,7 @@ pub(crate) async fn drop_tables_from_publication(
     }
 
     let publication = publication.0;
-    let publication = Publication { name: publication_name, tables: publication.tables };
+    let publication = PublicationDefinition { name: publication_name, tables: publication.tables };
     data::publications::drop_tables_from_publication(&publication, &source_pool).await?;
 
     Ok(StatusCode::OK)
@@ -480,7 +480,7 @@ pub(crate) async fn set_publication_tables(
     }
 
     let publication = publication.0;
-    let publication = Publication { name: publication_name, tables: publication.tables };
+    let publication = PublicationDefinition { name: publication_name, tables: publication.tables };
     data::publications::update_publication(&publication, &source_pool).await?;
 
     Ok(StatusCode::OK)
