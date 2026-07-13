@@ -267,7 +267,8 @@ fn read_streaming_progress(
 ) -> Option<(u64, u64)> {
     conn.query_row(
         &format!(
-            "SELECT last_commit_lsn, last_tx_ordinal FROM {}.{} WHERE table_name = {}",
+            "SELECT last_commit_lsn, last_tx_ordinal FROM {}.{} WHERE table_name = {} ORDER BY \
+             last_commit_lsn DESC, last_tx_ordinal DESC LIMIT 1",
             quote_identifier("lake"),
             quote_identifier("__etl_streaming_progress"),
             quote_literal(&table_name.id()),
@@ -2788,7 +2789,7 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 16);
-    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 2);
     assert_eq!(read_streaming_progress(&conn, &table_name), Some((415, 0)));
 
     let names: Vec<String> = conn
@@ -3145,7 +3146,7 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "truncate"), 0);
     assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 0);
-    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 2);
     assert_eq!(read_streaming_progress(&conn, &table_name), Some((800, 1)));
 
     let name: String = conn
