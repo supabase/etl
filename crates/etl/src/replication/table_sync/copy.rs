@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::VecDeque,
     pin::Pin,
     sync::Arc,
@@ -21,7 +22,7 @@ use tracing::{debug, info, warn};
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
 use crate::{
     data::TableRow,
-    destination::{Destination, WriteTableRowsResult},
+    destination::{Destination, DestinationWriteStatus, WriteTableRowsResult},
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::{
@@ -55,11 +56,41 @@ const CTID_COPY_ROWS_PER_PARTITION: u128 = 250_000;
 /// Maximum CTID ranges planned for one tracked table.
 const MAX_CTID_COPY_PARTITIONS: u16 = 1024;
 
+/// Mergeable progress accumulated across concurrent table-copy work.
+#[derive(Debug, Default)]
+struct CopyProgress {
+    /// Total number of rows copied.
+    total_rows: u64,
+    /// Whether any row batch was accepted without being durable.
+    barrier_required: bool,
+}
+
+impl CopyProgress {
+    /// Records one successfully accepted or durable row batch.
+    fn record_batch(&mut self, row_count: u64, status: DestinationWriteStatus) {
+        self.total_rows += row_count;
+        self.barrier_required |= status == DestinationWriteStatus::Accepted;
+    }
+
+    /// Merges progress from another copy stream, partition, or worker.
+    fn merge(&mut self, other: Self) {
+        self.total_rows += other.total_rows;
+        self.barrier_required |= other.barrier_required;
+    }
+}
+
 /// Result of a table copy operation.
 #[derive(Debug)]
 pub(crate) enum TableCopyResult {
     /// All rows copied successfully.
-    Completed { total_rows: u64, total_duration_secs: f64 },
+    Completed {
+        /// Total number of rows copied.
+        total_rows: u64,
+        /// Total copy duration in seconds.
+        total_duration_secs: f64,
+        /// Whether the copy requires a terminal durability barrier.
+        barrier_required: bool,
+    },
     /// Copy was interrupted by a shutdown signal.
     Shutdown,
 }
@@ -73,20 +104,15 @@ struct CopyPartition {
     filter_table_id: TableId,
     /// The physical ctid range for `source_table_id`.
     ctid_partition: CtidPartition,
-}
-
-/// Rows copied by a completed worker.
-#[derive(Debug)]
-struct CompletedCopyWorker {
-    /// Rows copied by this worker.
-    total_rows: u64,
+    /// Estimated heap blocks covered by this range.
+    planned_blocks: u64,
 }
 
 /// Outcome of one worker connection.
 #[derive(Debug)]
 enum CopyWorkerOutcome {
     /// The worker drained all available work and committed its transaction.
-    Completed(CompletedCopyWorker),
+    Completed(CopyProgress),
     /// The worker observed shutdown before committing its transaction.
     Shutdown,
 }
@@ -299,7 +325,11 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
         counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(0);
         histogram!(ETL_TABLE_COPY_DURATION_SECONDS).record(0.0);
 
-        return Ok(TableCopyResult::Completed { total_rows: 0, total_duration_secs: 0.0 });
+        return Ok(TableCopyResult::Completed {
+            total_rows: 0,
+            total_duration_secs: 0.0,
+            barrier_required: false,
+        });
     }
 
     info!(
@@ -369,11 +399,11 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
         });
     }
 
-    let mut total_rows = 0;
+    let mut progress = CopyProgress::default();
     while let Some(result) = join_set.join_next().await {
         match result {
-            Ok(Ok(CopyWorkerOutcome::Completed(worker_result))) => {
-                total_rows += worker_result.total_rows;
+            Ok(Ok(CopyWorkerOutcome::Completed(worker_progress))) => {
+                progress.merge(worker_progress);
             }
             Ok(Ok(CopyWorkerOutcome::Shutdown)) => {
                 info!(
@@ -412,10 +442,14 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     stop_table_copy_lag_reporter(&mut lag_reporter).await;
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
-    counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(total_rows);
+    counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(progress.total_rows);
     histogram!(ETL_TABLE_COPY_DURATION_SECONDS).record(total_duration_secs);
 
-    Ok(TableCopyResult::Completed { total_rows, total_duration_secs })
+    Ok(TableCopyResult::Completed {
+        total_rows: progress.total_rows,
+        total_duration_secs,
+        barrier_required: progress.barrier_required,
+    })
 }
 
 /// Plans ctid work items for every physical table that backs `table_id`.
@@ -496,9 +530,14 @@ async fn plan_copy_partitions(
                 source_table_id,
                 filter_table_id: table_id,
                 ctid_partition,
+                planned_blocks,
             });
         }
     }
+
+    // Start larger estimated ranges first so long copy tasks overlap while all
+    // workers are active, leaving smaller ranges to drain at the tail.
+    copy_partitions.sort_unstable_by_key(|partition| Reverse(partition.planned_blocks));
 
     histogram!(ETL_TABLE_COPY_PLANNED_PARTITIONS).record(f64::from(target_partitions));
     histogram!(ETL_TABLE_COPY_EFFECTIVE_PARTITIONS).record(copy_partitions.len() as f64);
@@ -527,7 +566,7 @@ where
 {
     let child_replication_transaction =
         child_replication_client.begin_transaction(&snapshot_id).await?;
-    let mut total_rows = 0;
+    let mut progress = CopyProgress::default();
 
     loop {
         if is_shutdown_requested(&shutdown_rx) {
@@ -542,7 +581,7 @@ where
             // means all CTID work has been claimed.
             child_replication_transaction.commit().await?;
 
-            return Ok(CopyWorkerOutcome::Completed(CompletedCopyWorker { total_rows }));
+            return Ok(CopyWorkerOutcome::Completed(progress));
         };
 
         match copy_partition_rows(
@@ -559,10 +598,10 @@ where
         )
         .await?
         {
-            TableCopyResult::Completed { total_rows: partition_rows, .. } => {
-                total_rows += partition_rows;
+            ShutdownResult::Ok(partition_progress) => {
+                progress.merge(partition_progress);
             }
-            TableCopyResult::Shutdown => return Ok(CopyWorkerOutcome::Shutdown),
+            ShutdownResult::Shutdown(_) => return Ok(CopyWorkerOutcome::Shutdown),
         }
     }
 }
@@ -580,12 +619,12 @@ async fn copy_partition_rows<D>(
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
-) -> EtlResult<TableCopyResult>
+) -> EtlResult<ShutdownResult<CopyProgress, CopyProgress>>
 where
     D: Destination + Clone + Send + 'static,
 {
     if is_shutdown_requested(&shutdown_rx) {
-        return Ok(TableCopyResult::Shutdown);
+        return Ok(ShutdownResult::Shutdown(CopyProgress::default()));
     }
 
     let start_time = Instant::now();
@@ -608,7 +647,7 @@ where
         )
         .await?;
 
-    let table_copy_stream = TableCopyStream::wrap(copy_stream, replicated_column_schemas.iter());
+    let table_copy_stream = TableCopyStream::wrap(copy_stream, replicated_column_schemas);
     let connection_updates_rx = child_replication_transaction.connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
@@ -622,7 +661,7 @@ where
     );
     pin!(table_copy_stream);
 
-    let total_rows = match copy_table_rows_from_stream(
+    let progress = match copy_table_rows_from_stream(
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
@@ -631,26 +670,26 @@ where
     )
     .await?
     {
-        ShutdownResult::Ok(total_rows) => total_rows,
-        ShutdownResult::Shutdown(_) => {
-            return Ok(TableCopyResult::Shutdown);
+        ShutdownResult::Ok(progress) => progress,
+        ShutdownResult::Shutdown(progress) => {
+            return Ok(ShutdownResult::Shutdown(progress));
         }
     };
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
     counter!(ETL_TABLE_COPY_PARTITIONS_TOTAL).increment(1);
-    histogram!(ETL_TABLE_COPY_PARTITION_ROWS).record(total_rows as f64);
+    histogram!(ETL_TABLE_COPY_PARTITION_ROWS).record(progress.total_rows as f64);
     histogram!(ETL_TABLE_COPY_PARTITION_DURATION_SECONDS).record(total_duration_secs);
 
     info!(
         table_id = table_id.0,
         source_table_id = partition.source_table_id.0,
-        total_rows,
+        total_rows = progress.total_rows,
         total_duration_secs,
         "completed ctid partition copy"
     );
 
-    Ok(TableCopyResult::Completed { total_rows, total_duration_secs })
+    Ok(ShutdownResult::Ok(progress))
 }
 
 /// Copies rows from a batched table-copy stream into the destination with
@@ -661,19 +700,19 @@ async fn copy_table_rows_from_stream<D, S>(
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     replicated_table_schema: ReplicatedTableSchema,
     destination: D,
-) -> EtlResult<ShutdownResult<u64, u64>>
+) -> EtlResult<ShutdownResult<CopyProgress, CopyProgress>>
 where
     D: Destination + Clone + Send + 'static,
     S: Stream<Item = EtlResult<Vec<TableRow>>>,
 {
-    let mut total_rows = 0;
+    let mut progress = CopyProgress::default();
 
     loop {
         tokio::select! {
             biased;
 
             _ = shutdown_rx.changed() => {
-                return Ok(ShutdownResult::Shutdown(total_rows));
+                return Ok(ShutdownResult::Shutdown(progress));
             }
 
             changed = connection_updates_rx.changed() => {
@@ -705,7 +744,7 @@ where
 
             maybe_batch = table_copy_stream.next() => {
                 let Some(table_rows) = maybe_batch else {
-                    return Ok(ShutdownResult::Ok(total_rows));
+                    return Ok(ShutdownResult::Ok(progress));
                 };
 
                 let table_rows = table_rows?;
@@ -717,9 +756,9 @@ where
                 destination
                     .write_table_rows(&replicated_table_schema, table_rows, flush_result)
                     .await?;
-                pending_flush_result.await.into_result()?;
+                let write_status = pending_flush_result.await.into_result()?;
 
-                total_rows += batch_size;
+                progress.record_batch(batch_size, write_status);
 
                 let send_duration_seconds = before_sending.elapsed().as_secs_f64();
                 histogram!(

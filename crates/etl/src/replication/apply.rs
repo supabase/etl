@@ -121,6 +121,7 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// progress points where durable ETL progress may have advanced. The next
 /// deadline is scheduled when the previous cleanup task finishes.
 const SCHEMA_CLEANUP_INTERVAL: Duration = Duration::from_hours(1);
+
 /// Result type for the apply loop execution.
 ///
 /// Indicates the reason why the apply loop terminated, enabling appropriate
@@ -727,12 +728,17 @@ impl ApplyLoopState {
         self.events_batch.push(event);
     }
 
-    /// Takes the events batch for further processing. Replacing it with a new
-    /// empty batch.
+    /// Takes the events batch for further processing and leaves behind a
+    /// replacement sized for the emitted batch.
     fn take_events_batch(&mut self) -> (Vec<Event>, usize) {
         debug_assert!(self.has_pending_batch());
 
-        let events_batch = std::mem::take(&mut self.events_batch);
+        // We replace the old vector with a new one of the same length, under the
+        // assumption that we do mostly steady-state streaming, so it's highly
+        // likely that the next batch will need the same memory footprint.
+        let replacement_capacity = self.events_batch.len();
+        let events_batch =
+            std::mem::replace(&mut self.events_batch, Vec::with_capacity(replacement_capacity));
         let events_batch_bytes = self.events_batch_bytes;
         self.events_batch_bytes = 0;
 

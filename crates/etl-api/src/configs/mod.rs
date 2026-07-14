@@ -5,3 +5,4 @@ pub mod pipeline;
 pub mod serde;
 pub mod source;
 pub mod store;
+pub mod update;

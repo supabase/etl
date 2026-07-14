@@ -18,8 +18,7 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::{
-        destination::FullApiDestinationConfig, pipeline::FullApiPipelineConfig,
-        source::StoredSourceConfig,
+        destination::ApiDestinationConfig, pipeline::ApiPipelineConfig, source::StoredSourceConfig,
     },
     data::source_database,
     k8s::SourceTlsConfig,
@@ -193,8 +192,8 @@ pub async fn validate_source(
 /// replica-identity requirements.
 pub async fn validate_destination(
     ctx: &ValidationContext,
-    destination_config: &FullApiDestinationConfig,
-    pipeline_config: Option<&FullApiPipelineConfig>,
+    destination_config: &ApiDestinationConfig,
+    pipeline_config: Option<&ApiPipelineConfig>,
 ) -> Result<Vec<ValidationFailure>, ValidationError> {
     let publication_name =
         pipeline_config.map(|pipeline_config| pipeline_config.publication_name.clone());
@@ -214,7 +213,7 @@ pub async fn validate_destination(
 /// - Sufficient replication slots are available.
 pub async fn validate_pipeline(
     ctx: &ValidationContext,
-    pipeline_config: &FullApiPipelineConfig,
+    pipeline_config: &ApiPipelineConfig,
 ) -> Result<Vec<ValidationFailure>, ValidationError> {
     let mut failures = validate_source(ctx).await?;
 

@@ -172,7 +172,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         let table_id = replicated_table_schema.id();
 
@@ -184,7 +184,7 @@ where
         info!(%table_id, row_count = table_rows.len(), "writing table rows");
         inner.table_rows.insert(table_id, table_rows);
 
-        async_result.send(Ok(()));
+        async_result.send(Ok(DestinationWriteStatus::Durable));
 
         Ok(())
     }

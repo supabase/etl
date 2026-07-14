@@ -46,7 +46,7 @@ where
             tokio::time::sleep(interval).await;
         }
 
-        if let Ok(Some(offset)) = destination.committed_offset(table_id).await
+        if let Ok(Some(offset)) = destination.fetch_committed_offset(table_id).await
             && &offset == expected
         {
             return Some(offset);

@@ -15,29 +15,47 @@ use crate::{
     etl_error,
 };
 
-/// Status reported by a streaming destination write.
+/// Durability status reported by streaming and table-copy destination writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestinationWriteStatus {
     /// The destination accepted ownership of the write, but ETL must not
-    /// advance durable replication progress for it yet.
+    /// consider it durable yet.
     ///
     /// Completing a result as `Accepted` consumes that result. After that
     /// point, ETL cannot wait on the same result for a later durability signal.
-    /// ETL carries the write's commit end LSN into the next streaming write and
-    /// advances durable progress only when a later cumulative
-    /// [`DestinationWriteStatus::Durable`] result proves it durable.
     ///
-    /// If no later streaming write is dispatched before shutdown, ETL exits
-    /// without acknowledging the accepted write as durable. Restart then
-    /// replays from the last durable checkpoint.
+    /// For streaming writes through
+    /// [`crate::destination::Destination::write_events`], ETL does not advance
+    /// the batch's commit end LSN. It carries that LSN into the next streaming
+    /// write and advances durable progress only when a later cumulative
+    /// [`DestinationWriteStatus::Durable`] result covers it. If no later write
+    /// is dispatched before shutdown, ETL leaves progress at the last durable
+    /// checkpoint so restart can replay the accepted write.
+    ///
+    /// For table-copy writes through
+    /// [`crate::destination::Destination::write_table_rows`], ETL may request
+    /// the next batch for the same copy partition, but records that the table
+    /// requires a terminal durability barrier. After all copy workers finish,
+    /// ETL sends an empty table-copy write and refuses to store `FinishedCopy`
+    /// until that barrier returns [`DestinationWriteStatus::Durable`].
+    /// Returning `Accepted` from the terminal barrier fails the table copy.
     Accepted,
-    /// This write and all earlier accepted writes in the same ordered
-    /// apply-loop stream are durable according to the destination contract.
+    /// The destination confirms the write is durable.
     ///
-    /// The cumulative meaning is required for deferred destinations. When the
-    /// apply loop observes this status, it may advance durable progress through
-    /// the greatest commit end LSN carried by this write or by earlier accepted
-    /// writes that were attached to this write.
+    /// For streaming writes through
+    /// [`crate::destination::Destination::write_events`], this write and all
+    /// earlier `Accepted` writes in the same ordered apply-loop stream are
+    /// durable. ETL may advance through the greatest commit end LSN carried by
+    /// this write or reattached from those earlier writes.
+    ///
+    /// For a nonempty table-copy write through
+    /// [`crate::destination::Destination::write_table_rows`], this status
+    /// confirms that batch is durable. If any table-copy batch returned
+    /// `Accepted`, ETL still sends a terminal empty write after every copy
+    /// worker finishes. `Durable` from that barrier must cover every accepted
+    /// write in the current table-copy attempt before ETL stores
+    /// `FinishedCopy`. Empty and skipped tables must also return `Durable`
+    /// from their empty initialization write before the copy can finish.
     Durable,
 }
 
@@ -45,10 +63,12 @@ pub enum DestinationWriteStatus {
 /// [`crate::destination::Destination::write_table_rows`].
 ///
 /// ETL waits for this result before requesting the next row batch for the same
-/// copy partition. The handle exists mostly to keep the destination API aligned
-/// with [`WriteEventsResult`], so destinations may still choose to structure
-/// their internal write paths in a similar way.
-pub type WriteTableRowsResult<T = ()> = AsyncResult<T>;
+/// copy partition. A destination may report
+/// [`DestinationWriteStatus::Accepted`] to continue copying before the batch is
+/// durable. ETL then issues a terminal empty write as a table-wide durability
+/// barrier and requires [`DestinationWriteStatus::Durable`] before completing
+/// the copy.
+pub type WriteTableRowsResult<T = DestinationWriteStatus> = AsyncResult<T>;
 
 /// Async completion handle used for
 /// [`crate::destination::Destination::drop_table_for_copy`].

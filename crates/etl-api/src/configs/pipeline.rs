@@ -2,10 +2,11 @@ use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
     PipelineConfig, TableSyncCopyConfig,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::configs::{log::LogLevel, store::Store};
+use crate::configs::{log::LogLevel, store::Store, update::UpdateField};
 
 const fn default_table_error_retry_max_attempts() -> u32 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
@@ -31,8 +32,31 @@ const fn default_replication_lag_refresh_interval_ms() -> u64 {
     PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS
 }
 
-fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
-    Some(MemoryBackpressureConfig::default())
+const fn default_batch() -> BatchConfig {
+    BatchConfig {
+        max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
+        memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
+        max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
+    }
+}
+
+const fn default_memory_backpressure() -> MemoryBackpressureConfig {
+    MemoryBackpressureConfig {
+        activate_threshold: MemoryBackpressureConfig::DEFAULT_ACTIVATE_THRESHOLD,
+        resume_threshold: MemoryBackpressureConfig::DEFAULT_RESUME_THRESHOLD,
+    }
+}
+
+const fn default_memory_backpressure_option() -> Option<MemoryBackpressureConfig> {
+    Some(default_memory_backpressure())
+}
+
+const fn default_table_sync_copy() -> TableSyncCopyConfig {
+    TableSyncCopyConfig::IncludeAllTables
+}
+
+const fn default_invalidated_slot_behavior() -> InvalidatedSlotBehavior {
+    InvalidatedSlotBehavior::Error
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
@@ -203,8 +227,9 @@ impl DuckLakeMaintenanceConfig {
     }
 }
 
+/// Non-patch API representation of a pipeline configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct FullApiPipelineConfig {
+pub struct ApiPipelineConfig {
     #[schema(example = "my_publication")]
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub publication_name: String,
@@ -228,7 +253,10 @@ pub struct FullApiPipelineConfig {
     #[schema(example = 10000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replication_lag_refresh_interval_ms: Option<u64>,
-    #[serde(default = "default_memory_backpressure", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default = "default_memory_backpressure_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_sync_copy: Option<TableSyncCopyConfig>,
@@ -242,7 +270,165 @@ pub struct FullApiPipelineConfig {
     pub log_level: Option<LogLevel>,
 }
 
-impl FullApiPipelineConfig {
+/// Errors returned while merging pipeline update configuration.
+#[derive(Debug, Error)]
+pub enum PipelineConfigUpdateError {
+    /// A required field was explicitly cleared.
+    #[error("Field `{field}` cannot be cleared")]
+    RequiredFieldCleared { field: &'static str },
+}
+
+/// Patch-style pipeline configuration used by update endpoints.
+///
+/// Omission preserves values only for the top-level fields defined here. A
+/// provided structured field, such as [`Self::batch`], replaces that complete
+/// nested configuration. Members omitted inside the provided object receive
+/// the nested type's deserialization defaults rather than values from the
+/// stored configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct UpdateApiPipelineConfig {
+    #[schema(example = "my_publication", value_type = Option<String>)]
+    #[serde(
+        default,
+        skip_serializing_if = "UpdateField::is_preserve",
+        deserialize_with = "deserialize_update_trimmed_string"
+    )]
+    pub publication_name: UpdateField<String>,
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub batch: UpdateField<BatchConfig>,
+    #[schema(example = 1000)]
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub table_error_retry_delay_ms: UpdateField<u64>,
+    #[schema(example = 5)]
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub table_error_retry_max_attempts: UpdateField<u32>,
+    #[schema(example = 4)]
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub max_table_sync_workers: UpdateField<u16>,
+    #[schema(example = 2)]
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub max_copy_connections_per_table: UpdateField<u16>,
+    #[schema(example = 100)]
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub memory_refresh_interval_ms: UpdateField<u64>,
+    #[schema(example = 10000)]
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub replication_lag_refresh_interval_ms: UpdateField<u64>,
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub memory_backpressure: UpdateField<MemoryBackpressureConfig>,
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub table_sync_copy: UpdateField<TableSyncCopyConfig>,
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub invalidated_slot_behavior: UpdateField<InvalidatedSlotBehavior>,
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub replicator_resources: UpdateField<ReplicatorResourcesConfig>,
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub ducklake_maintenance: UpdateField<DuckLakeMaintenanceConfig>,
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub log_level: UpdateField<LogLevel>,
+}
+
+impl UpdateApiPipelineConfig {
+    /// Builds an update that applies every field from an API pipeline
+    /// configuration.
+    ///
+    /// Optional fields that are absent in the API config are cleared.
+    pub fn from_api_config(value: ApiPipelineConfig) -> Self {
+        Self {
+            publication_name: UpdateField::Set(value.publication_name),
+            batch: UpdateField::from_option(value.batch),
+            table_error_retry_delay_ms: UpdateField::from_option(value.table_error_retry_delay_ms),
+            table_error_retry_max_attempts: UpdateField::from_option(
+                value.table_error_retry_max_attempts,
+            ),
+            max_table_sync_workers: UpdateField::from_option(value.max_table_sync_workers),
+            max_copy_connections_per_table: UpdateField::from_option(
+                value.max_copy_connections_per_table,
+            ),
+            memory_refresh_interval_ms: UpdateField::from_option(value.memory_refresh_interval_ms),
+            replication_lag_refresh_interval_ms: UpdateField::from_option(
+                value.replication_lag_refresh_interval_ms,
+            ),
+            memory_backpressure: UpdateField::from_option(value.memory_backpressure),
+            table_sync_copy: UpdateField::from_option(value.table_sync_copy),
+            invalidated_slot_behavior: UpdateField::from_option(value.invalidated_slot_behavior),
+            replicator_resources: UpdateField::from_option(value.replicator_resources),
+            ducklake_maintenance: UpdateField::from_option(value.ducklake_maintenance),
+            log_level: UpdateField::from_option(value.log_level),
+        }
+    }
+
+    /// Validates API-only pipeline configuration fields.
+    pub fn validate(&self) -> Result<(), String> {
+        if let UpdateField::Set(replicator_resources) = &self.replicator_resources {
+            replicator_resources.validate()?;
+        }
+
+        if let UpdateField::Set(ducklake_maintenance) = &self.ducklake_maintenance {
+            ducklake_maintenance.validate()?;
+        }
+
+        Ok(())
+    }
+
+    /// Merges this update into a stored pipeline configuration.
+    pub(crate) fn merge_into_stored(
+        self,
+        stored: StoredPipelineConfig,
+    ) -> Result<StoredPipelineConfig, PipelineConfigUpdateError> {
+        Ok(StoredPipelineConfig {
+            publication_name: self.publication_name.apply_to_required(
+                stored.publication_name,
+                PipelineConfigUpdateError::RequiredFieldCleared { field: "publication_name" },
+            )?,
+            batch: self.batch.apply_to_value(stored.batch, default_batch),
+            table_error_retry_delay_ms: self.table_error_retry_delay_ms.apply_to_value(
+                stored.table_error_retry_delay_ms,
+                default_table_error_retry_delay_ms,
+            ),
+            table_error_retry_max_attempts: self.table_error_retry_max_attempts.apply_to_value(
+                stored.table_error_retry_max_attempts,
+                default_table_error_retry_max_attempts,
+            ),
+            max_table_sync_workers: self
+                .max_table_sync_workers
+                .apply_to_value(stored.max_table_sync_workers, default_max_table_sync_workers),
+            max_copy_connections_per_table: self.max_copy_connections_per_table.apply_to_value(
+                stored.max_copy_connections_per_table,
+                default_max_copy_connections_per_table,
+            ),
+            memory_refresh_interval_ms: self.memory_refresh_interval_ms.apply_to_value(
+                stored.memory_refresh_interval_ms,
+                default_memory_refresh_interval_ms,
+            ),
+            replication_lag_refresh_interval_ms: self
+                .replication_lag_refresh_interval_ms
+                .apply_to_value(
+                    stored.replication_lag_refresh_interval_ms,
+                    default_replication_lag_refresh_interval_ms,
+                ),
+            memory_backpressure: self
+                .memory_backpressure
+                .apply_to_defaulted_option(stored.memory_backpressure, default_memory_backpressure),
+            table_sync_copy: self
+                .table_sync_copy
+                .apply_to_value(stored.table_sync_copy, default_table_sync_copy),
+            invalidated_slot_behavior: self.invalidated_slot_behavior.apply_to_value(
+                stored.invalidated_slot_behavior,
+                default_invalidated_slot_behavior,
+            ),
+            replicator_resources: self
+                .replicator_resources
+                .apply_to_option(stored.replicator_resources),
+            ducklake_maintenance: self
+                .ducklake_maintenance
+                .apply_to_option(stored.ducklake_maintenance),
+            log_level: self.log_level.apply_to_option(stored.log_level),
+        })
+    }
+}
+
+impl ApiPipelineConfig {
     /// Validates API-only pipeline configuration fields.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(replicator_resources) = &self.replicator_resources {
@@ -257,7 +443,7 @@ impl FullApiPipelineConfig {
     }
 }
 
-impl From<StoredPipelineConfig> for FullApiPipelineConfig {
+impl From<StoredPipelineConfig> for ApiPipelineConfig {
     fn from(value: StoredPipelineConfig) -> Self {
         Self {
             publication_name: value.publication_name,
@@ -281,7 +467,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredPipelineConfig {
     pub publication_name: String,
-    #[serde(default)]
+    #[serde(default = "default_batch")]
     pub batch: BatchConfig,
     #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
@@ -295,11 +481,11 @@ pub struct StoredPipelineConfig {
     pub memory_refresh_interval_ms: u64,
     #[serde(default = "default_replication_lag_refresh_interval_ms")]
     pub replication_lag_refresh_interval_ms: u64,
-    #[serde(default = "default_memory_backpressure")]
+    #[serde(default = "default_memory_backpressure_option")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
-    #[serde(default)]
+    #[serde(default = "default_table_sync_copy")]
     pub table_sync_copy: TableSyncCopyConfig,
-    #[serde(default)]
+    #[serde(default = "default_invalidated_slot_behavior")]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicator_resources: Option<ReplicatorResourcesConfig>,
@@ -339,9 +525,9 @@ impl StoredPipelineConfig {
 
 impl Store for StoredPipelineConfig {}
 
-impl From<FullApiPipelineConfig> for StoredPipelineConfig {
-    fn from(value: FullApiPipelineConfig) -> Self {
-        let batch = value.batch.unwrap_or_default();
+impl From<ApiPipelineConfig> for StoredPipelineConfig {
+    fn from(value: ApiPipelineConfig) -> Self {
+        let batch = value.batch.unwrap_or_else(default_batch);
 
         Self {
             publication_name: value.publication_name,
@@ -365,13 +551,25 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
                 .replication_lag_refresh_interval_ms
                 .unwrap_or(PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS),
             memory_backpressure: value.memory_backpressure,
-            table_sync_copy: value.table_sync_copy.unwrap_or_default(),
-            invalidated_slot_behavior: value.invalidated_slot_behavior.unwrap_or_default(),
+            table_sync_copy: value.table_sync_copy.unwrap_or_else(default_table_sync_copy),
+            invalidated_slot_behavior: value
+                .invalidated_slot_behavior
+                .unwrap_or_else(default_invalidated_slot_behavior),
             replicator_resources: value.replicator_resources,
             ducklake_maintenance: value.ducklake_maintenance,
             log_level: value.log_level,
         }
     }
+}
+
+fn deserialize_update_trimmed_string<'de, D>(
+    deserializer: D,
+) -> Result<UpdateField<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+        .map(|value| UpdateField::from_option(value.map(|value| value.trim().to_owned())))
 }
 
 fn default_ducklake_maintenance_min_interval_seconds() -> u64 {
@@ -471,8 +669,8 @@ mod tests {
     }
 
     #[test]
-    fn full_api_pipeline_config_conversion() {
-        let full_config = FullApiPipelineConfig {
+    fn api_pipeline_config_conversion() {
+        let api_config = ApiPipelineConfig {
             publication_name: "test_publication".to_owned(),
             batch: None,
             table_error_retry_delay_ms: None,
@@ -493,15 +691,15 @@ mod tests {
             log_level: Some(LogLevel::Debug),
         };
 
-        let stored: StoredPipelineConfig = full_config.clone().into();
-        let back_to_full: FullApiPipelineConfig = stored.into();
+        let stored: StoredPipelineConfig = api_config.clone().into();
+        let back_to_api: ApiPipelineConfig = stored.into();
 
-        assert_eq!(full_config.publication_name, back_to_full.publication_name);
+        assert_eq!(api_config.publication_name, back_to_api.publication_name);
     }
 
     #[test]
-    fn full_api_pipeline_config_defaults() {
-        let full_config = FullApiPipelineConfig {
+    fn api_pipeline_config_defaults() {
+        let api_config = ApiPipelineConfig {
             publication_name: "test_publication".to_owned(),
             batch: None,
             table_error_retry_delay_ms: None,
@@ -518,7 +716,7 @@ mod tests {
             log_level: None,
         };
 
-        let stored: StoredPipelineConfig = full_config.into();
+        let stored: StoredPipelineConfig = api_config.into();
 
         assert_eq!(stored.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
         assert_eq!(
@@ -544,6 +742,154 @@ mod tests {
         );
         assert_eq!(stored.memory_backpressure, None);
         assert_eq!(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::Error);
+    }
+
+    #[test]
+    fn update_api_pipeline_config_merges_preserve_set_and_clear_fields() {
+        let stored = StoredPipelineConfig {
+            publication_name: "publication".to_owned(),
+            batch: BatchConfig {
+                max_fill_ms: 5000,
+                memory_budget_ratio: 0.2,
+                max_bytes: 8 * 1024 * 1024,
+            },
+            table_error_retry_delay_ms: 1234,
+            table_error_retry_max_attempts: 7,
+            max_table_sync_workers: 4,
+            max_copy_connections_per_table: 8,
+            memory_refresh_interval_ms: 100,
+            replication_lag_refresh_interval_ms: 10_000,
+            memory_backpressure: Some(MemoryBackpressureConfig {
+                activate_threshold: 0.95,
+                resume_threshold: 0.9,
+            }),
+            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+            invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
+            replicator_resources: Some(ReplicatorResourcesConfig::default()),
+            ducklake_maintenance: Some(DuckLakeMaintenanceConfig::default()),
+            log_level: Some(LogLevel::Info),
+        };
+        let update = UpdateApiPipelineConfig {
+            publication_name: UpdateField::Set("updated_publication".to_owned()),
+            batch: UpdateField::Clear,
+            memory_backpressure: UpdateField::Clear,
+            log_level: UpdateField::Clear,
+            ..UpdateApiPipelineConfig::default()
+        };
+
+        let updated = update.merge_into_stored(stored).unwrap();
+        let omitted_create_config: ApiPipelineConfig =
+            serde_json::from_value(serde_json::json!({ "publication_name": "publication" }))
+                .unwrap();
+        let omitted_create_config: StoredPipelineConfig = omitted_create_config.into();
+
+        assert_eq!(updated.publication_name, "updated_publication");
+        assert_eq!(updated.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
+        assert_eq!(updated.table_error_retry_delay_ms, 1234);
+        assert_eq!(updated.memory_backpressure, omitted_create_config.memory_backpressure);
+        assert!(updated.log_level.is_none());
+    }
+
+    #[test]
+    fn update_api_pipeline_config_replaces_present_nested_config_atomically() {
+        let stored: StoredPipelineConfig = ApiPipelineConfig {
+            publication_name: "publication".to_owned(),
+            batch: Some(BatchConfig {
+                max_fill_ms: 5000,
+                memory_budget_ratio: 0.4,
+                max_bytes: 8 * 1024 * 1024,
+            }),
+            table_error_retry_delay_ms: None,
+            table_error_retry_max_attempts: None,
+            max_table_sync_workers: None,
+            max_copy_connections_per_table: None,
+            memory_refresh_interval_ms: None,
+            replication_lag_refresh_interval_ms: None,
+            memory_backpressure: None,
+            table_sync_copy: None,
+            invalidated_slot_behavior: None,
+            replicator_resources: None,
+            ducklake_maintenance: None,
+            log_level: None,
+        }
+        .into();
+        let update: UpdateApiPipelineConfig = serde_json::from_value(serde_json::json!({
+            "batch": { "max_fill_ms": 42 }
+        }))
+        .unwrap();
+
+        let updated = update.merge_into_stored(stored).unwrap();
+
+        assert_eq!(updated.batch.max_fill_ms, 42);
+        assert_eq!(updated.batch.memory_budget_ratio, BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO);
+        assert_eq!(updated.batch.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
+    }
+
+    #[test]
+    fn update_api_pipeline_config_rejects_cleared_publication_name() {
+        let stored: StoredPipelineConfig = ApiPipelineConfig {
+            publication_name: "publication".to_owned(),
+            batch: None,
+            table_error_retry_delay_ms: None,
+            table_error_retry_max_attempts: None,
+            max_table_sync_workers: None,
+            max_copy_connections_per_table: None,
+            memory_refresh_interval_ms: None,
+            replication_lag_refresh_interval_ms: None,
+            memory_backpressure: None,
+            table_sync_copy: None,
+            invalidated_slot_behavior: None,
+            replicator_resources: None,
+            ducklake_maintenance: None,
+            log_level: None,
+        }
+        .into();
+        let update = UpdateApiPipelineConfig {
+            publication_name: UpdateField::Clear,
+            ..UpdateApiPipelineConfig::default()
+        };
+
+        let error = update.merge_into_stored(stored).unwrap_err();
+
+        assert!(matches!(
+            error,
+            PipelineConfigUpdateError::RequiredFieldCleared { field: "publication_name" }
+        ));
+    }
+
+    #[test]
+    fn update_api_pipeline_config_resets_cleared_defaulted_field() {
+        let stored: StoredPipelineConfig = ApiPipelineConfig {
+            publication_name: "publication".to_owned(),
+            batch: Some(BatchConfig {
+                max_fill_ms: 5000,
+                memory_budget_ratio: 0.2,
+                max_bytes: 8 * 1024 * 1024,
+            }),
+            table_error_retry_delay_ms: None,
+            table_error_retry_max_attempts: None,
+            max_table_sync_workers: None,
+            max_copy_connections_per_table: None,
+            memory_refresh_interval_ms: None,
+            replication_lag_refresh_interval_ms: None,
+            memory_backpressure: None,
+            table_sync_copy: None,
+            invalidated_slot_behavior: None,
+            replicator_resources: None,
+            ducklake_maintenance: None,
+            log_level: None,
+        }
+        .into();
+        let update = UpdateApiPipelineConfig {
+            batch: UpdateField::Clear,
+            ..UpdateApiPipelineConfig::default()
+        };
+
+        let updated = update.merge_into_stored(stored).unwrap();
+
+        assert_eq!(updated.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
+        assert_eq!(updated.batch.memory_budget_ratio, BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO);
+        assert_eq!(updated.batch.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
     }
 
     #[test]
