@@ -127,6 +127,27 @@ impl From<TableRow> for BigQueryDefaultsRow {
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct BigQuerySchemaDivergenceRow {
+    pub(crate) id: i32,
+    pub(crate) name: Option<String>,
+    pub(crate) initially_required: Option<String>,
+    pub(crate) divergent_default: String,
+}
+
+impl From<TableRow> for BigQuerySchemaDivergenceRow {
+    fn from(value: TableRow) -> Self {
+        let columns = value.columns.unwrap();
+
+        BigQuerySchemaDivergenceRow {
+            id: parse_table_cell(columns[0].clone()).unwrap(),
+            name: parse_table_cell(columns[1].clone()),
+            initially_required: parse_table_cell(columns[2].clone()),
+            divergent_default: parse_table_cell(columns[3].clone()).unwrap(),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct BigQuerySchemaChangeRow {
     pub(crate) id: i32,
     pub(crate) full_name: String,

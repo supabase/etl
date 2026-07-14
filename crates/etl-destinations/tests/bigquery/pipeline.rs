@@ -17,7 +17,7 @@ use etl::{
     },
 };
 use etl_destinations::bigquery::test_utils::{
-    parse_table_cell, setup_bigquery_database, skip_if_missing_bigquery_env_vars,
+    setup_bigquery_database, skip_if_missing_bigquery_env_vars,
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
@@ -26,8 +26,9 @@ use tokio::time::sleep;
 
 use crate::support::{
     bigquery::{
-        BigQueryDefaultsRow, BigQueryOrder, BigQuerySchemaChangeRow, BigQueryUser,
-        NonNullableColsScalar, NullableColsArray, NullableColsScalar, parse_bigquery_table_rows,
+        BigQueryDefaultsRow, BigQueryOrder, BigQuerySchemaChangeRow, BigQuerySchemaDivergenceRow,
+        BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
+        parse_bigquery_table_rows,
     },
     crypto::install_crypto_provider,
 };
@@ -2314,24 +2315,29 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     let rows = bigquery_database.query_table(table_name).await.unwrap();
-    let mut values = rows
-        .into_iter()
-        .map(|row| {
-            let columns = row.columns.unwrap();
-            (
-                parse_table_cell::<String>(columns[1].clone()),
-                parse_table_cell::<String>(columns[2].clone()),
-                parse_table_cell::<String>(columns[3].clone()),
-            )
-        })
-        .collect::<Vec<_>>();
-    values.sort();
+    let mut rows = parse_bigquery_table_rows::<BigQuerySchemaDivergenceRow>(rows);
+    rows.sort();
     assert_eq!(
-        values,
+        rows,
         vec![
-            (None, None, Some("created".to_owned())),
-            (Some("after-default-drop".to_owned()), None, Some("explicit-after".to_owned()),),
-            (Some("before-drop".to_owned()), None, Some("explicit-before".to_owned()),),
+            BigQuerySchemaDivergenceRow {
+                id: 1,
+                name: Some("before-drop".to_owned()),
+                initially_required: None,
+                divergent_default: "explicit-before".to_owned(),
+            },
+            BigQuerySchemaDivergenceRow {
+                id: 2,
+                name: None,
+                initially_required: None,
+                divergent_default: "created".to_owned(),
+            },
+            BigQuerySchemaDivergenceRow {
+                id: 3,
+                name: Some("after-default-drop".to_owned()),
+                initially_required: None,
+                divergent_default: "explicit-after".to_owned(),
+            },
         ]
     );
 }
