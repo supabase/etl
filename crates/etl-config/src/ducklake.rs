@@ -128,6 +128,16 @@ pub fn parse_ducklake_s3_data_path(value: &str) -> Result<Url, ParseDucklakeUrlE
     Ok(url)
 }
 
+/// Returns the default DuckDB S3 URL style for DuckLake object storage.
+pub fn default_ducklake_s3_url_style(endpoint: Option<&str>) -> &'static str {
+    if endpoint.is_some() { "path" } else { "vhost" }
+}
+
+/// Returns the default DuckDB S3 SSL setting for DuckLake object storage.
+pub const fn default_ducklake_s3_use_ssl() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Mutex, OnceLock};
@@ -204,6 +214,21 @@ mod tests {
             error,
             ParseDucklakeUrlError::UnsupportedDataPathScheme(scheme) if scheme == "file"
         ));
+    }
+
+    #[test]
+    fn default_ducklake_s3_url_style_uses_vhost_for_aws_s3() {
+        assert_eq!(default_ducklake_s3_url_style(None), "vhost");
+    }
+
+    #[test]
+    fn default_ducklake_s3_url_style_uses_path_for_custom_endpoints() {
+        assert_eq!(default_ducklake_s3_url_style(Some("storage.example.com")), "path");
+    }
+
+    #[test]
+    fn default_ducklake_s3_use_ssl_is_enabled() {
+        assert!(default_ducklake_s3_use_ssl());
     }
 
     #[test]
