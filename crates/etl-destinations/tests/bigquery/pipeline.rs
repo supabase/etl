@@ -17,7 +17,7 @@ use etl::{
     },
 };
 use etl_destinations::bigquery::test_utils::{
-    setup_bigquery_database, skip_if_missing_bigquery_env_vars,
+    parse_table_cell, setup_bigquery_database, skip_if_missing_bigquery_env_vars,
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
@@ -2179,6 +2179,164 @@ async fn schema_change_add_column_defaults() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn schema_change_tolerates_nullability_and_default_divergence() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_database().await;
+    let table_name = test_table_name("nullability_schema");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("name", "text"),
+                ("initially_required", "text not null"),
+                ("divergent_default", "text not null default md5(random()::text)"),
+            ],
+        )
+        .await
+        .expect("failed to create source table");
+
+    let publication_name = "test_pub_bq_nullability_schema".to_owned();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("failed to create publication");
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready.notified().await;
+
+    let set_not_null_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::AlterColumn { name: "name", alteration: "set not null" },
+                TableModification::AlterColumn {
+                    name: "initially_required",
+                    alteration: "drop not null",
+                },
+                TableModification::AlterColumn {
+                    name: "divergent_default",
+                    alteration: "drop default",
+                },
+            ],
+        )
+        .await
+        .expect("failed to set source not null constraint");
+    database
+        .run_sql(&format!(
+            "insert into {} (name, initially_required, divergent_default) values ('before-drop', \
+             null, 'explicit-before')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to insert non-null source row");
+
+    set_not_null_notify.notified().await;
+
+    let drop_not_null_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::AlterColumn { name: "name", alteration: "drop not null" },
+                TableModification::AlterColumn {
+                    name: "divergent_default",
+                    alteration: "set default 'created'::text",
+                },
+            ],
+        )
+        .await
+        .expect("failed to drop source not null constraint");
+    database
+        .run_sql(&format!(
+            "insert into {} (name, initially_required) values (null, null)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to insert null source row");
+
+    drop_not_null_notify.notified().await;
+
+    let drop_default_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AlterColumn {
+                name: "divergent_default",
+                alteration: "drop default",
+            }],
+        )
+        .await
+        .expect("failed to drop supported source default");
+    database
+        .run_sql(&format!(
+            "insert into {} (name, initially_required, divergent_default) values \
+             ('after-default-drop', null, 'explicit-after')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to insert source row after dropping default");
+
+    drop_default_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let rows = bigquery_database.query_table(table_name).await.unwrap();
+    let mut values = rows
+        .into_iter()
+        .map(|row| {
+            let columns = row.columns.unwrap();
+            (
+                parse_table_cell::<String>(columns[1].clone()),
+                parse_table_cell::<String>(columns[2].clone()),
+                parse_table_cell::<String>(columns[3].clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    values.sort();
+    assert_eq!(
+        values,
+        vec![
+            (None, None, Some("created".to_owned())),
+            (Some("after-default-drop".to_owned()), None, Some("explicit-after".to_owned()),),
+            (Some("before-drop".to_owned()), None, Some("explicit-before".to_owned()),),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_schema_change() {
     if skip_if_missing_bigquery_env_vars() {
         return;
@@ -2221,6 +2379,7 @@ async fn table_schema_change() {
         store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
 
     pipeline.start().await.unwrap();
+
     table_sync_done.notified().await;
 
     let initial_state = store

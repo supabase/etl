@@ -875,6 +875,10 @@ where
 
         for change in &diff.columns_to_change {
             for modification in &change.modifications {
+                // Schema changes normally keep BigQuery aligned with PostgreSQL, and failures
+                // are propagated. Nullability and default changes intentionally
+                // allow known unsupported source states, so later changes must
+                // tolerate that divergence.
                 match modification {
                     ColumnModification::Rename { .. } => {}
                     ColumnModification::Nullability { old_nullable, new_nullable } => {
@@ -890,17 +894,12 @@ where
                             warn!(
                                 table_id = %table_id,
                                 column_name = %change.new_column.name,
-                                "BigQuery does not support setting NOT NULL on an existing \
+                                "bigquery does not support setting not null on an existing \
                                  column; keeping the destination column nullable"
                             );
                         }
                     }
-                    ColumnModification::Default { old_expression, new_expression } => {
-                        let old_default_was_supported =
-                            old_expression.as_deref().is_some_and(|default_expression| {
-                                supports_column_default(default_expression, &change.old_column.typ)
-                            });
-
+                    ColumnModification::Default { new_expression, .. } => {
                         if let Some(new_default_expression) = new_expression.as_deref() {
                             if supports_column_default(
                                 new_default_expression,
@@ -919,33 +918,24 @@ where
                                 warn!(
                                     table_id = %table_id,
                                     column_name = %change.new_column.name,
-                                    "skipping unsupported source column default for BigQuery"
+                                    "skipping unsupported source column default for bigquery"
                                 );
-                                if old_default_was_supported {
-                                    self.client
-                                        .drop_column_default(
-                                            &self.dataset_id,
-                                            &sequenced_bigquery_table_id.to_string(),
-                                            &change.new_column.name,
-                                        )
-                                        .await?;
-                                }
+                                self.client
+                                    .clear_column_default(
+                                        &self.dataset_id,
+                                        &sequenced_bigquery_table_id.to_string(),
+                                        &change.new_column.name,
+                                    )
+                                    .await?;
                             }
-                        } else if old_default_was_supported {
+                        } else {
                             self.client
-                                .drop_column_default(
+                                .clear_column_default(
                                     &self.dataset_id,
                                     &sequenced_bigquery_table_id.to_string(),
                                     &change.new_column.name,
                                 )
                                 .await?;
-                        } else if old_expression.is_some() {
-                            warn!(
-                                table_id = %table_id,
-                                column_name = %change.new_column.name,
-                                "skipping source column default removal for BigQuery because no \
-                                 supported destination default was set"
-                            );
                         }
                     }
                 }

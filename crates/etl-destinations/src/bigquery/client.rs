@@ -307,6 +307,22 @@ fn is_transient_query_error(error: &BQError) -> RetryDecision {
     }
 }
 
+/// Returns whether BigQuery rejected `DROP DEFAULT` because no default exists.
+fn is_missing_column_default_error(error: &BQError) -> bool {
+    let BQError::ResponseError { error } = error else {
+        return false;
+    };
+
+    error.error.code == 400
+        && error.error.errors.iter().any(|nested_error| {
+            nested_error.get("reason").is_some_and(|reason| reason == "invalid")
+                && nested_error.get("message").is_some_and(|message| {
+                    message.starts_with("Cannot DROP DEFAULT value from column ")
+                        && message.ends_with(" which does not have a DEFAULT value.")
+                })
+        })
+}
+
 /// Logs a transient BigQuery query retry.
 fn log_query_retry(attempt: crate::retry::RetryAttempt<'_, BQError>) {
     warn!(
@@ -1003,14 +1019,14 @@ impl BigQueryClient {
         let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
         let column_type = postgres_to_bigquery_type(&column_schema.typ);
 
-        info!("adding column {column_name} ({column_type}) to table {full_table_name} in BigQuery");
+        info!("adding column {column_name} ({column_type}) to table {full_table_name} in bigquery");
 
         if !column_schema.nullable && !is_array_type(&column_schema.typ) {
             warn!(
                 dataset_id = %dataset_id,
                 table_id = %table_id,
                 column_name = %column_schema.name,
-                "BigQuery does not support adding a top-level NOT NULL column; adding it as \
+                "bigquery does not support adding a top-level not null column; adding it as \
                  nullable"
             );
         }
@@ -1038,7 +1054,7 @@ impl BigQueryClient {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
         let column_name = quote_identifier(column_name, "BigQuery column name")?;
 
-        info!("dropping column {column_name} from table {full_table_name} in BigQuery");
+        info!("dropping column {column_name} from table {full_table_name} in bigquery");
 
         let query = format!("alter table {full_table_name} drop column {column_name}");
 
@@ -1062,7 +1078,7 @@ impl BigQueryClient {
         let old_name = quote_identifier(old_name, "BigQuery column name")?;
         let new_name = quote_identifier(new_name, "BigQuery column name")?;
 
-        info!("renaming column {old_name} to {new_name} in table {full_table_name} in BigQuery");
+        info!("renaming column {old_name} to {new_name} in table {full_table_name} in bigquery");
 
         let query = format!("alter table {full_table_name} rename column {old_name} to {new_name}");
 
@@ -1086,7 +1102,7 @@ impl BigQueryClient {
                 dataset_id = %dataset_id,
                 table_id = %table_id,
                 column_name = %column_name,
-                "skipping unsupported source column default for BigQuery"
+                "skipping unsupported source column default for bigquery"
             );
             return Ok(());
         };
@@ -1094,7 +1110,7 @@ impl BigQueryClient {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
         let column_name = quote_identifier(column_name, "BigQuery column name")?;
 
-        info!("setting default for column {column_name} in table {full_table_name} in BigQuery");
+        info!("setting default for column {column_name} in table {full_table_name} in bigquery");
 
         let query = format!(
             "alter table {full_table_name} alter column {column_name} set default \
@@ -1106,8 +1122,8 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Drops a default expression from a BigQuery column.
-    pub async fn drop_column_default(
+    /// Clears a default expression from a BigQuery column when present.
+    pub async fn clear_column_default(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
@@ -1116,27 +1132,68 @@ impl BigQueryClient {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
         let column_name = quote_identifier(column_name, "BigQuery column name")?;
 
-        info!("dropping default for column {column_name} in table {full_table_name} in BigQuery");
+        info!("clearing default for column {column_name} in table {full_table_name} in bigquery");
 
         let query =
             format!("alter table {full_table_name} alter column {column_name} drop default");
 
-        let _ = self.query(QueryRequest::new(query)).await?;
+        match self.query_with_bigquery_error(QueryRequest::new(query)).await {
+            Ok(_) => {}
+            Err(error) if is_missing_column_default_error(&error) => {
+                debug!(
+                    table_id = %table_id,
+                    column_name = %column_name,
+                    "column has no default in bigquery; skipping drop default"
+                );
+            }
+            Err(error) => return Err(bq_error_to_etl_error(error)),
+        }
 
         Ok(())
     }
 
-    /// Relaxes a BigQuery column from `REQUIRED` to `NULLABLE`.
+    /// Relaxes a BigQuery column from `REQUIRED` to `NULLABLE` when needed.
     pub(super) async fn drop_column_not_null(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         column_name: &str,
     ) -> EtlResult<()> {
+        let table = self
+            .client
+            .table()
+            .get(&self.project_id, dataset_id, table_id, None)
+            .await
+            .map_err(bq_error_to_etl_error)?;
+        let column_mode = table
+            .schema
+            .fields
+            .unwrap_or_default()
+            .into_iter()
+            .find(|field| field.name == column_name)
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::DestinationError,
+                    "BigQuery column not found",
+                    format!("Column {column_name} was not found in table {table_id}")
+                )
+            })?
+            .mode;
+
+        if column_mode.as_deref() != Some("REQUIRED") {
+            debug!(
+                table_id = %table_id,
+                column_name,
+                column_mode = column_mode.as_deref().unwrap_or("NULLABLE"),
+                "column is already nullable in bigquery; skipping drop not null"
+            );
+            return Ok(());
+        }
+
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
         let column_name = quote_identifier(column_name, "BigQuery column name")?;
 
-        info!("dropping not null for column {column_name} in table {full_table_name} in BigQuery");
+        info!("dropping not null for column {column_name} in table {full_table_name} in bigquery");
 
         let query =
             format!("alter table {full_table_name} alter column {column_name} drop not null");
@@ -1439,6 +1496,11 @@ impl BigQueryClient {
 
     /// Executes a BigQuery SQL query and returns the result set.
     pub async fn query(&self, request: QueryRequest) -> EtlResult<ResultSet> {
+        self.query_with_bigquery_error(request).await.map_err(bq_error_to_etl_error)
+    }
+
+    /// Executes a BigQuery SQL query while preserving the provider error.
+    async fn query_with_bigquery_error(&self, request: QueryRequest) -> Result<ResultSet, BQError> {
         let query_response = retry_with_backoff(
             QUERY_RETRY_POLICY,
             is_transient_query_error,
@@ -1450,7 +1512,7 @@ impl BigQueryClient {
             },
         )
         .await
-        .map_err(|failure| bq_error_to_etl_error(failure.last_error))?;
+        .map_err(|failure| failure.last_error)?;
 
         Ok(ResultSet::new_from_query_response(query_response))
     }
@@ -1525,6 +1587,35 @@ mod tests {
         };
 
         assert_eq!(is_transient_query_error(&error), RetryDecision::Retry);
+    }
+
+    #[test]
+    fn missing_column_default_error_matches_only_absent_default_response() {
+        let error = BQError::ResponseError {
+            error: ResponseError {
+                error: NestedResponseError {
+                    code: 400,
+                    errors: vec![
+                        [
+                            ("reason".to_owned(), "invalid".to_owned()),
+                            (
+                                "message".to_owned(),
+                                "Cannot DROP DEFAULT value from column status which does not have \
+                                 a DEFAULT value."
+                                    .to_owned(),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ],
+                    message: "Invalid schema change".to_owned(),
+                    status: "INVALID_ARGUMENT".to_owned(),
+                },
+            },
+        };
+
+        assert!(is_missing_column_default_error(&error));
+        assert!(!is_missing_column_default_error(&BQError::NoDataAvailable));
     }
 
     #[test]
