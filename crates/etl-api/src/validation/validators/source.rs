@@ -43,13 +43,9 @@ impl Validator for SourceValidator {
         if current_user != *expected_username {
             return Ok(vec![ValidationFailure::critical(
                 "Invalid Source Username",
-                format!(
-                    "The source connection authenticated as `{current_user}`, but this API server \
-                     expects `{expected_username}`.\n\nUpdate the source credentials to use the \
-                     trusted ETL role `{expected_username}`, or ask the ETL API operator to \
-                     change the configured trusted username if this source should use a different \
-                     role."
-                ),
+                "The source connection is not using the ETL account authorized for this \
+                 deployment.\n\nUpdate the source credentials to use the authorized ETL account, \
+                 or ask the ETL API operator to review the account configured for this source.",
             )]);
         }
 
@@ -136,12 +132,10 @@ impl Validator for SourceValidator {
         let Some(audit) = audit else {
             return Ok(vec![ValidationFailure::critical(
                 "Invalid Source Role Attributes",
-                format!(
-                    "The trusted ETL role `{expected_username}` was not found in your source \
-                     database.\n\nAsk a database administrator to create that login role, or \
-                     update the source credentials to use the existing role configured as the \
-                     trusted ETL username."
-                ),
+                "The ETL account authorized for this deployment is not available in the source \
+                 database.\n\nAsk the database administrator and ETL API operator to review the \
+                 source account configuration, or update the source credentials to use an \
+                 authorized ETL account.",
             )]);
         };
 
@@ -157,12 +151,10 @@ impl Validator for SourceValidator {
         if !has_required_role_attributes {
             failures.push(ValidationFailure::critical(
                 "Invalid Source Role Attributes",
-                "The trusted ETL role does not have the required attributes for your source \
-                 database.\n\nAsk a database administrator to alter the role so it can `LOGIN`, \
-                 has `REPLICATION`, `BYPASSRLS`, and `INHERIT`, has no password expiration, and \
-                 does not have `CREATEROLE` or `CREATEDB`. For example, use `ALTER ROLE \
-                 <etl_user> WITH LOGIN REPLICATION BYPASSRLS INHERIT NOCREATEROLE NOCREATEDB`; \
-                 configure password validity separately according to your authentication policy.",
+                "The authorized ETL account does not have sufficient access to use this source \
+                 database.\n\nAsk a database administrator to grant the account the access \
+                 required for ETL, or update the source connection to use an appropriately \
+                 configured ETL account.",
             ));
         }
 
@@ -177,14 +169,10 @@ impl Validator for SourceValidator {
         if !has_required_etl_schema_permissions {
             failures.push(ValidationFailure::critical(
                 "Invalid Source ETL Schema Permissions",
-                format!(
-                    "The trusted ETL role cannot manage the `{ETL_SCHEMA_NAME}` schema in your \
-                     source database.\n\nIf the schema does not exist, a database owner can run \
-                     `GRANT CREATE ON DATABASE <database> TO <etl_user>`. If it exists, grant \
-                     `USAGE, CREATE` on the `{ETL_SCHEMA_NAME}` schema and make the ETL role the \
-                     owner of its existing tables, or grant it membership in each table-owning \
-                     role."
-                ),
+                "The authorized ETL account does not have sufficient access to initialize or \
+                 manage ETL metadata in the source database.\n\nAsk a database administrator to \
+                 grant the account the required ETL access, or update the source connection to \
+                 use an appropriately configured ETL account.",
             ));
         }
 

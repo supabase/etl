@@ -480,10 +480,10 @@ fn replication_permission_failures(has_replication_permission: bool) -> Vec<Vali
     } else {
         vec![ValidationFailure::critical(
             "Missing Replication Permission",
-            "Your source database user does not have replication privileges.\n\nGrant the user \
-             the `REPLICATION` attribute with `ALTER ROLE <etl_user> WITH REPLICATION`, run by a \
-             superuser or a role allowed to alter that user, or update the source connection to \
-             use a role that already has it.",
+            "The source database account does not have sufficient access to start logical \
+             replication.\n\nAsk a database administrator to grant the account the required \
+             replication access, or update the source connection to use an appropriately \
+             configured account.",
         )]
     }
 }
