@@ -190,7 +190,9 @@ impl Validator for ReplicaIdentityValidator {
                     "{} cannot safely replicate {} changes for these publication tables because \
                      their replica identity is unsupported: {}.\n\nSet each table to {} before \
                      starting the pipeline. If a table has columns with large values (TOAST \
-                     columns), `REPLICA IDENTITY FULL` is recommended.",
+                     columns), `REPLICA IDENTITY FULL` is recommended. A table owner can apply it \
+                     with `ALTER TABLE <schema.table> REPLICA IDENTITY FULL`; alternatively, use \
+                     `USING INDEX <unique_index>` when that identity type is listed as supported.",
                     self.destination_name,
                     format_operations(&published_operations(
                         publication_publishes_updates,
@@ -227,7 +229,9 @@ impl Validator for ReplicaIdentityValidator {
                 format!(
                     "{}: {}.\n\nSet each table to {} before enabling those operations on the \
                      publication. If a table has columns with large values (TOAST columns), \
-                     `REPLICA IDENTITY FULL` is recommended.",
+                     `REPLICA IDENTITY FULL` is recommended. A table owner can apply it with \
+                     `ALTER TABLE <schema.table> REPLICA IDENTITY FULL`; alternatively, use \
+                     `USING INDEX <unique_index>` when that identity type is listed as supported.",
                     warning_prefix,
                     format_unsupported_tables(&warning_tables),
                     format_supported_identity_types(

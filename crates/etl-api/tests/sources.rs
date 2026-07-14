@@ -536,7 +536,7 @@ async fn source_creation_with_matching_trusted_username_but_invalid_role_profile
     let body = response.text().await.expect("failed to read response body");
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(body.contains("required attributes for your source database"));
+    assert!(body.contains("does not have sufficient access to use this source database"));
 
     drop_pg_database(&source_db_config).await;
 }

@@ -147,8 +147,10 @@ macro_rules! disabled_destination {
                 std::future::ready(Ok(vec![ValidationFailure::critical(
                     format!("{} Backend Disabled", $destination),
                     format!(
-                        "This API server was built without {} destination support.",
-                        $destination
+                        "This API server was built without {} destination support.\n\nChoose a \
+                         destination enabled on this deployment, or ask the ETL API operator to \
+                         deploy a build with {} support enabled.",
+                        $destination, $destination
                     ),
                 )]))
             }

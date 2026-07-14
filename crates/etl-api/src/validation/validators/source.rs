@@ -43,11 +43,9 @@ impl Validator for SourceValidator {
         if current_user != *expected_username {
             return Ok(vec![ValidationFailure::critical(
                 "Invalid Source Username",
-                format!(
-                    "The source connection authenticated as `{current_user}`, but this API server \
-                     expects `{expected_username}`.\n\nUpdate the source credentials to use the \
-                     trusted ETL role."
-                ),
+                "The source connection is not using the ETL account authorized for this \
+                 deployment.\n\nUpdate the source credentials to use the authorized ETL account, \
+                 or ask the ETL API operator to review the account configured for this source.",
             )]);
         }
 
@@ -134,11 +132,10 @@ impl Validator for SourceValidator {
         let Some(audit) = audit else {
             return Ok(vec![ValidationFailure::critical(
                 "Invalid Source Role Attributes",
-                format!(
-                    "The trusted ETL role `{expected_username}` was not found in your source \
-                     database.\n\nCreate the role or update the source credentials to use the \
-                     configured trusted role."
-                ),
+                "The ETL account authorized for this deployment is not available in the source \
+                 database.\n\nAsk the database administrator and ETL API operator to review the \
+                 source account configuration, or update the source credentials to use an \
+                 authorized ETL account.",
             )]);
         };
 
@@ -154,10 +151,10 @@ impl Validator for SourceValidator {
         if !has_required_role_attributes {
             failures.push(ValidationFailure::critical(
                 "Invalid Source Role Attributes",
-                "The trusted ETL role does not have the required attributes for your source \
-                 database.\n\nIt must be able to `LOGIN`, use `REPLICATION`, `BYPASSRLS`, and \
-                 `INHERIT` privileges, and avoid superuser-style `CREATEROLE` or `CREATEDB` \
-                 permissions.",
+                "The authorized ETL account does not have sufficient access to use this source \
+                 database.\n\nAsk a database administrator to grant the account the access \
+                 required for ETL, or update the source connection to use an appropriately \
+                 configured ETL account.",
             ));
         }
 
@@ -172,12 +169,10 @@ impl Validator for SourceValidator {
         if !has_required_etl_schema_permissions {
             failures.push(ValidationFailure::critical(
                 "Invalid Source ETL Schema Permissions",
-                format!(
-                    "The trusted ETL role cannot manage the `{ETL_SCHEMA_NAME}` schema in your \
-                     source database.\n\nGrant it permission to create the schema if it does not \
-                     exist, or `USAGE` and `CREATE` on the schema plus ownership access to \
-                     existing ETL tables."
-                ),
+                "The authorized ETL account does not have sufficient access to initialize or \
+                 manage ETL metadata in the source database.\n\nAsk a database administrator to \
+                 grant the account the required ETL access, or update the source connection to \
+                 use an appropriately configured ETL account.",
             ));
         }
 
