@@ -46,7 +46,9 @@ impl Validator for SourceValidator {
                 format!(
                     "The source connection authenticated as `{current_user}`, but this API server \
                      expects `{expected_username}`.\n\nUpdate the source credentials to use the \
-                     trusted ETL role."
+                     trusted ETL role `{expected_username}`, or ask the ETL API operator to \
+                     change the configured trusted username if this source should use a different \
+                     role."
                 ),
             )]);
         }
@@ -136,8 +138,9 @@ impl Validator for SourceValidator {
                 "Invalid Source Role Attributes",
                 format!(
                     "The trusted ETL role `{expected_username}` was not found in your source \
-                     database.\n\nCreate the role or update the source credentials to use the \
-                     configured trusted role."
+                     database.\n\nAsk a database administrator to create that login role, or \
+                     update the source credentials to use the existing role configured as the \
+                     trusted ETL username."
                 ),
             )]);
         };
@@ -155,9 +158,11 @@ impl Validator for SourceValidator {
             failures.push(ValidationFailure::critical(
                 "Invalid Source Role Attributes",
                 "The trusted ETL role does not have the required attributes for your source \
-                 database.\n\nIt must be able to `LOGIN`, use `REPLICATION`, `BYPASSRLS`, and \
-                 `INHERIT` privileges, and avoid superuser-style `CREATEROLE` or `CREATEDB` \
-                 permissions.",
+                 database.\n\nAsk a database administrator to alter the role so it can `LOGIN`, \
+                 has `REPLICATION`, `BYPASSRLS`, and `INHERIT`, has no password expiration, and \
+                 does not have `CREATEROLE` or `CREATEDB`. For example, use `ALTER ROLE \
+                 <etl_user> WITH LOGIN REPLICATION BYPASSRLS INHERIT NOCREATEROLE NOCREATEDB`; \
+                 configure password validity separately according to your authentication policy.",
             ));
         }
 
@@ -174,9 +179,11 @@ impl Validator for SourceValidator {
                 "Invalid Source ETL Schema Permissions",
                 format!(
                     "The trusted ETL role cannot manage the `{ETL_SCHEMA_NAME}` schema in your \
-                     source database.\n\nGrant it permission to create the schema if it does not \
-                     exist, or `USAGE` and `CREATE` on the schema plus ownership access to \
-                     existing ETL tables."
+                     source database.\n\nIf the schema does not exist, a database owner can run \
+                     `GRANT CREATE ON DATABASE <database> TO <etl_user>`. If it exists, grant \
+                     `USAGE, CREATE` on the `{ETL_SCHEMA_NAME}` schema and make the ETL role the \
+                     owner of its existing tables, or grant it membership in each table-owning \
+                     role."
                 ),
             ));
         }

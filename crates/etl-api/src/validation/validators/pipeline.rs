@@ -56,8 +56,9 @@ impl Validator for PublicationExistsValidator {
                 "Publication Not Found",
                 format!(
                     "Publication `{}` does not exist in your source database.\n\nCreate the \
-                     publication, or choose an existing publication for this pipeline. For \
-                     example: `CREATE PUBLICATION {} FOR TABLE <table_name>, ...`.",
+                     publication in the source database, or choose an existing publication for \
+                     this pipeline. A database owner or suitably privileged role can run `CREATE \
+                     PUBLICATION {} FOR TABLE <schema.table>, ...`.",
                     self.publication_name, self.publication_name
                 ),
             )])
@@ -222,8 +223,9 @@ impl Validator for PublicationHasTablesValidator {
                 "Publication Empty",
                 format!(
                     "Publication `{}` exists, but it does not publish any tables.\n\nAdd tables \
-                     to the publication before starting the pipeline. For example: `ALTER \
-                     PUBLICATION {} ADD TABLE <table_name>`.",
+                     to the publication in the source database before starting the pipeline. For \
+                     example, a publication owner can run `ALTER PUBLICATION {} ADD TABLE \
+                     <schema.table>`.",
                     self.publication_name, self.publication_name
                 ),
             )])
@@ -292,8 +294,10 @@ impl Validator for PublicationExcludesEtlTablesValidator {
                 format!(
                     "Publication `{}` is defined `FOR ALL TABLES`, which also publishes ETL's \
                      internal schema tables when they exist.\n\nUse an explicit table list, or \
-                     `FOR TABLES IN SCHEMA` with only customer-owned schemas. Exclude the \
-                     `{ETL_SCHEMA_NAME}` schema.",
+                     `FOR TABLES IN SCHEMA` with only customer-owned schemas. A `FOR ALL TABLES` \
+                     publication cannot be narrowed in place, so replace it with a publication \
+                     that excludes the `{ETL_SCHEMA_NAME}` schema and select that publication for \
+                     the pipeline.",
                     self.publication_name
                 ),
             )]);
@@ -303,12 +307,13 @@ impl Validator for PublicationExcludesEtlTablesValidator {
             return Ok(vec![ValidationFailure::critical(
                 "Publication Includes ETL Tables",
                 format!(
-                    "Publication `{}` includes ETL internal tables: {}.\n\nRemove the \
-                     `{ETL_SCHEMA_NAME}` schema from the publication before starting the \
-                     pipeline. ETL state tables are implementation details and must not be \
-                     replicated.",
+                    "Publication `{}` includes ETL internal tables: {}.\n\nRemove the listed \
+                     tables from the publication before starting the pipeline. A publication \
+                     owner can run `ALTER PUBLICATION {} DROP TABLE <schema.table>, ...`. ETL \
+                     state tables are implementation details and must not be replicated.",
                     self.publication_name,
-                    format_code_list(&published_etl_tables)
+                    format_code_list(&published_etl_tables),
+                    self.publication_name
                 ),
             )]);
         }
@@ -336,9 +341,10 @@ impl Validator for PublicationExcludesEtlTablesValidator {
                     "Publication Includes ETL Tables",
                     format!(
                         "Publication `{}` includes the `{ETL_SCHEMA_NAME}` schema.\n\nRemove that \
-                         schema from the publication and publish only customer-owned schemas or \
-                         explicit customer tables.",
-                        self.publication_name
+                         schema from the publication with `ALTER PUBLICATION {} DROP TABLES IN \
+                         SCHEMA {ETL_SCHEMA_NAME}`, or replace the publication with one \
+                         containing only customer-owned schemas or explicit customer tables.",
+                        self.publication_name, self.publication_name
                     ),
                 )]);
             }
@@ -405,7 +411,10 @@ impl Validator for GeneratedColumnsValidator {
                 format!(
                     "These publication tables have generated columns: {}.\n\nThe pipeline can \
                      start, but generated columns are not replicated and will be omitted from the \
-                     destination.",
+                     destination. If the destination needs those values, replace each generated \
+                     column with an ordinary stored column maintained by your application or a \
+                     trigger, then include that column in the publication. Otherwise, you can \
+                     proceed and compute the value in the destination.",
                     format_code_list(&tables_with_generated)
                 ),
             )])
@@ -455,8 +464,10 @@ fn wal_level_failures(wal_level: &str) -> Vec<ValidationFailure> {
             "Invalid WAL Level",
             format!(
                 "Your source database has `wal_level` set to `{wal_level}`, but logical \
-                 replication requires `logical`.\n\nSet `wal_level = 'logical'` in \
-                 `postgresql.conf` and restart PostgreSQL."
+                 replication requires `logical`.\n\nSet `wal_level = 'logical'` in the source \
+                 database's `postgresql.conf` (or its managed-service database parameter \
+                 settings), then restart PostgreSQL. A database administrator can use `ALTER \
+                 SYSTEM SET wal_level = 'logical'` on self-managed PostgreSQL."
             ),
         )]
     }
@@ -470,7 +481,9 @@ fn replication_permission_failures(has_replication_permission: bool) -> Vec<Vali
         vec![ValidationFailure::critical(
             "Missing Replication Permission",
             "Your source database user does not have replication privileges.\n\nGrant the user \
-             the `REPLICATION` attribute or connect with a role that already has it.",
+             the `REPLICATION` attribute with `ALTER ROLE <etl_user> WITH REPLICATION`, run by a \
+             superuser or a role allowed to alter that user, or update the source connection to \
+             use a role that already has it.",
         )]
     }
 }
@@ -494,7 +507,9 @@ fn replication_slot_failures(
                  may need up to {required_slots} during the initial table copy \
                  ({used_replication_slots}/{max_replication_slots} slots are currently in \
                  use).\n\nThis includes 1 apply slot plus up to `max_table_sync_workers` table \
-                 sync slots. Increase `max_replication_slots`, remove unused replication slots, \
+                 sync slots. Increase `max_replication_slots` in the source database's \
+                 `postgresql.conf` or managed-service parameter settings and restart PostgreSQL; \
+                 alternatively, drop confirmed-unused slots with `pg_drop_replication_slot(...)` \
                  or reduce `max_table_sync_workers`. After the initial copy, this pipeline only \
                  uses 1 slot.",
             ),
@@ -521,8 +536,9 @@ fn wal_sender_failures(
                  pipeline may need up to {required_wal_senders} during the initial table copy \
                  ({active_wal_senders}/{max_wal_senders} WAL senders are currently \
                  active).\n\nEach active replication slot needs a WAL sender connection. Increase \
-                 `max_wal_senders`, stop unused replication clients, or reduce \
-                 `max_table_sync_workers`."
+                 `max_wal_senders` in the source database's `postgresql.conf` or managed-service \
+                 parameter settings and restart PostgreSQL; alternatively, stop confirmed-unused \
+                 replication clients or reduce `max_table_sync_workers`."
             ),
         ));
     }
@@ -535,7 +551,9 @@ fn wal_sender_failures(
                  {max_replication_slots}.\n\nLogical replication needs a WAL sender connection \
                  for each active slot, and PostgreSQL recommends setting `max_wal_senders` at \
                  least as high as `max_replication_slots`, plus any physical replicas. Some \
-                 replication clients may fail to connect even when slots are available."
+                 replication clients may fail to connect even when slots are available. Increase \
+                 `max_wal_senders` in `postgresql.conf` or the managed-service database parameter \
+                 settings, then restart PostgreSQL."
             ),
         ));
     }
@@ -557,14 +575,20 @@ fn slot_wal_keep_size_failures(
              indefinitely when ETL is paused, disconnected, or stuck on a table error. This does \
              not prevent the pipeline from starting, but an abandoned or stalled slot can fill \
              the source database disk.\n\nSet a bounded value large enough for your write volume \
-             and longest expected initial copy.",
+             and longest expected initial copy in `postgresql.conf` or the managed-service \
+             database parameter settings, then reload the PostgreSQL configuration. For example, \
+             a database administrator can run `ALTER SYSTEM SET max_slot_wal_keep_size = '10GB'` \
+             followed by `SELECT pg_reload_conf()` on self-managed PostgreSQL.",
         )),
         0 => failures.push(ValidationFailure::critical(
             "Slot WAL Retention Disabled",
             "`max_slot_wal_keep_size` is 0 MB, leaving no per-slot WAL retention headroom.\n\nA \
              logical replication slot can be invalidated as soon as it falls behind at a \
              checkpoint, which can force ETL to restart table copies or require slot recreation. \
-             Increase `max_slot_wal_keep_size` to leave WAL headroom for normal replication lag.",
+             Set `max_slot_wal_keep_size` to a positive value in `postgresql.conf` or the \
+             managed-service database parameter settings, then reload the PostgreSQL \
+             configuration. Size it for source write volume, available disk, and the longest \
+             expected ETL downtime.",
         )),
         1..MIN_SLOT_WAL_KEEP_SIZE_MB => failures.push(ValidationFailure::warning(
             "Low Slot WAL Retention",
@@ -572,8 +596,12 @@ fn slot_wal_keep_size_failures(
                 "`max_slot_wal_keep_size` is {max_slot_wal_keep_size_mb} MB, which is below ETL's \
                  recommended minimum of {MIN_SLOT_WAL_KEEP_SIZE_MB} MB.\n\nThis may be too small \
                  for logical replication during large transactions, destination outages, or long \
-                 initial table copies. Increase it based on source write volume, available disk, \
-                 and the longest time ETL may need to catch up."
+                 initial table copies. Increase it in `postgresql.conf` or the managed-service \
+                 database parameter settings, then reload the PostgreSQL configuration. Size it \
+                 based on source write volume, available disk, and the longest time ETL may need \
+                 to catch up. On self-managed PostgreSQL, a database administrator can run `ALTER \
+                 SYSTEM SET max_slot_wal_keep_size = '1GB'` followed by `SELECT pg_reload_conf()` \
+                 to apply ETL's minimum."
             ),
         )),
         _ => {}
@@ -591,7 +619,9 @@ fn slot_wal_keep_size_failures(
                  invalidate ETL's logical replication slot after a short deploy, maintenance \
                  window, or incident pause, with `pg_replication_slots.invalidation_reason = \
                  'idle_timeout'`.\n\nUse `0` to disable idle-slot invalidation, or choose a value \
-                 safely above expected ETL downtime."
+                 safely above expected ETL downtime. Change the setting in `postgresql.conf` or \
+                 the managed-service database parameter settings, then reload the PostgreSQL \
+                 configuration."
             ),
         ));
     }
