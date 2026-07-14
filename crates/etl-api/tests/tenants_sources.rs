@@ -170,7 +170,7 @@ async fn tenant_and_source_creation_with_invalid_trusted_role_profile_fails() {
     let body = response.text().await.expect("failed to read response body");
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(body.contains("required attributes for your source database"));
+    assert!(body.contains("does not have sufficient access to use this source database"));
 
     drop_pg_database(&source_db_config).await;
 }
