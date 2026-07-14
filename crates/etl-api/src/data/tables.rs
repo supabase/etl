@@ -34,23 +34,6 @@ pub struct SourceTable {
     pub name: String,
 }
 
-/// A table referenced by a pipeline's table-sync-copy configuration.
-///
-/// `schema` and `name` are either both populated or both `None`. They are
-/// `None` when the table id no longer resolves in the source database, for
-/// example because the table was dropped after being selected. Callers can
-/// render the table as missing directly from this shape instead of treating an
-/// unresolved id as an error.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct ConfiguredTable {
-    /// The configured Postgres table OID.
-    pub id: u32,
-    /// The current schema, or `None` when the OID cannot be resolved.
-    pub schema: Option<String>,
-    /// The current table name, or `None` when the OID cannot be resolved.
-    pub name: Option<String>,
-}
-
 /// Returns the ordinary and partitioned tables available for replication.
 pub async fn get_tables(pool: &PgPool) -> Result<Vec<SourceTable>, TablesDbError> {
     let query = r#"

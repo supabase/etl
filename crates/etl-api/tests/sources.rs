@@ -163,6 +163,60 @@ async fn source_table_and_publication_responses_include_table_ids() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn dropping_and_recreating_a_table_yields_a_different_id() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+
+    source_pool
+        .execute("create table public.recreated_table (id bigint primary key)")
+        .await
+        .expect("failed to create source table");
+    let original_id: i64 =
+        sqlx::query_scalar("select 'public.recreated_table'::regclass::oid::bigint")
+            .fetch_one(&source_pool)
+            .await
+            .expect("failed to read source table oid");
+
+    source_pool
+        .execute("drop table public.recreated_table")
+        .await
+        .expect("failed to drop source table");
+    source_pool
+        .execute("create table public.recreated_table (id bigint primary key)")
+        .await
+        .expect("failed to recreate source table");
+    let recreated_id: i64 =
+        sqlx::query_scalar("select 'public.recreated_table'::regclass::oid::bigint")
+            .fetch_one(&source_pool)
+            .await
+            .expect("failed to read recreated source table oid");
+
+    assert_ne!(
+        original_id, recreated_id,
+        "recreating a table should assign a new OID, since a pipeline's table_sync_copy ids are \
+         only meaningful for the relation that held them when selected"
+    );
+
+    let tables_response = app.read_source_tables(tenant_id, source_id).await;
+    assert!(tables_response.status().is_success());
+    let tables_response: ReadTablesResponse =
+        tables_response.json().await.expect("failed to deserialize table response");
+    let recreated_id = u32::try_from(recreated_id).expect("Postgres OIDs fit in u32");
+    let table = tables_response
+        .tables
+        .iter()
+        .find(|table| table.schema == "public" && table.name == "recreated_table")
+        .expect("recreated table missing from response");
+    assert_eq!(table.id, recreated_id);
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_existing_source_can_be_read() {
     init_test_tracing();
     // Arrange

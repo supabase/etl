@@ -1,6 +1,6 @@
 use etl_api::{
     configs::{
-        pipeline::{ApiTableSyncCopyConfig, ReplicatorResourcesConfig, UpdateApiPipelineConfig},
+        pipeline::{ReplicatorResourcesConfig, UpdateApiPipelineConfig},
         update::UpdateField,
     },
     k8s::PodStatus,
@@ -11,9 +11,11 @@ use etl_api::{
             GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
             RollbackTablesRequest, RollbackTablesResponse, RollbackTablesTarget, RollbackType,
             SimpleTableState, TableStatus, UpdatePipelineRequest, UpdatePipelineVersionRequest,
+            ValidatePipelineRequest, ValidatePipelineResponse,
         },
     },
     startup::get_connection_pool,
+    validation::FailureType,
 };
 use etl_config::shared::{
     BatchConfig, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
@@ -484,7 +486,67 @@ async fn an_existing_pipeline_can_be_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn selective_table_copy_reads_return_complete_tables_after_publication_removal() {
+async fn selective_table_copy_reads_return_table_ids() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    source_pool
+        .execute("create table public.copy_selection_test (id bigint primary key)")
+        .await
+        .expect("failed to create source table");
+    source_pool
+        .execute("create publication copy_selection_pub for table public.copy_selection_test")
+        .await
+        .expect("failed to create source publication");
+    let table_id: i64 =
+        sqlx::query_scalar("select 'public.copy_selection_test'::regclass::oid::bigint")
+            .fetch_one(&source_pool)
+            .await
+            .expect("failed to read source table oid");
+    let table_id = u32::try_from(table_id).expect("Postgres OIDs fit in u32");
+
+    let mut config = new_pipeline_config();
+    config.publication_name = "copy_selection_pub".to_owned();
+    config.table_sync_copy = Some(TableSyncCopyConfig::SkipTables { table_ids: vec![table_id] });
+    let pipeline_id =
+        create_pipeline_with_config(&app, tenant_id, source_id, destination_id, config).await;
+
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert!(response.status().is_success());
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize pipeline response");
+    let TableSyncCopyConfig::SkipTables { table_ids } =
+        response.config.table_sync_copy.expect("table_sync_copy should be set")
+    else {
+        panic!("expected skip_tables read config");
+    };
+    assert_eq!(table_ids, vec![table_id]);
+
+    let response = app.read_all_pipelines(tenant_id).await;
+    assert!(response.status().is_success());
+    let response: ReadPipelinesResponse =
+        response.json().await.expect("failed to deserialize pipelines response");
+    let TableSyncCopyConfig::SkipTables { table_ids } = response.pipelines[0]
+        .config
+        .table_sync_copy
+        .clone()
+        .expect("table_sync_copy should be set")
+    else {
+        panic!("expected skip_tables read config");
+    };
+    assert_eq!(table_ids, vec![table_id]);
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selective_table_copy_reads_retain_stale_ids_after_publication_removal() {
     init_test_tracing();
     let app = spawn_test_app().await;
     create_default_image(&app).await;
@@ -518,39 +580,30 @@ async fn selective_table_copy_reads_return_complete_tables_after_publication_rem
         .execute("alter publication copy_selection_pub drop table public.copy_selection_test")
         .await
         .expect("failed to remove source table from publication");
+    source_pool
+        .execute("drop table public.copy_selection_test")
+        .await
+        .expect("failed to drop source table");
 
+    // The stale id is preserved verbatim: pipeline reads never resolve or
+    // validate table_sync_copy ids against the source database.
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
     assert!(response.status().is_success());
     let response: ReadPipelineResponse =
         response.json().await.expect("failed to deserialize pipeline response");
-    let ApiTableSyncCopyConfig::SkipTables { tables } = response.config.table_sync_copy else {
-        panic!("expected skip_tables read config");
-    };
-    assert_eq!(tables.len(), 1);
-    assert_eq!(tables[0].id, table_id);
-    assert_eq!(tables[0].schema.as_deref(), Some("public"));
-    assert_eq!(tables[0].name.as_deref(), Some("copy_selection_test"));
-
-    let response = app.read_all_pipelines(tenant_id).await;
-    assert!(response.status().is_success());
-    let response: ReadPipelinesResponse =
-        response.json().await.expect("failed to deserialize pipelines response");
-    let ApiTableSyncCopyConfig::SkipTables { tables } =
-        &response.pipelines[0].config.table_sync_copy
+    let TableSyncCopyConfig::SkipTables { table_ids } =
+        response.config.table_sync_copy.expect("table_sync_copy should be set")
     else {
         panic!("expected skip_tables read config");
     };
-    assert_eq!(tables.len(), 1);
-    assert_eq!(tables[0].id, table_id);
-    assert_eq!(tables[0].schema.as_deref(), Some("public"));
-    assert_eq!(tables[0].name.as_deref(), Some("copy_selection_test"));
+    assert_eq!(table_ids, vec![table_id]);
 
     drop(source_pool);
     drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn selective_table_copy_reads_render_dropped_tables_as_missing() {
+async fn pipeline_reads_succeed_while_source_database_is_unreachable() {
     init_test_tracing();
     let app = spawn_test_app().await;
     create_default_image(&app).await;
@@ -559,60 +612,31 @@ async fn selective_table_copy_reads_render_dropped_tables_as_missing() {
         create_test_source_database(&app, tenant_id).await;
     let destination_id = create_destination(&app, tenant_id).await;
 
-    source_pool
-        .execute("create table public.copy_selection_test (id bigint primary key)")
-        .await
-        .expect("failed to create source table");
-    source_pool
-        .execute("create publication copy_selection_pub for table public.copy_selection_test")
-        .await
-        .expect("failed to create source publication");
-    let table_id: i64 =
-        sqlx::query_scalar("select 'public.copy_selection_test'::regclass::oid::bigint")
-            .fetch_one(&source_pool)
-            .await
-            .expect("failed to read source table oid");
-    let table_id = u32::try_from(table_id).expect("Postgres OIDs fit in u32");
-
     let mut config = new_pipeline_config();
-    config.publication_name = "copy_selection_pub".to_owned();
-    config.table_sync_copy = Some(TableSyncCopyConfig::SkipTables { table_ids: vec![table_id] });
+    config.table_sync_copy = Some(TableSyncCopyConfig::SkipTables { table_ids: vec![16384] });
     let pipeline_id =
         create_pipeline_with_config(&app, tenant_id, source_id, destination_id, config).await;
 
-    source_pool
-        .execute("drop table public.copy_selection_test")
-        .await
-        .expect("failed to drop source table");
+    // Drop the source database entirely: pipeline reads must not depend on
+    // the source database being reachable, unlike endpoints that discover or
+    // resolve tables (source-table and publication reads, replication
+    // status).
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
 
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
     assert!(response.status().is_success());
     let response: ReadPipelineResponse =
         response.json().await.expect("failed to deserialize pipeline response");
-    let ApiTableSyncCopyConfig::SkipTables { tables } = response.config.table_sync_copy else {
-        panic!("expected skip_tables read config");
-    };
-    assert_eq!(tables.len(), 1);
-    assert_eq!(tables[0].id, table_id);
-    assert_eq!(tables[0].schema, None);
-    assert_eq!(tables[0].name, None);
-
-    let response = app.read_all_pipelines(tenant_id).await;
-    assert!(response.status().is_success());
-    let response: ReadPipelinesResponse =
-        response.json().await.expect("failed to deserialize pipelines response");
-    let ApiTableSyncCopyConfig::SkipTables { tables } =
-        &response.pipelines[0].config.table_sync_copy
+    let TableSyncCopyConfig::SkipTables { table_ids } =
+        response.config.table_sync_copy.expect("table_sync_copy should be set")
     else {
         panic!("expected skip_tables read config");
     };
-    assert_eq!(tables.len(), 1);
-    assert_eq!(tables[0].id, table_id);
-    assert_eq!(tables[0].schema, None);
-    assert_eq!(tables[0].name, None);
+    assert_eq!(table_ids, vec![16384]);
 
-    drop(source_pool);
-    drop_pg_database(&source_db_config).await;
+    let response = app.read_all_pipelines(tenant_id).await;
+    assert!(response.status().is_success());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -688,8 +712,8 @@ async fn pipeline_config_update_preserves_omitted_fields() {
     let response: ReadPipelineResponse =
         response.json().await.expect("failed to deserialize response");
     assert_eq!(response.config.publication_name, "renamed_publication");
-    assert_eq!(response.config.table_error_retry_delay_ms, 10000);
-    assert_eq!(response.config.max_table_sync_workers, 2);
+    assert_eq!(response.config.table_error_retry_delay_ms, Some(10000));
+    assert_eq!(response.config.max_table_sync_workers, Some(2));
     assert!(matches!(response.config.log_level, Some(etl_api::configs::log::LogLevel::Info)));
 }
 
@@ -791,7 +815,7 @@ async fn pipeline_config_update_clears_optional_fields_and_resets_default_fields
     let response: ReadPipelineResponse =
         response.json().await.expect("failed to deserialize response");
     assert!(response.config.log_level.is_none());
-    let batch = response.config.batch;
+    let batch = response.config.batch.expect("batch should be set");
     assert_eq!(batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
     assert_eq!(batch.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
     assert_eq!(response.config.memory_backpressure, Some(MemoryBackpressureConfig::default()));
@@ -931,6 +955,47 @@ async fn invalid_replicator_resources_are_rejected() {
         body.message,
         "Invalid pipeline request: Replicator cpu request must be greater than 0"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_validation_rejects_selected_table_ids_not_in_publication() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+
+    source_pool
+        .execute("create table public.copy_selection_test (id bigint primary key)")
+        .await
+        .expect("failed to create source table");
+    source_pool
+        .execute("create publication copy_selection_pub for table public.copy_selection_test")
+        .await
+        .expect("failed to create source publication");
+
+    let mut config = new_pipeline_config();
+    config.publication_name = "copy_selection_pub".to_owned();
+    // An id that does not belong to any table in the publication.
+    config.table_sync_copy = Some(TableSyncCopyConfig::IncludeTables { table_ids: vec![999_999] });
+    let request = ValidatePipelineRequest { source_id, config };
+
+    let response = app.validate_pipeline(tenant_id, &request).await;
+
+    assert!(response.status().is_success());
+    let response: ValidatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let failure = response
+        .validation_failures
+        .iter()
+        .find(|failure| failure.name == "Selected Tables Not In Publication")
+        .expect("expected a selected-tables-not-in-publication validation failure");
+    assert_eq!(failure.failure_type, FailureType::Critical);
+    assert!(failure.reason.contains("999999"));
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

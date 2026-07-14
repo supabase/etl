@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use etl_config::shared::TableSyncCopyConfig;
 use etl_postgres::store::catalog::ETL_SCHEMA_NAME;
 use sqlx::FromRow;
 
@@ -225,6 +226,86 @@ impl Validator for PublicationHasTablesValidator {
                      to the publication before starting the pipeline. For example: `ALTER \
                      PUBLICATION {} ADD TABLE <table_name>`.",
                     self.publication_name, self.publication_name
+                ),
+            )])
+        }
+    }
+}
+
+/// Validates that selective table-copy ids belong to the pipeline's
+/// publication.
+///
+/// Duplicate ids are harmless: [`TableSyncCopyConfig::should_copy_table`]
+/// checks membership, so repeating an id has no effect on which tables are
+/// copied.
+#[derive(Debug)]
+pub(super) struct SelectedTableIdsInPublicationValidator {
+    publication_name: String,
+    table_sync_copy: TableSyncCopyConfig,
+}
+
+impl SelectedTableIdsInPublicationValidator {
+    pub(super) fn new(publication_name: String, table_sync_copy: TableSyncCopyConfig) -> Self {
+        Self { publication_name, table_sync_copy }
+    }
+}
+
+#[async_trait]
+impl Validator for SelectedTableIdsInPublicationValidator {
+    async fn validate(
+        &self,
+        ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        let table_ids: &[u32] = match &self.table_sync_copy {
+            TableSyncCopyConfig::IncludeAllTables | TableSyncCopyConfig::SkipAllTables => &[],
+            TableSyncCopyConfig::IncludeTables { table_ids }
+            | TableSyncCopyConfig::SkipTables { table_ids } => table_ids,
+        };
+
+        if table_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let source_pool = ctx
+            .source_pool
+            .as_ref()
+            .expect("source pool required for selected table ids validation");
+
+        let oids = table_ids.iter().map(|id| *id as i64).collect::<Vec<_>>();
+        let published_oids: Vec<i64> = sqlx::query_scalar(
+            r#"
+            select c.oid::bigint
+            from pg_publication_tables pt
+            join pg_namespace n on n.nspname = pt.schemaname
+            join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
+            where pt.pubname = $1
+              and c.oid = any($2::oid[])
+            "#,
+        )
+        .bind(&self.publication_name)
+        .bind(&oids)
+        .fetch_all(source_pool)
+        .await?;
+
+        let published_oids = published_oids.into_iter().collect::<std::collections::HashSet<_>>();
+        let mut missing_ids = table_ids
+            .iter()
+            .filter(|id| !published_oids.contains(&(**id as i64)))
+            .copied()
+            .collect::<Vec<_>>();
+        missing_ids.sort_unstable();
+
+        if missing_ids.is_empty() {
+            Ok(vec![])
+        } else {
+            Ok(vec![ValidationFailure::critical(
+                "Selected Tables Not In Publication",
+                format!(
+                    "These selected table ids do not belong to publication `{}`: {}.\n\nAdd the \
+                     tables to the publication, or remove them from the initial table-copy \
+                     selection.",
+                    self.publication_name,
+                    missing_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
                 ),
             )])
         }

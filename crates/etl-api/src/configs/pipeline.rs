@@ -6,10 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::{
-    configs::{log::LogLevel, store::Store, update::UpdateField},
-    data::tables::ConfiguredTable,
-};
+use crate::configs::{log::LogLevel, store::Store, update::UpdateField};
 
 const fn default_table_error_retry_max_attempts() -> u32 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
@@ -460,108 +457,6 @@ impl From<StoredPipelineConfig> for ApiPipelineConfig {
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: Some(value.table_sync_copy),
             invalidated_slot_behavior: Some(value.invalidated_slot_behavior),
-            replicator_resources: value.replicator_resources,
-            ducklake_maintenance: value.ducklake_maintenance,
-            log_level: value.log_level,
-        }
-    }
-}
-
-/// Table-copy selection returned by pipeline read endpoints.
-///
-/// Write requests use [`TableSyncCopyConfig`] and provide Postgres table OIDs
-/// in `table_ids`. Read responses preserve those OIDs in [`ConfiguredTable`]
-/// values and add the current schema and table name when they can be resolved.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum ApiTableSyncCopyConfig {
-    /// Copies every table during initial synchronization.
-    IncludeAllTables,
-    /// Skips initial synchronization for every table.
-    SkipAllTables,
-    /// Copies only the listed tables during initial synchronization.
-    IncludeTables {
-        /// Tables selected by their source Postgres OIDs.
-        tables: Vec<ConfiguredTable>,
-    },
-    /// Skips initial synchronization for the listed tables.
-    SkipTables {
-        /// Tables selected by their source Postgres OIDs.
-        tables: Vec<ConfiguredTable>,
-    },
-}
-
-/// Fully materialized pipeline configuration returned by read endpoints.
-///
-/// Unlike [`ApiPipelineConfig`], which is the write shape and keeps fields
-/// optional for defaulting, this type contains the effective stored values and
-/// enriches table-copy OIDs with source table names when possible.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ReadApiPipelineConfig {
-    /// The publication consumed by the pipeline.
-    #[schema(example = "my_publication")]
-    pub publication_name: String,
-    /// Effective batching settings.
-    pub batch: BatchConfig,
-    /// Delay between table-error retries, in milliseconds.
-    #[schema(example = 1000)]
-    pub table_error_retry_delay_ms: u64,
-    /// Maximum attempts for retryable table errors.
-    #[schema(example = 5)]
-    pub table_error_retry_max_attempts: u32,
-    /// Maximum tables copied concurrently.
-    #[schema(example = 4)]
-    pub max_table_sync_workers: u16,
-    /// Maximum copy connections used per table.
-    #[schema(example = 2)]
-    pub max_copy_connections_per_table: u16,
-    /// Interval between memory measurements, in milliseconds.
-    #[schema(example = 100)]
-    pub memory_refresh_interval_ms: u64,
-    /// Interval between replication-lag measurements, in milliseconds.
-    #[schema(example = 10000)]
-    pub replication_lag_refresh_interval_ms: u64,
-    /// Effective memory-backpressure settings, when enabled.
-    pub memory_backpressure: Option<MemoryBackpressureConfig>,
-    /// Effective initial table-copy selection with resolved table metadata.
-    pub table_sync_copy: ApiTableSyncCopyConfig,
-    /// Behavior used when Postgres invalidates the replication slot.
-    pub invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Replicator resource overrides, when configured.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub replicator_resources: Option<ReplicatorResourcesConfig>,
-    /// DuckLake maintenance settings, when configured.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
-    /// Pipeline log-level override, when configured.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub log_level: Option<LogLevel>,
-}
-
-impl ReadApiPipelineConfig {
-    /// Builds a read response from stored values and resolved table metadata.
-    pub fn from_stored(value: StoredPipelineConfig, tables: Vec<ConfiguredTable>) -> Self {
-        let table_sync_copy = match value.table_sync_copy {
-            TableSyncCopyConfig::IncludeAllTables => ApiTableSyncCopyConfig::IncludeAllTables,
-            TableSyncCopyConfig::SkipAllTables => ApiTableSyncCopyConfig::SkipAllTables,
-            TableSyncCopyConfig::IncludeTables { .. } => {
-                ApiTableSyncCopyConfig::IncludeTables { tables }
-            }
-            TableSyncCopyConfig::SkipTables { .. } => ApiTableSyncCopyConfig::SkipTables { tables },
-        };
-
-        Self {
-            publication_name: value.publication_name,
-            batch: value.batch,
-            table_error_retry_delay_ms: value.table_error_retry_delay_ms,
-            table_error_retry_max_attempts: value.table_error_retry_max_attempts,
-            max_table_sync_workers: value.max_table_sync_workers,
-            max_copy_connections_per_table: value.max_copy_connections_per_table,
-            memory_refresh_interval_ms: value.memory_refresh_interval_ms,
-            replication_lag_refresh_interval_ms: value.replication_lag_refresh_interval_ms,
-            memory_backpressure: value.memory_backpressure,
-            table_sync_copy,
-            invalidated_slot_behavior: value.invalidated_slot_behavior,
             replicator_resources: value.replicator_resources,
             ducklake_maintenance: value.ducklake_maintenance,
             log_level: value.log_level,
