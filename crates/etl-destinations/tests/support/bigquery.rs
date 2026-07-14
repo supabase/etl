@@ -104,8 +104,7 @@ impl From<TableRow> for BigQueryOrder {
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct BigQueryDefaultsRow {
     pub(crate) id: i32,
-    pub(crate) name: Option<String>,
-    pub(crate) source_required: String,
+    pub(crate) name: String,
     pub(crate) status: Option<String>,
     pub(crate) score: Option<i32>,
     pub(crate) active: Option<bool>,
@@ -117,11 +116,10 @@ impl From<TableRow> for BigQueryDefaultsRow {
 
         BigQueryDefaultsRow {
             id: parse_table_cell(columns[0].clone()).unwrap(),
-            name: parse_table_cell(columns[1].clone()),
-            source_required: parse_table_cell(columns[2].clone()).unwrap(),
-            status: parse_table_cell(columns[3].clone()),
-            score: parse_table_cell(columns[4].clone()),
-            active: parse_table_cell(columns[5].clone()),
+            name: parse_table_cell(columns[1].clone()).unwrap(),
+            status: parse_table_cell(columns[2].clone()),
+            score: parse_table_cell(columns[3].clone()),
+            active: parse_table_cell(columns[4].clone()),
         }
     }
 }
