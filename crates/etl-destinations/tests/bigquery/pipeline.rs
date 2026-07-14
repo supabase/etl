@@ -2068,7 +2068,11 @@ async fn schema_change_add_column_defaults() {
     let bigquery_database = setup_bigquery_database().await;
     let table_name = test_table_name("defaults_schema");
     let table_id = database
-        .create_table(table_name.clone(), true, &[("name", "text not null")])
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("source_required", "text")],
+        )
         .await
         .expect("failed to create source table");
 
@@ -2079,7 +2083,7 @@ async fn schema_change_add_column_defaults() {
         .expect("failed to create publication");
     database
         .run_sql(&format!(
-            "insert into {} (name) values ('Alice')",
+            "insert into {} (name, source_required) values ('Alice', 'before')",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -2111,6 +2115,15 @@ async fn schema_change_add_column_defaults() {
         .alter_table(
             table_name.clone(),
             &[
+                TableModification::AlterColumn { name: "name", alteration: "drop not null" },
+                TableModification::AlterColumn {
+                    name: "source_required",
+                    alteration: "set not null",
+                },
+                TableModification::AlterColumn {
+                    name: "source_required",
+                    alteration: "set default 'after'::text",
+                },
                 TableModification::AddColumn {
                     name: "status",
                     data_type: "text default 'new'::text",
@@ -2121,11 +2134,17 @@ async fn schema_change_add_column_defaults() {
         )
         .await
         .expect("failed to alter source table");
-    database
+
+    let rejected_insert = database
         .run_sql(&format!(
-            "insert into {} (name) values ('Bob')",
+            "insert into {} (name, source_required) values ('rejected', null)",
             table_name.as_quoted_identifier()
         ))
+        .await;
+    assert!(rejected_insert.is_err(), "Postgres should enforce the new NOT NULL constraint");
+
+    database
+        .run_sql(&format!("insert into {} (name) values (null)", table_name.as_quoted_identifier()))
         .await
         .expect("failed to insert defaulted source row");
 
@@ -2141,14 +2160,16 @@ async fn schema_change_add_column_defaults() {
         vec![
             BigQueryDefaultsRow {
                 id: 1,
-                name: "Alice".to_owned(),
+                name: Some("Alice".to_owned()),
+                source_required: "before".to_owned(),
                 status: None,
                 score: None,
                 active: None,
             },
             BigQueryDefaultsRow {
-                id: 2,
-                name: "Bob".to_owned(),
+                id: 3,
+                name: None,
+                source_required: "after".to_owned(),
                 status: Some("new".to_owned()),
                 score: Some(15),
                 active: Some(true),

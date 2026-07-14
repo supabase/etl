@@ -5,7 +5,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     pipeline::PipelineId,
-    schema::{ColumnSchema, ReplicatedTableSchema, Type},
+    schema::{ColumnSchema, ReplicatedTableSchema, Type, is_array_type},
 };
 use gcp_bigquery_client::{
     Client,
@@ -1005,9 +1005,19 @@ impl BigQueryClient {
 
         info!("adding column {column_name} ({column_type}) to table {full_table_name} in BigQuery");
 
-        // BigQuery requires new columns to be nullable (no NOT NULL constraint
-        // allowed). Defaults must be applied through a separate ALTER COLUMN
-        // statement because BigQuery rejects ADD COLUMN with a default value.
+        if !column_schema.nullable && !is_array_type(&column_schema.typ) {
+            warn!(
+                dataset_id = %dataset_id,
+                table_id = %table_id,
+                column_name = %column_schema.name,
+                "BigQuery does not support adding a top-level NOT NULL column; adding it as \
+                 nullable"
+            );
+        }
+
+        // BigQuery cannot add a top-level REQUIRED column or a column with a
+        // default to an existing table. Add it as nullable here and apply any
+        // supported default through a separate ALTER COLUMN statement.
         let query = format!("alter table {full_table_name} add column {column_name} {column_type}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
@@ -1110,6 +1120,26 @@ impl BigQueryClient {
 
         let query =
             format!("alter table {full_table_name} alter column {column_name} drop default");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Relaxes a BigQuery column from `REQUIRED` to `NULLABLE`.
+    pub(super) async fn drop_column_not_null(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = quote_identifier(column_name, "BigQuery column name")?;
+
+        info!("dropping not null for column {column_name} in table {full_table_name} in BigQuery");
+
+        let query =
+            format!("alter table {full_table_name} alter column {column_name} drop not null");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 

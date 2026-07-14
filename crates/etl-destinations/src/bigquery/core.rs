@@ -878,13 +878,22 @@ where
                 match modification {
                     ColumnModification::Rename { .. } => {}
                     ColumnModification::Nullability { old_nullable, new_nullable } => {
-                        warn!(
-                            table_id = %table_id,
-                            column_name = %change.new_column.name,
-                            old_nullable,
-                            new_nullable,
-                            "skipping source column nullability change for BigQuery"
-                        );
+                        if !*old_nullable && *new_nullable {
+                            self.client
+                                .drop_column_not_null(
+                                    &self.dataset_id,
+                                    &sequenced_bigquery_table_id.to_string(),
+                                    &change.new_column.name,
+                                )
+                                .await?;
+                        } else {
+                            warn!(
+                                table_id = %table_id,
+                                column_name = %change.new_column.name,
+                                "BigQuery does not support setting NOT NULL on an existing \
+                                 column; keeping the destination column nullable"
+                            );
+                        }
                     }
                     ColumnModification::Default { old_expression, new_expression } => {
                         let old_default_was_supported =
