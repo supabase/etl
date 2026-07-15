@@ -8,7 +8,7 @@ use std::{
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
 use tokio_postgres::types::PgLsn;
-use tracing::warn;
+use tracing::debug;
 
 use crate::{
     error::{ErrorKind, EtlResult},
@@ -146,7 +146,7 @@ impl<T> AsyncResult<T> {
         };
 
         if tx.send(result).is_err() {
-            warn!("could not send async result because receiver was already closed");
+            debug!("async result receiver was already closed");
         }
     }
 }
