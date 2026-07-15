@@ -1,5 +1,5 @@
 use etl::schema::{
-    ColumnSchema, DefaultExpression, NumericModifiers, Type, is_array_type,
+    ColumnSchema, DefaultExpression, NumericModifiers, Type, is_array_type, numeric_modifiers,
     parse_default_expression,
 };
 use tracing::warn;
@@ -10,28 +10,32 @@ use crate::ducklake::{
 };
 
 /// Returns the DuckLake SQL type string for a given Postgres scalar type.
-fn postgres_scalar_type_to_ducklake_sql(typ: &Type) -> &'static str {
-    match typ {
-        &Type::BOOL => "boolean",
-        &Type::INT2 => "smallint",
-        &Type::INT4 => "integer",
-        &Type::INT8 => "bigint",
-        &Type::FLOAT4 => "float",
-        &Type::FLOAT8 => "double",
-        &Type::DATE => "date",
-        &Type::TIME => "time",
-        &Type::TIMESTAMP => "timestamp",
-        &Type::TIMESTAMPTZ => "timestamptz",
-        &Type::UUID => "uuid",
-        &Type::JSON | &Type::JSONB => "json",
-        &Type::OID => "ubigint",
-        &Type::BYTEA => "blob",
-        _ => "varchar",
-    }
+fn postgres_scalar_type_to_ducklake_sql(typ: &Type, modifier: i32) -> String {
+    let duckdb_type = match typ {
+        &Type::BOOL => Some("boolean".to_owned()),
+        &Type::INT2 => Some("smallint".to_owned()),
+        &Type::INT4 => Some("integer".to_owned()),
+        &Type::INT8 => Some("bigint".to_owned()),
+        &Type::FLOAT4 => Some("float".to_owned()),
+        &Type::FLOAT8 => Some("double".to_owned()),
+        &Type::NUMERIC => numeric_modifiers(modifier)
+            .filter(|nm| is_ducklake_compatible(*nm))
+            .map(|NumericModifiers { p, s }| format!("decimal({p}, {s})")),
+        &Type::DATE => Some("date".to_owned()),
+        &Type::TIME => Some("time".to_owned()),
+        &Type::TIMESTAMP => Some("timestamp".to_owned()),
+        &Type::TIMESTAMPTZ => Some("timestamptz".to_owned()),
+        &Type::UUID => Some("uuid".to_owned()),
+        &Type::JSON | &Type::JSONB => Some("json".to_owned()),
+        &Type::OID => Some("ubigint".to_owned()),
+        &Type::BYTEA => Some("blob".to_owned()),
+        _ => None,
+    };
+    duckdb_type.unwrap_or_else(|| "varchar".to_owned())
 }
 
 /// Returns the DuckDB SQL type string for a given Postgres array type.
-fn postgres_array_type_to_ducklake_sql(typ: &Type) -> &'static str {
+fn postgres_array_type_to_ducklake_sql(typ: &Type, _modifier: i32) -> &'static str {
     match typ {
         &Type::BOOL_ARRAY => "boolean[]",
         &Type::INT2_ARRAY => "smallint[]",
@@ -52,11 +56,11 @@ fn postgres_array_type_to_ducklake_sql(typ: &Type) -> &'static str {
 }
 
 /// Returns the DuckLake SQL type string for a Postgres column type.
-fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
+fn postgres_column_type_to_ducklake_sql(typ: &Type, modifier: i32) -> String {
     if is_array_type(typ) {
-        postgres_array_type_to_ducklake_sql(typ)
+        postgres_array_type_to_ducklake_sql(typ, modifier).to_owned()
     } else {
-        postgres_scalar_type_to_ducklake_sql(typ)
+        postgres_scalar_type_to_ducklake_sql(typ, modifier)
     }
 }
 
@@ -84,7 +88,8 @@ fn ducklake_column_definition(
     include_not_null: bool,
 ) -> String {
     let column_name = quote_identifier(&column_schema.name);
-    let duckdb_type = postgres_column_type_to_ducklake_sql(&column_schema.typ);
+    let duckdb_type =
+        postgres_column_type_to_ducklake_sql(&column_schema.typ, column_schema.modifier);
     let default_clause = if include_default {
         ducklake_default_clause(column_schema).unwrap_or_default()
     } else {
@@ -297,36 +302,74 @@ mod tests {
 
     #[test]
     fn scalar_type_mapping() {
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::BOOL), "boolean");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TEXT), "varchar");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT2), "smallint");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT4), "integer");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT8), "bigint");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::FLOAT4), "float");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::FLOAT8), "double");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC), "varchar");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::DATE), "date");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIME), "time");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIMETZ), "varchar");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIMESTAMP), "timestamp");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIMESTAMPTZ), "timestamptz");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INTERVAL), "varchar");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::UUID), "uuid");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::JSON), "json");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::JSONB), "json");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::OID), "ubigint");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::BYTEA), "blob");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::BOOL, -1), "boolean");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TEXT, -1), "varchar");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT2, -1), "smallint");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT4, -1), "integer");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT8, -1), "bigint");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::FLOAT4, -1), "float");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::FLOAT8, -1), "double");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, -1), "varchar");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::DATE, -1), "date");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIME, -1), "time");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIMETZ, -1), "varchar");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIMESTAMP, -1), "timestamp");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIMESTAMPTZ, -1), "timestamptz");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INTERVAL, -1), "varchar");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::UUID, -1), "uuid");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::JSON, -1), "json");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::JSONB, -1), "json");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::OID, -1), "ubigint");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::BYTEA, -1), "blob");
+    }
+
+    #[test]
+    fn scalar_type_mapping_numeric_compatible() {
+        // NUMERIC(10, 2): typmod = ((10 << 16) | 2) + 4
+        let typmod = ((10i32 << 16) | 2) + 4;
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(10, 2)");
+
+        // NUMERIC(38, 0): max DuckDB precision, zero scale.
+        #[allow(clippy::identity_op)]
+        let typmod = ((38i32 << 16) | 0) + 4;
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(38, 0)");
+
+        // NUMERIC(38, 38): max DuckDB precision and scale.
+        #[allow(clippy::identity_op)]
+        let typmod = ((38i32 << 16) | 38) + 4;
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(38, 38)");
+
+        // NUMERIC(1, 0): minimal.
+        #[allow(clippy::identity_op)]
+        let typmod = ((1i32 << 16) | 0) + 4;
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(1, 0)");
+    }
+
+    #[test]
+    fn scalar_type_mapping_numeric_incompatible_falls_back_to_varchar() {
+        // NUMERIC(39, 0): precision exceeds DuckDB max.
+        #[allow(clippy::identity_op)]
+        let typmod = ((39i32 << 16) | 0) + 4;
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "varchar");
+
+        // NUMERIC(10, -3): negative scale.
+        let typmod = ((10i32 << 16) | ((-3i16 as u16) as i32)) + 4;
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "varchar");
+
+        // NUMERIC(3, 5): scale exceeds precision.
+        let typmod = ((3i32 << 16) | 5) + 4;
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "varchar");
     }
 
     #[test]
     fn array_type_mapping() {
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::BOOL_ARRAY), "boolean[]");
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::TEXT_ARRAY), "varchar[]");
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::INT4_ARRAY), "integer[]");
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::FLOAT8_ARRAY), "double[]");
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::TIMETZ_ARRAY), "varchar[]");
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::INTERVAL_ARRAY), "varchar[]");
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::UUID_ARRAY), "uuid[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::BOOL_ARRAY, -1), "boolean[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::TEXT_ARRAY, -1), "varchar[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::INT4_ARRAY, -1), "integer[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::FLOAT8_ARRAY, -1), "double[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::TIMETZ_ARRAY, -1), "varchar[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::INTERVAL_ARRAY, -1), "varchar[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::UUID_ARRAY, -1), "uuid[]");
     }
 
     #[test]
