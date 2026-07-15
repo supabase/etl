@@ -5,6 +5,8 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
 use etl_config::Environment;
 #[cfg(test)]
+use etl_config::shared::DestinationKind;
+#[cfg(test)]
 use etl_maintenance::DuckLakeMaintenancePolicy;
 use k8s_openapi::{
     api::{
@@ -22,8 +24,10 @@ use serde_json::json;
 use thiserror::Error;
 use tracing::debug;
 
+#[cfg(test)]
+use crate::config::DefaultReplicatorResourcesConfig;
 use crate::{
-    config::{DefaultReplicatorResourcesConfig, DefaultVectorResourcesConfig, K8sConfig},
+    config::{DefaultVectorResourcesConfig, K8sConfig, ResolvedReplicatorResourcesConfig},
     configs::{
         log::LogLevel,
         pipeline::{DuckLakeMaintenanceConfig, ReplicatorResourcesConfig},
@@ -142,8 +146,10 @@ impl ReplicatorStatefulSetResourcesConfig {
     #[cfg(test)]
     fn for_environment(environment: &Environment) -> Result<Self, K8sError> {
         let k8s_config = test_k8s_config(environment);
+        let default_replicator_resources =
+            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
         Self::from_default_resources(
-            &k8s_config.replicator_resources,
+            &default_replicator_resources,
             &k8s_config.vector_resources,
             None,
         )
@@ -160,7 +166,7 @@ impl ReplicatorStatefulSetResourcesConfig {
     /// the pod qualify for Kubernetes Guaranteed QoS unless the pipeline opts
     /// into different replicator limits.
     fn from_default_resources(
-        default_replicator_resources: &DefaultReplicatorResourcesConfig,
+        default_replicator_resources: &ResolvedReplicatorResourcesConfig,
         default_vector_resources: &DefaultVectorResourcesConfig,
         pipeline_replicator_resources: Option<&ReplicatorResourcesConfig>,
     ) -> Result<Self, K8sError> {
@@ -246,6 +252,7 @@ fn test_k8s_config(environment: &Environment) -> K8sConfig {
         replicator_resources: DefaultReplicatorResourcesConfig {
             memory_request_mib,
             cpu_request_millicores,
+            destinations: Default::default(),
         },
         vector_resources: DefaultVectorResourcesConfig {
             memory_request_mib: 192,
@@ -725,8 +732,10 @@ impl K8sClient for HttpK8sClient {
 
         let prefix = request.prefix.as_str();
         let replicator_image = request.replicator_image.as_str();
+        let default_replicator_resources =
+            self.k8s_config.replicator_resources_for(request.destination_type.kind());
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &self.k8s_config.replicator_resources,
+            &default_replicator_resources,
             &self.k8s_config.vector_resources,
             request.replicator_resources.as_ref(),
         )?;
@@ -1776,7 +1785,10 @@ mod tests {
     use insta::{assert_json_snapshot, assert_snapshot};
 
     use super::*;
-    use crate::configs::pipeline::ReplicatorResourcesConfig;
+    use crate::{
+        config::DefaultReplicatorResourcesOverrideConfig,
+        configs::pipeline::ReplicatorResourcesConfig,
+    };
 
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
     const PIPELINE_ID: i64 = 24;
@@ -1927,9 +1939,11 @@ mod tests {
             ..ReplicatorResourcesConfig::default()
         };
         let k8s_config = test_k8s_config(&Environment::Prod);
+        let default_replicator_resources =
+            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &k8s_config.replicator_resources,
+            &default_replicator_resources,
             &k8s_config.vector_resources,
             Some(&overrides),
         )
@@ -1950,9 +1964,11 @@ mod tests {
             memory_limit_mib: Some(2048),
         };
         let k8s_config = test_k8s_config(&Environment::Prod);
+        let default_replicator_resources =
+            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &k8s_config.replicator_resources,
+            &default_replicator_resources,
             &k8s_config.vector_resources,
             Some(&overrides),
         )
@@ -1976,15 +1992,18 @@ mod tests {
             replicator_resources: DefaultReplicatorResourcesConfig {
                 cpu_request_millicores: -10,
                 memory_request_mib: 0,
+                destinations: Default::default(),
             },
             vector_resources: DefaultVectorResourcesConfig {
                 cpu_request_millicores: 0,
                 memory_request_mib: -20,
             },
         };
+        let default_replicator_resources =
+            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &k8s_config.replicator_resources,
+            &default_replicator_resources,
             &k8s_config.vector_resources,
             Some(&overrides),
         )
@@ -2009,9 +2028,11 @@ mod tests {
             memory_limit_mib: Some(100),
         };
         let k8s_config = test_k8s_config(&Environment::Prod);
+        let default_replicator_resources =
+            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &k8s_config.replicator_resources,
+            &default_replicator_resources,
             &k8s_config.vector_resources,
             Some(&overrides),
         )
@@ -2029,15 +2050,18 @@ mod tests {
             replicator_resources: DefaultReplicatorResourcesConfig {
                 cpu_request_millicores: 500,
                 memory_request_mib: 500,
+                destinations: Default::default(),
             },
             vector_resources: DefaultVectorResourcesConfig {
                 cpu_request_millicores: 80,
                 memory_request_mib: 192,
             },
         };
+        let default_replicator_resources =
+            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &k8s_config.replicator_resources,
+            &default_replicator_resources,
             &k8s_config.vector_resources,
             None,
         )
@@ -2212,32 +2236,41 @@ mod tests {
     }
 
     #[test]
-    fn test_replicator_stateful_set_resources_prefers_pipeline_over_api_config() {
+    fn test_replicator_resources_prefer_pipeline_then_destination_then_global_defaults() {
         let overrides = ReplicatorResourcesConfig {
             cpu_request_millicores: Some(900),
-            memory_request_mib: Some(1800),
             ..ReplicatorResourcesConfig::default()
         };
+        let destinations = BTreeMap::from([(
+            DestinationKind::Ducklake,
+            DefaultReplicatorResourcesOverrideConfig {
+                cpu_request_millicores: Some(600),
+                memory_request_mib: Some(800),
+            },
+        )]);
         let k8s_config = K8sConfig {
             replicator_resources: DefaultReplicatorResourcesConfig {
                 cpu_request_millicores: 300,
                 memory_request_mib: 400,
+                destinations,
             },
             vector_resources: DefaultVectorResourcesConfig {
                 cpu_request_millicores: 80,
                 memory_request_mib: 192,
             },
         };
+        let default_replicator_resources =
+            k8s_config.replicator_resources_for(DestinationKind::Ducklake);
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &k8s_config.replicator_resources,
+            &default_replicator_resources,
             &k8s_config.vector_resources,
             Some(&overrides),
         )
         .unwrap();
 
         assert_eq!(stateful_set_resources.replicator_cpu_request, "900m");
-        assert_eq!(stateful_set_resources.replicator_memory_request, "1800Mi");
+        assert_eq!(stateful_set_resources.replicator_memory_request, "800Mi");
     }
 
     #[test]
