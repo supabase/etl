@@ -30,7 +30,8 @@ use crate::{
         table_cache::SharedTableCache,
     },
     runtime::{
-        BatchBudgetController, MemoryMonitor, TableSyncWorkerState, concurrency::ShutdownRx,
+        BatchBudgetController, MemoryMonitor, TableSyncWorkerState,
+        concurrency::{ShutdownResult, ShutdownRx},
     },
     schema::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
     store::{PipelineStore, SchemaStore, StateStore},
@@ -103,7 +104,7 @@ pub(crate) async fn start_table_sync<S, D>(
     destination: D,
     shared_table_cache: &SharedTableCache,
     out_of_band_source_pool: OutOfBandSourcePool,
-    shutdown_rx: ShutdownRx,
+    mut shutdown_rx: ShutdownRx,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
 ) -> EtlResult<TableSyncResult>
@@ -210,7 +211,12 @@ where
                 destination
                     .drop_table_for_copy(&current_replication_table_schema, drop_result)
                     .await?;
-                pending_drop_result.await.into_result()?;
+                let ShutdownResult::Ok(completed_drop_result) =
+                    pending_drop_result.with_shutdown(&mut shutdown_rx).await
+                else {
+                    return Ok(TableSyncResult::Stopped);
+                };
+                completed_drop_result.into_result()?;
             }
 
             // We try to delete the slot if it already exists, since we might be starting a
@@ -356,7 +362,13 @@ where
                 destination
                     .write_table_rows(&replicated_table_schema, vec![], flush_result)
                     .await?;
-                match pending_flush_result.await.into_result()? {
+                let ShutdownResult::Ok(completed_flush_result) =
+                    pending_flush_result.with_shutdown(&mut shutdown_rx).await
+                else {
+                    return Ok(TableSyncResult::Stopped);
+                };
+
+                match completed_flush_result.into_result()? {
                     DestinationWriteStatus::Durable => {}
                     DestinationWriteStatus::Accepted => bail!(
                         ErrorKind::DestinationError,

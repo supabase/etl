@@ -10,7 +10,7 @@ use etl::{
     event::{Event, EventType, InsertEvent},
     pipeline::PipelineId,
     schema::{ColumnSchema, ReplicatedTableSchema, TableId},
-    store::{SchemaStore, TableState, TableStateType},
+    store::{SchemaStore, StateStore, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
@@ -193,6 +193,89 @@ where
     }
 }
 
+/// Destination test double that never completes a nonempty table-copy write.
+#[derive(Clone)]
+struct StalledCopyDestination<D> {
+    /// Destination used for operations other than nonempty table-copy writes.
+    inner: D,
+    /// Held result that keeps the table-copy write pending.
+    pending_result: Arc<Mutex<Option<WriteTableRowsResult>>>,
+    /// Notification emitted after a nonempty table-copy write is held.
+    write_reached: Arc<Notify>,
+}
+
+impl<D> StalledCopyDestination<D> {
+    /// Wraps a destination and stalls its first nonempty table-copy write.
+    fn wrap(inner: D) -> Self {
+        Self {
+            inner,
+            pending_result: Arc::new(Mutex::new(None)),
+            write_reached: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Returns a notification for the next stalled table-copy write.
+    fn notify_on_write(&self) -> TimedNotify {
+        TimedNotify::new(Arc::clone(&self.write_reached))
+    }
+}
+
+impl<D> Destination for StalledCopyDestination<D>
+where
+    D: PipelineDestination,
+{
+    fn name() -> &'static str {
+        "stalled_copy"
+    }
+
+    async fn startup(&self) -> EtlResult<()> {
+        self.inner.startup().await
+    }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.inner.shutdown().await
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        async_result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        self.inner.drop_table_for_copy(replicated_table_schema, async_result).await
+    }
+
+    async fn write_table_rows(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        if table_rows.is_empty() {
+            return self
+                .inner
+                .write_table_rows(replicated_table_schema, table_rows, async_result)
+                .await;
+        }
+
+        let mut pending_result = self.pending_result.lock().await;
+        assert!(pending_result.is_none(), "only one table-copy write should be pending");
+        *pending_result = Some(async_result);
+        drop(pending_result);
+
+        self.write_reached.notify_one();
+
+        Ok(())
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        self.inner.write_events(events, async_result).await
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_shutdown_calls_destination_shutdown() {
     init_test_tracing();
@@ -228,6 +311,38 @@ async fn pipeline_shutdown_calls_destination_shutdown() {
 
     // Verify that shutdown was called on the destination.
     assert!(destination.shutdown_called().await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_shutdown_interrupts_pending_result_wait() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let destination = StalledCopyDestination::wrap(immediate_destination);
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let write_reached = destination.notify_on_write();
+    pipeline.start().await.unwrap();
+    write_reached.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    assert!(matches!(table_state, TableState::DataSync));
 }
 
 #[tokio::test(flavor = "multi_thread")]
