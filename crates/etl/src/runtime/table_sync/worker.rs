@@ -400,6 +400,21 @@ where
     ) -> EtlResult<Option<TableSyncWorkerResult>> {
         error!(table_id = table_id.0, error = %err, "table sync worker failed");
 
+        // A failure that surfaces while shutdown is already in progress is a
+        // consequence of the shutdown itself (e.g. the destination rejects or
+        // drops in-flight work), not a replication problem. Do not persist it:
+        // a stored `Errored` state is never retried across restarts, so the
+        // table would otherwise stall on every later run. A dropped sender also
+        // counts as shutdown.
+        if shutdown_rx.has_changed().unwrap_or(true) {
+            info!(
+                table_id = table_id.0,
+                "table sync worker failed during shutdown, skipping error state persistence"
+            );
+
+            return Ok(Some(TableSyncWorkerResult::Shutdown));
+        }
+
         // Build a retry policy from the shared classifier. The concrete retry timestamp
         // is computed in the worker from config so both table sync and apply
         // worker use the same retry timing settings.

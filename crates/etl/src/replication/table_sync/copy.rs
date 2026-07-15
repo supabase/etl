@@ -756,7 +756,17 @@ where
                 destination
                     .write_table_rows(&replicated_table_schema, table_rows, flush_result)
                     .await?;
-                let write_status = pending_flush_result.await.into_result()?;
+                let write_status = tokio::select! {
+                    biased;
+
+                    _ = shutdown_rx.changed() => {
+                        return Ok(ShutdownResult::Shutdown(progress));
+                    }
+
+                    completed = pending_flush_result => {
+                        completed.into_result()?
+                    }
+                };
 
                 progress.record_batch(batch_size, write_status);
 
