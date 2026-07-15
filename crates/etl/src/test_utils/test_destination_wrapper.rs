@@ -442,8 +442,9 @@ where
             errors.push(err);
         }
 
-        if let Err(err) = self.tasks.drain().await {
-            errors.push(err);
+        match self.tasks.drain().await {
+            Ok(guard) => drop(guard),
+            Err(err) => errors.push(err),
         }
 
         let result = if errors.is_empty() { Ok(()) } else { Err(errors.into()) };
