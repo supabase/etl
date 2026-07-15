@@ -1,4 +1,7 @@
-use etl::schema::{ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression};
+use etl::schema::{
+    ColumnSchema, DefaultExpression, NumericModifiers, Type, is_array_type,
+    parse_default_expression,
+};
 use tracing::warn;
 
 use crate::ducklake::{
@@ -55,6 +58,20 @@ fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
     } else {
         postgres_scalar_type_to_ducklake_sql(typ)
     }
+}
+
+/// Maximum precision (width) supported by DuckDB `DECIMAL(p, s)`.
+const DUCKDB_MAX_DECIMAL_PRECISION: i16 = 38;
+
+/// Returns whether Postgres [`NumericModifiers`] are within the range
+/// supported by DuckDB `DECIMAL(p, s)`.
+///
+/// DuckDB requires `1 <= p <= 38` and `0 <= s <= p`. Postgres allows a wider
+/// range (p up to 1000, negative scale, scale exceeding precision), so
+/// constrained `NUMERIC(p, s)` columns outside the DuckDB range must fall
+/// back to `varchar`.
+fn is_ducklake_compatible(nm: NumericModifiers) -> bool {
+    nm.p >= 1 && nm.p <= DUCKDB_MAX_DECIMAL_PRECISION && nm.s >= 0 && nm.s <= nm.p
 }
 
 /// Builds one DuckLake column definition.
@@ -416,6 +433,33 @@ mod tests {
             sql,
             r#"alter table "lake"."public"."table""name" rename column "old""column" to "new""column""#
         );
+    }
+
+    #[test]
+    fn is_ducklake_compatible_within_duckdb_range() {
+        assert!(is_ducklake_compatible(NumericModifiers { p: 1, s: 0 }));
+        assert!(is_ducklake_compatible(NumericModifiers { p: 10, s: 2 }));
+        assert!(is_ducklake_compatible(NumericModifiers { p: 38, s: 0 }));
+        assert!(is_ducklake_compatible(NumericModifiers { p: 38, s: 38 }));
+        assert!(is_ducklake_compatible(NumericModifiers { p: 18, s: 3 }));
+    }
+
+    #[test]
+    fn is_ducklake_compatible_precision_too_large() {
+        assert!(!is_ducklake_compatible(NumericModifiers { p: 39, s: 0 }));
+        assert!(!is_ducklake_compatible(NumericModifiers { p: 1000, s: 0 }));
+    }
+
+    #[test]
+    fn is_ducklake_compatible_negative_scale() {
+        assert!(!is_ducklake_compatible(NumericModifiers { p: 10, s: -3 }));
+        assert!(!is_ducklake_compatible(NumericModifiers { p: 2, s: -1000 }));
+    }
+
+    #[test]
+    fn is_ducklake_compatible_scale_exceeds_precision() {
+        assert!(!is_ducklake_compatible(NumericModifiers { p: 3, s: 5 }));
+        assert!(!is_ducklake_compatible(NumericModifiers { p: 38, s: 39 }));
     }
 
     #[test]
