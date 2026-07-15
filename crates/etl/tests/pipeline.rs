@@ -9,7 +9,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     event::{Event, EventType, InsertEvent},
     pipeline::PipelineId,
-    schema::{ColumnSchema, ReplicatedTableSchema, TableId},
+    schema::{ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId},
     store::{SchemaStore, StateStore, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -1201,10 +1201,12 @@ async fn publication_changes_are_correctly_handled() {
     // Wait for the table_3 to be done.
     let table_3_ready_notify =
         store.notify_on_table_state_type(table_3_id, TableStateType::Ready).await;
+    let table_2_removed_notify = store.notify_on_table_state_removed(table_2_id).await;
 
     pipeline.start().await.unwrap();
 
     table_3_ready_notify.notified().await;
+    table_2_removed_notify.notified().await;
 
     // Insert one row in table_1 and table_3 and wait for the new events.
     let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
@@ -1235,6 +1237,256 @@ async fn publication_changes_are_correctly_handled() {
     assert_eq!(table_1_inserts.len(), 1);
     let table_3_inserts = grouped.get(&(EventType::Insert, table_3_id)).cloned().unwrap();
     assert_eq!(table_3_inserts.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_changes_are_applied_at_runtime() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let table_1 = test_table_name("runtime_publication_table_1");
+    let table_1_id =
+        database.create_table(table_1.clone(), true, &[("value", "int4 not null")]).await.unwrap();
+    database.insert_values(table_1.clone(), &["value"], &[&1]).await.unwrap();
+    let sentinel_table = test_table_name("runtime_publication_sentinel");
+    let sentinel_table_id = database
+        .create_table(sentinel_table.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "test_runtime_publication_changes";
+    database
+        .create_publication(publication_name, &[table_1.clone(), sentinel_table])
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let memory_destination = MemoryDestination::new(store.clone());
+    let destination = TestDestinationWrapper::wrap(memory_destination);
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_replication_lag_refresh_interval_ms(100)
+    .build();
+
+    let table_1_ready = store.notify_on_table_state_type(table_1_id, TableStateType::Ready).await;
+    let sentinel_table_ready =
+        store.notify_on_table_state_type(sentinel_table_id, TableStateType::Ready).await;
+    pipeline.start().await.unwrap();
+    table_1_ready.notified().await;
+    sentinel_table_ready.notified().await;
+
+    let table_2 = test_table_name("runtime_publication_table_2");
+    let table_2_id =
+        database.create_table(table_2.clone(), true, &[("value", "int4 not null")]).await.unwrap();
+    database.insert_values(table_2.clone(), &["value"], &[&2]).await.unwrap();
+
+    let table_2_ready = store.notify_on_table_state_type(table_2_id, TableStateType::Ready).await;
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "alter publication {} add table {}",
+                quote_identifier(publication_name),
+                table_2.as_quoted_identifier()
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    table_2_ready.notified().await;
+
+    let copied_rows = destination.get_table_rows().await;
+    assert_eq!(copied_rows.get(&table_2_id).unwrap().len(), 1);
+
+    let table_1_removed = store.notify_on_table_state_removed(table_1_id).await;
+    let table_2_removed = store.notify_on_table_state_removed(table_2_id).await;
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "alter publication {} drop table {}, {}",
+                quote_identifier(publication_name),
+                table_1.as_quoted_identifier(),
+                table_2.as_quoted_identifier()
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    table_1_removed.notified().await;
+    table_2_removed.notified().await;
+
+    assert!(store.get_table_state(table_1_id).await.unwrap().is_none());
+    assert!(store.get_table_state(table_2_id).await.unwrap().is_none());
+    assert!(store.get_table_state(sentinel_table_id).await.unwrap().is_some());
+    assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_some());
+    assert!(store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_some());
+
+    database.insert_values(table_1.clone(), &["value"], &[&3]).await.unwrap();
+
+    let table_1_ready = store.notify_on_table_state_type(table_1_id, TableStateType::Ready).await;
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "alter publication {} add table {}",
+                quote_identifier(publication_name),
+                table_1.as_quoted_identifier()
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    table_1_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let copied_rows = destination.get_table_rows().await;
+    assert_eq!(copied_rows.get(&table_1_id).unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_publication_is_not_applied_at_runtime() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let table = test_table_name("runtime_empty_publication");
+    let table_id =
+        database.create_table(table.clone(), true, &[("value", "int4 not null")]).await.unwrap();
+
+    let publication_name = "test_runtime_empty_publication";
+    database.create_publication(publication_name, std::slice::from_ref(&table)).await.unwrap();
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        random(),
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    )
+    .with_replication_lag_refresh_interval_ms(100)
+    .build();
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "alter publication {} drop table {}",
+                quote_identifier(publication_name),
+                table.as_quoted_identifier()
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        store.get_table_state(table_id).await.unwrap().as_ref().map(TableState::as_type),
+        Some(TableStateType::Ready)
+    );
+
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_removal_waits_for_active_table_sync_worker() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let table = test_table_name("runtime_publication_active_sync");
+    let table_id =
+        database.create_table(table.clone(), true, &[("value", "int4 not null")]).await.unwrap();
+    database.insert_values(table.clone(), &["value"], &[&1]).await.unwrap();
+    let sentinel_table = test_table_name("runtime_publication_active_sync_sentinel");
+    let sentinel_table_id = database
+        .create_table(sentinel_table.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "test_runtime_publication_active_sync";
+    database.create_publication(publication_name, std::slice::from_ref(&table)).await.unwrap();
+
+    let store = NotifyingStore::new();
+    let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let destination = DeferredCopyDestination::wrap(immediate_destination);
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        random(),
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_replication_lag_refresh_interval_ms(100)
+    .build();
+
+    let barrier_reached = destination.notify_on_barrier();
+    pipeline.start().await.unwrap();
+    barrier_reached.notified().await;
+
+    let table_removed = store.notify_on_table_state_removed(table_id).await;
+    let sentinel_table_ready =
+        store.notify_on_table_state_type(sentinel_table_id, TableStateType::Ready).await;
+    let transaction = database.client.as_mut().unwrap().transaction().await.unwrap();
+    transaction
+        .execute(
+            &format!(
+                "alter publication {} add table {}",
+                quote_identifier(publication_name),
+                sentinel_table.as_quoted_identifier()
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            &format!(
+                "alter publication {} drop table {}",
+                quote_identifier(publication_name),
+                table.as_quoted_identifier()
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    sleep(Duration::from_secs(1)).await;
+    let table_states = store.get_table_states().await;
+    assert_eq!(
+        table_states.get(&table_id).map(TableState::as_type),
+        Some(TableStateType::DataSync)
+    );
+
+    let sentinel_barrier_reached = destination.notify_on_barrier();
+    destination.complete_barrier(DestinationWriteStatus::Durable).await;
+    table_removed.notified().await;
+    sentinel_barrier_reached.notified().await;
+    destination.complete_barrier(DestinationWriteStatus::Durable).await;
+    sentinel_table_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -16,8 +16,10 @@ use crate::{error::EtlResult, schema::TableId};
 ///   fresh copy after its destination table has been dropped.
 /// - [`TableStateOperation::ResetForResync`] resets the whole pipeline for a
 ///   fresh synchronization pass.
+/// - [`TableStateOperation::Deactivate`] stops replicating a table while
+///   retaining enough destination identity to replace it if it is re-added.
 /// - [`TableStateOperation::Delete`] removes all ETL-owned state for a table
-///   that is no longer part of the publication.
+///   during permanent cleanup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableStateOperation {
     /// Prepare a table state entry for a fresh table copy.
@@ -41,12 +43,24 @@ pub enum TableStateOperation {
     /// restarted table sync can drop any existing destination object before
     /// clearing its own copy state.
     ResetForResync,
-    /// Delete all ETL-owned state for a table removed from the publication.
+    /// Deactivate a table removed from the publication.
+    ///
+    /// Deletes table state history and durable table-sync progress while
+    /// preserving stored schemas and destination metadata. The destination
+    /// object itself is deliberately left untouched, and retaining its metadata
+    /// prevents it from becoming unreachable: if the same source table is later
+    /// re-added, the fresh copy can locate and replace the existing destination
+    /// object instead of appending duplicate data to it.
+    Deactivate {
+        /// The removed table whose active replication state should be deleted.
+        table_id: TableId,
+    },
+    /// Delete all ETL-owned state for a table during permanent cleanup.
     ///
     /// Deletes table state history, stored table schemas, destination table
     /// metadata, and durable table-sync progress for `table_id`. Does not drop
-    /// or otherwise modify the destination object, since publication removal is
-    /// an ETL state deletion rather than a destination data deletion.
+    /// or otherwise modify the destination object. Callers performing permanent
+    /// cleanup must coordinate destination deletion separately when required.
     Delete {
         /// The removed table whose ETL state should be deleted.
         table_id: TableId,
@@ -56,7 +70,7 @@ pub enum TableStateOperation {
 /// Lifecycle operations across state and schema stores.
 ///
 /// Provides primitives for table-copy preparation, reset-to-resync recovery,
-/// and publication removal. Implementations must keep persistent state and
+/// and publication deactivation. Implementations must keep persistent state and
 /// in-memory caches consistent for each operation.
 pub trait TableStateLifecycleStore: Sync {
     /// Applies a table state lifecycle `operation`.
@@ -67,8 +81,8 @@ pub trait TableStateLifecycleStore: Sync {
     /// table state entries affected by the operation:
     /// - `0` for copy preparation because table state is preserved.
     /// - The number of reset table states for pipeline resync.
-    /// - `1` when a table removal deletes an existing table state, otherwise
-    ///   `0`.
+    /// - `1` when deactivation or deletion removes an existing table state,
+    ///   otherwise `0`.
     fn apply_table_state_operation(
         &self,
         operation: TableStateOperation,
@@ -107,14 +121,29 @@ pub trait TableStateLifecycleStore: Sync {
         async move { self.apply_table_state_operation(TableStateOperation::ResetForResync).await }
     }
 
+    /// Deactivates replication state for `table_id` while preserving
+    /// destination identity and schema information for a possible future
+    /// re-add.
+    fn deactivate_table_state(
+        &self,
+        table_id: TableId,
+    ) -> impl Future<Output = EtlResult<()>> + Send {
+        async move {
+            self.apply_table_state_operation(TableStateOperation::Deactivate { table_id }).await?;
+
+            Ok(())
+        }
+    }
+
     /// Deletes all stored ETL state for `table_id`.
     ///
     /// Removes table state (including history), table schemas, destination
     /// table metadata, and durable table-sync progress. This must NOT drop or
     /// modify the actual destination table.
     ///
-    /// Intended for use when a table is removed from the publication. This is a
-    /// convenience wrapper around [`TableStateOperation::Delete`].
+    /// Intended for permanent ETL-owned cleanup, not temporary publication
+    /// removal. This is a convenience wrapper around
+    /// [`TableStateOperation::Delete`].
     fn delete_table_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send {
         async move {
             self.apply_table_state_operation(TableStateOperation::Delete { table_id }).await?;

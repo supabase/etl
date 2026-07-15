@@ -77,6 +77,8 @@ pub struct PipelineBuilder<S, D> {
     max_copy_connections_per_table: u16,
     /// The time between memory refreshes of the memory monitor. Default: 0.2.
     memory_refresh_interval_ms: u64,
+    /// The time between source replication lag and publication refreshes.
+    replication_lag_refresh_interval_ms: u64,
     /// Memory-based backpressure configuration. Default: enabled with defaults.
     memory_backpressure: MemoryBackpressureConfig,
 }
@@ -130,6 +132,8 @@ where
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
             max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
             memory_refresh_interval_ms: 100,
+            replication_lag_refresh_interval_ms:
+                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
             memory_backpressure: MemoryBackpressureConfig {
                 activate_threshold: 0.95,
                 resume_threshold: 0.85,
@@ -176,6 +180,13 @@ where
         self
     }
 
+    /// Sets the interval used to refresh source replication lag and publication
+    /// membership.
+    pub fn with_replication_lag_refresh_interval_ms(mut self, interval_ms: u64) -> Self {
+        self.replication_lag_refresh_interval_ms = interval_ms;
+        self
+    }
+
     /// Builds and returns the configured pipeline.
     ///
     /// This method consumes the builder and creates a `Pipeline` instance with
@@ -195,8 +206,7 @@ where
             invalidated_slot_behavior: self.invalidated_slot_behavior,
             max_copy_connections_per_table: self.max_copy_connections_per_table,
             memory_refresh_interval_ms: self.memory_refresh_interval_ms,
-            replication_lag_refresh_interval_ms:
-                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+            replication_lag_refresh_interval_ms: self.replication_lag_refresh_interval_ms,
             memory_backpressure: Some(self.memory_backpressure),
             run_source_migrations: true,
         };

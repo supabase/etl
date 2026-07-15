@@ -20,6 +20,7 @@ use std::{
 };
 
 use etl_config::shared::PipelineConfig;
+use etl_postgres::slots::EtlReplicationSlot;
 use futures::StreamExt;
 use metrics::{counter, gauge, histogram};
 use postgres_replication::{
@@ -28,11 +29,12 @@ use postgres_replication::{
 };
 use tokio::{
     pin,
-    sync::{Mutex, Semaphore, watch},
+    sync::{Mutex, Semaphore, mpsc, watch},
     task::JoinHandle,
     time::MissedTickBehavior,
 };
 use tokio_postgres::types::PgLsn;
+use tokio_stream::wrappers::IntervalStream;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
@@ -62,7 +64,8 @@ use crate::{
     },
     pipeline::PipelineId,
     postgres::{
-        EventsStream, OutOfBandSourcePool, StatusUpdateResult, StatusUpdateType,
+        EventsStream, OutOfBandSourcePool, PublicationTableSnapshot, StatusUpdateResult,
+        StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
@@ -408,6 +411,83 @@ impl SchemaCleanupRun {
     }
 }
 
+/// Publication monitor owned by the main apply worker.
+///
+/// Table-sync apply loops perform individual COPY phases and do not need their
+/// own monitor. The main apply worker remains active while those workers run,
+/// so it continues detecting publication changes during COPY.
+#[derive(Debug)]
+struct PublicationMonitor {
+    /// Background publication membership polling task.
+    task: JoinHandle<()>,
+    /// Publication snapshots produced by the polling task.
+    snapshot_rx: mpsc::Receiver<PublicationTableSnapshot>,
+}
+
+impl PublicationMonitor {
+    /// Starts a publication membership monitor.
+    fn spawn(
+        out_of_band_source_pool: OutOfBandSourcePool,
+        publication_name: String,
+        refresh_interval: Duration,
+    ) -> Self {
+        let (publication_snapshot_tx, snapshot_rx) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            Self::run(
+                out_of_band_source_pool,
+                publication_name,
+                refresh_interval,
+                publication_snapshot_tx,
+            )
+            .await;
+        });
+
+        Self { task, snapshot_rx }
+    }
+
+    /// Polls publication membership without blocking the replication stream.
+    async fn run(
+        out_of_band_source_pool: OutOfBandSourcePool,
+        publication_name: String,
+        refresh_interval: Duration,
+        publication_snapshot_tx: mpsc::Sender<PublicationTableSnapshot>,
+    ) {
+        let mut interval = tokio::time::interval(refresh_interval);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut interval_stream = IntervalStream::new(interval);
+
+        while interval_stream.next().await.is_some() {
+            match out_of_band_source_pool.get_publication_table_snapshot(&publication_name).await {
+                Ok(snapshot) => match publication_snapshot_tx.try_send(snapshot) {
+                    Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                    Err(mpsc::error::TrySendError::Closed(_)) => return,
+                },
+                Err(error) => {
+                    warn!(
+                        publication_name,
+                        error = %error,
+                        "publication monitor failed to poll source database"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Aborts and joins the polling task.
+    async fn teardown(mut self) {
+        self.task.abort();
+
+        if let Err(error) = (&mut self.task).await
+            && !error.is_cancelled()
+        {
+            warn!(
+                error = %error,
+                "publication monitor task failed before completing"
+            );
+        }
+    }
+}
+
 /// Background tasks owned by an apply loop invocation.
 #[derive(Debug)]
 struct ApplyLoopTasks {
@@ -415,6 +495,8 @@ struct ApplyLoopTasks {
     schema_cleanup_task: Option<JoinHandle<()>>,
     /// Background replication lag sampler task owned by this apply loop.
     replication_lag_sampler_task: JoinHandle<()>,
+    /// Publication monitor present only on the main apply worker.
+    publication_monitor: Option<PublicationMonitor>,
 }
 
 impl ApplyLoopTasks {
@@ -424,15 +506,24 @@ impl ApplyLoopTasks {
         replication_lag_metrics: ReplicationLagMetrics,
         worker_type: WorkerType,
         replication_lag_refresh_interval: Duration,
+        publication_name: String,
     ) -> Self {
         let replication_lag_sampler_task = Self::spawn_replication_lag_sampler(
-            out_of_band_source_pool,
+            out_of_band_source_pool.clone(),
             replication_lag_metrics,
             worker_type,
             replication_lag_refresh_interval,
         );
 
-        Self { schema_cleanup_task: None, replication_lag_sampler_task }
+        let publication_monitor = (worker_type == WorkerType::Apply).then(|| {
+            PublicationMonitor::spawn(
+                out_of_band_source_pool,
+                publication_name,
+                replication_lag_refresh_interval,
+            )
+        });
+
+        Self { schema_cleanup_task: None, replication_lag_sampler_task, publication_monitor }
     }
 
     /// Returns `true` if a schema cleanup task is still running.
@@ -562,6 +653,9 @@ impl ApplyLoopTasks {
         schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
     ) {
         self.handle_replication_lag_sampler_task_result().await;
+        if let Some(publication_monitor) = self.publication_monitor.take() {
+            publication_monitor.teardown().await;
+        }
         self.handle_schema_cleanup_task_result(worker_type, schema_cleanup_deadline).await;
     }
 
@@ -654,6 +748,10 @@ struct ApplyLoopState {
     flush_deadline: Option<Instant>,
     /// The deadline for the next proactive keep alive status update.
     keep_alive_deadline: Instant,
+    /// Highest decoder-safe position reported by a primary keep alive.
+    last_keep_alive_lsn: PgLsn,
+    /// Latest publication membership awaiting its decoder-safe WAL barrier.
+    pending_publication_snapshot: Option<PublicationTableSnapshot>,
     /// Destination write result waiting to be applied to replication progress.
     pending_flush_result: Option<PendingWriteEventsResult>,
     /// The strongest exit that this apply loop invocation should eventually
@@ -708,6 +806,8 @@ impl ApplyLoopState {
             draining_for_shutdown: false,
             flush_deadline: None,
             keep_alive_deadline: Instant::now() + keep_alive_deadline_duration,
+            last_keep_alive_lsn: replication_progress.last_received_lsn(),
+            pending_publication_snapshot: None,
             pending_flush_result: None,
             exit_intent: None,
             processing_paused: false,
@@ -802,6 +902,25 @@ impl ApplyLoopState {
     fn update_last_received_lsn(&mut self, lsn: PgLsn) {
         self.replication_progress.update_last_received_lsn(lsn);
         self.update_replication_lag_metrics_from_progress();
+    }
+
+    /// Records a decoder-safe logical sender position from a primary keep
+    /// alive.
+    fn update_last_keep_alive_lsn(&mut self, lsn: PgLsn) {
+        self.last_keep_alive_lsn = self.last_keep_alive_lsn.max(lsn);
+    }
+
+    /// Replaces the pending publication snapshot with the latest observation.
+    fn set_pending_publication_snapshot(&mut self, snapshot: PublicationTableSnapshot) {
+        self.pending_publication_snapshot = Some(snapshot);
+    }
+
+    /// Returns whether the pending publication snapshot crossed its WAL
+    /// barrier.
+    fn publication_reconciliation_is_ready(&self) -> bool {
+        self.pending_publication_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.barrier_lsn <= self.last_keep_alive_lsn)
     }
 
     /// Updates the last durable flush LSN and snapshots replication lag
@@ -1095,6 +1214,7 @@ where
             replication_lag_metrics.clone(),
             worker_type,
             replication_lag_refresh_interval,
+            config.publication_name.clone(),
         );
 
         let state = ApplyLoopState::new(
@@ -1196,8 +1316,9 @@ where
     /// 2. PostgreSQL connection lifecycle updates.
     /// 3. Pending destination flush results.
     /// 4. Batch flush deadline expiry.
-    /// 5. Incoming replication messages.
-    /// 6. Periodic heartbeats once the computed keep alive deadline expires.
+    /// 5. Publication membership snapshots.
+    /// 6. Incoming replication messages.
+    /// 7. Periodic heartbeats once the computed keep alive deadline expires.
     ///
     /// PostgreSQL normally sends keep alives at roughly half of
     /// `wal_sender_timeout`. We wait a little longer than that before
@@ -1220,6 +1341,10 @@ where
         replication_client: &PgReplicationClient,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
+        // Reconcile publication membership before spawning table sync workers so a
+        // removed table is not restarted after its WAL barrier is safe.
+        self.maybe_reconcile_publication_when_idle().await?;
+
         // We try to process syncing tables if we are idle, so that we advance state
         // faster.
         self.maybe_process_syncing_tables_when_idle().await?;
@@ -1259,7 +1384,12 @@ where
                 self.flush_batch("flush deadline reached").await?;
             }
 
-            // PRIORITY 5: Process incoming replication messages from PostgreSQL.
+            // PRIORITY 5: Record publication membership snapshots from the source monitor.
+            maybe_snapshot = Self::wait_for_publication_snapshot(self.tasks.publication_monitor.as_mut()) => {
+                self.handle_publication_snapshot(events_stream.as_mut(), maybe_snapshot).await?;
+            }
+
+            // PRIORITY 6: Process incoming replication messages from PostgreSQL.
             // New WAL messages are only accepted while the loop is still actively ingesting.
             maybe_message = events_stream.next(), if self.state.can_process_messages() => {
                 self.handle_stream_message(
@@ -1270,7 +1400,7 @@ where
                 .await?;
             }
 
-            // PRIORITY 6: Emit a periodic status update once the computed keep alive deadline
+            // PRIORITY 7: Emit a periodic status update once the computed keep alive deadline
             // expires. This intentionally resends the same effective flush LSN so PostgreSQL keeps
             // the standby connection open during long stalls, including cases where the loop is
             // paused behind an in-flight flush and therefore not making visible progress yet. This
@@ -1288,6 +1418,8 @@ where
                     .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
             }
         }
+
+        self.maybe_reconcile_publication_when_idle().await?;
 
         // We try to process syncing tables if we are idle, so that we advance state
         // faster.
@@ -1437,6 +1569,16 @@ where
         tokio::time::sleep_until(deadline.into()).await;
     }
 
+    /// Waits for a publication snapshot when this is the main apply worker.
+    async fn wait_for_publication_snapshot(
+        publication_monitor: Option<&mut PublicationMonitor>,
+    ) -> Option<PublicationTableSnapshot> {
+        match publication_monitor {
+            Some(publication_monitor) => publication_monitor.snapshot_rx.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
     /// Computes the keep alive deadline from PostgreSQL's `wal_sender_timeout`.
     ///
     /// PostgreSQL normally sends a keep alive after roughly half of this
@@ -1543,6 +1685,45 @@ where
         // table schema snapshots.
         if let StatusUpdateResult::Sent = status_update_result {
             self.maybe_spawn_schema_cleanup().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Records a publication snapshot and requests a decoder progress reply
+    /// when its source WAL barrier has not been observed yet.
+    async fn handle_publication_snapshot(
+        &mut self,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        publication_snapshot: Option<PublicationTableSnapshot>,
+    ) -> EtlResult<()> {
+        let Some(publication_snapshot) = publication_snapshot else {
+            if let Some(publication_monitor) = self.tasks.publication_monitor.take() {
+                publication_monitor.teardown().await;
+            }
+            warn!("publication monitor stopped before the apply loop completed");
+            return Ok(());
+        };
+
+        // Keep one fixed barrier until it is reconciled. Replacing it with every
+        // newer source WAL position could make publication changes starve while
+        // a busy source continuously advances faster than this consumer.
+        if self.state.pending_publication_snapshot.is_some() {
+            return Ok(());
+        }
+
+        let barrier_lsn = publication_snapshot.barrier_lsn;
+        let needs_barrier_reply = barrier_lsn > self.state.last_keep_alive_lsn;
+        self.state.set_pending_publication_snapshot(publication_snapshot);
+
+        if needs_barrier_reply {
+            self.send_status_update(
+                events_stream.as_mut(),
+                true,
+                StatusUpdateType::PeriodicKeepAlive,
+            )
+            .await?;
+            self.state.reset_keep_alive_deadline(self.keep_alive_deadline_duration);
         }
 
         Ok(())
@@ -1948,6 +2129,10 @@ where
             ReplicationMessage::PrimaryKeepAlive(message) => {
                 let end_lsn = PgLsn::from(message.wal_end());
                 self.state.update_last_received_lsn(end_lsn);
+                // Unlike the `wal_end` field carried by `XLogData`, the logical
+                // sender's keep alive position is bounded by WAL it has decoded
+                // and sent. Keep this separate as the publication barrier.
+                self.state.update_last_keep_alive_lsn(end_lsn);
 
                 debug!(
                     wal_end = %end_lsn,
@@ -2624,6 +2809,101 @@ where
         }
 
         self.schema_store.upsert_replication_progress(worker_type, flush_lsn).await
+    }
+
+    /// Reconciles publication membership after the logical sender crosses the
+    /// source catalog snapshot's WAL barrier.
+    async fn maybe_reconcile_publication_when_idle(&mut self) -> EtlResult<()> {
+        if self.state.exit_intent.is_some()
+            || !self.state.is_idle()
+            || !self.state.publication_reconciliation_is_ready()
+        {
+            return Ok(());
+        }
+
+        let Some(publication_snapshot) = self.state.pending_publication_snapshot.clone() else {
+            return Ok(());
+        };
+        let WorkerContext::Apply(ctx) = &mut self.worker_context else {
+            return Ok(());
+        };
+
+        let has_deferred_removals =
+            Self::reconcile_publication_snapshot(ctx, publication_snapshot).await?;
+        if !has_deferred_removals {
+            self.state.pending_publication_snapshot = None;
+        }
+
+        Ok(())
+    }
+
+    /// Applies one decoder-safe publication snapshot to runtime table state.
+    ///
+    /// Returns `true` when a removed table still has an active table sync
+    /// worker and must be retried after that worker completes.
+    async fn reconcile_publication_snapshot(
+        ctx: &mut ApplyWorkerContext<S, D>,
+        publication_snapshot: PublicationTableSnapshot,
+    ) -> EtlResult<bool> {
+        let publication_table_ids: HashSet<TableId> =
+            publication_snapshot.table_ids.into_iter().collect();
+        let table_states = ctx.store.get_table_states().await?;
+        let added_tables = publication_table_ids
+            .iter()
+            .filter(|table_id| !table_states.contains_key(table_id))
+            .map(|table_id| (*table_id, TableState::Init))
+            .collect::<Vec<_>>();
+
+        if !added_tables.is_empty() {
+            info!(
+                publication_name = %ctx.config.publication_name,
+                table_count = added_tables.len(),
+                "initializing tables added to publication"
+            );
+            ctx.store.update_table_states(added_tables).await?;
+        }
+
+        let removed_tables = table_states
+            .keys()
+            .filter(|table_id| !publication_table_ids.contains(table_id))
+            .copied()
+            .collect::<Vec<_>>();
+        let mut tables_to_deactivate = Vec::new();
+        let mut has_deferred_removals = false;
+        for table_id in removed_tables {
+            if ctx.pool.get_active_worker_state(table_id).await.is_some() {
+                has_deferred_removals = true;
+                debug!(
+                    table_id = table_id.0,
+                    "deferring publication removal while table sync worker is active"
+                );
+                continue;
+            }
+
+            tables_to_deactivate.push(table_id);
+        }
+
+        if tables_to_deactivate.is_empty() {
+            return Ok(has_deferred_removals);
+        }
+
+        let slot_client = PgReplicationClient::connect(ctx.config.pg_connection.clone()).await?;
+        for table_id in tables_to_deactivate {
+            let slot_name: String =
+                EtlReplicationSlot::for_table_sync_worker(ctx.pipeline_id, table_id).try_into()?;
+            slot_client.delete_slot_if_exists(&slot_name).await?;
+
+            // Do not use the full deletion lifecycle here. It removes destination
+            // metadata while deliberately leaving the physical destination table,
+            // which would orphan that object and prevent a later re-add from
+            // replacing it with a fresh copy.
+            ctx.store.deactivate_table_state(table_id).await?;
+            ctx.shared_table_cache.remove_table(table_id).await;
+
+            info!(table_id = table_id.0, slot_name, "deactivated table removed from publication");
+        }
+
+        Ok(has_deferred_removals)
     }
 
     /// Processes syncing tables when the apply loop is idle.

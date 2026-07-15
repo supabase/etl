@@ -946,6 +946,69 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn deactivate_table_state_preserves_schema_and_destination_metadata() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let table_schema = create_sample_table_schema();
+    let table_id = table_schema.id;
+    let metadata = DestinationTableMetadata::new_applied(
+        "dest_table".to_owned(),
+        SnapshotId::initial(),
+        ReplicationMask::from_bytes(vec![1, 1, 1]),
+    );
+
+    store.update_table_state(table_id, TableState::Init).await.unwrap();
+    store.update_table_state(table_id, TableState::Ready).await.unwrap();
+    store.store_table_schema(table_schema).await.unwrap();
+    store.store_destination_table_metadata(table_id, metadata).await.unwrap();
+    store
+        .upsert_replication_progress(WorkerType::TableSync { table_id }, PgLsn::from(200u64))
+        .await
+        .unwrap();
+
+    store.deactivate_table_state(table_id).await.unwrap();
+
+    assert!(store.get_table_state(table_id).await.unwrap().is_none());
+    assert!(store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().is_some());
+    assert!(store.get_applied_destination_table_metadata(table_id).await.unwrap().is_some());
+    assert!(
+        store.get_replication_progress(WorkerType::TableSync { table_id }).await.unwrap().is_none()
+    );
+
+    let pool = connect_to_source_database(&database.config, 0, 1, None)
+        .await
+        .expect("Failed to connect to source database with sqlx");
+    let state_history_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.replication_state where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id as i64)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state_history_count, 0);
+
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    new_store.load_table_states().await.unwrap();
+    new_store.load_table_schemas().await.unwrap();
+    new_store.load_destination_tables_metadata().await.unwrap();
+
+    assert!(new_store.get_table_state(table_id).await.unwrap().is_none());
+    assert!(new_store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().is_some());
+    assert!(new_store.get_applied_destination_table_metadata(table_id).await.unwrap().is_some());
+    assert!(
+        new_store
+            .get_replication_progress(WorkerType::TableSync { table_id })
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
     init_test_tracing();
 

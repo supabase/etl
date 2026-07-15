@@ -739,6 +739,35 @@ impl TableStateLifecycleStore for PostgresStore {
 
                 Ok(reset_count)
             }
+            TableStateOperation::Deactivate { table_id } => {
+                let mut inner = self.inner.lock().await;
+                let affected_table_count = usize::from(inner.table_states.contains_key(&table_id));
+                let mut tx = self.pool.begin().await?;
+
+                pg_table_state::delete_table_state(&mut *tx, self.pipeline_id as i64, table_id)
+                    .await?;
+
+                progress::delete_replication_progress_for_table(
+                    &mut *tx,
+                    self.pipeline_id as i64,
+                    table_id,
+                )
+                .await
+                .map_err(|error| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Replication progress deletion failed",
+                        source: error
+                    )
+                })?;
+
+                tx.commit().await?;
+
+                inner.remove_table_state(table_id);
+                emit_table_metrics(&inner.state_counts);
+
+                Ok(affected_table_count)
+            }
             TableStateOperation::Delete { table_id } => {
                 let mut inner = self.inner.lock().await;
                 let affected_table_count = usize::from(inner.table_states.contains_key(&table_id));

@@ -292,7 +292,8 @@ pub struct PipelineConfig {
     /// Number of milliseconds between one memory usage refresh and another.
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
-    /// Number of milliseconds between one replication lag refresh and another.
+    /// Number of milliseconds between source replication lag and publication
+    /// membership refreshes.
     #[serde(default = "default_replication_lag_refresh_interval_ms")]
     pub replication_lag_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.
@@ -477,7 +478,8 @@ pub struct PipelineConfigWithoutSecrets {
     /// Number of milliseconds between one memory usage refresh and another.
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
-    /// Number of milliseconds between one replication lag refresh and another.
+    /// Number of milliseconds between source replication lag and publication
+    /// membership refreshes.
     #[serde(default = "default_replication_lag_refresh_interval_ms")]
     pub replication_lag_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.

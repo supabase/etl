@@ -1537,14 +1537,9 @@ async fn get_publication_table_ids_errors_when_empty() {
 
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    // Attempting to get table IDs from an empty publication should error.
-    let result = client.get_publication_table_ids(publication_name).await;
-
-    // Should return a ConfigError since the publication has no tables.
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::ConfigError);
-    assert!(err.to_string().contains("does not contain any tables"));
+    let error = client.get_publication_table_ids(publication_name).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::ConfigError);
+    assert!(error.to_string().contains("Publication has no tables"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

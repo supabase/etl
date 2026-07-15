@@ -4,9 +4,8 @@
 //! replication with destination systems. Manages worker lifecycles, shutdown
 //! coordination, and error handling.
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
-use etl_postgres::slots::EtlReplicationSlot;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
@@ -24,7 +23,6 @@ use crate::{
         ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool,
         concurrency::create_shutdown_channel,
     },
-    schema::TableId,
     store::PipelineStore,
 };
 
@@ -332,18 +330,16 @@ where
         self.wait().await
     }
 
-    /// Initializes table states for tables in the publication and
-    /// purges state for tables removed from it.
+    /// Initializes table states for tables currently in the publication.
     ///
     /// Ensures each table currently in the Postgres publication has a
     /// corresponding table state; tables without existing states are
     /// initialized to [`TableState::Init`].
     ///
-    /// Also detects tables for which we have stored state but are no longer
-    /// part of the publication, deletes their stored state (replication state,
-    /// destination table metadata, table schemas, and durable table-sync
-    /// progress), and performs best-effort cleanup of their table sync
-    /// replication slots without touching the actual destination tables.
+    /// Stored state for absent tables is intentionally preserved here. The main
+    /// apply worker reconciles removals only after its logical replication
+    /// stream crosses the catalog snapshot's WAL barrier; deleting eagerly at
+    /// startup could skip retained pre-removal WAL that has not been replayed.
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,
@@ -377,36 +373,6 @@ where
         for table_id in &publication_table_ids {
             if !table_states.contains_key(table_id) {
                 self.store.update_table_state(*table_id, TableState::Init).await?;
-            }
-        }
-
-        // Detect and purge tables that have been removed from the publication.
-        //
-        // The purging doesn't delete any data in the destination, it just removes
-        // internal state for that table.
-        let publication_set: HashSet<TableId> = publication_table_ids.iter().copied().collect();
-        for &table_id in table_states.keys() {
-            if !publication_set.contains(&table_id) {
-                info!(
-                    table_id = table_id.0,
-                    "table removed from publication, purging stored state and slot"
-                );
-
-                // We delete all table state before removing the slot, so that we don't
-                // incur in the case where we have a slot tied to an invalid state.
-                self.store.delete_table_state(table_id).await?;
-
-                // We try to delete the replication slot.
-                let slot_name: String =
-                    EtlReplicationSlot::for_table_sync_worker(self.config.id, table_id)
-                        .try_into()?;
-                replication_client.delete_slot_if_exists(&slot_name).await?;
-
-                info!(
-                    table_id = table_id.0,
-                    slot_name,
-                    "purged stored state and table sync slot for table removed from publication"
-                );
             }
         }
 

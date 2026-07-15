@@ -34,6 +34,7 @@ pub enum StateStoreMethod {
 
 type TableStateTypeCondition = (TableId, TableStateType, Arc<Notify>);
 type TableStateCondition = (TableId, Arc<Notify>, Box<dyn Fn(&TableState) -> bool + Send + Sync>);
+type TableStateRemovedCondition = (TableId, Arc<Notify>);
 type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
 type TableSchemaPruneCondition = Arc<Notify>;
 
@@ -45,6 +46,7 @@ struct Inner {
     replication_progress: HashMap<WorkerType, PgLsn>,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
+    table_state_removed_conditions: Vec<TableStateRemovedCondition>,
     table_schema_count_conditions: Vec<TableSchemaCountCondition>,
     table_schema_prune_conditions: Vec<TableSchemaPruneCondition>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
@@ -75,6 +77,14 @@ impl Inner {
             } else {
                 true
             }
+        });
+
+        self.table_state_removed_conditions.retain(|(tid, notify)| {
+            let should_retain = table_states.contains_key(tid);
+            if !should_retain {
+                notify.notify_one();
+            }
+            should_retain
         });
 
         self.table_schema_count_conditions.retain(|(tid, expected_count, notify)| {
@@ -117,6 +127,7 @@ impl NotifyingStore {
             replication_progress: HashMap::new(),
             table_state_type_conditions: Vec::new(),
             table_state_conditions: Vec::new(),
+            table_state_removed_conditions: Vec::new(),
             table_schema_count_conditions: Vec::new(),
             table_schema_prune_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
@@ -196,6 +207,16 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
         inner.table_state_conditions.push((table_id, Arc::clone(&notify), Box::new(condition)));
+
+        TimedNotify::new(notify)
+    }
+
+    /// Registers a notification that fires when a future lifecycle operation
+    /// removes the table's current state.
+    pub async fn notify_on_table_state_removed(&self, table_id: TableId) -> TimedNotify {
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+        inner.table_state_removed_conditions.push((table_id, Arc::clone(&notify)));
 
         TimedNotify::new(notify)
     }
@@ -479,6 +500,17 @@ impl TableStateLifecycleStore for NotifyingStore {
                 inner.check_conditions();
 
                 Ok(reset_count)
+            }
+            TableStateOperation::Deactivate { table_id } => {
+                let mut inner = self.inner.write().await;
+                let affected_table_count = usize::from(inner.table_states.contains_key(&table_id));
+
+                Arc::make_mut(&mut inner.table_states).remove(&table_id);
+                inner.table_state_history.remove(&table_id);
+                inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+                inner.check_conditions();
+
+                Ok(affected_table_count)
             }
             TableStateOperation::Delete { table_id } => {
                 let mut inner = self.inner.write().await;

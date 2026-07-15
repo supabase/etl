@@ -294,6 +294,16 @@ impl TableStateLifecycleStore for MemoryStore {
 
                 Ok(reset_count)
             }
+            TableStateOperation::Deactivate { table_id } => {
+                let mut inner = self.inner.lock().await;
+                let affected_table_count = usize::from(inner.table_states.contains_key(&table_id));
+
+                Arc::make_mut(&mut inner.table_states).remove(&table_id);
+                inner.table_state_history.remove(&table_id);
+                inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+
+                Ok(affected_table_count)
+            }
             TableStateOperation::Delete { table_id } => {
                 let mut inner = self.inner.lock().await;
                 let affected_table_count = usize::from(inner.table_states.contains_key(&table_id));
