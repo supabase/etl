@@ -156,6 +156,54 @@ impl fmt::Display for TableName {
 /// attributes, such as length for varchar or precision for numeric types.
 type TypeModifier = i32;
 
+/// The size of the varlena header that Postgres adds to stored type modifiers.
+///
+/// Postgres encodes type-specific parameters into `atttypmod` with a
+/// `VARHDRSZ` offset so that `-1` (no modifier) never collides with a valid
+/// encoded value.
+///
+/// Postgres reference: `src/include/c.h`.
+const VARHDRSZ: i32 = 4;
+
+/// Decoded precision and scale from a Postgres `NUMERIC(p, s)` type modifier.
+///
+/// Postgres encodes the modifier as `((p << 16) | (s & 0xffff)) + VARHDRSZ`.
+/// Unconstrained `NUMERIC` columns use the sentinel modifier value `-1` and
+/// produce `None` from [`numeric_modifiers`].
+///
+/// `p` (precision) ranges from 1 to 1000 and `s` (scale) ranges from -1000 to
+/// 1000. Negative scales are permitted since Postgres 15.
+///
+/// Postgres reference: `src/backend/utils/adt/numeric.c`.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct NumericModifiers {
+    /// The total number of significant digits (1..=1000).
+    pub p: i16,
+    /// The number of digits to the right of the decimal point (-1000..=1000).
+    pub s: i16,
+}
+
+/// Decodes a Postgres `atttypmod` value for a `NUMERIC` column into its
+/// precision and scale components.
+///
+/// Returns `None` when `modifier` is `-1`, which Postgres uses for
+/// unconstrained `NUMERIC` columns that have no explicit precision or scale.
+///
+/// Postgres reference: `src/backend/utils/adt/numeric.c`,
+/// `numerictypmodin` / `numerictypmodout`.
+pub fn numeric_modifiers(modifier: TypeModifier) -> Option<NumericModifiers> {
+    if modifier == -1 {
+        return None;
+    }
+
+    let tmp = modifier - VARHDRSZ;
+    let p = ((tmp >> 16) & 0xFFFF) as i16;
+    // Reinterpret the lower 16 bits as signed to recover negative scales.
+    let s = (tmp & 0xFFFF) as i16;
+
+    Some(NumericModifiers { p, s })
+}
+
 /// Represents the schema of a single column in a Postgres table.
 ///
 /// This type contains all metadata about a column including its name, data
@@ -467,5 +515,72 @@ mod tests {
         assert_eq!(schema.primary_key_ordinal_position, Some(1));
         assert!(!schema.nullable);
         assert_eq!(schema.default_expression.as_deref(), Some("'new'::text"));
+    }
+
+    #[test]
+    fn numeric_modifiers_unconstrained() {
+        assert_eq!(numeric_modifiers(-1), None);
+    }
+
+    #[test]
+    fn numeric_modifiers_precision_and_positive_scale() {
+        // NUMERIC(10, 2): typmod = ((10 << 16) | 2) + 4 = 655366
+        let m = numeric_modifiers(655366).unwrap();
+        assert_eq!(m.p, 10);
+        assert_eq!(m.s, 2);
+    }
+
+    #[test]
+    fn numeric_modifiers_zero_scale() {
+        // NUMERIC(38, 0): typmod = ((38 << 16) | 0) + 4 = 2490372
+        let m = numeric_modifiers(2490372).unwrap();
+        assert_eq!(m.p, 38);
+        assert_eq!(m.s, 0);
+    }
+
+    #[test]
+    fn numeric_modifiers_max_precision_and_scale() {
+        // NUMERIC(1000, 1000): typmod = ((1000 << 16) | 1000) + 4
+        let typmod = ((1000i32 << 16) | 1000) + VARHDRSZ;
+        let m = numeric_modifiers(typmod).unwrap();
+        assert_eq!(m.p, 1000);
+        assert_eq!(m.s, 1000);
+    }
+
+    #[test]
+    fn numeric_modifiers_negative_scale() {
+        // NUMERIC(2, -3): typmod = ((2 << 16) | (-3i16 as u16 as i32)) + 4
+        let typmod = ((2i32 << 16) | ((-3i16 as u16) as i32)) + VARHDRSZ;
+        let m = numeric_modifiers(typmod).unwrap();
+        assert_eq!(m.p, 2);
+        assert_eq!(m.s, -3);
+    }
+
+    #[test]
+    fn numeric_modifiers_min_negative_scale() {
+        // NUMERIC(1000, -1000)
+        let typmod = ((1000i32 << 16) | ((-1000i16 as u16) as i32)) + VARHDRSZ;
+        let m = numeric_modifiers(typmod).unwrap();
+        assert_eq!(m.p, 1000);
+        assert_eq!(m.s, -1000);
+    }
+
+    #[test]
+    fn numeric_modifiers_scale_exceeds_precision() {
+        // NUMERIC(3, 5): valid in Postgres, stores values like 0.00999
+        let typmod = ((3i32 << 16) | 5) + VARHDRSZ;
+        let m = numeric_modifiers(typmod).unwrap();
+        assert_eq!(m.p, 3);
+        assert_eq!(m.s, 5);
+    }
+
+    #[test]
+    fn numeric_modifiers_minimal() {
+        // NUMERIC(1, 0)
+        #[allow(clippy::identity_op)]
+        let typmod = ((1i32 << 16) | 0) + VARHDRSZ;
+        let m = numeric_modifiers(typmod).unwrap();
+        assert_eq!(m.p, 1);
+        assert_eq!(m.s, 0);
     }
 }
