@@ -587,6 +587,7 @@ async fn spawn_test_app_with_services(
             replicator_resources: DefaultReplicatorResourcesConfig {
                 memory_request_mib: 250,
                 cpu_request_millicores: 125,
+                destinations: Default::default(),
             },
             vector_resources: DefaultVectorResourcesConfig {
                 memory_request_mib: 192,
