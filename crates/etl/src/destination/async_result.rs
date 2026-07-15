@@ -151,19 +151,6 @@ impl<T> AsyncResult<T> {
     }
 }
 
-impl<T> Drop for AsyncResult<T> {
-    fn drop(&mut self) {
-        let Some(tx) = self.tx.take() else {
-            return;
-        };
-
-        let _ = tx.send(Err(etl_error!(
-            ErrorKind::DestinationError,
-            "Async result dropped without sending"
-        )));
-    }
-}
-
 pin_project! {
     /// Receiver half of a typed asynchronous completion result.
     #[must_use = "pending async results do nothing unless polled"]
