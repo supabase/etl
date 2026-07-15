@@ -64,6 +64,9 @@ pub enum PipelineError {
     #[error("The pipeline with id {0} is active; stop it before deleting it")]
     ActivePipeline(i64),
 
+    #[error("The pipeline with id {0} is not running; start it before restarting it")]
+    InactivePipeline(i64),
+
     #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
 
@@ -253,9 +256,9 @@ impl IntoResponse for PipelineError {
                 TableLookupError::TableNotFound(_) => StatusCode::BAD_GATEWAY,
             },
             PipelineError::Validation(error) => route_utils::validation_error_status_code(error),
-            PipelineError::ActivePipeline(_) | PipelineError::DuplicatePipeline => {
-                StatusCode::CONFLICT
-            }
+            PipelineError::ActivePipeline(_)
+            | PipelineError::InactivePipeline(_)
+            | PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             PipelineError::PipelineNotFound(_)
             | PipelineError::EtlStateNotInitialized
             | PipelineError::ImageIdNotDefault(_)
@@ -984,6 +987,55 @@ pub(crate) async fn start_pipeline(
     txn.commit().await?;
 
     Ok(StatusCode::OK)
+}
+
+#[utoipa::path(
+    post,
+    path = "/pipelines/{pipeline_id}/restart",
+    summary = "Restart a pipeline",
+    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator.",
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 202, description = "Pipeline restart initiated successfully"),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Pipeline, source, or destination not found", body = ErrorMessage),
+        (status = 409, description = "Pipeline is not running", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+pub(crate) async fn restart_pipeline(
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    pipeline_id: Path<i64>,
+) -> Result<impl IntoResponse, PipelineError> {
+    let tenant_id = extract_tenant_id(&headers)?;
+    let pipeline_id = pipeline_id.into_inner();
+
+    let mut connection = pool.acquire().await?;
+    let restarted = restart_pipeline_replicator_if_running(
+        &mut connection,
+        tenant_id,
+        pipeline_id,
+        &encryption_key,
+        k8s_client.as_deref(),
+        &source_tls_config,
+        &api_config,
+    )
+    .await?;
+
+    if !restarted {
+        return Err(PipelineError::InactivePipeline(pipeline_id));
+    }
+
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[utoipa::path(

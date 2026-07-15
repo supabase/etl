@@ -1210,6 +1210,56 @@ async fn an_existing_pipeline_can_be_started() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_running_pipeline_can_be_restarted() {
+    init_test_tracing();
+    let k8s_state = MockK8sState::default();
+    let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
+    create_default_image(&app).await;
+    let tenant_id = create_tenant(&app).await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+    let pipeline_id = create_pipeline_with_config(
+        &app,
+        &tenant_id,
+        source_id,
+        destination_id,
+        new_pipeline_config(),
+    )
+    .await;
+    let create_calls_before = k8s_state.create_calls();
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(k8s_state.create_calls() > create_calls_before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_pipeline_cannot_be_restarted() {
+    init_test_tracing();
+    let k8s_state = MockK8sState::default();
+    k8s_state.set_pod_status(PodStatus::Stopped).await;
+    let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
+    create_default_image(&app).await;
+    let tenant_id = create_tenant(&app).await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+    let pipeline_id = create_pipeline_with_config(
+        &app,
+        &tenant_id,
+        source_id,
+        destination_id,
+        new_pipeline_config(),
+    )
+    .await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(k8s_state.create_calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_existing_pipeline_can_be_stopped() {
     init_test_tracing();
     // Arrange
