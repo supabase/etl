@@ -90,10 +90,10 @@ pub trait Destination {
     /// The method return value is reserved for immediate dispatch/setup
     /// failures before the work has been accepted.
     ///
-    /// ETL waits for each table-copy batch to finish before reading the next
-    /// batch for the same copy partition. When multiple copy workers are
-    /// configured, this method can still run concurrently across different
-    /// partitions.
+    /// Unless shutdown is requested, ETL waits for each table-copy batch to
+    /// finish before reading the next batch for the same copy partition. When
+    /// multiple copy workers are configured, this method can still run
+    /// concurrently across different partitions.
     ///
     /// [`crate::destination::DestinationWriteStatus::Durable`] means the batch
     /// and all earlier accepted writes it covers are durable.

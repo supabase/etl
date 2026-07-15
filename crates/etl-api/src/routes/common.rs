@@ -25,7 +25,8 @@ use crate::{
 /// up those changes.
 ///
 /// If Kubernetes support is unavailable, or the pipeline has no active
-/// Kubernetes resources, the call is a no-op.
+/// Kubernetes resources, the call returns `false` without reconciling.
+/// Otherwise, it returns `true` after the Kubernetes resources are reconciled.
 pub(crate) async fn restart_pipeline_replicator_if_running(
     connection: &mut sqlx::PgConnection,
     tenant_id: &str,
@@ -34,16 +35,16 @@ pub(crate) async fn restart_pipeline_replicator_if_running(
     k8s_client: Option<&dyn K8sClient>,
     source_tls_config: &SourceTlsConfig,
     api_config: &ApiConfig,
-) -> Result<(), PipelineError> {
-    let Some(k8s_client) = k8s_client else {
-        return Ok(());
-    };
-
+) -> Result<bool, PipelineError> {
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(connection, tenant_id, pipeline_id, encryption_key).await?;
 
+    let Some(k8s_client) = k8s_client else {
+        return Ok(false);
+    };
+
     if !should_reconcile_replicator_resources(k8s_client, tenant_id, replicator.id).await? {
-        return Ok(());
+        return Ok(false);
     }
 
     create_or_update_pipeline_resources_in_k8s(
@@ -59,7 +60,7 @@ pub(crate) async fn restart_pipeline_replicator_if_running(
     )
     .await?;
 
-    Ok(())
+    Ok(true)
 }
 
 /// Validates a source config against the trusted source profile, when enabled.
