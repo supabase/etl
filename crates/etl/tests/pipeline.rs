@@ -14,6 +14,7 @@ use etl::{
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
+        faults::FaultyOp,
         memory_destination::MemoryDestination,
         notify::TimedNotify,
         notifying_store::NotifyingStore,
@@ -193,7 +194,16 @@ where
     }
 }
 
-/// Behavior used by [`StalledCopyDestination`] for nonempty copy writes.
+/// Destination operation stalled by [`StalledCopyDestination`].
+#[derive(Clone, Copy)]
+enum StallTarget {
+    /// A destination drop before a fresh table copy.
+    DropTableForCopy,
+    /// A nonempty table-copy row write.
+    WriteTableRows,
+}
+
+/// Behavior used by [`StalledCopyDestination`] for the selected operation.
 #[derive(Clone, Copy)]
 enum StallMode {
     /// Drops the result without completing it.
@@ -205,30 +215,36 @@ enum StallMode {
 /// Destination test double that drops or indefinitely holds a copy result.
 #[derive(Clone)]
 struct StalledCopyDestination<D> {
-    /// Destination used for operations other than nonempty table-copy writes.
+    /// Destination used for operations other than the selected stall target.
     inner: D,
-    /// Behavior applied to the first nonempty table-copy write.
+    /// Destination operation to stall.
+    target: StallTarget,
+    /// Behavior applied to the selected operation.
     mode: StallMode,
-    /// Held result that keeps the table-copy write pending.
-    pending_result: Arc<Mutex<Option<WriteTableRowsResult>>>,
+    /// Held result that keeps a destination drop pending.
+    pending_drop_result: Arc<Mutex<Option<DropTableForCopyResult<()>>>>,
+    /// Held result that keeps a table-copy write pending.
+    pending_write_result: Arc<Mutex<Option<WriteTableRowsResult>>>,
     /// Notification emitted after the result is dropped or held.
-    write_reached: Arc<Notify>,
+    stall_reached: Arc<Notify>,
 }
 
 impl<D> StalledCopyDestination<D> {
     /// Wraps a destination with the selected stall behavior.
-    fn wrap(inner: D, mode: StallMode) -> Self {
+    fn wrap(inner: D, target: StallTarget, mode: StallMode) -> Self {
         Self {
             inner,
+            target,
             mode,
-            pending_result: Arc::new(Mutex::new(None)),
-            write_reached: Arc::new(Notify::new()),
+            pending_drop_result: Arc::new(Mutex::new(None)),
+            pending_write_result: Arc::new(Mutex::new(None)),
+            stall_reached: Arc::new(Notify::new()),
         }
     }
 
-    /// Returns a notification for the next stalled table-copy write.
-    fn notify_on_write(&self) -> TimedNotify {
-        TimedNotify::new(Arc::clone(&self.write_reached))
+    /// Returns a notification for the next stalled operation.
+    fn notify_on_stall(&self) -> TimedNotify {
+        TimedNotify::new(Arc::clone(&self.stall_reached))
     }
 }
 
@@ -253,7 +269,22 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        self.inner.drop_table_for_copy(replicated_table_schema, async_result).await
+        if !matches!(self.target, StallTarget::DropTableForCopy) {
+            return self.inner.drop_table_for_copy(replicated_table_schema, async_result).await;
+        }
+
+        match self.mode {
+            StallMode::DropResult => drop(async_result),
+            StallMode::HoldResult => {
+                let mut pending_result = self.pending_drop_result.lock().await;
+                assert!(pending_result.is_none(), "only one destination drop should be pending");
+                *pending_result = Some(async_result);
+            }
+        }
+
+        self.stall_reached.notify_one();
+
+        Ok(())
     }
 
     async fn write_table_rows(
@@ -262,7 +293,7 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        if table_rows.is_empty() {
+        if !matches!(self.target, StallTarget::WriteTableRows) {
             return self
                 .inner
                 .write_table_rows(replicated_table_schema, table_rows, async_result)
@@ -272,13 +303,13 @@ where
         match self.mode {
             StallMode::DropResult => drop(async_result),
             StallMode::HoldResult => {
-                let mut pending_result = self.pending_result.lock().await;
+                let mut pending_result = self.pending_write_result.lock().await;
                 assert!(pending_result.is_none(), "only one table-copy write should be pending");
                 *pending_result = Some(async_result);
             }
         }
 
-        self.write_reached.notify_one();
+        self.stall_reached.notify_one();
 
         Ok(())
     }
@@ -340,7 +371,11 @@ async fn table_copy_errors_when_async_result_is_dropped() {
 
     let store = NotifyingStore::new();
     let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let destination = StalledCopyDestination::wrap(immediate_destination, StallMode::DropResult);
+    let destination = StalledCopyDestination::wrap(
+        immediate_destination,
+        StallTarget::WriteTableRows,
+        StallMode::DropResult,
+    );
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -377,7 +412,11 @@ async fn table_copy_shutdown_interrupts_pending_result_wait() {
 
     let store = NotifyingStore::new();
     let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let destination = StalledCopyDestination::wrap(immediate_destination, StallMode::HoldResult);
+    let destination = StalledCopyDestination::wrap(
+        immediate_destination,
+        StallTarget::WriteTableRows,
+        StallMode::HoldResult,
+    );
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -388,7 +427,7 @@ async fn table_copy_shutdown_interrupts_pending_result_wait() {
         destination.clone(),
     );
 
-    let write_reached = destination.notify_on_write();
+    let write_reached = destination.notify_on_stall();
 
     pipeline.start().await.unwrap();
 
@@ -398,6 +437,160 @@ async fn table_copy_shutdown_interrupts_pending_result_wait() {
 
     let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
     assert!(matches!(table_state, TableState::DataSync));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drop_table_for_copy_errors_when_async_result_is_dropped() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let destination = StalledCopyDestination::wrap(
+        immediate_destination,
+        StallTarget::DropTableForCopy,
+        StallMode::DropResult,
+    );
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    store.reset_table_state(table_id).await.unwrap();
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+
+    let table_errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+
+    pipeline.start().await.unwrap();
+
+    table_errored.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    let TableState::Errored { source_err, .. } = table_state else {
+        panic!("dropped destination-drop result should put the table in an errored state");
+    };
+    assert_eq!(source_err.kind(), ErrorKind::DestinationError);
+    assert!(store.get_destination_table_metadata(table_id).await.unwrap().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drop_table_for_copy_shutdown_interrupts_pending_result_wait() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let destination = StalledCopyDestination::wrap(
+        immediate_destination,
+        StallTarget::DropTableForCopy,
+        StallMode::HoldResult,
+    );
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    let drop_reached = destination.notify_on_stall();
+
+    store.reset_table_state(table_id).await.unwrap();
+
+    drop_reached.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    assert!(matches!(table_state, TableState::Init));
+    assert!(store.get_destination_table_metadata(table_id).await.unwrap().is_some());
+}
+
+/// Verifies that resetting a table during an active copy is overwritten by the
+/// active worker.
+///
+/// Real-time resets are not supported yet: the active worker currently owns a
+/// separate in-memory state and can overwrite the stored `Init` state when it
+/// advances. Supporting resets without restarting the pipeline requires
+/// coordinating the reset with that worker and changing this expectation so a
+/// fresh copy drops the existing destination table.
+#[tokio::test(flavor = "multi_thread")]
+async fn reset_during_active_copy_is_overwritten_by_active_worker() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let held_write = destination.hold_next(FaultyOp::WriteTableRows).await;
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    held_write.wait_reached().await;
+
+    // We reset the table state while the write table rows method is blocked.
+    store.reset_table_state(table_id).await.unwrap();
+
+    // We release the hold, which causes the system to continue its work and
+    // overrides the `Init` state which was set by the reset.
+    held_write.release_ok();
+
+    // The table becomes ready since naturally since the copy just continued.
+    table_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert!(!destination.was_table_dropped_for_copy(table_id).await);
 }
 
 #[tokio::test(flavor = "multi_thread")]

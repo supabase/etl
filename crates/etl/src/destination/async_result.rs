@@ -249,7 +249,7 @@ mod tests {
 
         let err = pending_result.await.into_result().unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationError);
-        assert_eq!(err.description(), Some("Async result dropped without sending"));
+        assert_eq!(err.description(), Some("Async result channel closed before sending"));
     }
 
     #[tokio::test]
