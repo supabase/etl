@@ -53,8 +53,8 @@ use crate::{
             ReadPipelinesResponse, SimpleTableState, TableStatus, UpdatePipelineRequest,
             UpdatePipelineVersionRequest, ValidatePipelineRequest, ValidatePipelineResponse,
             create_pipeline, delete_pipeline, get_pipeline_replication_status, get_pipeline_status,
-            get_pipeline_version, read_all_pipelines, read_pipeline, rollback_tables,
-            start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
+            get_pipeline_version, read_all_pipelines, read_pipeline, restart_pipeline,
+            rollback_tables, start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
             update_pipeline_version, validate_pipeline,
         },
         sources::{
@@ -363,6 +363,7 @@ pub fn run(
         crate::routes::pipelines::get_pipeline_version,
         crate::routes::pipelines::get_pipeline_replication_status,
         crate::routes::pipelines::update_pipeline_version,
+        crate::routes::pipelines::restart_pipeline,
         crate::routes::tenants::create_tenant,
         crate::routes::tenants::create_or_update_tenant,
         crate::routes::tenants::read_tenant,
@@ -442,6 +443,7 @@ pub fn run(
             get(read_pipeline).post(update_pipeline).delete(delete_pipeline),
         )
         .route("/pipelines/{pipeline_id}/start", post(start_pipeline))
+        .route("/pipelines/{pipeline_id}/restart", post(restart_pipeline))
         .route("/pipelines/{pipeline_id}/stop", post(stop_pipeline))
         .route("/pipelines/{pipeline_id}/status", get(get_pipeline_status))
         .route(
