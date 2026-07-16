@@ -588,9 +588,11 @@ async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let users_schema = database_schema.users_schema();
     let table_id = users_schema.id;
-    let unpublished_table = test_table_name("table_sync_keepalive_wal");
-    database
-        .create_table(unpublished_table.clone(), true, &[("value", "int4 not null")])
+
+    let other_database = spawn_source_database().await;
+    let other_database_table = test_table_name("table_sync_keepalive_wal");
+    other_database
+        .create_table(other_database_table.clone(), true, &[("value", "int4 not null")])
         .await
         .unwrap();
 
@@ -615,20 +617,18 @@ async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
     finished_copy.notified().await;
 
     // Commit one published row at A while the table-sync worker is paused, then
-    // advance WAL to T through an unpublished table. Waiting for the apply slot
-    // to acknowledge T makes the later catchup target strictly newer than A.
+    // advance cluster WAL to T in another database. Logical decoding skips that
+    // transaction entirely, so no event batch exists at T.
     insert_users_data(&mut database, &users_schema.name, 1..=1).await;
-    database.insert_values(unpublished_table, &["value"], &[&1_i32]).await.unwrap();
-    let target_lsn: PgLsn = database
-        .client
-        .as_ref()
-        .unwrap()
-        .query_one("select pg_current_wal_flush_lsn()", &[])
+    other_database
+        .insert_values(other_database_table, &["value"], &[&1_i32])
         .await
-        .unwrap()
-        .get(0);
-
+        .unwrap();
     let client = database.client.as_ref().unwrap();
+    let target_lsn: PgLsn =
+        client.query_one("select pg_current_wal_flush_lsn()", &[]).await.unwrap().get(0);
+
+    // Ensure the apply worker observes T before choosing table sync's catchup target.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let row = client
@@ -648,7 +648,7 @@ async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
         }
     })
     .await
-    .expect("timed out waiting for the apply slot to acknowledge unrelated WAL");
+    .expect("timed out waiting for the apply slot to acknowledge cross-database WAL");
 
     let sync_done = store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
     let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
