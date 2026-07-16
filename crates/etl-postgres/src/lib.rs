@@ -4,6 +4,7 @@
 //! crates: source database access, replication slot naming, ETL metadata-store
 //! queries, schema primitives, value wrappers, and type conversion helpers.
 
+pub mod application_name;
 pub mod default_expression;
 pub mod lag;
 pub mod numeric;
