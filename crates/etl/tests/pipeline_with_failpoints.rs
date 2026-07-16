@@ -3,6 +3,12 @@
 use std::time::Duration;
 
 use etl::{
+    data::TableRow,
+    destination::{
+        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
+    },
+    error::EtlResult,
     event::{Event, EventType, InsertEvent},
     failpoints::{
         FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
@@ -10,7 +16,7 @@ use etl::{
         STORE_REPLICATION_PROGRESS_FP, TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
     },
     pipeline::PipelineId,
-    schema::{SnapshotId, TableId, TableSchema},
+    schema::{ReplicatedTableSchema, SnapshotId, TableId, TableSchema},
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -32,13 +38,124 @@ use etl::{
 use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
     below_version,
+    slots::EtlReplicationSlot,
     tokio::test_utils::TableModification,
     version::POSTGRES_15,
 };
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
-use tokio_postgres::types::Type;
+use tokio::{sync::mpsc, time::sleep};
+use tokio_postgres::types::{PgLsn, Type};
+
+/// Relevant streaming write observed by [`DeferredEventsDestination`].
+enum DeferredEventsWrite {
+    /// Target-table event batch accepted at this commit end LSN.
+    Accepted { commit_end_lsn: PgLsn },
+    /// Empty required-durability write whose result remains held by the test.
+    DurabilityBarrier { result: WriteEventsResult },
+}
+
+/// Destination test double that accepts one table event batch and holds its
+/// barrier.
+#[derive(Clone)]
+struct DeferredEventsDestination {
+    /// Table whose next insert batch should be accepted.
+    table_id: TableId,
+    /// Channel used to expose the accepted batch and empty barrier to the test.
+    writes_tx: mpsc::UnboundedSender<DeferredEventsWrite>,
+}
+
+impl DeferredEventsDestination {
+    /// Creates a destination and its ordered streaming-write observer.
+    fn new(table_id: TableId) -> (Self, mpsc::UnboundedReceiver<DeferredEventsWrite>) {
+        let (writes_tx, writes_rx) = mpsc::unbounded_channel();
+
+        (Self { table_id, writes_tx }, writes_rx)
+    }
+}
+
+impl Destination for DeferredEventsDestination {
+    fn name() -> &'static str {
+        "deferred_events"
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        async_result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(()));
+
+        Ok(())
+    }
+
+    async fn write_table_rows(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        _table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(DestinationWriteStatus::Durable));
+
+        Ok(())
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        durability: WriteEventsDurability,
+        async_result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        let contains_target_insert = events.iter().any(|event| {
+            matches!(
+                event,
+                Event::Insert(insert) if insert.replicated_table_schema.id() == self.table_id
+            )
+        });
+
+        if contains_target_insert {
+            assert_eq!(durability, WriteEventsDurability::MayDefer);
+            let commit_end_lsn = events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Event::Commit(commit) => Some(commit.end_lsn),
+                    _ => None,
+                })
+                .expect("accepted event batch should contain its commit");
+
+            // Expose A before resolving its result so the test observes protocol order.
+            assert!(
+                self.writes_tx.send(DeferredEventsWrite::Accepted { commit_end_lsn }).is_ok(),
+                "streaming write observer should remain available"
+            );
+
+            // Accepted transfers ownership without proving durability, so ETL must carry A.
+            async_result.send(Ok(DestinationWriteStatus::Accepted));
+
+            return Ok(());
+        }
+
+        if events.is_empty() {
+            assert_eq!(durability, WriteEventsDurability::RequireDurable);
+            // Hold the empty barrier so the test can prove completion waits for it.
+            assert!(
+                self.writes_tx
+                    .send(DeferredEventsWrite::DurabilityBarrier { result: async_result })
+                    .is_ok(),
+                "streaming write observer should remain available"
+            );
+
+            return Ok(());
+        }
+
+        assert_eq!(durability, WriteEventsDurability::MayDefer);
+        async_result.send(Ok(DestinationWriteStatus::Durable));
+
+        Ok(())
+    }
+}
 
 enum ExpectedReplicatedEvent<'a> {
     Relation(&'a [(&'static str, Type)]),
@@ -458,6 +575,123 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
     let grouped_events = group_events_by_type_and_table_id(&events);
     let catchup_events = grouped_events.get(&(EventType::Insert, table_id)).map_or(0, Vec::len);
     assert_eq!(catchup_events, catchup_rows);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
+    let unpublished_table = test_table_name("table_sync_keepalive_wal");
+    database
+        .create_table(unpublished_table.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
+
+    let pipeline_id: PipelineId = random();
+    let apply_slot_name: String =
+        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let finished_copy =
+        store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
+
+    pipeline.start().await.unwrap();
+    finished_copy.notified().await;
+
+    // Commit one published row at A while the table-sync worker is paused, then
+    // advance WAL to T through an unpublished table. Waiting for the apply slot
+    // to acknowledge T makes the later catchup target strictly newer than A.
+    insert_users_data(&mut database, &users_schema.name, 1..=1).await;
+    database.insert_values(unpublished_table, &["value"], &[&1_i32]).await.unwrap();
+    let target_lsn: PgLsn = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one("select pg_current_wal_flush_lsn()", &[])
+        .await
+        .unwrap()
+        .get(0);
+
+    let client = database.client.as_ref().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let row = client
+                .query_one(
+                    "select confirmed_flush_lsn from pg_replication_slots where slot_name = $1",
+                    &[&apply_slot_name],
+                )
+                .await
+                .unwrap();
+            let confirmed_flush_lsn: PgLsn = row.get(0);
+
+            if confirmed_flush_lsn >= target_lsn {
+                break;
+            }
+
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the apply slot to acknowledge unrelated WAL");
+
+    let sync_done = store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
+    let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+
+    // Accepted(A) must be followed by the empty barrier because no event batch
+    // exists at the later catchup target T to settle A's durability debt.
+    let (accepted_commit_end_lsn, barrier_result) =
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let Some(DeferredEventsWrite::Accepted { commit_end_lsn }) = writes_rx.recv().await
+            else {
+                panic!("expected accepted target-table event batch");
+            };
+            let Some(DeferredEventsWrite::DurabilityBarrier { result }) = writes_rx.recv().await
+            else {
+                panic!("expected empty required-durability barrier");
+            };
+
+            (commit_end_lsn, result)
+        })
+        .await
+        .expect("timed out waiting for accepted batch and durability barrier");
+
+    // This strict gap distinguishes keepalive-only completion from a terminal
+    // event batch, which the existing RequireDurable path already covers.
+    assert!(accepted_commit_end_lsn < target_lsn);
+
+    // Catchup and SyncWait are in-memory states. The last persisted state must
+    // remain FinishedCopy until the required barrier confirms durability.
+    let table_states = store.get_table_states().await;
+    assert_eq!(
+        table_states.get(&table_id).map(TableState::as_type),
+        Some(TableStateType::FinishedCopy)
+    );
+
+    // Confirming the barrier must unblock both table-sync handoff and the apply
+    // worker transition to Ready.
+    barrier_result.send(Ok(DestinationWriteStatus::Durable));
+    sync_done.notified().await;
+    ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

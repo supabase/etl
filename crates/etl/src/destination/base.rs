@@ -162,6 +162,15 @@ pub trait Destination {
     /// cumulative guarantee for all earlier accepted writes in the same
     /// apply-loop stream.
     ///
+    /// ETL may call this method with an empty event vector and
+    /// [`WriteEventsDurability::RequireDurable`]. The empty vector carries no
+    /// new replication events, but the call may flush or wait for earlier
+    /// accepted work and must not complete until all writes covered by its
+    /// ordering state are durable. It may return `Durable` immediately if no
+    /// such work remains, and it may prove durability over a stronger scope
+    /// than the originating apply-loop stream. ETL does not issue empty
+    /// [`WriteEventsDurability::MayDefer`] writes.
+    ///
     /// ETL keeps at most one streaming write result pending while it continues
     /// building the next batch. If a result completes as
     /// [`crate::destination::DestinationWriteStatus::Accepted`], ETL carries
@@ -171,9 +180,11 @@ pub trait Destination {
     /// cumulative: it must mean that later write and all earlier `Accepted`
     /// writes in the same apply-loop stream are durable.
     ///
-    /// If no later streaming write is dispatched before shutdown, ETL exits
-    /// without acknowledging accepted-but-not-durable progress. Restart then
-    /// replays from the last durable checkpoint.
+    /// If no later streaming write is dispatched before shutdown, ETL normally
+    /// exits without acknowledging accepted-but-not-durable progress. Restart
+    /// then replays from the last durable checkpoint. A terminal table-sync
+    /// catchup may issue the empty required-durability barrier described above
+    /// instead.
     ///
     /// Async implementations that offload work should coordinate `async_result`
     /// with [`Destination::shutdown`]. ETL calls [`Destination::shutdown`]
