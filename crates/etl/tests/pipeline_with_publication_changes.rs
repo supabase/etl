@@ -23,8 +23,6 @@ use rand::random;
 use tokio::time::sleep;
 use tokio_postgres::Client;
 
-use crate::support::deferred_copy_destination::DeferredCopyDestination;
-
 /// Alters one publication after registering every expected lifecycle
 /// notification.
 async fn alter_publication_and_wait_for_table_states(
@@ -789,8 +787,7 @@ async fn publication_removal_aborts_active_table_sync_worker() {
     database.create_publication(publication_name, std::slice::from_ref(&table)).await.unwrap();
 
     let store = NotifyingStore::new();
-    let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let destination = DeferredCopyDestination::wrap(immediate_destination);
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let pipeline_id = random();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
@@ -806,9 +803,9 @@ async fn publication_removal_aborts_active_table_sync_worker() {
     })
     .build();
 
-    let barrier_reached = destination.notify_on_barrier();
+    let held_copy = destination.hold_next(FaultyOp::WriteTableRows).await;
     pipeline.start().await.unwrap();
-    barrier_reached.notified().await;
+    held_copy.wait_reached().await;
 
     let table_removed = store.notify_on_table_state_removed(table_id).await;
     database
