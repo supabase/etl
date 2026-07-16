@@ -12,6 +12,7 @@ use etl::{
 };
 use etl_postgres::{
     lag,
+    schema::TableName,
     source::{TableLookupError, get_table_names_from_table_ids},
     store::{health, table_state},
 };
@@ -38,6 +39,7 @@ use crate::{
         replicators::ReplicatorsDbError,
         source_database,
         sources::SourcesDbError,
+        tables::SourceTable,
     },
     feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant},
     k8s::{
@@ -393,16 +395,58 @@ impl From<TableState> for SimpleTableState {
     }
 }
 
+/// Converts an internal table ID and name into the shared API table shape.
+fn source_table(table_id: TableId, table_name: &TableName) -> SourceTable {
+    SourceTable {
+        id: table_id.into_inner(),
+        schema: table_name.schema.clone(),
+        name: table_name.name.clone(),
+    }
+}
+
+/// Replication state and table-sync lag for one source table.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TableStatus {
-    #[schema(example = 1)]
+    /// The table's structured identity.
+    ///
+    /// This field is flattened to the top-level `id`, `schema`, and `name`
+    /// response properties.
+    #[serde(flatten)]
+    pub table: SourceTable,
+    // TODO: Remove the legacy fields after all platform consumers use `id`,
+    // `schema`, and `name`.
+    /// Deprecated compatibility alias for `id`.
+    #[schema(example = 1, deprecated)]
     pub table_id: u32,
-    #[schema(example = "public.users")]
+    /// Deprecated unquoted `schema.name` compatibility representation.
+    #[schema(example = "public.users", deprecated)]
     pub table_name: String,
+    /// The table's current replication state.
     pub state: SimpleTableState,
+    /// Lag for the table-sync worker assigned to this table, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = true)]
     pub table_sync_lag: Option<SlotLagMetricsResponse>,
+}
+
+impl TableStatus {
+    /// Creates a status whose canonical and legacy table fields cannot diverge.
+    fn new(
+        table_id: TableId,
+        table_name: &TableName,
+        state: SimpleTableState,
+        table_sync_lag: Option<SlotLagMetricsResponse>,
+    ) -> Self {
+        let id = table_id.into_inner();
+
+        Self {
+            table: source_table(table_id, table_name),
+            table_id: id,
+            table_name: table_name.to_string(),
+            state,
+            table_sync_lag,
+        }
+    }
 }
 
 /// WAL availability status reported by Postgres for a replication slot.
@@ -712,22 +756,20 @@ pub(crate) async fn read_pipeline(
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let response = data::pipelines::read_pipeline(&pool, tenant_id, pipeline_id)
+    let pipeline = data::pipelines::read_pipeline(&pool, tenant_id, pipeline_id)
         .await?
-        .map(|pipeline| {
-            Ok::<ReadPipelineResponse, serde_json::Error>(ReadPipelineResponse {
-                id: pipeline.id,
-                tenant_id: pipeline.tenant_id,
-                source_id: pipeline.source_id,
-                source_name: pipeline.source_name,
-                destination_id: pipeline.destination_id,
-                destination_name: pipeline.destination_name,
-                replicator_id: pipeline.replicator_id,
-                config: pipeline.config.into(),
-            })
-        })
-        .transpose()?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    let response = ReadPipelineResponse {
+        id: pipeline.id,
+        tenant_id: pipeline.tenant_id,
+        source_id: pipeline.source_id,
+        source_name: pipeline.source_name,
+        destination_id: pipeline.destination_id,
+        destination_name: pipeline.destination_name,
+        replicator_id: pipeline.replicator_id,
+        config: pipeline.config.into(),
+    };
 
     Ok(Json(response))
 }
@@ -915,9 +957,10 @@ pub(crate) async fn read_all_pipelines(
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
 
-    let mut pipelines = vec![];
-    for pipeline in data::pipelines::read_all_pipelines(&pool, tenant_id).await? {
-        let pipeline = ReadPipelineResponse {
+    let stored_pipelines = data::pipelines::read_all_pipelines(&pool, tenant_id).await?;
+    let pipelines = stored_pipelines
+        .into_iter()
+        .map(|pipeline| ReadPipelineResponse {
             id: pipeline.id,
             tenant_id: pipeline.tenant_id,
             source_id: pipeline.source_id,
@@ -926,9 +969,8 @@ pub(crate) async fn read_all_pipelines(
             destination_name: pipeline.destination_name,
             replicator_id: pipeline.replicator_id,
             config: pipeline.config.into(),
-        };
-        pipelines.push(pipeline);
-    }
+        })
+        .collect();
 
     let response = ReadPipelinesResponse { pipelines };
 
@@ -1311,12 +1353,12 @@ pub(crate) async fn get_pipeline_replication_status(
             .ok_or(PipelineError::MissingTableState)
             .and_then(|m| serde_json::from_value(m).map_err(PipelineError::InvalidTableState))?;
 
-        tables.push(TableStatus {
-            table_id: table_id.into_inner(),
-            table_name: table_name.to_string(),
-            state: state.into(),
-            table_sync_lag: lag_metrics.table_sync.remove(&table_id).map(Into::into),
-        });
+        tables.push(TableStatus::new(
+            table_id,
+            table_name,
+            state.into(),
+            lag_metrics.table_sync.remove(&table_id).map(Into::into),
+        ));
     }
 
     let response =
