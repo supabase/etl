@@ -20,13 +20,15 @@
 //! See `scripts/docker/docker-compose.yaml` for the test database
 //! configuration.
 
+use std::time::Duration;
+
 use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig};
 use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
 use pg_escape::quote_identifier;
-use tokio_postgres::Client;
+use tokio_postgres::{Client, types::PgLsn};
 use uuid::Uuid;
 
-use crate::{postgres::migrations, schema::TableName};
+use crate::{postgres::migrations, schema::TableName, test_utils::notify::DEFAULT_NOTIFY_TIMEOUT};
 
 /// The schema name used for organizing test tables.
 ///
@@ -138,4 +140,41 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
     migrations::run_source_migrations(&config).await.expect("Failed to run source migrations");
 
     database
+}
+
+/// Returns the replication slot's confirmed flush LSN and active walsender PID.
+pub async fn replication_slot_state(client: &Client, slot_name: &str) -> (PgLsn, Option<i32>) {
+    let row = client
+        .query_one(
+            "select confirmed_flush_lsn, active_pid from pg_replication_slots where slot_name = $1",
+            &[&slot_name],
+        )
+        .await
+        .unwrap();
+
+    (row.get(0), row.get(1))
+}
+
+/// Waits until the replication slot is served by a walsender other than
+/// `old_pid`.
+///
+/// # Panics
+///
+/// Panics after [`DEFAULT_NOTIFY_TIMEOUT`] if no new walsender becomes active,
+/// mirroring [`crate::test_utils::notify::TimedNotify`].
+pub async fn wait_for_new_walsender(client: &Client, slot_name: &str, old_pid: i32) {
+    tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, async {
+        loop {
+            let (_, active_pid) = replication_slot_state(client, slot_name).await;
+            if let Some(pid) = active_pid
+                && pid != old_pid
+            {
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for a new walsender to serve the replication slot");
 }

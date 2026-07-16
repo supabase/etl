@@ -7,7 +7,7 @@ use etl::{
     schema::TableId,
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
-        database::spawn_source_database,
+        database::{replication_slot_state, spawn_source_database, wait_for_new_walsender},
         event::group_events_by_type_and_table_id,
         faults::{FaultAction, FaultyOp},
         memory_destination::MemoryDestination,
@@ -20,7 +20,7 @@ use etl::{
 use etl_postgres::slots::EtlReplicationSlot;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
-use tokio_postgres::{Client, types::PgLsn};
+use tokio_postgres::types::PgLsn;
 
 /// Counts recorded insert events for the table.
 fn count_table_inserts(events: &[Event], table_id: TableId) -> usize {
@@ -38,37 +38,6 @@ fn table_insert_commit_lsns(events: &[Event], table_id: TableId) -> Vec<PgLsn> {
             _ => None,
         })
         .collect()
-}
-
-/// Returns the apply slot's confirmed flush LSN and active walsender PID.
-async fn apply_slot_state(client: &Client, slot_name: &str) -> (PgLsn, Option<i32>) {
-    let row = client
-        .query_one(
-            "select confirmed_flush_lsn, active_pid from pg_replication_slots where slot_name = $1",
-            &[&slot_name],
-        )
-        .await
-        .unwrap();
-
-    (row.get(0), row.get(1))
-}
-
-/// Waits until the apply slot is served by a walsender other than `old_pid`.
-async fn wait_for_new_walsender(client: &Client, slot_name: &str, old_pid: i32) {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let (_, active_pid) = apply_slot_state(client, slot_name).await;
-            if let Some(pid) = active_pid
-                && pid != old_pid
-            {
-                return;
-            }
-
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("timed out waiting for the apply worker to reconnect");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -348,7 +317,7 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
 
     // WHEN: the apply connection dies while the write response is withheld
     let client = database.client.as_ref().unwrap();
-    let (flush_lsn_at_kill, active_pid) = apply_slot_state(client, &apply_slot_name).await;
+    let (flush_lsn_at_kill, active_pid) = replication_slot_state(client, &apply_slot_name).await;
     let old_pid = active_pid.expect("apply walsender should be active");
 
     client.query_one("select pg_terminate_backend($1)", &[&old_pid]).await.unwrap();
@@ -432,7 +401,7 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
 
     // WHEN: the apply connection dies and the response releases before reconnect
     let client = database.client.as_ref().unwrap();
-    let (_, active_pid) = apply_slot_state(client, &apply_slot_name).await;
+    let (_, active_pid) = replication_slot_state(client, &apply_slot_name).await;
     let old_pid = active_pid.expect("apply walsender should be active");
 
     let first_insert_recorded = destination
