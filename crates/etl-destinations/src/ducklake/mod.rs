@@ -97,10 +97,11 @@ impl fmt::Display for DuckLakeTableName {
 /// materialized to Parquet by an external maintenance job.
 pub(super) const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 1_000_000;
 
-/// Table-level DuckLake data inlining limit during initial copies.
+/// Connection-level DuckLake data inlining limit during initial copies.
 ///
-/// Zero disables inline writes, ensuring initial-copy batches become Parquet
-/// files instead of accumulating in the catalog.
+/// COPY uses a dedicated connection pool attached with this limit so its
+/// batches become Parquet files without persisting a catalog option that must
+/// later be changed for streaming.
 pub(super) const COPY_DATA_INLINING_ROW_LIMIT: u64 = 0;
 
 pub use core::{
