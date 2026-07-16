@@ -8,7 +8,7 @@ use etl::{
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
         database::{replication_slot_state, spawn_source_database, wait_for_new_walsender},
-        event::group_events_by_type_and_table_id,
+        event::{EventCondition, group_events_by_type_and_table_id},
         faults::{FaultAction, FaultyOp},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
@@ -21,11 +21,6 @@ use etl_postgres::slots::EtlReplicationSlot;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use tokio_postgres::types::PgLsn;
-
-/// Counts recorded insert events for the table.
-fn count_table_inserts(events: &[Event], table_id: TableId) -> usize {
-    table_insert_commit_lsns(events, table_id).len()
-}
 
 /// Returns the commit LSNs of recorded insert events for the table, in order.
 fn table_insert_commit_lsns(events: &[Event], table_id: TableId) -> Vec<PgLsn> {
@@ -326,7 +321,7 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
 
     // WHEN: the held response is released only after the reconnect
     let replay_recorded = destination
-        .notify_on_events(move |events| count_table_inserts(events, table_id) == 2)
+        .wait_for_all_events(vec![EventCondition::Table(EventType::Insert, table_id, 2)])
         .await;
 
     hold.release_ok();
@@ -405,7 +400,7 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
     let old_pid = active_pid.expect("apply walsender should be active");
 
     let first_insert_recorded = destination
-        .notify_on_events(move |events| count_table_inserts(events, table_id) >= 1)
+        .wait_for_all_events(vec![EventCondition::Table(EventType::Insert, table_id, 1)])
         .await;
 
     client.query_one("select pg_terminate_backend($1)", &[&old_pid]).await.unwrap();
