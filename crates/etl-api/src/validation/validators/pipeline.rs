@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use etl_config::shared::TableSyncCopyConfig;
 use etl_postgres::store::catalog::ETL_SCHEMA_NAME;
-use sqlx::FromRow;
+use sqlx::{FromRow, postgres::types::Oid};
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 
@@ -273,29 +273,52 @@ impl Validator for SelectedTableIdsInPublicationValidator {
             .as_ref()
             .expect("source pool required for selected table ids validation");
 
-        let oids = table_ids.iter().map(|id| *id as i64).collect::<Vec<_>>();
-        let published_oids: Vec<i64> = sqlx::query_scalar(
+        let selected_oids = table_ids.iter().copied().map(Oid).collect::<Vec<_>>();
+        let Some((has_tables, published_oids)) = sqlx::query_as::<_, (bool, Vec<Oid>)>(
             r#"
-            select c.oid::bigint
-            from pg_publication_tables pt
-            join pg_namespace n on n.nspname = pt.schemaname
-            join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
-            where pt.pubname = $1
-              and c.oid = any($2::oid[])
-            "#,
+                select
+                    p.puballtables or exists (
+                        select 1
+                        from pg_publication_tables pt
+                        where pt.pubname = p.pubname
+                    ),
+                    array(
+                        select c.oid
+                        from pg_publication_tables pt
+                        join pg_namespace n on n.nspname = pt.schemaname
+                        join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
+                        where pt.pubname = p.pubname
+                          and c.oid = any($2::oid[])
+                        order by c.oid
+                    )
+                from pg_publication p
+                where p.pubname = $1
+                "#,
         )
         .bind(&self.publication_name)
-        .bind(&oids)
-        .fetch_all(source_pool)
-        .await?;
+        .bind(&selected_oids)
+        .fetch_optional(source_pool)
+        .await?
+        else {
+            // The publication existence validator reports the actionable
+            // prerequisite failure.
+            return Ok(vec![]);
+        };
+
+        if !has_tables {
+            // The publication tables validator reports the actionable
+            // prerequisite failure.
+            return Ok(vec![]);
+        }
 
         let published_oids = published_oids.into_iter().collect::<std::collections::HashSet<_>>();
         let mut missing_ids = table_ids
             .iter()
-            .filter(|id| !published_oids.contains(&(**id as i64)))
+            .filter(|id| !published_oids.contains(&Oid(**id)))
             .copied()
             .collect::<Vec<_>>();
         missing_ids.sort_unstable();
+        missing_ids.dedup();
 
         if missing_ids.is_empty() {
             Ok(vec![])
@@ -303,9 +326,10 @@ impl Validator for SelectedTableIdsInPublicationValidator {
             Ok(vec![ValidationFailure::critical(
                 "Selected Tables Not In Publication",
                 format!(
-                    "These selected table ids do not belong to publication `{}`: {}.\n\nAdd the \
-                     tables to the publication, or remove them from the initial table-copy \
-                     selection.",
+                    "These selected table ids do not belong to publication `{}`: {}.\n\nRefresh \
+                     the publication table list and reselect the tables to replace stale \
+                     publication IDs, or add any missing tables to the publication before \
+                     selecting them.",
                     self.publication_name,
                     missing_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
                 ),
