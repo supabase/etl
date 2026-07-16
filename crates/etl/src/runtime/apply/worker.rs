@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use etl_config::shared::{InvalidatedSlotBehavior, PipelineConfig};
 use etl_postgres::slots::EtlReplicationSlot;
@@ -29,7 +29,7 @@ use crate::{
         concurrency::ShutdownRx,
         error_policy::{RetryDirective, build_error_handling_policy},
     },
-    store::{PipelineStore, StateStore, TableStateLifecycleStore},
+    store::{PipelineStore, StateStore, TableState, TableStateLifecycleStore},
 };
 
 /// Handle for monitoring and controlling the apply worker.
@@ -289,13 +289,22 @@ where
         )
         .await?;
 
-        let (start_lsn, _) = prepare_apply_start_lsn(
+        validate_publication_exists(&replication_client, &self.config.publication_name).await?;
+
+        // Establish the apply-slot lineage before reading publication membership.
+        // Changes committed after this point are retained in WAL, so startup only
+        // adds current members and never infers removals from a later catalog
+        // snapshot.
+        let (start_lsn, apply_slot_created) = prepare_apply_start_lsn(
             self.pipeline_id,
             &replication_client,
             &self.store,
             &self.config.invalidated_slot_behavior,
         )
         .await?;
+
+        initialize_table_states(&replication_client, &self.store, &self.config, apply_slot_created)
+            .await?;
 
         let worker_context = WorkerContext::Apply(ApplyWorkerContext {
             pipeline_id: self.pipeline_id,
@@ -309,7 +318,6 @@ where
             table_sync_worker_permits: self.table_sync_worker_permits,
             memory_monitor: self.memory_monitor.clone(),
             batch_budget: self.batch_budget.clone(),
-            pending_table_deletions: HashMap::new(),
         });
 
         let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
@@ -366,7 +374,7 @@ where
 /// Init state. If any table is not in Init state when creating a new slot, it
 /// indicates that data was synchronized based on a different apply worker
 /// lineage, which would break replication correctness.
-pub(crate) async fn prepare_apply_start_lsn<S: StateStore + TableStateLifecycleStore>(
+async fn prepare_apply_start_lsn<S: StateStore + TableStateLifecycleStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
     store: &S,
@@ -479,6 +487,67 @@ pub(crate) async fn prepare_apply_start_lsn<S: StateStore + TableStateLifecycleS
 
         Ok((slot_start_lsn, false))
     }
+}
+
+/// Ensures the configured publication exists before creating its apply slot.
+async fn validate_publication_exists(
+    replication_client: &PgReplicationClient,
+    publication_name: &str,
+) -> EtlResult<()> {
+    if replication_client.publication_exists(publication_name).await? {
+        return Ok(());
+    }
+
+    bail!(
+        ErrorKind::ConfigError,
+        "Missing publication",
+        format!("The publication '{publication_name}' does not exist in the database")
+    );
+}
+
+/// Initializes missing table states after the apply-slot lineage is known.
+///
+/// Reactive mode performs additive reconciliation on every worker attempt.
+/// Disabled mode captures membership only for a new lineage. An empty state
+/// store is also initialized for an existing slot so a crash between slot
+/// creation and the atomic state write can recover on retry.
+async fn initialize_table_states<S: StateStore + TableStateLifecycleStore>(
+    replication_client: &PgReplicationClient,
+    store: &S,
+    config: &PipelineConfig,
+    apply_slot_created: bool,
+) -> EtlResult<()> {
+    store.load_table_states().await?;
+    let table_states = store.get_table_states().await?;
+
+    let should_load_publication = config.publication_changes_mode.is_reactive()
+        || apply_slot_created
+        || table_states.is_empty();
+    if !should_load_publication {
+        return Ok(());
+    }
+
+    let publication_table_ids =
+        replication_client.get_publication_table_ids(&config.publication_name).await?;
+    let missing_table_states = publication_table_ids
+        .iter()
+        .filter(|table_id| !table_states.contains_key(table_id))
+        .map(|table_id| (*table_id, TableState::Init))
+        .collect::<Vec<_>>();
+    let initialized_table_count = missing_table_states.len();
+
+    if !missing_table_states.is_empty() {
+        store.update_table_states(missing_table_states).await?;
+    }
+
+    info!(
+        publication_name = %config.publication_name,
+        table_count = publication_table_ids.len(),
+        initialized_table_count,
+        "publication tables initialized"
+    );
+
+    Ok(())
 }
 
 /// Handles the case when the apply worker slot is found to be invalidated.

@@ -282,6 +282,7 @@ pub(crate) struct TableSyncWorkerHandle {
     worker_id: TableSyncWorkerId,
     state: TableSyncWorkerState,
     abort_handle: AbortHandle,
+    completion: Arc<Notify>,
 }
 
 impl TableSyncWorkerHandle {
@@ -290,8 +291,9 @@ impl TableSyncWorkerHandle {
         worker_id: TableSyncWorkerId,
         state: TableSyncWorkerState,
         abort_handle: AbortHandle,
+        completion: Arc<Notify>,
     ) -> Self {
-        Self { worker_id, state, abort_handle }
+        Self { worker_id, state, abort_handle, completion }
     }
 
     /// Returns the unique identifier for this worker run.
@@ -309,9 +311,11 @@ impl TableSyncWorkerHandle {
         self.abort_handle.is_finished()
     }
 
-    /// Aborts the worker task.
-    pub(crate) fn abort(&self) {
+    /// Aborts the worker task and waits until it has fully stopped.
+    pub(crate) async fn abort_and_wait(&self) {
+        let completed = self.completion.notified();
         self.abort_handle.abort();
+        completed.await;
     }
 }
 

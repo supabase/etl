@@ -192,9 +192,6 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) memory_monitor: MemoryMonitor,
     /// Shared batch budget controller.
     pub(crate) batch_budget: BatchBudgetController,
-    /// Tables removed from the publication whose stored metadata must remain
-    /// available until earlier destination events become durable.
-    pub(crate) pending_table_deletions: HashMap<TableId, PendingTableDeletion>,
 }
 
 /// Resources for the table sync worker during the apply loop.
@@ -682,6 +679,9 @@ struct ApplyLoopState {
     /// and new message intake until the in-flight flush resolves and the
     /// queued batch can be retried.
     processing_paused: bool,
+    /// Tables removed from the publication whose stored metadata must remain
+    /// available until earlier destination events become durable.
+    pending_table_deletions: HashMap<TableId, PendingTableDeletion>,
     /// Fallback snapshot used before a table has established shared protocol
     /// state.
     ///
@@ -723,6 +723,7 @@ impl ApplyLoopState {
             pending_flush_result: None,
             exit_intent: None,
             processing_paused: false,
+            pending_table_deletions: HashMap::new(),
             bootstrap_snapshot_id,
             slot_name,
             schema_cleanup_deadline: Arc::new(Mutex::new(Some(
@@ -811,24 +812,22 @@ impl ApplyLoopState {
     }
 
     /// Updates the last received LSN and snapshots replication lag metrics.
-    fn update_last_received_lsn(&mut self, lsn: PgLsn, has_pending_table_deletions: bool) {
+    fn update_last_received_lsn(&mut self, lsn: PgLsn) {
         self.replication_progress.update_last_received_lsn(lsn);
-        self.update_replication_lag_metrics_from_progress(has_pending_table_deletions);
+        self.update_replication_lag_metrics_from_progress();
     }
 
     /// Updates the last durable flush LSN and snapshots replication lag
     /// metrics.
-    fn update_last_flush_lsn(&mut self, lsn: PgLsn, has_pending_table_deletions: bool) {
+    fn update_last_flush_lsn(&mut self, lsn: PgLsn) {
         self.replication_progress.update_last_flush_lsn(lsn);
-        self.update_replication_lag_metrics_from_progress(has_pending_table_deletions);
+        self.update_replication_lag_metrics_from_progress();
     }
 
     /// Snapshots apply-loop progress into the replication lag metrics.
-    fn update_replication_lag_metrics_from_progress(&self, has_pending_table_deletions: bool) {
-        self.replication_lag_metrics.update_from_progress(
-            self.replication_progress,
-            self.effective_flush_lsn(has_pending_table_deletions),
-        );
+    fn update_replication_lag_metrics_from_progress(&self) {
+        self.replication_lag_metrics
+            .update_from_progress(self.replication_progress, self.effective_flush_lsn());
     }
 
     /// Returns the last received LSN that should be reported as written to the
@@ -854,11 +853,11 @@ impl ApplyLoopState {
     /// acknowledged through a separate side channel. This may increase the
     /// replay window while the stream is idle, but it preserves the single
     /// pending-result apply-loop model.
-    fn is_idle(&self, has_pending_table_deletions: bool) -> bool {
+    fn is_idle(&self) -> bool {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
             && self.last_commit_end_lsn.is_none()
-            && !has_pending_table_deletions
+            && self.pending_table_deletions.is_empty()
     }
 
     /// Returns the effective flush LSN to report to PostgreSQL and use for
@@ -877,8 +876,8 @@ impl ApplyLoopState {
     /// used, and it might jump back compared to the last received LSN that
     /// we sent before, however this is fine since the status update logic
     /// guarantees monotonically increasing LSNs.
-    fn effective_flush_lsn(&self, has_pending_table_deletions: bool) -> PgLsn {
-        if self.is_idle(has_pending_table_deletions) {
+    fn effective_flush_lsn(&self) -> PgLsn {
+        if self.is_idle() {
             self.replication_progress.last_received_lsn()
         } else {
             self.replication_progress.last_flush_lsn()
@@ -1053,15 +1052,6 @@ where
     S: PipelineStore,
     D: PipelineDestination,
 {
-    /// Returns whether the apply worker has table deletions waiting for a
-    /// destination durability boundary.
-    fn has_pending_table_deletions(&self) -> bool {
-        matches!(
-            &self.worker_context,
-            WorkerContext::Apply(ctx) if !ctx.pending_table_deletions.is_empty()
-        )
-    }
-
     /// Starts the apply loop for processing replication events.
     ///
     /// This is the main entry point that creates the loop instance and runs it.
@@ -1562,7 +1552,7 @@ where
             .stream_mut()
             .send_status_update(
                 self.state.last_received_lsn(),
-                self.state.effective_flush_lsn(self.has_pending_table_deletions()),
+                self.state.effective_flush_lsn(),
                 force,
                 status_update_type,
             )
@@ -1924,10 +1914,7 @@ where
         // and recorded once the destination acknowledges the batch.
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: self.state.last_commit_end_lsn.take(),
-            table_deletions: match &self.worker_context {
-                WorkerContext::Apply(ctx) => ctx.pending_table_deletions.keys().copied().collect(),
-                WorkerContext::TableSync(_) => Vec::new(),
-            },
+            table_deletions: self.state.pending_table_deletions.keys().copied().collect(),
             metrics: DispatchMetrics {
                 items_count: events_batch_size,
                 dispatched_at: Instant::now(),
@@ -1967,11 +1954,10 @@ where
         match message {
             ReplicationMessage::XLogData(message) => {
                 let start_lsn = PgLsn::from(message.wal_start());
-                let has_pending_table_deletions = self.has_pending_table_deletions();
-                self.state.update_last_received_lsn(start_lsn, has_pending_table_deletions);
+                self.state.update_last_received_lsn(start_lsn);
 
                 let end_lsn = PgLsn::from(message.wal_end());
-                self.state.update_last_received_lsn(end_lsn, has_pending_table_deletions);
+                self.state.update_last_received_lsn(end_lsn);
 
                 debug!(
                     %start_lsn,
@@ -1983,8 +1969,7 @@ where
             }
             ReplicationMessage::PrimaryKeepAlive(message) => {
                 let end_lsn = PgLsn::from(message.wal_end());
-                let has_pending_table_deletions = self.has_pending_table_deletions();
-                self.state.update_last_received_lsn(end_lsn, has_pending_table_deletions);
+                self.state.update_last_received_lsn(end_lsn);
 
                 debug!(
                     wal_end = %end_lsn,
@@ -2265,7 +2250,12 @@ where
             %commit_lsn,
             "applying publication membership change"
         );
-        Self::reconcile_publication_change(ctx, &publication_change).await?;
+        Self::reconcile_publication_change(
+            ctx,
+            &mut self.state.pending_table_deletions,
+            &publication_change,
+        )
+        .await?;
 
         Ok(HandleMessageResult::no_event())
     }
@@ -2624,7 +2614,9 @@ where
         remote_final_lsn: PgLsn,
     ) -> EtlResult<bool> {
         match &self.worker_context {
-            WorkerContext::Apply(ctx) if ctx.pending_table_deletions.contains_key(&table_id) => {
+            WorkerContext::Apply(_)
+                if self.state.pending_table_deletions.contains_key(&table_id) =>
+            {
                 Ok(false)
             }
             WorkerContext::Apply(ctx) => {
@@ -2641,9 +2633,15 @@ where
     /// Dispatches to worker-specific implementation based on the worker
     /// context.
     async fn process_syncing_tables_after_commit_event(&mut self, lsn: PgLsn) -> EtlResult<bool> {
+        let pending_table_deletions = &self.state.pending_table_deletions;
         let exit_intent = match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
-                apply_worker::process_syncing_tables_after_commit_event(ctx, lsn).await
+                apply_worker::process_syncing_tables_after_commit_event(
+                    ctx,
+                    pending_table_deletions,
+                    lsn,
+                )
+                .await
             }
             WorkerContext::TableSync(ctx) => {
                 table_sync_worker::process_syncing_tables_after_commit_event(ctx, lsn).await
@@ -2672,8 +2670,7 @@ where
         // to avoid writing to the customer database on every quiet heartbeat.
         let durable_flush_lsn =
             self.upsert_durable_replication_progress(last_commit_end_lsn).await?;
-        let has_pending_table_deletions = self.has_pending_table_deletions();
-        self.state.update_last_flush_lsn(durable_flush_lsn, has_pending_table_deletions);
+        self.state.update_last_flush_lsn(durable_flush_lsn);
 
         let current_lsn = self.state.replication_progress.last_flush_lsn();
         debug!(
@@ -2682,9 +2679,15 @@ where
             "processing syncing tables after durable batch flush"
         );
 
+        let pending_table_deletions = &self.state.pending_table_deletions;
         let exit_intent = match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
-                apply_worker::process_syncing_tables_after_flush(ctx, current_lsn).await?;
+                apply_worker::process_syncing_tables_after_flush(
+                    ctx,
+                    pending_table_deletions,
+                    current_lsn,
+                )
+                .await?;
 
                 None
             }
@@ -2729,7 +2732,8 @@ where
         let slot_client = PgReplicationClient::connect(ctx.config.pg_connection.clone()).await?;
 
         for table_id in table_ids {
-            let Some(pending_deletion) = ctx.pending_table_deletions.get(&table_id).copied() else {
+            let Some(pending_deletion) = self.state.pending_table_deletions.get(&table_id).copied()
+            else {
                 continue;
             };
 
@@ -2742,7 +2746,7 @@ where
             if pending_deletion.recreate {
                 ctx.store.update_table_state(table_id, TableState::Init).await?;
             }
-            ctx.pending_table_deletions.remove(&table_id);
+            self.state.pending_table_deletions.remove(&table_id);
 
             info!(
                 table_id = table_id.0,
@@ -2758,6 +2762,7 @@ where
     /// Applies one complete publication membership snapshot.
     async fn reconcile_publication_change(
         ctx: &mut ApplyWorkerContext<S, D>,
+        pending_table_deletions: &mut HashMap<TableId, PendingTableDeletion>,
         publication_change: &PublicationChangeMessage,
     ) -> EtlResult<()> {
         let publication_table_ids =
@@ -2766,7 +2771,7 @@ where
 
         // A later publication snapshot is authoritative for whether a table
         // should be recreated after its pending deletion completes.
-        for (table_id, pending_deletion) in &mut ctx.pending_table_deletions {
+        for (table_id, pending_deletion) in pending_table_deletions.iter_mut() {
             pending_deletion.recreate = publication_table_ids.contains(table_id);
         }
 
@@ -2774,7 +2779,7 @@ where
             .iter()
             .filter(|table_id| {
                 !table_states.contains_key(table_id)
-                    && !ctx.pending_table_deletions.contains_key(table_id)
+                    && !pending_table_deletions.contains_key(table_id)
             })
             .map(|table_id| (*table_id, TableState::Init))
             .collect::<Vec<_>>();
@@ -2794,13 +2799,13 @@ where
             .copied()
             .collect::<Vec<_>>();
         for table_id in removed_tables {
-            if ctx.pending_table_deletions.contains_key(&table_id) {
+            if pending_table_deletions.contains_key(&table_id) {
                 continue;
             }
 
-            ctx.pool.abort(table_id).await;
+            ctx.pool.abort_and_wait(table_id).await;
             ctx.shared_table_cache.remove_table(table_id).await;
-            ctx.pending_table_deletions.insert(table_id, PendingTableDeletion { recreate: false });
+            pending_table_deletions.insert(table_id, PendingTableDeletion { recreate: false });
 
             info!(
                 publication_name = %publication_change.publication_name,
@@ -2837,7 +2842,7 @@ where
     /// progress even if there are no events for the tables in the publication
     /// that this instance is interested in.
     async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
-        if !self.state.is_idle(self.has_pending_table_deletions()) {
+        if !self.state.is_idle() {
             debug!("skipping table sync processing because apply loop is not idle");
 
             return Ok(());
@@ -2851,9 +2856,15 @@ where
             "processing syncing tables outside transaction"
         );
 
+        let pending_table_deletions = &self.state.pending_table_deletions;
         let exit_intent = match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
-                apply_worker::process_syncing_tables_when_idle(ctx, current_lsn).await
+                apply_worker::process_syncing_tables_when_idle(
+                    ctx,
+                    pending_table_deletions,
+                    current_lsn,
+                )
+                .await
             }
             WorkerContext::TableSync(ctx) => {
                 table_sync_worker::process_syncing_tables_when_idle(ctx, current_lsn).await
@@ -2869,6 +2880,7 @@ where
 /// Returns tables that are still synchronizing.
 async fn get_syncing_tables<S, D>(
     ctx: &ApplyWorkerContext<S, D>,
+    pending_table_deletions: &HashMap<TableId, PendingTableDeletion>,
 ) -> EtlResult<Vec<(TableId, TableState)>>
 where
     S: StateStore,
@@ -2877,7 +2889,7 @@ where
     Ok(states
         .iter()
         .filter(|(table_id, state)| {
-            !state.as_type().is_done() && !ctx.pending_table_deletions.contains_key(table_id)
+            !state.as_type().is_done() && !pending_table_deletions.contains_key(table_id)
         })
         .map(|(id, state)| (*id, state.clone()))
         .collect())
@@ -2941,13 +2953,14 @@ mod apply_worker {
     /// Does NOT perform SyncDone → Ready transitions.
     pub(super) async fn process_syncing_tables_after_commit_event<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
+        pending_table_deletions: &HashMap<TableId, PendingTableDeletion>,
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: PipelineStore,
         D: PipelineDestination,
     {
-        for (table_id, table_state) in get_syncing_tables(ctx).await? {
+        for (table_id, table_state) in get_syncing_tables(ctx, pending_table_deletions).await? {
             let exit_intent =
                 process_single_syncing_table_after_commit(ctx, table_id, table_state, current_lsn)
                     .await?;
@@ -3193,13 +3206,14 @@ mod apply_worker {
     /// Handles `SyncDone → Ready` transitions and spawns new workers.
     pub(super) async fn process_syncing_tables_after_flush<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
+        pending_table_deletions: &HashMap<TableId, PendingTableDeletion>,
         current_lsn: PgLsn,
     ) -> EtlResult<()>
     where
         S: PipelineStore,
         D: PipelineDestination,
     {
-        for (table_id, table_state) in get_syncing_tables(ctx).await? {
+        for (table_id, table_state) in get_syncing_tables(ctx, pending_table_deletions).await? {
             process_single_syncing_table_after_flush(ctx, table_id, table_state, current_lsn)
                 .await?;
         }
@@ -3322,13 +3336,14 @@ mod apply_worker {
     /// outside a transaction and the batch is empty.
     pub(super) async fn process_syncing_tables_when_idle<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
+        pending_table_deletions: &HashMap<TableId, PendingTableDeletion>,
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: PipelineStore,
         D: PipelineDestination,
     {
-        for (table_id, table_state) in get_syncing_tables(ctx).await? {
+        for (table_id, table_state) in get_syncing_tables(ctx, pending_table_deletions).await? {
             let exit_intent =
                 process_single_syncing_table_when_idle(ctx, table_id, table_state, current_lsn)
                     .await?;
@@ -3798,11 +3813,15 @@ mod tests {
             SnapshotId::from(initial_lsn),
             "test_slot".to_owned(),
         );
-        state.update_last_received_lsn(PgLsn::from(20), false);
+        state.update_last_received_lsn(PgLsn::from(20));
 
-        assert_eq!(state.effective_flush_lsn(false), PgLsn::from(20));
+        assert_eq!(state.effective_flush_lsn(), PgLsn::from(20));
 
-        assert!(!state.is_idle(true));
-        assert_eq!(state.effective_flush_lsn(true), initial_lsn);
+        state
+            .pending_table_deletions
+            .insert(TableId::new(1), PendingTableDeletion { recreate: false });
+
+        assert!(!state.is_idle());
+        assert_eq!(state.effective_flush_lsn(), initial_lsn);
     }
 }

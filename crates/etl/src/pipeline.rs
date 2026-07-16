@@ -11,17 +11,16 @@ use tracing::{debug, error, info, warn};
 
 pub use crate::runtime::concurrency::ShutdownTx;
 use crate::{
-    bail,
     config::PipelineConfig,
     destination::PipelineDestination,
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::register_metrics,
-    postgres::{OutOfBandSourcePool, client::PgReplicationClient, migrations},
-    replication::{SharedTableCache, state::TableState},
+    postgres::{OutOfBandSourcePool, migrations},
+    replication::SharedTableCache,
     runtime::{
         ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool,
-        concurrency::create_shutdown_channel, prepare_apply_start_lsn,
+        concurrency::create_shutdown_channel,
     },
     store::PipelineStore,
 };
@@ -162,10 +161,6 @@ where
             self.config.memory_refresh_interval_ms,
         );
 
-        // We create the first connection to Postgres.
-        let replication_client =
-            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
-
         // We load the destination table metadata and schemas from the store to have
         // them cached for quick access.
         //
@@ -174,20 +169,6 @@ where
         // are loaded in the cache.
         self.store.load_destination_tables_metadata().await?;
         self.store.load_table_schemas().await?;
-
-        // Establish the apply-slot lineage before reading publication membership.
-        // Changes committed after this point are retained in WAL, so startup only
-        // needs to add current members and must never infer removals from a later
-        // catalog snapshot.
-        let (_, apply_slot_created) = prepare_apply_start_lsn(
-            self.config.id,
-            &replication_client,
-            &self.store,
-            &self.config.invalidated_slot_behavior,
-        )
-        .await?;
-
-        self.initialize_table_states(&replication_client, apply_slot_created).await?;
 
         // We then let destinations perform their startup sequence if any.
         self.destination.startup().await?;
@@ -337,60 +318,5 @@ where
     pub async fn shutdown_and_wait(self) -> EtlResult<()> {
         self.shutdown();
         self.wait().await
-    }
-
-    /// Initializes missing table states from the current publication.
-    ///
-    /// Ensures each table currently in the Postgres publication has a
-    /// corresponding table state; tables without existing states are
-    /// initialized to [`TableState::Init`].
-    ///
-    /// In reactive mode this additive reconciliation runs on every startup.
-    /// Disabled mode captures membership only when a new apply slot establishes
-    /// a fresh replication lineage. Removals are never inferred from a startup
-    /// catalog snapshot because only ordered WAL messages provide the
-    /// durability boundary needed to delete ETL-owned state safely.
-    async fn initialize_table_states(
-        &self,
-        replication_client: &PgReplicationClient,
-        apply_slot_created: bool,
-    ) -> EtlResult<()> {
-        // We need to make sure that the publication exists.
-        if !replication_client.publication_exists(&self.config.publication_name).await? {
-            bail!(
-                ErrorKind::ConfigError,
-                "Missing publication",
-                format!(
-                    "The publication '{}' does not exist in the database",
-                    self.config.publication_name
-                )
-            );
-        }
-
-        if !apply_slot_created && !self.config.publication_changes_mode.is_reactive() {
-            return Ok(());
-        }
-
-        let publication_table_ids =
-            replication_client.get_publication_table_ids(&self.config.publication_name).await?;
-
-        info!(
-            publication_name = %self.config.publication_name,
-            table_count = publication_table_ids.len(),
-            "publication tables loaded"
-        );
-
-        // We load the current table states.
-        self.store.load_table_states().await?;
-        let table_states = self.store.get_table_states().await?;
-
-        // Initialize states for newly added tables in the publication.
-        for table_id in &publication_table_ids {
-            if !table_states.contains_key(table_id) {
-                self.store.update_table_state(*table_id, TableState::Init).await?;
-            }
-        }
-
-        Ok(())
     }
 }

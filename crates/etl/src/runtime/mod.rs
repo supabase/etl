@@ -8,7 +8,7 @@ mod table_sync;
 
 pub(crate) mod concurrency;
 
-pub(crate) use apply::{ApplyWorker, ApplyWorkerHandle, prepare_apply_start_lsn};
+pub(crate) use apply::{ApplyWorker, ApplyWorkerHandle};
 pub(crate) use batch_budget::{BatchBudgetController, CachedBatchBudget};
 pub(crate) use error_policy::ErrorHandlingPolicy;
 pub(crate) use memory_monitor::{MemoryMonitor, MemoryMonitorSubscription};

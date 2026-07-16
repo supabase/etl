@@ -1,11 +1,14 @@
 use std::{
     collections::HashMap,
     future::Future,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use tokio::{
-    sync::{Mutex, RwLock},
+    sync::{Mutex, Notify, RwLock},
     task::JoinSet,
 };
 use tracing::{debug, warn};
@@ -62,6 +65,18 @@ pub(crate) struct TableSyncWorkerPool {
     workers: RwLock<HashMap<TableId, TableSyncWorkerHandle>>,
 }
 
+/// Notifies a waiter when a table-sync task is dropped or completes.
+///
+/// This does not reap the task. The [`JoinSet`] remains the sole owner of task
+/// results, including canceled [`tokio::task::JoinError`] values.
+struct WorkerCompletionGuard(Arc<Notify>);
+
+impl Drop for WorkerCompletionGuard {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
 impl TableSyncWorkerPool {
     /// Creates a new empty table sync worker pool.
     pub(crate) fn new() -> Self {
@@ -106,15 +121,18 @@ impl TableSyncWorkerPool {
         // Generate a unique run ID for this worker.
         let run_id = self.next_run_id.fetch_add(1, Ordering::Relaxed);
         let worker_id = TableSyncWorkerId { table_id, run_id };
+        let completion = Arc::new(Notify::new());
+        let completion_guard = WorkerCompletionGuard(Arc::clone(&completion));
 
         // Spawn the worker task.
         let abort_handle = workers_join_set.spawn(async move {
+            let _completion_guard = completion_guard;
             let result = future.await;
             (worker_id, result)
         });
 
         // Create and store the handle.
-        let handle = TableSyncWorkerHandle::new(worker_id, state, abort_handle);
+        let handle = TableSyncWorkerHandle::new(worker_id, state, abort_handle, completion);
         workers.insert(table_id, handle);
 
         debug!(%worker_id, "spawned table sync worker in pool");
@@ -144,10 +162,11 @@ impl TableSyncWorkerPool {
     /// Aborts the active worker for `table_id` and waits for it to stop.
     ///
     /// The completed task remains owned by the pool's join set and is reaped
-    /// by [`Self::wait_all`]. Holding the workers read lock while waiting also
+    /// by [`Self::wait_all`]. Holding the workers read lock while waiting
     /// prevents a replacement worker from being registered before the aborted
-    /// task is fully quiesced.
-    pub(crate) async fn abort(&self, table_id: TableId) -> bool {
+    /// task is fully quiesced. Afterward, this exact worker run is removed from
+    /// the active map without inspecting its canceled result.
+    pub(crate) async fn abort_and_wait(&self, table_id: TableId) -> bool {
         let workers = self.workers.read().await;
         let Some(handle) = workers.get(&table_id) else {
             return false;
@@ -156,11 +175,16 @@ impl TableSyncWorkerPool {
             return false;
         }
 
-        handle.abort();
-        while !handle.is_finished() {
-            tokio::task::yield_now().await;
+        let worker_id = handle.worker_id();
+        handle.abort_and_wait().await;
+        drop(workers);
+
+        let mut workers = self.workers.write().await;
+        if workers.get(&table_id).is_some_and(|handle| handle.worker_id() == worker_id) {
+            workers.remove(&table_id);
         }
-        debug!(table_id = table_id.0, "aborted and stopped table sync worker");
+
+        debug!(%worker_id, "aborted, stopped, and removed table sync worker");
 
         true
     }
