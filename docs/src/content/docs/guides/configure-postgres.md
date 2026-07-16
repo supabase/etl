@@ -7,7 +7,10 @@ description: Set up Postgres with the correct permissions and settings for ETL l
 
 This guide covers the essential **Postgres settings, slots, publications, and version-specific features** needed for logical replication with ETL.
 
-*Using a Supabase-hosted database?* Also see the Supabase product guide to [database replication](https://supabase.com/docs/guides/database/replication). It covers the Supabase-facing replication workflow and is the best companion reference when you are using ETL against a Supabase project.
+Using the managed product in the Supabase Dashboard? Follow the canonical
+[Supabase Pipelines documentation](https://supabase.com/docs/guides/database/replication/pipelines)
+instead. This guide covers PostgreSQL configuration for developers who run or
+embed the open-source ETL framework themselves.
 
 ## Prerequisites
 
