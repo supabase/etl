@@ -26,4 +26,4 @@ pub use metadata::{
     AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
 };
 
-pub use crate::runtime::concurrency::TaskSet;
+pub use crate::runtime::concurrency::{TaskSet, TaskSetDrainGuard};

@@ -331,7 +331,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         let fault = self.take_fault(FaultyOp::WriteTableRows).await?;
 
@@ -442,8 +442,9 @@ where
             errors.push(err);
         }
 
-        if let Err(err) = self.tasks.drain().await {
-            errors.push(err);
+        match self.tasks.drain().await {
+            Ok(guard) => drop(guard),
+            Err(err) => errors.push(err),
         }
 
         let result = if errors.is_empty() { Ok(()) } else { Err(errors.into()) };

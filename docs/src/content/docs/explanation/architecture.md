@@ -84,7 +84,7 @@ pub trait Destination {
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
     fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
     fn drop_table_for_copy(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: DropTableForCopyResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, rows: Vec<TableRow>, async_result: WriteTableRowsResult) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
@@ -95,13 +95,14 @@ pub trait Destination {
 | `shutdown()` | After ETL stops submitting work | Clean up destination resources, drain writers, or stop background tasks |
 | `startup()` | After store caches are loaded, removed-publication tables are purged, and before workers start | Reconcile destination state after process restarts |
 | `drop_table_for_copy()` | Before restarting a table copy when previous destination state exists | Drop the existing destination object and destination-private replay state using the previously stored replicated schema |
-| `write_table_rows()` | During initial copy | Receive bulk rows for the current replicated schema |
+| `write_table_rows()` | During initial copy | Receive bulk rows or complete a deferred copy durability barrier for the current replicated schema |
 | `write_events()` | During catch-up and continuous replication | Receive streaming changes |
 
 Each write-like method receives an async result handle. The intent is different per method:
 
 - `write_events()`: after dispatch succeeds, ETL may keep processing other work while the destination finishes the batch. ETL still waits for that batch's async result before handing the destination the next streaming batch.
-- `drop_table_for_copy()` and `write_table_rows()`: ETL waits for the result immediately. After a successful drop, ETL clears its own copy-scoped schema, destination metadata, and table-sync progress before storing the fresh `0/0` copy schema.
+- `drop_table_for_copy()`: ETL waits for the result immediately. After a successful drop, ETL clears its own copy-scoped schema, destination metadata, and table-sync progress before storing the fresh `0/0` copy schema.
+- `write_table_rows()`: ETL waits for each result before requesting the next batch for that copy partition. `Durable` confirms that batch and any earlier accepted writes covered by the result. `Accepted` transfers ownership to the destination and lets copying continue without marking the table copy finished. If any batch is accepted this way, ETL sends a final empty batch after all copy workers finish; that table-wide barrier must cover every accepted write and return `Durable` before ETL stores `FinishedCopy`.
 
 ### Store
 

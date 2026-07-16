@@ -267,7 +267,8 @@ fn read_streaming_progress(
 ) -> Option<(u64, u64)> {
     conn.query_row(
         &format!(
-            "SELECT last_commit_lsn, last_tx_ordinal FROM {}.{} WHERE table_name = {}",
+            "SELECT last_commit_lsn, last_tx_ordinal FROM {}.{} WHERE table_name = {} ORDER BY \
+             last_commit_lsn DESC, last_tx_ordinal DESC LIMIT 1",
             quote_identifier("lake"),
             quote_identifier("__etl_streaming_progress"),
             quote_literal(&table_name.id()),
@@ -386,10 +387,10 @@ async fn write_table_rows_basic() {
     assert_eq!(name.as_deref(), Some("Alice"));
 }
 
-/// Small copy batches should remain inlined after the caller returns.
+/// Small copy batches should write a Parquet file before the caller returns.
 #[tokio::test(flavor = "multi_thread")]
-async fn write_table_rows_small_batch_stays_inlined_after_return() {
-    let lake = create_test_lake("write_table_rows_small_batch_stays_inlined_after_return").await;
+async fn write_table_rows_small_batch_writes_parquet_before_return() {
+    let lake = create_test_lake("write_table_rows_small_batch_writes_parquet_before_return").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
     let data = lake.data_dir.clone();
@@ -428,8 +429,8 @@ async fn write_table_rows_small_batch_stays_inlined_after_return() {
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
     assert_eq!(
         count_table_files(&data, &table_name),
-        0,
-        "small copy batch should remain inlined until background maintenance"
+        1,
+        "small copy batch should write a Parquet file"
     );
 }
 
@@ -810,10 +811,28 @@ async fn concurrent_same_table_copy_batches_complete() {
         )
         .unwrap_or(-1);
 
-    let marker_detail: Vec<(String, Option<u64>, Option<u64>)> = {
+    let marker_counts_by_epoch: Vec<i64> = {
         let sql = format!(
-            "SELECT batch_id, first_start_lsn, last_commit_lsn FROM {}.{} WHERE table_name = {} \
-             AND batch_kind = {}",
+            "SELECT COUNT(*) AS marker_count FROM {}.{} WHERE table_name = {} AND batch_kind = {} \
+             GROUP BY COALESCE(replay_epoch, {}) ORDER BY marker_count",
+            quote_identifier("lake"),
+            quote_identifier("__etl_applied_table_batches"),
+            quote_literal(&table_name.id()),
+            quote_literal("copy"),
+            quote_literal("__legacy__"),
+        );
+        let mut stmt = conn.prepare(&sql).expect("marker count by epoch prepare failed");
+        stmt.query_map([], |row| row.get::<_, i64>(0))
+            .expect("marker count by epoch query failed")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("marker count by epoch collect failed")
+    };
+
+    let marker_detail: Vec<(String, String, Option<u64>, Option<u64>)> = {
+        let sql = format!(
+            "SELECT COALESCE(replay_epoch, {}), batch_id, first_start_lsn, last_commit_lsn FROM \
+             {}.{} WHERE table_name = {} AND batch_kind = {}",
+            quote_literal("__legacy__"),
             quote_identifier("lake"),
             quote_identifier("__etl_applied_table_batches"),
             quote_literal(&table_name.id()),
@@ -823,8 +842,9 @@ async fn concurrent_same_table_copy_batches_complete() {
         stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, Option<u64>>(1)?,
+                row.get::<_, String>(1)?,
                 row.get::<_, Option<u64>>(2)?,
+                row.get::<_, Option<u64>>(3)?,
             ))
         })
         .expect("marker detail query failed")
@@ -835,14 +855,18 @@ async fn concurrent_same_table_copy_batches_complete() {
     eprintln!(
         "[concurrent_same_table_copy_batches_complete] diagnostics:\n  catalog rows      : \
          {rows}\n  applied markers   : {markers}\n  parquet rows      : {parquet_rows}\n  marker \
-         detail     : {marker_detail:?}"
+         counts/epoch: {marker_counts_by_epoch:?}\n  marker detail     : {marker_detail:?}"
     );
 
+    // The seed write before truncate remains as an old-epoch marker until
+    // maintenance cleanup. The two concurrent copy batches should land in the
+    // same current epoch.
     assert_eq!(
-        (rows, markers),
-        (100, 2),
-        "expected (rows, markers) = (100, 2), got ({rows}, {markers}); parquet rows = \
-         {parquet_rows}, marker detail = {marker_detail:?}"
+        (rows, markers, marker_counts_by_epoch.as_slice()),
+        (100, 3, [1, 2].as_slice()),
+        "expected rows = 100 with one retained old marker and two current markers, got rows = \
+         {rows}, markers = {markers}; parquet rows = {parquet_rows}, marker counts/epoch = \
+         {marker_counts_by_epoch:?}, marker detail = {marker_detail:?}"
     );
 }
 
@@ -942,10 +966,10 @@ async fn truncate_clears_rows() {
     assert_eq!(col_count, 2, "table should still have 2 columns after truncate");
 }
 
-/// Truncation should clear copy markers so the same rows can be copied again.
+/// Truncation should rotate replay state so the same rows can be copied again.
 #[tokio::test(flavor = "multi_thread")]
-async fn truncate_clears_copy_markers_for_recopy() {
-    let lake = create_test_lake("truncate_clears_copy_markers_for_recopy").await;
+async fn truncate_rotates_replay_state_for_recopy() {
+    let lake = create_test_lake("truncate_rotates_replay_state_for_recopy").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
@@ -981,7 +1005,7 @@ async fn truncate_clears_copy_markers_for_recopy() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
-    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 2);
 }
 
 /// `write_events` applies inserts, updates, and deletes to the current table
@@ -2765,7 +2789,7 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 16);
-    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 2);
     assert_eq!(read_streaming_progress(&conn, &table_name), Some((415, 0)));
 
     let names: Vec<String> = conn
@@ -2872,11 +2896,11 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
     reset_ducklake_test_hooks();
 }
 
-/// Marker-table rows should stay in the DuckLake catalog instead of creating
-/// Parquet files.
+/// Marker-table rows should write Parquet files to avoid catalog-level
+/// contention.
 #[tokio::test(flavor = "multi_thread")]
-async fn applied_batches_table_uses_data_inlining() {
-    let lake = create_test_lake("applied_batches_table_uses_data_inlining").await;
+async fn applied_batches_table_writes_parquet() {
+    let lake = create_test_lake("applied_batches_table_writes_parquet").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
     let data = lake.data_dir.clone();
@@ -2913,7 +2937,7 @@ async fn applied_batches_table_uses_data_inlining() {
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
-    assert_eq!(count_internal_table_files(&data, "__etl_applied_table_batches"), 0);
+    assert_eq!(count_internal_table_files(&data, "__etl_applied_table_batches"), 1);
 }
 
 /// Mixed table batches remain correct when multiple tables are written in one
@@ -3122,7 +3146,7 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "truncate"), 0);
     assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 0);
-    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 2);
     assert_eq!(read_streaming_progress(&conn, &table_name), Some((800, 1)));
 
     let name: String = conn
@@ -3307,6 +3331,144 @@ async fn concurrent_writes_with_single_slot_complete() {
     .await;
     assert_eq!(count_rows(&conn, &table_name_a), 50);
     assert_eq!(count_rows(&conn, &table_name_b), 50);
+}
+
+/// Concurrent first writes with the production default pool size should not
+/// expose DuckLake catalog transaction conflicts.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_first_writes_with_default_pool_complete() {
+    let lake = create_test_lake("concurrent_first_writes_default_pool").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schemas = (0..8)
+        .map(|index| make_schema(100 + index, "public", &format!("table_{index}")))
+        .collect::<Vec<_>>();
+    let replicated_table_schemas =
+        schemas.iter().map(make_replicated_table_schema).collect::<Vec<_>>();
+    let table_names = schemas
+        .iter()
+        .map(|schema| table_name_to_ducklake_table_name(&schema.name).unwrap())
+        .collect::<Vec<_>>();
+
+    let store = MemoryStore::new();
+    for schema in schemas {
+        store.store_table_schema(schema).await.unwrap();
+    }
+
+    let destination = Arc::new(
+        DuckLakeDestination::new(
+            catalog_url.clone(),
+            data_url.clone(),
+            4,
+            None,
+            None,
+            None,
+            None,
+            store,
+        )
+        .await
+        .unwrap(),
+    );
+
+    let mut tasks = Vec::new();
+    for (index, replicated_table_schema) in replicated_table_schemas.into_iter().enumerate() {
+        let destination = Arc::clone(&destination);
+        tasks.push(tokio::spawn(async move {
+            let rows = (0..25)
+                .map(|id| {
+                    TableRow::new(vec![
+                        Cell::I32(id),
+                        Cell::String(format!("table-{index}-row-{id}")),
+                    ])
+                })
+                .collect::<Vec<_>>();
+
+            destination.write_table_rows(&replicated_table_schema, rows).await
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    let visible_table_names = table_names.iter().collect::<Vec<_>>();
+    let conn =
+        open_lake_conn_when_tables_visible(&catalog_url, &data_url, &visible_table_names).await;
+
+    for table_name in table_names {
+        assert_eq!(count_rows(&conn, &table_name), 25);
+    }
+}
+
+/// Concurrent table truncations with the production default pool size should
+/// not expose DuckLake catalog transaction conflicts.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_truncates_with_default_pool_complete() {
+    let lake = create_test_lake("concurrent_truncates_default_pool").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schemas = (0..8)
+        .map(|index| make_schema(200 + index, "public", &format!("truncate_table_{index}")))
+        .collect::<Vec<_>>();
+    let replicated_table_schemas =
+        schemas.iter().map(make_replicated_table_schema).collect::<Vec<_>>();
+    let table_names = schemas
+        .iter()
+        .map(|schema| table_name_to_ducklake_table_name(&schema.name).unwrap())
+        .collect::<Vec<_>>();
+
+    let store = MemoryStore::new();
+    for schema in schemas {
+        store.store_table_schema(schema).await.unwrap();
+    }
+
+    let destination = Arc::new(
+        DuckLakeDestination::new(
+            catalog_url.clone(),
+            data_url.clone(),
+            4,
+            None,
+            None,
+            None,
+            None,
+            store,
+        )
+        .await
+        .unwrap(),
+    );
+
+    for (index, replicated_table_schema) in replicated_table_schemas.iter().enumerate() {
+        let row_id = i32::try_from(index).unwrap();
+        destination
+            .write_table_rows(
+                replicated_table_schema,
+                vec![TableRow::new(vec![
+                    Cell::I32(row_id),
+                    Cell::String(format!("truncate-table-{index}")),
+                ])],
+            )
+            .await
+            .unwrap();
+    }
+
+    let visible_table_names = table_names.iter().collect::<Vec<_>>();
+    let conn =
+        open_lake_conn_when_tables_visible(&catalog_url, &data_url, &visible_table_names).await;
+    drop(conn);
+
+    let mut tasks = Vec::new();
+    for replicated_table_schema in replicated_table_schemas {
+        let destination = Arc::clone(&destination);
+        tasks.push(tokio::spawn(async move {
+            destination.truncate_table(&replicated_table_schema).await
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
 }
 
 /// Verifies that common Postgres types survive the write → read cycle.

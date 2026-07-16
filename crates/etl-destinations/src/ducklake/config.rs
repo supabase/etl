@@ -648,6 +648,8 @@ fn build_setup_plan_with_strategy(
         ("KEY_ID", quote_literal(s3.map(|s| s.access_key_id.as_str()).unwrap_or_default())),
         ("REGION", quote_literal(s3.map(|s| s.region.as_str()).unwrap_or_default())),
         ("SECRET", quote_literal(s3.map(|s| s.secret_access_key.as_str()).unwrap_or_default())),
+        ("SCOPE", quote_literal(data_path)),
+        ("URL_COMPATIBILITY_MODE", "true".to_owned()),
         ("URL_STYLE", quote_literal(s3.map(|s| s.url_style.as_str()).unwrap_or_default())),
     ]);
 
@@ -704,7 +706,8 @@ fn build_setup_plan_with_strategy(
             label: "configure_object_store",
             sql: format!(
                 "SET enable_http_metadata_cache = true; SET parquet_metadata_cache = true; CREATE \
-                 OR REPLACE SECRET {secret_name} (TYPE S3, {secret_body}, USE_SSL {});",
+                 OR REPLACE SECRET {secret_name} (TYPE S3, PROVIDER config, {secret_body}, \
+                 USE_SSL {});",
                 if s3.use_ssl { "true" } else { "false" }
             ),
         });
@@ -1252,6 +1255,11 @@ mod tests {
         assert!(plan.steps()[1].sql.contains(HTTPFS_EXTENSION_FILE));
         assert!(!plan.steps()[1].sql.contains("json"));
         assert!(plan.steps()[2].sql.contains("CREATE OR REPLACE SECRET"));
+        assert!(plan.steps()[2].sql.contains("PROVIDER config"));
+        assert!(
+            plan.steps()[2].sql.contains(&format!("SCOPE {}", quote_literal(data_url.as_str())))
+        );
+        assert!(plan.steps()[2].sql.contains("URL_COMPATIBILITY_MODE true"));
         assert!(plan.steps()[3].sql.contains("ATTACH"));
         assert!(plan.steps()[3].sql.contains("METADATA_SCHEMA 'ducklake'"));
         assert_eq!(plan.steps()[4].sql, configure_parquet_settings_sql());
@@ -1303,6 +1311,7 @@ mod tests {
 
         assert!(sql.contains(&format!("KEY_ID {}", quote_literal(&s3.access_key_id))));
         assert!(sql.contains(&format!("SECRET {}", quote_literal(&s3.secret_access_key))));
+        assert!(sql.contains(&format!("SCOPE {}", quote_literal(data_url.as_str()))));
         assert!(
             sql.contains(&format!("ENDPOINT {}", quote_literal(s3.endpoint.as_deref().unwrap())))
         );

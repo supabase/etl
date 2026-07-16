@@ -1,11 +1,10 @@
-use std::{
-    fmt,
-    num::NonZeroI32,
-    sync::{Arc, LazyLock},
-    time::Duration,
-};
+use std::{fmt, num::NonZeroI32, sync::Arc, time::Duration};
 
-use etl_postgres::{source::extract_server_version, tokio::tls::MakeRustlsConnect};
+use etl_postgres::{
+    application_name::{apply_worker_application_name, table_sync_worker_application_name},
+    source::extract_server_version,
+    tokio::tls::MakeRustlsConnect,
+};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::{
@@ -34,6 +33,7 @@ use crate::{
     config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
     error::{ErrorKind, EtlResult},
     etl_error,
+    pipeline::PipelineId,
     schema::{TableId, TableName},
 };
 
@@ -44,21 +44,24 @@ use crate::{
 const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default duration unit used when `pg_settings.unit` is empty.
 const PG_SETTINGS_DEFAULT_DURATION_UNIT: &str = "ms";
-/// Application name for ETL logical replication connections.
-const APP_NAME_REPLICATOR_REPLICATION: &str = "supabase_etl_replicator_replication";
+/// Base application name for ETL logical replication connections.
+///
+/// Worker connections append a suffix (see [`etl_postgres::application_name`])
+/// so they can be told apart in `pg_stat_activity`.
+pub const APP_NAME_REPLICATOR_REPLICATION: &str = "supabase_etl_replicator_replication";
 
-/// Connection options for logical replication.
+/// Builds connection options for logical replication connections.
 ///
 /// Disables statement, lock, and idle-in-transaction timeouts because
 /// replication streams, slot creation, and initial table synchronization can
 /// legitimately run for a long time.
-static REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> = LazyLock::new(|| {
-    PgConnectionOptions::builder(APP_NAME_REPLICATOR_REPLICATION)
+fn replication_options(application_name: String) -> PgConnectionOptions {
+    PgConnectionOptions::builder(application_name)
         .statement_timeout(0)
         .lock_timeout(0)
         .idle_in_transaction_session_timeout(0)
         .build()
-});
+}
 
 /// The kind of PostgreSQL connection to create.
 #[derive(Debug, Clone, Copy)]
@@ -99,13 +102,21 @@ fn tls_client_config_from_root_certs(trusted_root_certs: &str) -> EtlResult<Clie
 pub(super) struct PgReplicationConnectionConfig {
     /// Original PostgreSQL connection settings.
     pg_connection_config: Arc<PgConnectionConfig>,
+    /// Session options, including the per-worker `application_name`.
+    ///
+    /// Child connections reuse these options, so they inherit the parent
+    /// worker's `application_name`.
+    options: Arc<PgConnectionOptions>,
     /// Parsed rustls client config, present when TLS is enabled.
     tls_client_config: Option<Arc<ClientConfig>>,
 }
 
 impl PgReplicationConnectionConfig {
     /// Creates shared connection settings from an owned PostgreSQL config.
-    fn new(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
+    fn new(
+        pg_connection_config: PgConnectionConfig,
+        options: PgConnectionOptions,
+    ) -> EtlResult<Self> {
         let tls_client_config = if pg_connection_config.tls.enabled {
             Some(Arc::new(tls_client_config_from_root_certs(
                 &pg_connection_config.tls.trusted_root_certs,
@@ -114,12 +125,21 @@ impl PgReplicationConnectionConfig {
             None
         };
 
-        Ok(Self { pg_connection_config: Arc::new(pg_connection_config), tls_client_config })
+        Ok(Self {
+            pg_connection_config: Arc::new(pg_connection_config),
+            options: Arc::new(options),
+            tls_client_config,
+        })
     }
 
     /// Returns the raw PostgreSQL connection settings.
     fn pg_connection_config(&self) -> &PgConnectionConfig {
         &self.pg_connection_config
+    }
+
+    /// Returns the session options for connections created from this config.
+    fn options(&self) -> &PgConnectionOptions {
+        &self.options
     }
 
     /// Returns the shared rustls client config.
@@ -213,9 +233,55 @@ impl PgReplicationClient {
     /// Establishes a connection to Postgres. The connection uses TLS if
     /// configured in the supplied [`PgConnectionConfig`].
     ///
-    /// The connection is configured for logical replication mode.
+    /// The connection is configured for logical replication mode and uses the
+    /// base replication `application_name`. Worker connections should use
+    /// [`PgReplicationClient::connect_for_apply_worker`] or
+    /// [`PgReplicationClient::connect_for_table_sync_worker`] instead.
     pub async fn connect(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
-        let connection_config = PgReplicationConnectionConfig::new(pg_connection_config)?;
+        Self::connect_with_application_name(
+            pg_connection_config,
+            APP_NAME_REPLICATOR_REPLICATION.to_owned(),
+        )
+        .await
+    }
+
+    /// Establishes a replication connection tagged for an apply worker.
+    pub async fn connect_for_apply_worker(
+        pg_connection_config: PgConnectionConfig,
+        pipeline_id: PipelineId,
+    ) -> EtlResult<Self> {
+        Self::connect_with_application_name(
+            pg_connection_config,
+            apply_worker_application_name(APP_NAME_REPLICATOR_REPLICATION, pipeline_id),
+        )
+        .await
+    }
+
+    /// Establishes a replication connection tagged for a table sync worker.
+    pub async fn connect_for_table_sync_worker(
+        pg_connection_config: PgConnectionConfig,
+        pipeline_id: PipelineId,
+        table_id: TableId,
+    ) -> EtlResult<Self> {
+        Self::connect_with_application_name(
+            pg_connection_config,
+            table_sync_worker_application_name(
+                APP_NAME_REPLICATOR_REPLICATION,
+                pipeline_id,
+                table_id,
+            ),
+        )
+        .await
+    }
+
+    /// Establishes a replication connection with the supplied
+    /// `application_name`.
+    async fn connect_with_application_name(
+        pg_connection_config: PgConnectionConfig,
+        application_name: String,
+    ) -> EtlResult<Self> {
+        let options = replication_options(application_name);
+        let connection_config = PgReplicationConnectionConfig::new(pg_connection_config, options)?;
 
         PgReplicationClient::connect_with_kind(connection_config, ConnectionKind::Replication).await
     }
@@ -237,7 +303,7 @@ impl PgReplicationClient {
         kind: ConnectionKind,
     ) -> EtlResult<Self> {
         let mut config: Config =
-            connection_config.pg_connection_config().with_db(Some(&REPLICATION_OPTIONS));
+            connection_config.pg_connection_config().with_db(Some(connection_config.options()));
         kind.configure(&mut config);
 
         let (client, connection) = config.connect(NoTls).await?;
@@ -258,7 +324,7 @@ impl PgReplicationClient {
         kind: ConnectionKind,
     ) -> EtlResult<Self> {
         let mut config: Config =
-            connection_config.pg_connection_config().with_db(Some(&REPLICATION_OPTIONS));
+            connection_config.pg_connection_config().with_db(Some(connection_config.options()));
         kind.configure(&mut config);
 
         let tls_config = connection_config.tls_client_config().ok_or_else(|| {
@@ -692,5 +758,25 @@ impl PgReplicationClient {
                 Err(err.into())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replication_base_name_fits_worker_suffix_without_clamping() {
+        // --- GIVEN: a worker suffix with pipeline id and table oid summing to 15
+        // digits, the documented no-clamp bound for the replication base name ---
+        let name = table_sync_worker_application_name(
+            APP_NAME_REPLICATOR_REPLICATION,
+            99_999,
+            TableId::new(u32::MAX),
+        );
+
+        // --- THEN: the name fits Postgres's 63-byte limit with the base intact ---
+        assert!(name.len() <= 63, "worker application_name '{name}' exceeds Postgres limit");
+        assert!(name.starts_with(APP_NAME_REPLICATOR_REPLICATION));
     }
 }

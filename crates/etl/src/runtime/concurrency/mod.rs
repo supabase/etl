@@ -11,4 +11,4 @@ pub(crate) use stream::{
     BackpressureStream, TryBatchBackpressureStream, apply_worker_apply_stream_id,
     table_sync_worker_apply_stream_id, table_sync_worker_copy_stream_id,
 };
-pub use task_set::TaskSet;
+pub use task_set::{TaskSet, TaskSetDrainGuard};

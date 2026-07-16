@@ -46,7 +46,8 @@ use crate::{
         },
         core::is_create_table_conflict,
         encoding::{
-            PreparedRows, cell_to_sql_literal_ref, prepare_rows, table_row_to_sql_literal_ref,
+            PreparedRows, cell_to_sql_literal_ref, prepare_copy_rows, prepare_rows,
+            table_row_to_sql_literal_ref,
         },
         metrics::{
             BATCH_KIND_LABEL, DELETE_ORIGIN_LABEL, ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,
@@ -55,6 +56,7 @@ use crate::{
             ETL_DUCKLAKE_RETRIES_TOTAL, ETL_DUCKLAKE_UPSERT_ROWS, PREPARED_ROWS_KIND_LABEL,
             RETRY_SCOPE_LABEL, SUB_BATCH_KIND_LABEL,
         },
+        replay_epoch::LEGACY_REPLAY_EPOCH,
         sql::{qualified_lake_table_name, quote_identifier},
     },
     retry::{RetryAttempt, RetryDecision, RetryPolicy, retry_with_backoff},
@@ -77,9 +79,12 @@ const SQL_DELETE_BATCH_SIZE: usize = 16;
 const CDC_MUTATION_BATCH_SIZE: usize = 16;
 /// ETL-managed marker table storing per-table applied copy batches.
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
-/// Inline small marker-table writes in the DuckLake metadata catalog instead of
-/// creating Parquet files for this metadata-like table.
-const APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT: usize = 256;
+/// Disable helper-table data inlining. These tables are shared by all
+/// replicated tables, so keeping their writes out of DuckLake inline metadata
+/// avoids a catalog-level conflict hotspot.
+const APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT: usize = 0;
+/// Replay epoch column shared by ETL helper tables.
+const REPLAY_EPOCH_COLUMN: &str = "replay_epoch";
 
 /// Formats an optional LSN without using debug output.
 fn format_optional_lsn(lsn: Option<PgLsn>) -> String {
@@ -138,9 +143,9 @@ fn format_update_mutation_error_detail(
 /// ETL-managed per-table streaming replay progress for steady-state CDC
 /// retries.
 const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
-/// Inline small progress-table writes in the DuckLake metadata catalog instead
-/// of materializing files for this metadata-like table.
-const STREAMING_PROGRESS_TABLE_DATA_INLINING_ROW_LIMIT: usize = 256;
+/// Disable helper-table data inlining for the same reason as
+/// [`APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT`].
+const STREAMING_PROGRESS_TABLE_DATA_INLINING_ROW_LIMIT: usize = 0;
 /// Maximum number of times a failed write attempt is retried before giving up.
 const MAX_COMMIT_RETRIES: u32 = 10;
 /// Initial backoff duration before the first retry.
@@ -322,6 +327,7 @@ enum PreparedDuckLakeTableBatchAction {
 /// Prepared atomic DuckLake table batch with replay metadata.
 pub(super) struct PreparedDuckLakeTableBatch {
     table_name: DuckLakeTableName,
+    replay_epoch: String,
     batch_id: String,
     batch_kind: DuckLakeTableBatchKind,
     first_start_lsn: Option<PgLsn>,
@@ -375,6 +381,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
     let ddl = format!(
         r#"CREATE TABLE IF NOT EXISTS {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}" (
              table_name VARCHAR NOT NULL,
+             replay_epoch VARCHAR,
              batch_id VARCHAR NOT NULL,
              batch_kind VARCHAR NOT NULL,
              first_start_lsn UBIGINT,
@@ -398,6 +405,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
                 ));
             }
         }
+        ensure_helper_table_replay_epoch_column(conn, APPLIED_BATCHES_TABLE)?;
 
         let set_option_sql = format!(
             "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
@@ -441,6 +449,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
     let ddl = format!(
         r#"CREATE TABLE IF NOT EXISTS {LAKE_CATALOG}."{STREAMING_PROGRESS_TABLE}" (
              table_name VARCHAR NOT NULL,
+             replay_epoch VARCHAR,
              last_commit_lsn UBIGINT NOT NULL,
              last_tx_ordinal UBIGINT NOT NULL,
              updated_at TIMESTAMPTZ NOT NULL
@@ -462,6 +471,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
                 ));
             }
         }
+        ensure_helper_table_replay_epoch_column(conn, STREAMING_PROGRESS_TABLE)?;
 
         let set_option_sql = format!(
             "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
@@ -481,6 +491,69 @@ pub(super) async fn ensure_streaming_progress_table_exists(
         Ok(())
     })
     .await
+}
+
+/// Adds the replay epoch column to helper tables created by older versions.
+fn ensure_helper_table_replay_epoch_column(
+    conn: &duckdb::Connection,
+    table_name: &str,
+) -> EtlResult<()> {
+    if helper_table_has_column(conn, table_name, REPLAY_EPOCH_COLUMN)? {
+        return Ok(());
+    }
+
+    let table_name = format!(r#"{LAKE_CATALOG}."{table_name}""#);
+    let column_name = quote_identifier(REPLAY_EPOCH_COLUMN);
+    let sql = format!("ALTER TABLE {table_name} ADD COLUMN {column_name} VARCHAR;");
+    conn.execute_batch(&sql).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake helper table migration failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })?;
+
+    Ok(())
+}
+
+fn helper_table_has_column(
+    conn: &duckdb::Connection,
+    table_name: &str,
+    column_name: &str,
+) -> EtlResult<bool> {
+    let sql = format!(
+        "SELECT 1 FROM information_schema.columns WHERE table_catalog = {} AND table_name = {} \
+         AND column_name = {} LIMIT 1;",
+        quote_literal(LAKE_CATALOG),
+        quote_literal(table_name),
+        quote_literal(column_name)
+    );
+    let mut statement = conn.prepare(&sql).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake helper table schema lookup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })?;
+    let mut rows = statement.query([]).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake helper table schema lookup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })?;
+
+    rows.next().map(|row| row.is_some()).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake helper table schema row fetch failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })
 }
 
 /// Applies all prepared atomic batches for one table, reusing one DuckDB
@@ -652,6 +725,7 @@ pub(super) async fn apply_table_batch_with_retry(
 pub(super) fn prepare_mutation_table_batches(
     replicated_table_schema: &ReplicatedTableSchema,
     table_name: DuckLakeTableName,
+    replay_epoch: String,
     tracked_mutations: Vec<TrackedTableMutation>,
 ) -> EtlResult<Vec<PreparedDuckLakeTableBatch>> {
     let mut prepared_batches = Vec::new();
@@ -664,6 +738,7 @@ pub(super) fn prepare_mutation_table_batches(
                 &mut prepared_batches,
                 replicated_table_schema,
                 &table_name,
+                &replay_epoch,
                 std::mem::take(&mut pending_mutations),
             )?;
         }
@@ -673,6 +748,7 @@ pub(super) fn prepare_mutation_table_batches(
         &mut prepared_batches,
         replicated_table_schema,
         &table_name,
+        &replay_epoch,
         pending_mutations,
     )?;
 
@@ -683,11 +759,13 @@ pub(super) fn prepare_mutation_table_batches(
 pub(super) fn prepare_copy_table_batch(
     replicated_table_schema: &ReplicatedTableSchema,
     table_name: DuckLakeTableName,
+    replay_epoch: String,
     table_rows: Vec<TableRow>,
 ) -> EtlResult<PreparedDuckLakeTableBatch> {
     let identity = build_copy_batch_identity(&table_name, replicated_table_schema, &table_rows)?;
     Ok(PreparedDuckLakeTableBatch {
         table_name,
+        replay_epoch,
         batch_id: identity.batch_id,
         batch_kind: DuckLakeTableBatchKind::Copy,
         first_start_lsn: identity.first_start_lsn,
@@ -696,7 +774,7 @@ pub(super) fn prepare_copy_table_batch(
         last_sequence_key: None,
         insert_column_names: replicated_column_names(replicated_table_schema),
         action: PreparedDuckLakeTableBatchAction::Mutation(vec![PreparedTableMutation::Upsert(
-            prepare_rows(table_rows),
+            prepare_copy_rows(replicated_table_schema, table_rows)?,
         )]),
     })
 }
@@ -704,11 +782,13 @@ pub(super) fn prepare_copy_table_batch(
 /// Prepares the ordered atomic batch for one table's truncate events.
 pub(super) fn prepare_truncate_table_batch(
     table_name: DuckLakeTableName,
+    replay_epoch: String,
     tracked_truncates: Vec<TrackedTruncateEvent>,
 ) -> PreparedDuckLakeTableBatch {
     let identity = build_truncate_batch_identity(&table_name, &tracked_truncates);
     PreparedDuckLakeTableBatch {
         table_name,
+        replay_epoch,
         batch_id: identity.batch_id,
         batch_kind: DuckLakeTableBatchKind::Truncate,
         first_start_lsn: identity.first_start_lsn,
@@ -718,52 +798,6 @@ pub(super) fn prepare_truncate_table_batch(
         insert_column_names: Vec::new(),
         action: PreparedDuckLakeTableBatchAction::Truncate,
     }
-}
-
-/// Deletes persisted markers for one table and batch kind.
-pub(super) fn clear_applied_batch_markers_for_kind(
-    conn: &duckdb::Connection,
-    table_name: &DuckLakeTableName,
-    batch_kind: DuckLakeTableBatchKind,
-) -> EtlResult<()> {
-    let table_id = table_name.id();
-    let sql = format!(
-        r#"DELETE FROM {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}"
-         WHERE table_name = {} AND batch_kind = {};"#,
-        quote_literal(&table_id),
-        quote_literal(batch_kind.as_str())
-    );
-    conn.execute_batch(&sql).map_err(|err| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake batch marker delete failed",
-            format_query_error_detail(&sql),
-            source: err
-        )
-    })?;
-    Ok(())
-}
-
-/// Deletes the persisted streaming replay watermark for one table.
-pub(super) fn clear_table_streaming_progress(
-    conn: &duckdb::Connection,
-    table_name: &DuckLakeTableName,
-) -> EtlResult<()> {
-    let table_id = table_name.id();
-    let sql = format!(
-        r#"DELETE FROM {LAKE_CATALOG}."{STREAMING_PROGRESS_TABLE}"
-         WHERE table_name = {};"#,
-        quote_literal(&table_id),
-    );
-    conn.execute_batch(&sql).map_err(|err| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake streaming progress delete failed",
-            format_query_error_detail(&sql),
-            source: err
-        )
-    })?;
-    Ok(())
 }
 
 /// Applies jitter to one DuckLake retry delay.
@@ -798,13 +832,18 @@ fn record_replayed_batch_skip(batch: &PreparedDuckLakeTableBatch) {
 fn read_table_streaming_progress(
     conn: &duckdb::Connection,
     table_name: &DuckLakeTableName,
+    replay_epoch: &str,
 ) -> EtlResult<Option<TableStreamingProgress>> {
     let table_id = table_name.id();
     let sql = format!(
         r#"SELECT last_commit_lsn, last_tx_ordinal
          FROM {LAKE_CATALOG}."{STREAMING_PROGRESS_TABLE}"
-         WHERE table_name = {} LIMIT 1;"#,
+         WHERE table_name = {} AND COALESCE({REPLAY_EPOCH_COLUMN}, {}) = {}
+         ORDER BY last_commit_lsn DESC, last_tx_ordinal DESC
+         LIMIT 1;"#,
         quote_literal(&table_id),
+        quote_literal(LEGACY_REPLAY_EPOCH),
+        quote_literal(replay_epoch),
     );
     let mut statement = conn.prepare(&sql).map_err(|err| {
         etl_error!(
@@ -861,8 +900,10 @@ fn read_table_streaming_progress(
 pub(super) fn read_table_streaming_progress_sequence_key(
     conn: &duckdb::Connection,
     table_name: &DuckLakeTableName,
+    replay_epoch: &str,
 ) -> EtlResult<Option<EventSequenceKey>> {
-    Ok(read_table_streaming_progress(conn, table_name)?.map(|progress| progress.last_sequence_key))
+    Ok(read_table_streaming_progress(conn, table_name, replay_epoch)?
+        .map(|progress| progress.last_sequence_key))
 }
 
 /// Drops already-applied tracked mutations using the persisted sequence key.
@@ -962,7 +1003,7 @@ fn apply_table_batches(
     }
 
     let mut streaming_progress = if batches[0].uses_streaming_progress() {
-        read_table_streaming_progress(conn, batches[0].table_name())?
+        read_table_streaming_progress(conn, batches[0].table_name(), &batches[0].replay_epoch)?
     } else {
         None
     };
@@ -1029,6 +1070,7 @@ fn push_prepared_mutation_batch(
     prepared_batches: &mut Vec<PreparedDuckLakeTableBatch>,
     replicated_table_schema: &ReplicatedTableSchema,
     table_name: &DuckLakeTableName,
+    replay_epoch: &str,
     tracked_mutations: Vec<TrackedTableMutation>,
 ) -> EtlResult<()> {
     if tracked_mutations.is_empty() {
@@ -1043,6 +1085,7 @@ fn push_prepared_mutation_batch(
 
     prepared_batches.push(PreparedDuckLakeTableBatch {
         table_name: table_name.clone(),
+        replay_epoch: replay_epoch.to_owned(),
         batch_id: identity.batch_id,
         batch_kind: DuckLakeTableBatchKind::Mutation,
         first_start_lsn: identity.first_start_lsn,
@@ -1527,8 +1570,13 @@ fn applied_batch_marker_exists(
     let table_id = batch.table_name.id();
     let sql = format!(
         r#"SELECT 1 FROM {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}"
-         WHERE table_name = {} AND batch_id = {} LIMIT 1;"#,
+         WHERE table_name = {}
+           AND COALESCE({REPLAY_EPOCH_COLUMN}, {}) = {}
+           AND batch_id = {}
+         LIMIT 1;"#,
         quote_literal(&table_id),
+        quote_literal(LEGACY_REPLAY_EPOCH),
+        quote_literal(&batch.replay_epoch),
         quote_literal(&batch.batch_id)
     );
     let mut statement = conn.prepare(&sql).map_err(|err| {
@@ -1566,8 +1614,10 @@ fn insert_applied_batch_marker(
     let table_id = batch.table_name.id();
     let sql = format!(
         r#"INSERT INTO {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}"
-         (table_name, batch_id, batch_kind, first_start_lsn, last_commit_lsn, applied_at) VALUES ({}, {}, {}, {}, {}, current_timestamp);"#,
+         (table_name, replay_epoch, batch_id, batch_kind, first_start_lsn, last_commit_lsn, applied_at)
+         VALUES ({}, {}, {}, {}, {}, {}, current_timestamp);"#,
         quote_literal(&table_id),
+        quote_literal(&batch.replay_epoch),
         quote_literal(&batch.batch_id),
         quote_literal(batch.batch_kind.as_str()),
         optional_lsn_to_sql_literal(batch.first_start_lsn),
@@ -1584,7 +1634,7 @@ fn insert_applied_batch_marker(
     Ok(())
 }
 
-/// Updates the steady-state streaming replay watermark inside the open
+/// Appends the steady-state streaming replay watermark inside the open
 /// transaction.
 fn update_table_streaming_progress(
     conn: &duckdb::Connection,
@@ -1599,13 +1649,11 @@ fn update_table_streaming_progress(
     })?;
     let table_id = batch.table_name.id();
     let sql = format!(
-        r#"DELETE FROM {LAKE_CATALOG}."{STREAMING_PROGRESS_TABLE}"
-         WHERE table_name = {};
-         INSERT INTO {LAKE_CATALOG}."{STREAMING_PROGRESS_TABLE}"
-         (table_name, last_commit_lsn, last_tx_ordinal, updated_at)
-         VALUES ({}, {}, {}, current_timestamp);"#,
+        r#"INSERT INTO {LAKE_CATALOG}."{STREAMING_PROGRESS_TABLE}"
+         (table_name, replay_epoch, last_commit_lsn, last_tx_ordinal, updated_at)
+         VALUES ({}, {}, {}, {}, current_timestamp);"#,
         quote_literal(&table_id),
-        quote_literal(&table_id),
+        quote_literal(&batch.replay_epoch),
         u64::from(last_sequence_key.commit_lsn),
         last_sequence_key.tx_ordinal,
     );
@@ -1753,6 +1801,32 @@ impl ReusableStagingTable {
                         },
                     )?;
                 }
+                appender.flush().map_err(|err| {
+                    tracing::error!(error = %err, "error flush");
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake staging appender flush failed",
+                        source: err
+                    )
+                })?;
+            }
+            PreparedRows::ArrowRecordBatch(record_batch) => {
+                let mut appender = conn.appender(&self.staging_name).map_err(|error| {
+                    tracing::error!(error = %error, "error appender");
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake staging appender creation failed",
+                        source: error
+                    )
+                })?;
+                appender.append_record_batch(record_batch.clone()).map_err(|err| {
+                    tracing::error!(error = %err, "error append record batch");
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake staging append_record_batch failed",
+                        source: err
+                    )
+                })?;
                 appender.flush().map_err(|err| {
                     tracing::error!(error = %err, "error flush");
                     etl_error!(
@@ -1937,10 +2011,7 @@ fn apply_upsert_mutation(
     prepared_rows: &PreparedRows,
     reusable_staging_table: &mut ReusableStagingTable,
 ) -> EtlResult<()> {
-    let row_count = match prepared_rows {
-        PreparedRows::Appender(values) => values.len(),
-        PreparedRows::SqlLiterals(values) => values.len(),
-    };
+    let row_count = prepared_rows_count(prepared_rows);
 
     if row_count == 0 {
         return Ok(());
@@ -2040,6 +2111,7 @@ fn apply_update_mutation(
 fn prepared_rows_count(prepared_rows: &PreparedRows) -> usize {
     match prepared_rows {
         PreparedRows::Appender(values) => values.len(),
+        PreparedRows::ArrowRecordBatch(record_batch) => record_batch.num_rows(),
         PreparedRows::SqlLiterals(values) => values.len(),
     }
 }
@@ -2048,6 +2120,7 @@ fn prepared_rows_count(prepared_rows: &PreparedRows) -> usize {
 fn prepared_rows_kind(prepared_rows: &PreparedRows) -> &'static str {
     match prepared_rows {
         PreparedRows::Appender(_) => "appender",
+        PreparedRows::ArrowRecordBatch(_) => "arrow_record_batch",
         PreparedRows::SqlLiterals(_) => "sql_literals",
     }
 }
@@ -2071,10 +2144,7 @@ fn apply_sub_batch_rows(batch: &PreparedDuckLakeTableBatch) -> Option<usize> {
     }
 
     match &prepared_mutations[0] {
-        PreparedTableMutation::Upsert(prepared_rows) => Some(match prepared_rows {
-            PreparedRows::Appender(values) => values.len(),
-            PreparedRows::SqlLiterals(values) => values.len(),
-        }),
+        PreparedTableMutation::Upsert(prepared_rows) => Some(prepared_rows_count(prepared_rows)),
         PreparedTableMutation::Delete { .. } | PreparedTableMutation::Update { .. } => None,
     }
 }
@@ -2235,13 +2305,26 @@ mod tests {
         ReplicatedTableSchema::all(Arc::new(make_schema()))
     }
 
+    fn make_replicated_schema_with_columns(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
+        ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            columns,
+        )))
+    }
+
     fn ducklake_table_name() -> DuckLakeTableName {
         DuckLakeTableName::new("public", "users")
+    }
+
+    fn attach_lake_catalog(conn: &duckdb::Connection) {
+        conn.execute_batch("attach ':memory:' as lake;").unwrap();
     }
 
     fn make_prepared_batch(table_name: DuckLakeTableName) -> PreparedDuckLakeTableBatch {
         PreparedDuckLakeTableBatch {
             table_name,
+            replay_epoch: LEGACY_REPLAY_EPOCH.to_owned(),
             batch_id: "test-batch".to_owned(),
             batch_kind: DuckLakeTableBatchKind::Mutation,
             first_start_lsn: None,
@@ -2265,6 +2348,188 @@ mod tests {
         let source = error.source().expect("expected sanitized source");
         assert!(!source.to_string().contains(sensitive_value));
         assert!(source.to_string().contains("omitted because it may contain row values"));
+    }
+
+    #[test]
+    fn applied_batch_marker_exists_filters_by_replay_epoch() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        attach_lake_catalog(&conn);
+        conn.execute_batch(
+            r#"create table lake."__etl_applied_table_batches" (
+                 table_name varchar not null,
+                 replay_epoch varchar,
+                 batch_id varchar not null,
+                 batch_kind varchar not null,
+                 first_start_lsn ubigint,
+                 last_commit_lsn ubigint,
+                 applied_at timestamptz not null
+               );"#,
+        )
+        .unwrap();
+        let mut batch = make_prepared_batch(ducklake_table_name());
+        batch.replay_epoch = "current".to_owned();
+        let table_id = batch.table_name.id();
+
+        conn.execute_batch(&format!(
+            r#"insert into lake."__etl_applied_table_batches"
+               (table_name, replay_epoch, batch_id, batch_kind, applied_at)
+               values ({}, 'other', 'test-batch', 'mutation', current_timestamp);"#,
+            quote_literal(&table_id)
+        ))
+        .unwrap();
+        assert!(!applied_batch_marker_exists(&conn, &batch).unwrap());
+
+        conn.execute_batch(&format!(
+            r#"insert into lake."__etl_applied_table_batches"
+               (table_name, replay_epoch, batch_id, batch_kind, applied_at)
+               values ({}, 'current', 'test-batch', 'mutation', current_timestamp);"#,
+            quote_literal(&table_id)
+        ))
+        .unwrap();
+        assert!(applied_batch_marker_exists(&conn, &batch).unwrap());
+    }
+
+    #[test]
+    fn applied_batch_marker_exists_treats_null_replay_epoch_as_legacy() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        attach_lake_catalog(&conn);
+        conn.execute_batch(
+            r#"create table lake."__etl_applied_table_batches" (
+                 table_name varchar not null,
+                 replay_epoch varchar,
+                 batch_id varchar not null,
+                 batch_kind varchar not null,
+                 first_start_lsn ubigint,
+                 last_commit_lsn ubigint,
+                 applied_at timestamptz not null
+               );"#,
+        )
+        .unwrap();
+        let legacy_batch = make_prepared_batch(ducklake_table_name());
+        let mut current_batch = make_prepared_batch(ducklake_table_name());
+        current_batch.replay_epoch = "current".to_owned();
+        let table_id = legacy_batch.table_name.id();
+
+        conn.execute_batch(&format!(
+            r#"insert into lake."__etl_applied_table_batches"
+               (table_name, replay_epoch, batch_id, batch_kind, applied_at)
+               values ({}, null, 'test-batch', 'mutation', current_timestamp);"#,
+            quote_literal(&table_id)
+        ))
+        .unwrap();
+
+        assert!(applied_batch_marker_exists(&conn, &legacy_batch).unwrap());
+        assert!(!applied_batch_marker_exists(&conn, &current_batch).unwrap());
+    }
+
+    #[test]
+    fn ensure_helper_table_replay_epoch_column_adds_missing_column() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        attach_lake_catalog(&conn);
+        conn.execute_batch(
+            r#"create table lake."__etl_applied_table_batches" (
+                 table_name varchar not null,
+                 batch_id varchar not null
+               );"#,
+        )
+        .unwrap();
+
+        assert!(
+            !helper_table_has_column(&conn, APPLIED_BATCHES_TABLE, REPLAY_EPOCH_COLUMN).unwrap()
+        );
+        ensure_helper_table_replay_epoch_column(&conn, APPLIED_BATCHES_TABLE).unwrap();
+        assert!(
+            helper_table_has_column(&conn, APPLIED_BATCHES_TABLE, REPLAY_EPOCH_COLUMN).unwrap()
+        );
+        ensure_helper_table_replay_epoch_column(&conn, APPLIED_BATCHES_TABLE).unwrap();
+    }
+
+    #[test]
+    fn read_table_streaming_progress_sequence_key_filters_by_replay_epoch() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        attach_lake_catalog(&conn);
+        conn.execute_batch(
+            r#"create table lake."__etl_streaming_progress" (
+                 table_name varchar not null,
+                 replay_epoch varchar,
+                 last_commit_lsn ubigint not null,
+                 last_tx_ordinal ubigint not null,
+                 updated_at timestamptz not null
+               );"#,
+        )
+        .unwrap();
+        let table_name = ducklake_table_name();
+        let table_id = table_name.id();
+
+        conn.execute_batch(&format!(
+            r#"insert into lake."__etl_streaming_progress"
+               (table_name, replay_epoch, last_commit_lsn, last_tx_ordinal, updated_at)
+               values
+                 ({0}, 'current', 20, 1, current_timestamp),
+                 ({0}, 'other', 999, 0, current_timestamp),
+                 ({0}, 'current', 20, 2, current_timestamp),
+                 ({0}, null, 30, 0, current_timestamp);"#,
+            quote_literal(&table_id)
+        ))
+        .unwrap();
+
+        let current_key =
+            read_table_streaming_progress_sequence_key(&conn, &table_name, "current").unwrap();
+        assert_eq!(current_key, Some(EventSequenceKey::new(PgLsn::from(20), 2)));
+
+        let legacy_key =
+            read_table_streaming_progress_sequence_key(&conn, &table_name, LEGACY_REPLAY_EPOCH)
+                .unwrap();
+        assert_eq!(legacy_key, Some(EventSequenceKey::new(PgLsn::from(30), 0)));
+    }
+
+    #[test]
+    fn staging_load_rows_appends_arrow_record_batch() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table staging_arrow_copy (id integer, name varchar, created_at timestamp);",
+        )
+        .unwrap();
+        let replicated_table_schema = make_replicated_schema_with_columns(vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("created_at".to_owned(), PgType::TIMESTAMP, -1, 3, true),
+        ]);
+        let prepared_rows = prepare_copy_rows(
+            &replicated_table_schema,
+            vec![
+                TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("alice".to_owned()),
+                    Cell::Timestamp(
+                        chrono::NaiveDate::from_ymd_opt(2026, 1, 2)
+                            .unwrap()
+                            .and_hms_opt(3, 4, 5)
+                            .unwrap(),
+                    ),
+                ]),
+                TableRow::new(vec![Cell::I32(2), Cell::Null, Cell::Null]),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(prepared_rows, PreparedRows::ArrowRecordBatch(_)));
+
+        let staging_table = ReusableStagingTable {
+            table_name: ducklake_table_name(),
+            staging_name: "staging_arrow_copy".to_owned(),
+            created: true,
+            insert_column_names: vec!["id".to_owned(), "name".to_owned(), "created_at".to_owned()],
+        };
+
+        staging_table.load_rows(&conn, &prepared_rows).unwrap();
+
+        let count: i64 = conn
+            .query_row("select count(*) from staging_arrow_copy", [], |row| row.get(0))
+            .unwrap();
+        let id_sum: i64 =
+            conn.query_row("select sum(id) from staging_arrow_copy", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(id_sum, 3);
     }
 
     #[test]
@@ -2432,6 +2697,9 @@ mod tests {
             PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
                 panic!("expected appender payload")
             }
+            PreparedTableMutation::Upsert(PreparedRows::ArrowRecordBatch(_)) => {
+                panic!("expected appender payload")
+            }
             PreparedTableMutation::Delete { .. } | PreparedTableMutation::Update { .. } => {
                 panic!("expected upsert second")
             }
@@ -2594,6 +2862,7 @@ mod tests {
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
             ducklake_table_name(),
+            LEGACY_REPLAY_EPOCH.to_owned(),
             vec![
                 TrackedTableMutation::new(
                     PgLsn::from(10),
@@ -2629,6 +2898,9 @@ mod tests {
                     PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
                         panic!("expected appender payload")
                     }
+                    PreparedTableMutation::Upsert(PreparedRows::ArrowRecordBatch(_)) => {
+                        panic!("expected appender payload")
+                    }
                     PreparedTableMutation::Delete { .. } | PreparedTableMutation::Update { .. } => {
                         panic!("expected upsert")
                     }
@@ -2644,6 +2916,7 @@ mod tests {
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
             ducklake_table_name(),
+            LEGACY_REPLAY_EPOCH.to_owned(),
             vec![
                 TrackedTableMutation::new(
                     PgLsn::from(100),
@@ -2701,6 +2974,7 @@ mod tests {
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
             ducklake_table_name(),
+            LEGACY_REPLAY_EPOCH.to_owned(),
             vec![
                 TrackedTableMutation::new(
                     PgLsn::from(100),
@@ -2751,6 +3025,7 @@ mod tests {
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
             ducklake_table_name(),
+            LEGACY_REPLAY_EPOCH.to_owned(),
             vec![
                 TrackedTableMutation::new(
                     PgLsn::from(100),
@@ -2824,6 +3099,7 @@ mod tests {
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
             ducklake_table_name(),
+            LEGACY_REPLAY_EPOCH.to_owned(),
             tracked,
         )
         .unwrap();
@@ -2861,6 +3137,7 @@ mod tests {
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
             ducklake_table_name(),
+            LEGACY_REPLAY_EPOCH.to_owned(),
             vec![
                 TrackedTableMutation::new(
                     PgLsn::from(100),

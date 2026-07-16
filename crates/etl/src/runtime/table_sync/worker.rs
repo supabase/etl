@@ -729,8 +729,12 @@ where
         // Note that this connection must be tied to the lifetime of this worker,
         // otherwise there will be problems when cleaning up the replication
         // slot.
-        let mut replication_client =
-            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+        let mut replication_client = PgReplicationClient::connect_for_table_sync_worker(
+            self.config.pg_connection.clone(),
+            self.pipeline_id,
+            self.table_id,
+        )
+        .await?;
 
         let table_sync_result = start_table_sync(
             self.pipeline_id,

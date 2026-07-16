@@ -11,9 +11,9 @@ mod secret;
 pub mod shared;
 
 pub use ducklake::{
-    DuckLakeCatalogConnectOptionsError, ParseDucklakeUrlError,
-    ducklake_catalog_metadata_connect_options, libpq_tcp_host, parse_ducklake_s3_data_path,
-    parse_ducklake_url,
+    DuckLakeCatalogConnectOptionsError, ParseDucklakeUrlError, default_ducklake_s3_url_style,
+    default_ducklake_s3_use_ssl, ducklake_catalog_metadata_connect_options, libpq_tcp_host,
+    parse_ducklake_s3_data_path, parse_ducklake_url,
 };
 pub use environment::Environment;
 pub use load::{Config, LoadConfigError, load_config};

@@ -7,16 +7,16 @@ use etl_destinations::iceberg::{
 use secrecy::ExposeSecret;
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
-use crate::configs::destination::FullApiIcebergConfig;
+use crate::configs::destination::ApiIcebergConfig;
 
 /// Validates Iceberg destination connectivity.
 #[derive(Debug)]
 pub(super) struct IcebergValidator {
-    config: FullApiIcebergConfig,
+    config: ApiIcebergConfig,
 }
 
 impl IcebergValidator {
-    pub(super) fn new(config: FullApiIcebergConfig) -> Self {
+    pub(super) fn new(config: ApiIcebergConfig) -> Self {
         Self { config }
     }
 }
@@ -28,7 +28,7 @@ impl Validator for IcebergValidator {
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
         let client = match &self.config {
-            FullApiIcebergConfig::Supabase {
+            ApiIcebergConfig::Supabase {
                 project_ref,
                 warehouse_name,
                 catalog_token,
@@ -48,7 +48,7 @@ impl Validator for IcebergValidator {
                 )
                 .await
             }
-            FullApiIcebergConfig::Rest {
+            ApiIcebergConfig::Rest {
                 catalog_uri,
                 warehouse_name,
                 s3_access_key_id,

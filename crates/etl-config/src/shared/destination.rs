@@ -63,7 +63,8 @@ pub enum DuckLakeMaintenanceMode {
 }
 
 /// Supported product destination kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DestinationKind {
     /// Google BigQuery destination.
     BigQuery,

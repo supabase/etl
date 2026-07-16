@@ -1,4 +1,8 @@
 use etl_api::{
+    configs::{
+        destination::UpdateApiDestinationConfig, pipeline::UpdateApiPipelineConfig,
+        update::UpdateField,
+    },
     data,
     k8s::PodStatus,
     routes::{
@@ -301,9 +305,11 @@ async fn an_existing_bigquery_destination_and_pipeline_can_be_updated() {
     // Act
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
-        destination_config: updated_destination_config().into(),
+        destination_config: UpdateApiDestinationConfig::from_api_config(
+            updated_destination_config(),
+        ),
         source_id: new_source_id,
-        pipeline_config: updated_pipeline_config(),
+        pipeline_config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app
         .update_destination_pipeline(tenant_id, destination_id, pipeline_id, &destination_pipeline)
@@ -332,6 +338,67 @@ async fn an_existing_bigquery_destination_and_pipeline_can_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn destination_pipeline_update_accepts_partial_config_updates() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    create_default_image(&app).await;
+    let destination_pipeline = CreateDestinationPipelineRequest {
+        destination_name: new_name(),
+        destination_config: new_bigquery_destination_config(),
+        source_id,
+        pipeline_config: new_pipeline_config(),
+    };
+    let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let CreateDestinationPipelineResponse { destination_id, pipeline_id } = response;
+
+    let update_request = UpdateDestinationPipelineRequest {
+        destination_name: updated_name(),
+        destination_config: UpdateApiDestinationConfig::BigQuery {
+            project_id: UpdateField::Preserve,
+            dataset_id: UpdateField::Set("dataset-id-patched".to_owned()),
+            service_account_key: UpdateField::Preserve,
+            max_staleness_mins: UpdateField::Preserve,
+            connection_pool_size: UpdateField::Preserve,
+        },
+        source_id,
+        pipeline_config: UpdateApiPipelineConfig {
+            log_level: UpdateField::Clear,
+            ..UpdateApiPipelineConfig::default()
+        },
+    };
+    let response = app
+        .update_destination_pipeline(tenant_id, destination_id, pipeline_id, &update_request)
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app.read_destination(tenant_id, destination_id).await;
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    match response.config {
+        etl_api::configs::destination::ApiDestinationConfig::BigQuery {
+            project_id,
+            dataset_id,
+            ..
+        } => {
+            assert_eq!(project_id, "project-id");
+            assert_eq!(dataset_id, "dataset-id-patched");
+        }
+        _ => panic!("Config types don't match"),
+    }
+
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert!(response.config.log_level.is_none());
+    assert_eq!(response.config.publication_name, "publication");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_existing_iceberg_supabase_destination_and_pipeline_can_be_updated() {
     init_test_tracing();
     // Arrange
@@ -354,9 +421,11 @@ async fn an_existing_iceberg_supabase_destination_and_pipeline_can_be_updated() 
     // Act
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: "Iceberg Supabase Destination (Updated)".to_owned(),
-        destination_config: updated_iceberg_supabase_destination_config().into(),
+        destination_config: UpdateApiDestinationConfig::from_api_config(
+            updated_iceberg_supabase_destination_config(),
+        ),
         source_id: new_source_id,
-        pipeline_config: updated_pipeline_config(),
+        pipeline_config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app
         .update_destination_pipeline(tenant_id, destination_id, pipeline_id, &destination_pipeline)
@@ -418,9 +487,11 @@ async fn destination_and_pipeline_with_another_tenants_source_cannot_be_updated(
     let source2_id = create_source(&app, tenant2_id).await;
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
-        destination_config: updated_destination_config().into(),
+        destination_config: UpdateApiDestinationConfig::from_api_config(
+            updated_destination_config(),
+        ),
         source_id: source2_id,
-        pipeline_config: updated_pipeline_config(),
+        pipeline_config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app
         .update_destination_pipeline(tenant1_id, destination_id, pipeline_id, &destination_pipeline)
@@ -469,9 +540,11 @@ async fn updating_destination_pipeline_to_duplicate_source_destination_returns_c
     // Act
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
-        destination_config: updated_destination_config().into(),
+        destination_config: UpdateApiDestinationConfig::from_api_config(
+            updated_destination_config(),
+        ),
         source_id: source2_id,
-        pipeline_config: updated_pipeline_config(),
+        pipeline_config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app
         .update_destination_pipeline(tenant_id, destination_id, pipeline_id, &destination_pipeline)
@@ -516,9 +589,11 @@ async fn destination_and_pipeline_with_another_tenants_destination_cannot_be_upd
     let destination2_id = create_destination(&app, tenant2_id).await;
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
-        destination_config: updated_destination_config().into(),
+        destination_config: UpdateApiDestinationConfig::from_api_config(
+            updated_destination_config(),
+        ),
         source_id: source1_id,
-        pipeline_config: updated_pipeline_config(),
+        pipeline_config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app
         .update_destination_pipeline(
@@ -579,9 +654,11 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cannot_be_update
     // Act
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
-        destination_config: updated_destination_config().into(),
+        destination_config: UpdateApiDestinationConfig::from_api_config(
+            updated_destination_config(),
+        ),
         source_id: source1_id,
-        pipeline_config: updated_pipeline_config(),
+        pipeline_config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app
         .update_destination_pipeline(

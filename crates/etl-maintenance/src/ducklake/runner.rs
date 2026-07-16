@@ -35,6 +35,11 @@ use tracing::{debug, info, trace, warn};
 use url::Url;
 
 const LAKE_CATALOG: &str = "lake";
+const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
+const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
+const REPLAY_EPOCHS_TABLE: &str = "__etl_replay_epochs";
+const REPLAY_EPOCH_COLUMN: &str = "replay_epoch";
+const LEGACY_REPLAY_EPOCH: &str = "__legacy__";
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
@@ -91,6 +96,27 @@ impl DuckLakeMaintenanceTableName {
 impl fmt::Display for DuckLakeMaintenanceTableName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.id())
+    }
+}
+
+/// Current replay epoch for one destination table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DuckLakeReplayEpoch {
+    table_name: String,
+    replay_epoch: String,
+}
+
+/// Rows removed from ETL replay helper tables.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ReplayHelperCleanupOutcome {
+    applied_batch_rows: u64,
+    streaming_progress_rows: u64,
+}
+
+impl ReplayHelperCleanupOutcome {
+    /// Returns the total number of helper rows removed.
+    fn total_rows(self) -> u64 {
+        self.applied_batch_rows.saturating_add(self.streaming_progress_rows)
     }
 }
 
@@ -612,6 +638,8 @@ fn build_setup_plan_with_strategy(
         ("KEY_ID", quote_literal(s3.map(|s| s.access_key_id.as_str()).unwrap_or_default())),
         ("REGION", quote_literal(s3.map(|s| s.region.as_str()).unwrap_or_default())),
         ("SECRET", quote_literal(s3.map(|s| s.secret_access_key.as_str()).unwrap_or_default())),
+        ("SCOPE", quote_literal(data_path)),
+        ("URL_COMPATIBILITY_MODE", "true".to_owned()),
         ("URL_STYLE", quote_literal(s3.map(|s| s.url_style.as_str()).unwrap_or_default())),
     ]);
 
@@ -668,7 +696,8 @@ fn build_setup_plan_with_strategy(
             label: "configure_object_store",
             sql: format!(
                 "SET enable_http_metadata_cache = true; SET parquet_metadata_cache = true; CREATE \
-                 OR REPLACE SECRET {secret_name} (TYPE S3, {secret_body}, USE_SSL {});",
+                 OR REPLACE SECRET {secret_name} (TYPE S3, PROVIDER config, {secret_body}, \
+                 USE_SSL {});",
                 if s3.use_ssl { "true" } else { "false" }
             ),
         });
@@ -1665,6 +1694,8 @@ pub async fn run_maintenance_once(
         run_cleanup_old_files(&duckdb, &mut outcome).await?;
     }
 
+    run_replay_helper_cleanup(&duckdb, &metadata_pg_pool, &metadata_schema).await?;
+
     info!(outcome = ?outcome, applied = outcome.applied(), "ducklake external maintenance completed");
     Ok(outcome)
 }
@@ -1793,6 +1824,71 @@ async fn list_ducklake_tables(
         .into_iter()
         .map(|(schema_name, table_name)| DuckLakeMaintenanceTableName::new(schema_name, table_name))
         .collect())
+}
+
+/// Loads current per-table replay epochs from the DuckLake metadata catalog.
+async fn load_current_replay_epochs(
+    metadata_pg_pool: &PgPool,
+    metadata_schema: &str,
+) -> EtlResult<Vec<DuckLakeReplayEpoch>> {
+    if !postgres_metadata_table_exists(metadata_pg_pool, metadata_schema, REPLAY_EPOCHS_TABLE)
+        .await?
+    {
+        debug!(
+            metadata_schema,
+            "ducklake replay epoch table is absent, skipping helper table cleanup"
+        );
+        return Ok(Vec::new());
+    }
+
+    let sql = format!(
+        "SELECT table_name, replay_epoch FROM {}.{} ORDER BY table_name;",
+        quote_identifier(metadata_schema),
+        quote_identifier(REPLAY_EPOCHS_TABLE)
+    );
+    let rows: Vec<(String, String)> =
+        sqlx::query_as(AssertSqlSafe(sql)).fetch_all(metadata_pg_pool).await.map_err(|source| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake replay epoch query failed",
+                format!("metadata_schema={metadata_schema}"),
+                source: source
+            )
+        })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(table_name, replay_epoch)| DuckLakeReplayEpoch { table_name, replay_epoch })
+        .collect())
+}
+
+/// Returns whether one metadata table exists in the DuckLake PostgreSQL schema.
+async fn postgres_metadata_table_exists(
+    metadata_pg_pool: &PgPool,
+    metadata_schema: &str,
+    table_name: &str,
+) -> EtlResult<bool> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM information_schema.tables
+             WHERE table_schema = $1 AND table_name = $2
+         );",
+    )
+    .bind(metadata_schema)
+    .bind(table_name)
+    .fetch_one(metadata_pg_pool)
+    .await
+    .map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake metadata table existence query failed",
+            format!("metadata_schema={metadata_schema}, table_name={table_name}"),
+            source: source
+        )
+    })?;
+
+    Ok(exists)
 }
 
 /// Runs inline flush for tables that crossed the pending-inline threshold.
@@ -2019,6 +2115,32 @@ async fn run_cleanup_old_files(
         older_than = CLEANUP_OLD_FILES_OLDER_THAN,
         cleaned_up_files, "ducklake cleanup-old-files completed"
     );
+    Ok(())
+}
+
+/// Deletes stale ETL replay helper rows after one maintenance run.
+async fn run_replay_helper_cleanup(
+    duckdb: &DuckDbMaintenanceExecutor,
+    metadata_pg_pool: &PgPool,
+    metadata_schema: &str,
+) -> EtlResult<()> {
+    let current_epochs = load_current_replay_epochs(metadata_pg_pool, metadata_schema).await?;
+    if current_epochs.is_empty() {
+        debug!("ducklake replay helper cleanup skipped because no current epochs exist");
+        return Ok(());
+    }
+
+    let epoch_count = current_epochs.len();
+    let cleanup =
+        duckdb.run(move |conn| cleanup_stale_replay_helper_rows(conn, &current_epochs)).await?;
+    info!(
+        epoch_count,
+        applied_batch_rows = cleanup.applied_batch_rows,
+        streaming_progress_rows = cleanup.streaming_progress_rows,
+        total_rows = cleanup.total_rows(),
+        "ducklake replay helper cleanup completed"
+    );
+
     Ok(())
 }
 
@@ -2253,6 +2375,155 @@ fn cleanup_old_files_sql() -> String {
         quote_literal(LAKE_CATALOG),
         quote_literal(CLEANUP_OLD_FILES_OLDER_THAN),
     )
+}
+
+/// Deletes stale rows from all ETL replay helper tables.
+fn cleanup_stale_replay_helper_rows(
+    conn: &duckdb::Connection,
+    current_epochs: &[DuckLakeReplayEpoch],
+) -> EtlResult<ReplayHelperCleanupOutcome> {
+    Ok(ReplayHelperCleanupOutcome {
+        applied_batch_rows: cleanup_stale_replay_rows_for_helper_table(
+            conn,
+            APPLIED_BATCHES_TABLE,
+            current_epochs,
+        )?,
+        streaming_progress_rows: cleanup_stale_replay_rows_for_helper_table(
+            conn,
+            STREAMING_PROGRESS_TABLE,
+            current_epochs,
+        )?,
+    })
+}
+
+/// Deletes stale rows from one ETL replay helper table.
+fn cleanup_stale_replay_rows_for_helper_table(
+    conn: &duckdb::Connection,
+    helper_table_name: &str,
+    current_epochs: &[DuckLakeReplayEpoch],
+) -> EtlResult<u64> {
+    if !ducklake_helper_table_exists(conn, helper_table_name)? {
+        debug!(
+            helper_table = helper_table_name,
+            "ducklake replay helper cleanup skipped missing helper table"
+        );
+        return Ok(0);
+    }
+
+    let has_replay_epoch_column =
+        ducklake_helper_table_has_column(conn, helper_table_name, REPLAY_EPOCH_COLUMN)?;
+    let mut deleted_rows = 0u64;
+    for current_epoch in current_epochs {
+        deleted_rows = deleted_rows.saturating_add(delete_stale_replay_rows_for_table(
+            conn,
+            helper_table_name,
+            has_replay_epoch_column,
+            current_epoch,
+        )?);
+    }
+
+    Ok(deleted_rows)
+}
+
+/// Deletes stale helper rows for one destination table.
+fn delete_stale_replay_rows_for_table(
+    conn: &duckdb::Connection,
+    helper_table_name: &str,
+    has_replay_epoch_column: bool,
+    current_epoch: &DuckLakeReplayEpoch,
+) -> EtlResult<u64> {
+    let helper_table = ducklake_helper_table_name(helper_table_name);
+    let sql = if has_replay_epoch_column {
+        format!(
+            "DELETE FROM {helper_table} WHERE table_name = {} AND COALESCE({}, {}) <> {};",
+            quote_literal(&current_epoch.table_name),
+            quote_identifier(REPLAY_EPOCH_COLUMN),
+            quote_literal(LEGACY_REPLAY_EPOCH),
+            quote_literal(&current_epoch.replay_epoch),
+        )
+    } else {
+        format!(
+            "DELETE FROM {helper_table} WHERE table_name = {};",
+            quote_literal(&current_epoch.table_name),
+        )
+    };
+
+    conn.execute(&sql, []).map(|rows| u64::try_from(rows).unwrap_or(u64::MAX)).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake replay helper cleanup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })
+}
+
+/// Returns the qualified DuckLake helper table name.
+fn ducklake_helper_table_name(helper_table_name: &str) -> String {
+    format!("{}.{}", quote_identifier(LAKE_CATALOG), quote_identifier(helper_table_name))
+}
+
+/// Returns whether one DuckLake helper table exists.
+fn ducklake_helper_table_exists(
+    conn: &duckdb::Connection,
+    helper_table_name: &str,
+) -> EtlResult<bool> {
+    let sql = format!(
+        "SELECT 1 FROM information_schema.tables WHERE table_catalog = {} AND table_name = {} \
+         LIMIT 1;",
+        quote_literal(LAKE_CATALOG),
+        quote_literal(helper_table_name),
+    );
+    duckdb_exists(conn, &sql, "DuckLake helper table existence query failed")
+}
+
+/// Returns whether one DuckLake helper table has a column.
+fn ducklake_helper_table_has_column(
+    conn: &duckdb::Connection,
+    helper_table_name: &str,
+    column_name: &str,
+) -> EtlResult<bool> {
+    let sql = format!(
+        "SELECT 1 FROM information_schema.columns WHERE table_catalog = {} AND table_name = {} \
+         AND column_name = {} LIMIT 1;",
+        quote_literal(LAKE_CATALOG),
+        quote_literal(helper_table_name),
+        quote_literal(column_name),
+    );
+    duckdb_exists(conn, &sql, "DuckLake helper table column query failed")
+}
+
+/// Returns whether one DuckDB query returns at least one row.
+fn duckdb_exists(
+    conn: &duckdb::Connection,
+    sql: &str,
+    description: &'static str,
+) -> EtlResult<bool> {
+    let mut statement = conn.prepare(sql).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql),
+            source: source
+        )
+    })?;
+    let mut rows = statement.query([]).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql),
+            source: source
+        )
+    })?;
+
+    rows.next().map(|row| row.is_some()).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql),
+            source: source
+        )
+    })
 }
 
 /// Counts rows returned by one DuckLake maintenance call.
@@ -2623,6 +2894,126 @@ mod tests {
             pool: Arc::new(pool),
             blocking_slots: Arc::new(Semaphore::new(1)),
         }
+    }
+
+    fn attach_lake_catalog(conn: &duckdb::Connection) {
+        conn.execute_batch("attach ':memory:' as lake;").unwrap();
+    }
+
+    fn count_rows(conn: &duckdb::Connection, table_name: &str) -> i64 {
+        let sql = format!("select count(*) from {}", ducklake_helper_table_name(table_name));
+        conn.query_row(&sql, [], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn replay_helper_cleanup_deletes_only_non_current_epoch_rows() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        attach_lake_catalog(&conn);
+        conn.execute_batch(
+            r#"create table lake."__etl_applied_table_batches" (
+                 table_name varchar not null,
+                 replay_epoch varchar,
+                 batch_id varchar not null
+               );
+               create table lake."__etl_streaming_progress" (
+                 table_name varchar not null,
+                 replay_epoch varchar,
+                 last_commit_lsn ubigint not null,
+                 last_tx_ordinal ubigint not null
+               );
+               insert into lake."__etl_applied_table_batches" values
+                 ('public.users', 'current', 'keep-current'),
+                 ('public.users', 'old', 'drop-old'),
+                 ('public.users', null, 'drop-legacy'),
+                 ('public.orders', 'old', 'keep-other-table');
+               insert into lake."__etl_streaming_progress" values
+                 ('public.users', 'current', 20, 1),
+                 ('public.users', 'old', 10, 0),
+                 ('public.users', null, 5, 0),
+                 ('public.orders', 'old', 999, 0);"#,
+        )
+        .unwrap();
+
+        let cleanup = cleanup_stale_replay_helper_rows(
+            &conn,
+            &[DuckLakeReplayEpoch {
+                table_name: "public.users".to_owned(),
+                replay_epoch: "current".to_owned(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            cleanup,
+            ReplayHelperCleanupOutcome { applied_batch_rows: 2, streaming_progress_rows: 2 }
+        );
+        assert_eq!(count_rows(&conn, APPLIED_BATCHES_TABLE), 2);
+        assert_eq!(count_rows(&conn, STREAMING_PROGRESS_TABLE), 2);
+    }
+
+    #[test]
+    fn replay_helper_cleanup_deletes_legacy_rows_when_helper_table_has_no_epoch_column() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        attach_lake_catalog(&conn);
+        conn.execute_batch(
+            r#"create table lake."__etl_applied_table_batches" (
+                 table_name varchar not null,
+                 batch_id varchar not null
+               );
+               insert into lake."__etl_applied_table_batches" values
+                 ('public.users', 'drop-a'),
+                 ('public.users', 'drop-b'),
+                 ('public.orders', 'keep-other-table');"#,
+        )
+        .unwrap();
+
+        let cleanup = cleanup_stale_replay_helper_rows(
+            &conn,
+            &[DuckLakeReplayEpoch {
+                table_name: "public.users".to_owned(),
+                replay_epoch: "current".to_owned(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            cleanup,
+            ReplayHelperCleanupOutcome { applied_batch_rows: 2, streaming_progress_rows: 0 }
+        );
+        assert_eq!(count_rows(&conn, APPLIED_BATCHES_TABLE), 1);
+    }
+
+    #[test]
+    fn build_setup_plan_configures_scoped_s3_secret() {
+        let catalog_url = Url::parse("postgres://user:pass@host/db").unwrap();
+        let data_url = Url::parse("s3://warehouse/tenant/").unwrap();
+        let s3 = S3Config {
+            access_key_id: "key".to_owned(),
+            secret_access_key: "secret".to_owned(),
+            region: "eu-west-3".to_owned(),
+            endpoint: Some("storage.example.com/storage/v1/s3".to_owned()),
+            url_style: "path".to_owned(),
+            use_ssl: true,
+        };
+        let plan = build_setup_plan_with_strategy(
+            &catalog_url,
+            &data_url,
+            Some(&s3),
+            Some("ducklake"),
+            DuckDbExtensionStrategy::InstallFromRepository,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(plan.steps()[2].label, "configure_object_store");
+        assert!(plan.steps()[2].sql.contains("CREATE OR REPLACE SECRET"));
+        assert!(plan.steps()[2].sql.contains("PROVIDER config"));
+        assert!(
+            plan.steps()[2].sql.contains(&format!("SCOPE {}", quote_literal(data_url.as_str())))
+        );
+        assert!(plan.steps()[2].sql.contains("URL_COMPATIBILITY_MODE true"));
+        assert!(plan.steps()[2].sql.contains("URL_STYLE 'path'"));
+        assert!(plan.steps()[2].sql.contains("USE_SSL true"));
     }
 
     #[test]

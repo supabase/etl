@@ -1,5 +1,7 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
+use std::time::Duration;
+
 use etl::{
     event::{Event, EventType, InsertEvent},
     failpoints::{
@@ -27,7 +29,12 @@ use etl::{
         },
     },
 };
-use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
+use etl_postgres::{
+    application_name::{apply_worker_application_name, table_sync_worker_application_name},
+    below_version,
+    tokio::test_utils::TableModification,
+    version::POSTGRES_15,
+};
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
@@ -1542,6 +1549,85 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
     // Verify the same events are received after restart.
     let events_after_restart = destination.get_events().await;
     verify_events(&events_after_restart, table_id);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_connections_are_tagged_with_per_worker_application_names() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+
+    init_test_tracing();
+
+    // --- GIVEN: a pipeline whose table sync worker is paused after copy, so both
+    // worker connections are alive ---
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let finished_copy_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
+
+    pipeline.start().await.unwrap();
+
+    finished_copy_notify.notified().await;
+
+    // --- THEN: pg_stat_activity shows both connections under their per-worker
+    // application names ---
+    //
+    // Names are computed with the same helpers used by the workers because the
+    // random test pipeline ids can be long enough to clamp the base name.
+    let apply_name =
+        apply_worker_application_name("supabase_etl_replicator_replication", pipeline_id);
+    let table_sync_name = table_sync_worker_application_name(
+        "supabase_etl_replicator_replication",
+        pipeline_id,
+        table_id,
+    );
+
+    let client = database.client.as_ref().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let rows = client
+                .query(
+                    "select application_name from pg_stat_activity where datname = \
+                     current_database() and application_name in ($1, $2)",
+                    &[&apply_name, &table_sync_name],
+                )
+                .await
+                .unwrap();
+            let names: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
+
+            if names.contains(&apply_name) && names.contains(&table_sync_name) {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for per-worker application names in pg_stat_activity");
+
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+
+    ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
