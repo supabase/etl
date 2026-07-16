@@ -1779,8 +1779,8 @@ fn get_restarted_at_annotation_value() -> String {
 mod tests {
     use etl_config::shared::{
         BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
-        PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
-        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+        PgConnectionConfig, PipelineConfig, PublicationChangesMode, ReplicatorConfig,
+        ReplicatorConfigWithoutSecrets, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
     use insta::{assert_json_snapshot, assert_snapshot};
 
@@ -2370,6 +2370,7 @@ mod tests {
                 max_table_sync_workers: 4,
                 memory_refresh_interval_ms: 100,
                 replication_lag_refresh_interval_ms: 10000,
+                publication_changes_mode: PublicationChangesMode::Reactive,
                 memory_backpressure: Some(MemoryBackpressureConfig {
                     activate_threshold: 1.0,
                     resume_threshold: 0.99,
@@ -2960,6 +2961,48 @@ mod tests {
             PIPELINE_ID,
         );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
+    }
+
+    #[test]
+    fn replicator_stateful_set_preserves_digest_pinned_image_reference() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let stateful_set_name = create_stateful_set_name(&prefix);
+        let replicator_image = concat!(
+            "registry.example/team/replicator:commit-sha@sha256:",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        let environment = Environment::Dev;
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::BigQuery,
+            None,
+            LogLevel::Info,
+        );
+
+        let stateful_set_json = create_replicator_stateful_set_json(
+            &prefix,
+            TENANT_ID,
+            PIPELINE_ID,
+            &stateful_set_name,
+            replicator_image,
+            container_environment,
+            create_node_selector_json(&environment),
+            create_init_containers_json(&prefix, &environment, &stateful_set_resources),
+            create_volumes_json(&prefix, &environment),
+            create_volume_mounts_json(&environment),
+            &stateful_set_resources,
+        );
+
+        assert_eq!(
+            stateful_set_json
+                .pointer("/spec/template/spec/containers/0/image")
+                .and_then(serde_json::Value::as_str),
+            Some(replicator_image)
+        );
     }
 
     #[test]

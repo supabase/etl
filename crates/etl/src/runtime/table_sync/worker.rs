@@ -308,6 +308,11 @@ impl TableSyncWorkerHandle {
     pub(crate) fn is_finished(&self) -> bool {
         self.abort_handle.is_finished()
     }
+
+    /// Aborts the worker task.
+    pub(crate) fn abort(&self) {
+        self.abort_handle.abort();
+    }
 }
 
 /// Worker responsible for synchronizing individual tables from Postgres to

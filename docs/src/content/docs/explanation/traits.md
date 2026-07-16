@@ -187,7 +187,7 @@ pub trait TableStateLifecycleStore {
 | `apply_table_state_operation()` | Single implementation point for [`TableStateOperation`]. Custom stores implement the prepare, reset, and delete semantics here |
 | `prepare_table_state_for_copy()` | Deletes destination metadata, schema versions, and durable table-sync progress while preserving the table state. This is called only after the destination object was dropped for a fresh copy |
 | `reset_table_states_for_resync()` | Resets all current table states to `Init` and deletes durable apply-worker progress while preserving destination metadata, schema versions, and durable table-sync progress |
-| `delete_table_state()` | Deletes all stored ETL-owned state for a table removed from the publication. Does not modify destination tables |
+| `delete_table_state()` | Deletes all stored ETL-owned state for a table removed from the publication. Does not modify destination tables; a later re-add copies into the retained destination object and is not a table reset |
 
 ## Combining Traits
 

@@ -27,6 +27,36 @@ use crate::{
 /// contain JSON-encoded schema information.
 pub(crate) const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
 
+/// The prefix used for publication membership messages emitted by the source
+/// event triggers.
+pub(crate) const PUBLICATION_CHANGE_MESSAGE_PREFIX: &str = "supabase_etl_publication_change";
+
+/// Represents the complete table membership of one PostgreSQL publication.
+///
+/// The message contains post-change catalog state. The apply worker compares
+/// it with stored table state to derive additions and removals in WAL order.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct PublicationChangeMessage {
+    /// Name of the publication whose membership was captured.
+    pub(crate) publication_name: String,
+    /// Table OIDs returned by `pg_catalog.pg_get_publication_tables`.
+    pub(crate) table_ids: Vec<u32>,
+}
+
+impl FromStr for PublicationChangeMessage {
+    type Err = EtlError;
+
+    fn from_str(message: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(message).map_err(|error| {
+            etl_error!(
+                ErrorKind::ConversionError,
+                "Failed to parse publication change message",
+                source: error
+            )
+        })
+    }
+}
+
 /// Represents a schema change message emitted by Postgres event trigger.
 ///
 /// This message is emitted when ALTER TABLE commands are executed on tables
@@ -82,11 +112,11 @@ impl FromStr for SchemaChangeMessage {
     type Err = EtlError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_str(s).map_err(|e| {
+        serde_json::from_str(s).map_err(|error| {
             etl_error!(
                 ErrorKind::ConversionError,
                 "Failed to parse schema change message",
-                format!("Invalid JSON in schema change message: {}", e)
+                source: error
             )
         })
     }
@@ -982,16 +1012,16 @@ fn convert_tuple_data_to_cell(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{str::FromStr, sync::Arc};
 
     use bytes::Bytes;
     use postgres_replication::protocol::{LogicalReplicationMessage, TupleData};
     use tokio_postgres::types::{PgLsn, Type};
 
     use super::{
-        IdentityMessage, convert_tuple_to_row, convert_update_tuple_to_updated_table_row,
-        normalize_key_tuple_to_row, parse_event_from_delete_message,
-        parse_event_from_update_message,
+        IdentityMessage, PublicationChangeMessage, convert_tuple_to_row,
+        convert_update_tuple_to_updated_table_row, normalize_key_tuple_to_row,
+        parse_event_from_delete_message, parse_event_from_update_message,
     };
     use crate::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
@@ -1002,6 +1032,27 @@ mod tests {
             TableSchema,
         },
     };
+
+    #[test]
+    fn publication_change_message_parses_empty_and_nonempty_membership() {
+        let empty = PublicationChangeMessage::from_str(
+            r#"{"publication_name":"example_publication","table_ids":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty,
+            PublicationChangeMessage {
+                publication_name: "example_publication".to_owned(),
+                table_ids: Vec::new(),
+            }
+        );
+
+        let nonempty = PublicationChangeMessage::from_str(
+            r#"{"publication_name":"example_publication","table_ids":[42,84]}"#,
+        )
+        .unwrap();
+        assert_eq!(nonempty.table_ids, vec![42, 84]);
+    }
 
     #[derive(Clone, Copy)]
     enum TestTupleData<'a> {

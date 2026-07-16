@@ -3,7 +3,8 @@ use std::{collections::BTreeSet, sync::LazyLock};
 use etl::{
     config::{
         BatchConfig, IntoConnectOptions, InvalidatedSlotBehavior, MemoryBackpressureConfig,
-        PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
+        PgConnectionConfig, PgConnectionOptions, PipelineConfig, PublicationChangesMode,
+        TableSyncCopyConfig,
     },
     pipeline::Pipeline,
     postgres::migrations::run_source_migrations,
@@ -173,6 +174,7 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
         max_copy_connections_per_table: 2,
         memory_refresh_interval_ms: 100,
         replication_lag_refresh_interval_ms: 10000,
+        publication_changes_mode: PublicationChangesMode::Reactive,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
@@ -220,6 +222,124 @@ async fn pipeline_start_runs_source_migrations_without_postgres_store_tables() {
     assert!(source_helper_exists(&database).await);
     assert!(!postgres_store_table_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, source_migration_versions());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_change_trigger_functions_are_hardened() {
+    init_test_tracing();
+
+    let database = spawn_unmigrated_database().await;
+    run_source_migrations(&database.config).await.unwrap();
+
+    assert!(
+        query_bool(
+            &database,
+            "select count(*) = 3
+             and bool_and(
+                 p.proconfig @> array['search_path=pg_catalog, pg_temp']::text[]
+                 and case p.proname
+                     when 'emit_publication_change_message' then not p.prosecdef
+                     else p.prosecdef
+                 end
+                 and not exists (
+                     select 1
+                     from pg_catalog.aclexplode(
+                         coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))
+                     ) privilege
+                     where privilege.grantee = 0
+                       and privilege.privilege_type = 'EXECUTE'
+                 )
+             )
+             from pg_catalog.pg_proc p
+             join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+             where n.nspname = 'etl'
+               and p.proname in (
+                   'emit_publication_change_message',
+                   'emit_publication_ddl_change_message',
+                   'emit_publication_drop_change_message'
+               )",
+        )
+        .await
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_change_messages_are_emitted_only_for_committed_changes() {
+    init_test_tracing();
+
+    let mut database = spawn_unmigrated_database().await;
+    run_source_migrations(&database.config).await.unwrap();
+    let client = database.client.as_mut().expect("database client should be initialized");
+    client
+        .batch_execute(
+            "create table publication_commit_table (id bigint primary key);
+             create publication publication_commit_test;",
+        )
+        .await
+        .unwrap();
+    client
+        .query_one(
+            "select * from pg_catalog.pg_create_logical_replication_slot(
+                'publication_commit_slot',
+                'test_decoding'
+            )",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let transaction = client.transaction().await.unwrap();
+    transaction
+        .execute(
+            "alter publication publication_commit_test
+             add table publication_commit_table",
+            &[],
+        )
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+
+    let rolled_back_messages = client
+        .query(
+            "select data
+             from pg_catalog.pg_logical_slot_get_changes(
+                 'publication_commit_slot',
+                 null,
+                 null
+             )
+             where data like '%prefix: supabase_etl_publication_change%'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(rolled_back_messages.is_empty());
+
+    client
+        .execute(
+            "alter publication publication_commit_test
+             add table publication_commit_table",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let committed_messages = client
+        .query(
+            "select data
+             from pg_catalog.pg_logical_slot_get_changes(
+                 'publication_commit_slot',
+                 null,
+                 null
+             )
+             where data like '%prefix: supabase_etl_publication_change%'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed_messages.len(), 1);
+    let message: &str = committed_messages[0].get(0);
+    assert!(message.contains("transactional: 1"));
+    assert!(message.contains("\"publication_name\": \"publication_commit_test\""));
 }
 
 #[tokio::test(flavor = "multi_thread")]

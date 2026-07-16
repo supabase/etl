@@ -599,12 +599,6 @@ impl PgReplicationClient {
     /// partition root or subtree root used for relation messages. With
     /// `publish_via_partition_root=false`, it returns the leaf relations whose
     /// schemas are used for replication.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ErrorKind::ConfigError`] if the publication contains no
-    /// tables. This typically indicates a misconfigured publication that
-    /// won't replicate any data.
     pub async fn get_publication_table_ids(
         &self,
         publication_name: &str,
@@ -624,19 +618,6 @@ impl PgReplicationClient {
                 let table_id = get_row_value::<TableId>(&row, "oid", "pg_class")?;
                 table_ids.push(table_id);
             }
-        }
-
-        if table_ids.is_empty() {
-            bail!(
-                ErrorKind::ConfigError,
-                "Publication has no tables",
-                format!(
-                    "Publication '{}' does not contain any tables. Ensure the publication is \
-                     configured with tables using FOR TABLE, FOR ALL TABLES, or FOR TABLES IN \
-                     SCHEMA.",
-                    publication_name
-                )
-            );
         }
 
         Ok(table_ids)

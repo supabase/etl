@@ -99,6 +99,29 @@ impl Default for BatchConfig {
     }
 }
 
+/// Controls how publication membership changes are discovered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationChangesMode {
+    /// Uses only the publication membership captured when a new apply slot is
+    /// created. Later membership changes are ignored. Switching an existing
+    /// slot lineage to [`Self::Reactive`] cannot reconstruct removals skipped
+    /// in this mode.
+    Disabled,
+    /// Adds current publication members at startup and applies ordered
+    /// membership changes from the logical replication stream.
+    #[default]
+    Reactive,
+}
+
+impl PublicationChangesMode {
+    /// Returns whether logical publication-change messages should be handled.
+    pub const fn is_reactive(self) -> bool {
+        matches!(self, Self::Reactive)
+    }
+}
+
 const fn default_batch_max_fill_ms() -> u64 {
     BatchConfig::DEFAULT_MAX_FILL_MS
 }
@@ -295,6 +318,13 @@ pub struct PipelineConfig {
     /// Number of milliseconds between one replication lag refresh and another.
     #[serde(default = "default_replication_lag_refresh_interval_ms")]
     pub replication_lag_refresh_interval_ms: u64,
+    /// How publication membership changes are discovered.
+    ///
+    /// Reactive removal deletes ETL-owned state only after preceding
+    /// destination work is durable. It does not reset or drop the destination
+    /// object.
+    #[serde(default)]
+    pub publication_changes_mode: PublicationChangesMode,
     /// Optional memory-based backpressure configuration.
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
@@ -308,8 +338,7 @@ pub struct PipelineConfig {
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
     /// Whether [`Pipeline::start`] should run the source migrations that
-    /// install the schema helper functions and the `ddl_command_end` event
-    /// trigger.
+    /// install the schema helper functions and DDL event triggers.
     ///
     /// Defaults to `true`, preserving the existing behavior. Set to `false`
     /// when the replication role is intentionally de-elevated and lacks the
@@ -480,6 +509,12 @@ pub struct PipelineConfigWithoutSecrets {
     /// Number of milliseconds between one replication lag refresh and another.
     #[serde(default = "default_replication_lag_refresh_interval_ms")]
     pub replication_lag_refresh_interval_ms: u64,
+    /// How publication membership changes are discovered.
+    ///
+    /// Reactive removal deletes ETL state without resetting or dropping the
+    /// destination object.
+    #[serde(default)]
+    pub publication_changes_mode: PublicationChangesMode,
     /// Optional memory-based backpressure configuration.
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
@@ -512,6 +547,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             max_copy_connections_per_table: value.max_copy_connections_per_table,
             memory_refresh_interval_ms: value.memory_refresh_interval_ms,
             replication_lag_refresh_interval_ms: value.replication_lag_refresh_interval_ms,
+            publication_changes_mode: value.publication_changes_mode,
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: value.table_sync_copy,
             invalidated_slot_behavior: value.invalidated_slot_behavior,
@@ -589,6 +625,7 @@ mod tests {
         let config: PipelineConfig = serde_json::from_str(json).unwrap();
 
         assert!(config.run_source_migrations);
+        assert_eq!(config.publication_changes_mode, PublicationChangesMode::Reactive);
     }
 
     #[test]
@@ -608,15 +645,18 @@ mod tests {
                     "enabled": false
                 }
             },
-            "run_source_migrations": false
+            "run_source_migrations": false,
+            "publication_changes_mode": "disabled"
         }"#;
 
         let config: PipelineConfig = serde_json::from_str(json).unwrap();
 
         assert!(!config.run_source_migrations);
+        assert_eq!(config.publication_changes_mode, PublicationChangesMode::Disabled);
 
         let without_secrets = PipelineConfigWithoutSecrets::from(config);
         assert!(!without_secrets.run_source_migrations);
+        assert_eq!(without_secrets.publication_changes_mode, PublicationChangesMode::Disabled);
     }
 
     #[test]
@@ -662,6 +702,7 @@ mod tests {
             memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
             replication_lag_refresh_interval_ms:
                 PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+            publication_changes_mode: PublicationChangesMode::Reactive,
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
@@ -687,6 +728,7 @@ mod tests {
             memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
             replication_lag_refresh_interval_ms:
                 PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+            publication_changes_mode: PublicationChangesMode::Reactive,
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

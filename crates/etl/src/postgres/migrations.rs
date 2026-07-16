@@ -90,7 +90,8 @@ async fn run_migration_set(
 /// Runs source-side migrations required by every ETL pipeline.
 ///
 /// These migrations install the `etl` schema, schema snapshot helper
-/// functions, and the DDL event trigger used by replication.
+/// functions, and the schema and publication DDL event triggers used by
+/// replication.
 /// When the configured source is a physical standby, this function skips
 /// migration execution because standby connections are read-only. In that
 /// setup, source-side migrations must be applied on the primary and then

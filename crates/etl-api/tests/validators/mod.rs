@@ -45,6 +45,7 @@ pub(super) fn create_pipeline_config(publication_name: &str) -> ApiPipelineConfi
         max_table_sync_workers: Some(2),
         memory_refresh_interval_ms: Some(100),
         replication_lag_refresh_interval_ms: None,
+        publication_changes_mode: None,
         max_copy_connections_per_table: None,
         memory_backpressure: None,
         table_sync_copy: None,

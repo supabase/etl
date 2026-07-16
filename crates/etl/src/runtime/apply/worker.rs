@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use etl_config::shared::{InvalidatedSlotBehavior, PipelineConfig};
 use etl_postgres::slots::EtlReplicationSlot;
@@ -289,7 +289,7 @@ where
         )
         .await?;
 
-        let start_lsn = get_start_lsn(
+        let (start_lsn, _) = prepare_apply_start_lsn(
             self.pipeline_id,
             &replication_client,
             &self.store,
@@ -309,6 +309,7 @@ where
             table_sync_worker_permits: self.table_sync_worker_permits,
             memory_monitor: self.memory_monitor.clone(),
             batch_budget: self.batch_budget.clone(),
+            pending_table_deletions: HashMap::new(),
         });
 
         let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
@@ -365,12 +366,12 @@ where
 /// Init state. If any table is not in Init state when creating a new slot, it
 /// indicates that data was synchronized based on a different apply worker
 /// lineage, which would break replication correctness.
-async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
+pub(crate) async fn prepare_apply_start_lsn<S: StateStore + TableStateLifecycleStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
     store: &S,
     invalidated_slot_behavior: &InvalidatedSlotBehavior,
-) -> EtlResult<PgLsn> {
+) -> EtlResult<(PgLsn, bool)> {
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
     let worker_type = WorkerType::Apply;
 
@@ -403,14 +404,16 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
         let slot_state = replication_client.get_slot_state(&slot_name).await?;
 
         if slot_state == SlotState::Invalidated {
-            return handle_invalidated_slot(
+            let start_lsn = handle_invalidated_slot(
                 pipeline_id,
                 replication_client,
                 store,
                 &slot_name,
                 invalidated_slot_behavior,
             )
-            .await;
+            .await?;
+
+            return Ok((start_lsn, true));
         }
     }
 
@@ -443,7 +446,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
             return Err(err);
         }
 
-        return Ok(slot_start_lsn);
+        return Ok((slot_start_lsn, true));
     }
 
     let durable_flush_lsn = store.get_replication_progress(worker_type).await?;
@@ -466,7 +469,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
             "apply worker resume position selected from durable replication progress and replication slot"
         );
 
-        Ok(start_lsn)
+        Ok((start_lsn, false))
     } else {
         info!(
             slot_name,
@@ -474,7 +477,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
             "apply worker durable replication progress not found, using slot fallback"
         );
 
-        Ok(slot_start_lsn)
+        Ok((slot_start_lsn, false))
     }
 }
 

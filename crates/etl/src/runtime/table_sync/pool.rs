@@ -141,6 +141,30 @@ impl TableSyncWorkerPool {
         Some(handle.state())
     }
 
+    /// Aborts the active worker for `table_id` and waits for it to stop.
+    ///
+    /// The completed task remains owned by the pool's join set and is reaped
+    /// by [`Self::wait_all`]. Holding the workers read lock while waiting also
+    /// prevents a replacement worker from being registered before the aborted
+    /// task is fully quiesced.
+    pub(crate) async fn abort(&self, table_id: TableId) -> bool {
+        let workers = self.workers.read().await;
+        let Some(handle) = workers.get(&table_id) else {
+            return false;
+        };
+        if handle.is_finished() {
+            return false;
+        }
+
+        handle.abort();
+        while !handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        debug!(table_id = table_id.0, "aborted and stopped table sync worker");
+
+        true
+    }
+
     /// Waits for all workers in the pool to complete.
     ///
     /// This method holds the workers_join_set lock while draining all tasks,

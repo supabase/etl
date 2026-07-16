@@ -20,6 +20,7 @@ use std::{
 };
 
 use etl_config::shared::PipelineConfig;
+use etl_postgres::slots::EtlReplicationSlot;
 use futures::StreamExt;
 use metrics::{counter, gauge, histogram};
 use postgres_replication::{
@@ -65,12 +66,13 @@ use crate::{
         EventsStream, OutOfBandSourcePool, StatusUpdateResult, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
         codec::{
-            DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
-            insert_message_payload_bytes, parse_event_from_begin_message,
-            parse_event_from_commit_message, parse_event_from_delete_message,
-            parse_event_from_insert_message, parse_event_from_truncate_message,
-            parse_event_from_update_message, parse_replica_identity_column_names,
-            parse_replicated_column_names, update_message_payload_bytes,
+            DDL_MESSAGE_PREFIX, PUBLICATION_CHANGE_MESSAGE_PREFIX, PublicationChangeMessage,
+            SchemaChangeMessage, delete_message_payload_bytes, insert_message_payload_bytes,
+            parse_event_from_begin_message, parse_event_from_commit_message,
+            parse_event_from_delete_message, parse_event_from_insert_message,
+            parse_event_from_truncate_message, parse_event_from_update_message,
+            parse_replica_identity_column_names, parse_replicated_column_names,
+            update_message_payload_bytes,
         },
     },
     replication::{
@@ -190,6 +192,9 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) memory_monitor: MemoryMonitor,
     /// Shared batch budget controller.
     pub(crate) batch_budget: BatchBudgetController,
+    /// Tables removed from the publication whose stored metadata must remain
+    /// available until earlier destination events become durable.
+    pub(crate) pending_table_deletions: HashMap<TableId, PendingTableDeletion>,
 }
 
 /// Resources for the table sync worker during the apply loop.
@@ -375,6 +380,13 @@ struct HandleMessageResult {
     /// Set when a batch should be ended earlier than the normal batching
     /// parameters.
     end_batch: bool,
+}
+
+/// Publication-removal work owned by the apply loop.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PendingTableDeletion {
+    /// Whether the latest publication snapshot includes the table again.
+    recreate: bool,
 }
 
 impl HandleMessageResult {
@@ -670,6 +682,9 @@ struct ApplyLoopState {
     /// and new message intake until the in-flight flush resolves and the
     /// queued batch can be retried.
     processing_paused: bool,
+    /// Whether publication removal state is waiting for a destination
+    /// durability boundary.
+    pending_table_deletion: bool,
     /// Fallback snapshot used before a table has established shared protocol
     /// state.
     ///
@@ -711,6 +726,7 @@ impl ApplyLoopState {
             pending_flush_result: None,
             exit_intent: None,
             processing_paused: false,
+            pending_table_deletion: false,
             bootstrap_snapshot_id,
             slot_name,
             schema_cleanup_deadline: Arc::new(Mutex::new(Some(
@@ -830,6 +846,11 @@ impl ApplyLoopState {
     /// feedback keeps reporting the last durable flush LSN until a later
     /// durable write proves the carried LSN safe.
     ///
+    /// A pending publication deletion is also an explicit non-idle barrier.
+    /// The commit LSN normally provides the same protection, but tracking the
+    /// deletion independently prevents future batch-state changes from
+    /// advancing feedback before the deletion's durable boundary.
+    ///
     /// If no later batch arrives, durability for the accepted write is
     /// intentionally deferred until the next batch instead of being
     /// acknowledged through a separate side channel. This may increase the
@@ -839,6 +860,7 @@ impl ApplyLoopState {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
             && self.last_commit_end_lsn.is_none()
+            && !self.pending_table_deletion
     }
 
     /// Returns the effective flush LSN to report to PostgreSQL and use for
@@ -1748,6 +1770,8 @@ where
                     self.state.update_last_commit_end_lsn(metadata.commit_end_lsn);
                 }
                 DestinationWriteStatus::Durable => {
+                    self.complete_table_deletions(metadata.table_deletions).await?;
+
                     // We process the syncing tables with the last end lsn that the batch contains.
                     //
                     // Note that it could be that there is no end lsn for a specific batch, which
@@ -1893,6 +1917,10 @@ where
         // and recorded once the destination acknowledges the batch.
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: self.state.last_commit_end_lsn.take(),
+            table_deletions: match &self.worker_context {
+                WorkerContext::Apply(ctx) => ctx.pending_table_deletions.keys().copied().collect(),
+                WorkerContext::TableSync(_) => Vec::new(),
+            },
             metrics: DispatchMetrics {
                 items_count: events_batch_size,
                 dispatched_at: Instant::now(),
@@ -2043,44 +2071,44 @@ where
         histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => event_type).record(payload_bytes as f64);
     }
 
-    /// Handles Postgres MESSAGE messages (pg_logical_emit_message).
-    ///
-    /// For `supabase_etl_ddl`, we persist the new table schema as soon as the
-    /// logical message is decoded and invalidate any cached replication mask
-    /// for that table before more changes in the same transaction are
-    /// processed.
-    ///
-    /// This ordering matches how `pgoutput` produces the stream:
-    /// - `pgoutput_message()` writes logical `Message` records directly and
-    ///   does not inject `Relation` metadata.
-    /// - `Relation` records are synthesized lazily by `maybe_send_schema()`
-    ///   only when `pgoutput_change()` is about to emit a DML change.
-    /// - relcache invalidation from the DDL resets `schema_sent`, so the first
-    ///   post-DDL DML for the relation gets a fresh `Relation` message just
-    ///   before the row event.
-    ///
-    /// In other words, the protocol variant this code relies on is:
-    /// `... -> ddl Message -> Relation(new schema) -> Insert/Update/Delete
-    /// ...`. Because the DDL message itself is not a DML event, we must
-    /// update the stored schema and drop the old mask here, so that the
-    /// very next `Relation` rebuilds the mask against the new schema
-    /// snapshot.
+    /// Dispatches a PostgreSQL logical message by its ETL prefix.
     async fn handle_message(
         &mut self,
         start_lsn: PgLsn,
         message: &protocol::MessageBody,
     ) -> EtlResult<HandleMessageResult> {
-        // If the prefix is unknown, we don't want to process it.
-        let prefix = message.prefix()?;
-        if prefix != DDL_MESSAGE_PREFIX {
-            warn!(
-                prefix = %prefix,
-                "received logical message with unknown prefix, discarding"
-            );
+        match message.prefix()? {
+            DDL_MESSAGE_PREFIX => self.handle_ddl_message(start_lsn, message).await,
+            PUBLICATION_CHANGE_MESSAGE_PREFIX => {
+                if !matches!(self.worker_context, WorkerContext::Apply(_)) {
+                    return Ok(HandleMessageResult::no_event());
+                }
 
-            return Ok(HandleMessageResult::no_event());
+                self.handle_apply_publication_change_message(message).await
+            }
+            prefix => {
+                warn!(
+                    %prefix,
+                    "received logical message with unknown prefix, discarding"
+                );
+
+                Ok(HandleMessageResult::no_event())
+            }
         }
+    }
 
+    /// Applies one ETL schema-change logical message.
+    ///
+    /// The schema is stored as soon as the message is decoded, and the cached
+    /// replication mask is invalidated before later changes in the same
+    /// transaction are processed. PostgreSQL emits the next `Relation`
+    /// message lazily before the first post-DDL row change, so that message
+    /// rebuilds the mask from this newly stored schema.
+    async fn handle_ddl_message(
+        &mut self,
+        start_lsn: PgLsn,
+        message: &protocol::MessageBody,
+    ) -> EtlResult<HandleMessageResult> {
         // DDL messages must be transactional.
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
@@ -2179,6 +2207,57 @@ where
             %snapshot_id,
             "stored new schema version from ddl message"
         );
+
+        Ok(HandleMessageResult::no_event())
+    }
+
+    /// Applies a transactional publication membership snapshot.
+    ///
+    /// Only the main apply worker reconciles publication membership. Table-sync
+    /// workers receive the same logical messages through their own slots but
+    /// leave pipeline-level worker ownership unchanged.
+    async fn handle_apply_publication_change_message(
+        &mut self,
+        message: &protocol::MessageBody,
+    ) -> EtlResult<HandleMessageResult> {
+        let WorkerContext::Apply(ctx) = &mut self.worker_context else {
+            return Ok(HandleMessageResult::no_event());
+        };
+
+        if !ctx.config.publication_changes_mode.is_reactive() {
+            debug!("ignoring publication change because runtime handling is disabled");
+
+            return Ok(HandleMessageResult::no_event());
+        }
+
+        let Some(commit_lsn) = self.state.remote_final_lsn else {
+            bail!(
+                ErrorKind::InvalidState,
+                "Invalid transaction state",
+                "Publication change messages must be transactional (transactional=true)"
+            );
+        };
+
+        let publication_change = PublicationChangeMessage::from_str(message.content()?)?;
+
+        if publication_change.publication_name != ctx.config.publication_name {
+            debug!(
+                publication_name = %publication_change.publication_name,
+                configured_publication_name = %ctx.config.publication_name,
+                "ignoring publication change for another publication"
+            );
+
+            return Ok(HandleMessageResult::no_event());
+        }
+
+        info!(
+            publication_name = %publication_change.publication_name,
+            table_count = publication_change.table_ids.len(),
+            %commit_lsn,
+            "applying publication membership change"
+        );
+        Self::reconcile_publication_change(ctx, &publication_change).await?;
+        self.state.pending_table_deletion = !ctx.pending_table_deletions.is_empty();
 
         Ok(HandleMessageResult::no_event())
     }
@@ -2537,6 +2616,9 @@ where
         remote_final_lsn: PgLsn,
     ) -> EtlResult<bool> {
         match &self.worker_context {
+            WorkerContext::Apply(ctx) if ctx.pending_table_deletions.contains_key(&table_id) => {
+                Ok(false)
+            }
             WorkerContext::Apply(ctx) => {
                 apply_worker::should_apply_changes(ctx, table_id, remote_final_lsn).await
             }
@@ -2626,6 +2708,102 @@ where
         self.schema_store.upsert_replication_progress(worker_type, flush_lsn).await
     }
 
+    /// Deletes table lifecycle state covered by a durable destination batch.
+    async fn complete_table_deletions(&mut self, table_ids: Vec<TableId>) -> EtlResult<()> {
+        if table_ids.is_empty() {
+            return Ok(());
+        }
+
+        let WorkerContext::Apply(ctx) = &mut self.worker_context else {
+            return Ok(());
+        };
+        let slot_client = PgReplicationClient::connect(ctx.config.pg_connection.clone()).await?;
+
+        for table_id in table_ids {
+            let Some(pending_deletion) = ctx.pending_table_deletions.get(&table_id).copied() else {
+                continue;
+            };
+
+            let slot_name: String =
+                EtlReplicationSlot::for_table_sync_worker(ctx.pipeline_id, table_id).try_into()?;
+            ctx.store.delete_table_state(table_id).await?;
+            slot_client.delete_slot_if_exists(&slot_name).await?;
+            ctx.shared_table_cache.remove_table(table_id).await;
+
+            if pending_deletion.recreate {
+                ctx.store.update_table_state(table_id, TableState::Init).await?;
+            }
+            ctx.pending_table_deletions.remove(&table_id);
+
+            info!(
+                table_id = table_id.0,
+                slot_name,
+                recreate = pending_deletion.recreate,
+                "completed durable publication table deletion"
+            );
+        }
+        self.state.pending_table_deletion = !ctx.pending_table_deletions.is_empty();
+
+        Ok(())
+    }
+
+    /// Applies one complete publication membership snapshot.
+    async fn reconcile_publication_change(
+        ctx: &mut ApplyWorkerContext<S, D>,
+        publication_change: &PublicationChangeMessage,
+    ) -> EtlResult<()> {
+        let publication_table_ids =
+            publication_change.table_ids.iter().copied().map(TableId::new).collect::<HashSet<_>>();
+        let table_states = ctx.store.get_table_states().await?;
+
+        // A later publication snapshot is authoritative for whether a table
+        // should be recreated after its pending deletion completes.
+        for (table_id, pending_deletion) in &mut ctx.pending_table_deletions {
+            pending_deletion.recreate = publication_table_ids.contains(table_id);
+        }
+
+        let added_tables = publication_table_ids
+            .iter()
+            .filter(|table_id| {
+                !table_states.contains_key(table_id)
+                    && !ctx.pending_table_deletions.contains_key(table_id)
+            })
+            .map(|table_id| (*table_id, TableState::Init))
+            .collect::<Vec<_>>();
+
+        if !added_tables.is_empty() {
+            info!(
+                publication_name = %publication_change.publication_name,
+                table_count = added_tables.len(),
+                "initializing tables added to publication"
+            );
+            ctx.store.update_table_states(added_tables).await?;
+        }
+
+        let removed_tables = table_states
+            .keys()
+            .filter(|table_id| !publication_table_ids.contains(table_id))
+            .copied()
+            .collect::<Vec<_>>();
+        for table_id in removed_tables {
+            if ctx.pending_table_deletions.contains_key(&table_id) {
+                continue;
+            }
+
+            ctx.pool.abort(table_id).await;
+            ctx.shared_table_cache.remove_table(table_id).await;
+            ctx.pending_table_deletions.insert(table_id, PendingTableDeletion { recreate: false });
+
+            info!(
+                publication_name = %publication_change.publication_name,
+                table_id = table_id.0,
+                "scheduled table state deletion after destination durability"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Processes syncing tables when the apply loop is idle.
     ///
     /// Once an exit has already been requested we intentionally skip this class
@@ -2681,14 +2859,18 @@ where
 }
 
 /// Returns tables that are still synchronizing.
-async fn get_syncing_tables<S>(store: &S) -> EtlResult<Vec<(TableId, TableState)>>
+async fn get_syncing_tables<S, D>(
+    ctx: &ApplyWorkerContext<S, D>,
+) -> EtlResult<Vec<(TableId, TableState)>>
 where
     S: StateStore,
 {
-    let states = store.get_table_states().await?;
+    let states = ctx.store.get_table_states().await?;
     Ok(states
         .iter()
-        .filter(|(_, state)| !state.as_type().is_done())
+        .filter(|(table_id, state)| {
+            !state.as_type().is_done() && !ctx.pending_table_deletions.contains_key(table_id)
+        })
         .map(|(id, state)| (*id, state.clone()))
         .collect())
 }
@@ -2757,7 +2939,7 @@ mod apply_worker {
         S: PipelineStore,
         D: PipelineDestination,
     {
-        for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
+        for (table_id, table_state) in get_syncing_tables(ctx).await? {
             let exit_intent =
                 process_single_syncing_table_after_commit(ctx, table_id, table_state, current_lsn)
                     .await?;
@@ -3009,7 +3191,7 @@ mod apply_worker {
         S: PipelineStore,
         D: PipelineDestination,
     {
-        for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
+        for (table_id, table_state) in get_syncing_tables(ctx).await? {
             process_single_syncing_table_after_flush(ctx, table_id, table_state, current_lsn)
                 .await?;
         }
@@ -3138,7 +3320,7 @@ mod apply_worker {
         S: PipelineStore,
         D: PipelineDestination,
     {
-        for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
+        for (table_id, table_state) in get_syncing_tables(ctx).await? {
             let exit_intent =
                 process_single_syncing_table_when_idle(ctx, table_id, table_state, current_lsn)
                     .await?;
@@ -3591,5 +3773,30 @@ async fn get_replicated_table_schema(
                 )
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_table_deletion_keeps_feedback_at_durable_flush_lsn() {
+        let initial_lsn = PgLsn::from(10);
+        let mut state = ApplyLoopState::new(
+            ReplicationProgress::new(initial_lsn),
+            ReplicationLagMetrics::new(initial_lsn),
+            Duration::from_secs(1),
+            SnapshotId::from(initial_lsn),
+            "test_slot".to_owned(),
+        );
+        state.update_last_received_lsn(PgLsn::from(20));
+
+        assert_eq!(state.effective_flush_lsn(), PgLsn::from(20));
+
+        state.pending_table_deletion = true;
+
+        assert!(!state.is_idle());
+        assert_eq!(state.effective_flush_lsn(), initial_lsn);
     }
 }

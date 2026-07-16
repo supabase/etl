@@ -27,7 +27,7 @@ use etl_config::{
     Environment,
     shared::{
         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+        PipelineConfig, PublicationChangesMode, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
 };
 #[cfg(feature = "bigquery")]
@@ -836,6 +836,7 @@ pub fn pipeline_config(
         memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
         replication_lag_refresh_interval_ms:
             PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+        publication_changes_mode: PublicationChangesMode::Reactive,
         memory_backpressure: if tuning.disable_memory_backpressure {
             None
         } else {

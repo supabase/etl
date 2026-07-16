@@ -1,6 +1,6 @@
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig,
+    PipelineConfig, PublicationChangesMode, TableSyncCopyConfig,
 };
 use etl_postgres::tokio::test_utils::PgDatabase;
 use rand::random;
@@ -79,6 +79,8 @@ pub struct PipelineBuilder<S, D> {
     memory_refresh_interval_ms: u64,
     /// Memory-based backpressure configuration. Default: enabled with defaults.
     memory_backpressure: MemoryBackpressureConfig,
+    /// How publication membership changes are discovered.
+    publication_changes_mode: PublicationChangesMode,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -134,6 +136,7 @@ where
                 activate_threshold: 0.95,
                 resume_threshold: 0.85,
             },
+            publication_changes_mode: PublicationChangesMode::Reactive,
         }
     }
 
@@ -176,6 +179,12 @@ where
         self
     }
 
+    /// Sets how publication membership changes are discovered.
+    pub fn with_publication_changes_mode(mut self, mode: PublicationChangesMode) -> Self {
+        self.publication_changes_mode = mode;
+        self
+    }
+
     /// Builds and returns the configured pipeline.
     ///
     /// This method consumes the builder and creates a `Pipeline` instance with
@@ -197,6 +206,7 @@ where
             memory_refresh_interval_ms: self.memory_refresh_interval_ms,
             replication_lag_refresh_interval_ms:
                 PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+            publication_changes_mode: self.publication_changes_mode,
             memory_backpressure: Some(self.memory_backpressure),
             run_source_migrations: true,
         };

@@ -1,6 +1,6 @@
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig,
+    PipelineConfig, PublicationChangesMode, TableSyncCopyConfig,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -30,6 +30,10 @@ const fn default_memory_refresh_interval_ms() -> u64 {
 
 const fn default_replication_lag_refresh_interval_ms() -> u64 {
     PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS
+}
+
+fn default_publication_changes_mode() -> PublicationChangesMode {
+    PublicationChangesMode::default()
 }
 
 const fn default_batch() -> BatchConfig {
@@ -253,6 +257,12 @@ pub struct ApiPipelineConfig {
     #[schema(example = 10000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replication_lag_refresh_interval_ms: Option<u64>,
+    /// How publication membership changes are discovered.
+    ///
+    /// Publication removal deletes ETL state without resetting or dropping the
+    /// destination object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication_changes_mode: Option<PublicationChangesMode>,
     #[serde(
         default = "default_memory_backpressure_option",
         skip_serializing_if = "Option::is_none"
@@ -314,6 +324,12 @@ pub struct UpdateApiPipelineConfig {
     #[schema(example = 10000)]
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub replication_lag_refresh_interval_ms: UpdateField<u64>,
+    /// How publication membership changes are discovered.
+    ///
+    /// Publication removal deletes ETL state without resetting or dropping the
+    /// destination object.
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub publication_changes_mode: UpdateField<PublicationChangesMode>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub memory_backpressure: UpdateField<MemoryBackpressureConfig>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
@@ -349,6 +365,7 @@ impl UpdateApiPipelineConfig {
             replication_lag_refresh_interval_ms: UpdateField::from_option(
                 value.replication_lag_refresh_interval_ms,
             ),
+            publication_changes_mode: UpdateField::from_option(value.publication_changes_mode),
             memory_backpressure: UpdateField::from_option(value.memory_backpressure),
             table_sync_copy: UpdateField::from_option(value.table_sync_copy),
             invalidated_slot_behavior: UpdateField::from_option(value.invalidated_slot_behavior),
@@ -407,6 +424,9 @@ impl UpdateApiPipelineConfig {
                     stored.replication_lag_refresh_interval_ms,
                     default_replication_lag_refresh_interval_ms,
                 ),
+            publication_changes_mode: self
+                .publication_changes_mode
+                .apply_to_value(stored.publication_changes_mode, default_publication_changes_mode),
             memory_backpressure: self
                 .memory_backpressure
                 .apply_to_defaulted_option(stored.memory_backpressure, default_memory_backpressure),
@@ -454,6 +474,7 @@ impl From<StoredPipelineConfig> for ApiPipelineConfig {
             max_copy_connections_per_table: Some(value.max_copy_connections_per_table),
             memory_refresh_interval_ms: Some(value.memory_refresh_interval_ms),
             replication_lag_refresh_interval_ms: Some(value.replication_lag_refresh_interval_ms),
+            publication_changes_mode: Some(value.publication_changes_mode),
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: Some(value.table_sync_copy),
             invalidated_slot_behavior: Some(value.invalidated_slot_behavior),
@@ -481,6 +502,8 @@ pub struct StoredPipelineConfig {
     pub memory_refresh_interval_ms: u64,
     #[serde(default = "default_replication_lag_refresh_interval_ms")]
     pub replication_lag_refresh_interval_ms: u64,
+    #[serde(default = "default_publication_changes_mode")]
+    pub publication_changes_mode: PublicationChangesMode,
     #[serde(default = "default_memory_backpressure_option")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(default = "default_table_sync_copy")]
@@ -512,6 +535,7 @@ impl StoredPipelineConfig {
             max_table_sync_workers: self.max_table_sync_workers,
             memory_refresh_interval_ms: self.memory_refresh_interval_ms,
             replication_lag_refresh_interval_ms: self.replication_lag_refresh_interval_ms,
+            publication_changes_mode: self.publication_changes_mode,
             memory_backpressure: self.memory_backpressure,
             table_sync_copy: self.table_sync_copy,
             invalidated_slot_behavior: self.invalidated_slot_behavior,
@@ -550,6 +574,7 @@ impl From<ApiPipelineConfig> for StoredPipelineConfig {
             replication_lag_refresh_interval_ms: value
                 .replication_lag_refresh_interval_ms
                 .unwrap_or(PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS),
+            publication_changes_mode: value.publication_changes_mode.unwrap_or_default(),
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: value.table_sync_copy.unwrap_or_else(default_table_sync_copy),
             invalidated_slot_behavior: value
@@ -637,6 +662,7 @@ mod tests {
             max_copy_connections_per_table: 8,
             memory_refresh_interval_ms: 100,
             replication_lag_refresh_interval_ms: 10_000,
+            publication_changes_mode: PublicationChangesMode::Disabled,
             memory_backpressure: Some(MemoryBackpressureConfig {
                 activate_threshold: 0.8,
                 resume_threshold: 0.7,
@@ -666,6 +692,7 @@ mod tests {
             config.max_copy_connections_per_table,
             deserialized.max_copy_connections_per_table
         );
+        assert_eq!(config.publication_changes_mode, deserialized.publication_changes_mode);
     }
 
     #[test]
@@ -679,6 +706,7 @@ mod tests {
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
             replication_lag_refresh_interval_ms: None,
+            publication_changes_mode: Some(PublicationChangesMode::Disabled),
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -695,6 +723,7 @@ mod tests {
         let back_to_api: ApiPipelineConfig = stored.into();
 
         assert_eq!(api_config.publication_name, back_to_api.publication_name);
+        assert_eq!(back_to_api.publication_changes_mode, Some(PublicationChangesMode::Disabled));
     }
 
     #[test]
@@ -708,6 +737,7 @@ mod tests {
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
             replication_lag_refresh_interval_ms: None,
+            publication_changes_mode: None,
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -740,6 +770,7 @@ mod tests {
             stored.replication_lag_refresh_interval_ms,
             PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS
         );
+        assert_eq!(stored.publication_changes_mode, PublicationChangesMode::Reactive);
         assert_eq!(stored.memory_backpressure, None);
         assert_eq!(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::Error);
     }
@@ -759,6 +790,7 @@ mod tests {
             max_copy_connections_per_table: 8,
             memory_refresh_interval_ms: 100,
             replication_lag_refresh_interval_ms: 10_000,
+            publication_changes_mode: PublicationChangesMode::Disabled,
             memory_backpressure: Some(MemoryBackpressureConfig {
                 activate_threshold: 0.95,
                 resume_threshold: 0.9,
@@ -777,6 +809,12 @@ mod tests {
             ..UpdateApiPipelineConfig::default()
         };
 
+        let cleared_publication_changes: UpdateApiPipelineConfig =
+            serde_json::from_value(serde_json::json!({
+                "publication_changes_mode": null
+            }))
+            .unwrap();
+        let reset = cleared_publication_changes.merge_into_stored(stored.clone()).unwrap();
         let updated = update.merge_into_stored(stored).unwrap();
         let omitted_create_config: ApiPipelineConfig =
             serde_json::from_value(serde_json::json!({ "publication_name": "publication" }))
@@ -787,6 +825,8 @@ mod tests {
         assert_eq!(updated.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
         assert_eq!(updated.table_error_retry_delay_ms, 1234);
         assert_eq!(updated.memory_backpressure, omitted_create_config.memory_backpressure);
+        assert_eq!(updated.publication_changes_mode, PublicationChangesMode::Disabled);
+        assert_eq!(reset.publication_changes_mode, PublicationChangesMode::Reactive);
         assert!(updated.log_level.is_none());
     }
 
@@ -805,6 +845,7 @@ mod tests {
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
             replication_lag_refresh_interval_ms: None,
+            publication_changes_mode: None,
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -836,6 +877,7 @@ mod tests {
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
             replication_lag_refresh_interval_ms: None,
+            publication_changes_mode: None,
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -872,6 +914,7 @@ mod tests {
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
             replication_lag_refresh_interval_ms: None,
+            publication_changes_mode: None,
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -907,6 +950,7 @@ mod tests {
             max_copy_connections_per_table: 8,
             memory_refresh_interval_ms: 100,
             replication_lag_refresh_interval_ms: 10_000,
+            publication_changes_mode: PublicationChangesMode::Reactive,
             memory_backpressure: Some(MemoryBackpressureConfig {
                 activate_threshold: 0.8,
                 resume_threshold: 0.7,

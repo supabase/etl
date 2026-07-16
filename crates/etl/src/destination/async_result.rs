@@ -14,6 +14,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     runtime::concurrency::{ShutdownResult, ShutdownRx},
+    schema::TableId,
 };
 
 /// Durability status reported by streaming and table-copy destination writes.
@@ -102,7 +103,7 @@ pub(crate) struct DispatchMetrics {
 }
 
 /// Metadata carried by apply-loop event write completions.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Commit end LSN associated with the dispatched batch, if any.
     ///
@@ -112,6 +113,9 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// [`DestinationWriteStatus::Accepted`] results and advances only when a
     /// later cumulative durable result covers the carried LSN.
     pub commit_end_lsn: Option<PgLsn>,
+    /// Tables whose stored lifecycle state can be deleted after this batch is
+    /// durable.
+    pub table_deletions: Vec<TableId>,
     /// Dispatch-time metrics for the batch.
     pub metrics: DispatchMetrics,
 }
@@ -228,6 +232,7 @@ mod tests {
     async fn async_result_round_trips_success() {
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: Some(PgLsn::from(42)),
+            table_deletions: vec![TableId::new(7)],
             metrics: DispatchMetrics { items_count: 1, dispatched_at: Instant::now() },
         };
         let (result_tx, pending_result) = WriteEventsResult::new(metadata);
@@ -239,6 +244,7 @@ mod tests {
 
         let metadata = metadata.expect("metadata should be present");
         assert_eq!(metadata.commit_end_lsn, Some(PgLsn::from(42)));
+        assert_eq!(metadata.table_deletions, vec![TableId::new(7)]);
         assert_eq!(result.unwrap(), 7);
     }
 

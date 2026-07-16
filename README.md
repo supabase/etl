@@ -121,7 +121,7 @@ BigQuery.
 use etl::{
     config::{
         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+        PipelineConfig, PublicationChangesMode, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
     pipeline::Pipeline,
     store::PostgresStore,
@@ -170,9 +170,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
         memory_refresh_interval_ms: 100,
         replication_lag_refresh_interval_ms: 10_000,
+        publication_changes_mode: PublicationChangesMode::Reactive,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+        run_source_migrations: true,
     };
 
     // Start the pipeline.
@@ -185,6 +187,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+`publication_changes_mode` controls publication-membership updates. `reactive`
+adds current members at startup and handles ordered changes from the logical
+stream. `disabled` captures membership only when the apply slot is first
+created and ignores later changes, including across restarts. Reactive live
+updates require the source event triggers installed by the source migrations.
+Tables that become members implicitly after `CREATE TABLE` under `FOR ALL
+TABLES` or `FOR TABLES IN SCHEMA` are discovered on the next reactive startup.
+Startup reconciliation is additive: removing stored state requires an ordered
+publication-change message from WAL.
+Treat the selected mode as fixed for an apply-slot lineage. Switching from
+`disabled` to `reactive` cannot reconstruct removals skipped while disabled.
+
+Publication removal deletes ETL-owned state but does not reset or drop the
+destination table. If the same source table is later added again, ETL treats it
+as a new publication member and copies it again without clearing the retained
+destination object. Removal followed by re-addition must not be used as a
+table-reset mechanism.
 
 For a guided walkthrough, start with
 [Your First Pipeline](https://supabase.github.io/etl/guides/first-pipeline/).

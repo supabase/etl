@@ -8,6 +8,7 @@ mod pipeline_replica_identity;
 mod pipeline_with_failpoints;
 mod pipeline_with_faulty_destination;
 mod pipeline_with_partitioned_table;
+mod pipeline_with_publication_changes;
 mod pipelines_with_schema_changes;
 mod postgres_store;
 mod replication;

@@ -382,6 +382,7 @@ where
         let (wrapped_flush_result, pending_flush_result) =
             WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
                 commit_end_lsn: None,
+                table_deletions: Vec::new(),
                 metrics: DispatchMetrics {
                     items_count: events.len(),
                     dispatched_at: Instant::now(),

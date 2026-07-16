@@ -46,7 +46,9 @@ pub enum TableStateOperation {
     /// Deletes table state history, stored table schemas, destination table
     /// metadata, and durable table-sync progress for `table_id`. Does not drop
     /// or otherwise modify the destination object, since publication removal is
-    /// an ETL state deletion rather than a destination data deletion.
+    /// an ETL state deletion rather than a destination data deletion. A later
+    /// re-add starts a new copy without clean-replacement semantics for that
+    /// retained destination object.
     Delete {
         /// The removed table whose ETL state should be deleted.
         table_id: TableId,

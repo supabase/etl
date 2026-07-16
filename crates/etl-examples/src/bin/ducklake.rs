@@ -34,8 +34,8 @@ use clap::{Args, Parser};
 use etl::{
     config::{
         BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig,
-        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig, parse_ducklake_s3_data_path,
-        parse_ducklake_url,
+        PublicationChangesMode, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+        parse_ducklake_s3_data_path, parse_ducklake_url,
     },
     pipeline::Pipeline,
     store::PostgresStore,
@@ -208,6 +208,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         max_table_sync_workers: args.ducklake_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
         replication_lag_refresh_interval_ms: 10_000,
+        publication_changes_mode: PublicationChangesMode::Reactive,
         memory_backpressure: None,
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

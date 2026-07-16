@@ -68,7 +68,8 @@
 //! use etl::{
 //!     config::{
 //!         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-//!         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+//!         PipelineConfig, PublicationChangesMode, TableSyncCopyConfig, TcpKeepaliveConfig,
+//!         TlsConfig,
 //!     },
 //!     data::TableRow,
 //!     destination::{
@@ -151,6 +152,7 @@
 //!         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
 //!         memory_refresh_interval_ms: 100,
 //!         replication_lag_refresh_interval_ms: 10_000,
+//!         publication_changes_mode: PublicationChangesMode::Reactive,
 //!         memory_backpressure: Some(MemoryBackpressureConfig::default()),
 //!         table_sync_copy: TableSyncCopyConfig::default(),
 //!         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

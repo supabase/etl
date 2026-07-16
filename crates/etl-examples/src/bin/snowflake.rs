@@ -23,7 +23,7 @@ use clap::{Args, Parser};
 use etl::{
     config::{
         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+        PipelineConfig, PublicationChangesMode, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
     pipeline::Pipeline,
     store::PostgresStore,
@@ -177,6 +177,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         max_table_sync_workers: args.sf_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
         replication_lag_refresh_interval_ms: 10_000,
+        publication_changes_mode: PublicationChangesMode::Reactive,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

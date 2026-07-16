@@ -1527,7 +1527,7 @@ async fn get_replicated_column_names_errors_when_table_not_in_publication() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn get_publication_table_ids_errors_when_empty() {
+async fn get_publication_table_ids_returns_empty_membership() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1537,14 +1537,8 @@ async fn get_publication_table_ids_errors_when_empty() {
 
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    // Attempting to get table IDs from an empty publication should error.
-    let result = client.get_publication_table_ids(publication_name).await;
-
-    // Should return a ConfigError since the publication has no tables.
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::ConfigError);
-    assert!(err.to_string().contains("does not contain any tables"));
+    let table_ids = client.get_publication_table_ids(publication_name).await.unwrap();
+    assert!(table_ids.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -11,8 +11,8 @@ pub use etl_config::{
         IcebergConfigWithoutSecrets, IntoConnectOptions, InvalidatedSlotBehavior,
         MemoryBackpressureConfig, PgConnectionConfig, PgConnectionConfigWithoutSecrets,
         PgConnectionOptions, PgConnectionOptionsBuilder, PipelineConfig,
-        PipelineConfigWithoutSecrets, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
-        SentryConfig, SupabaseConfig, SupabaseConfigWithoutSecrets, TableSyncCopyConfig,
-        TcpKeepaliveConfig, TlsConfig, ValidationError,
+        PipelineConfigWithoutSecrets, PublicationChangesMode, ReplicatorConfig,
+        ReplicatorConfigWithoutSecrets, SentryConfig, SupabaseConfig, SupabaseConfigWithoutSecrets,
+        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig, ValidationError,
     },
 };
