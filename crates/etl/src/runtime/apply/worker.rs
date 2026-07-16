@@ -283,8 +283,11 @@ where
 
     /// Runs a single apply worker attempt.
     async fn run_apply_worker(self) -> EtlResult<()> {
-        let replication_client =
-            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+        let replication_client = PgReplicationClient::connect_for_apply_worker(
+            self.config.pg_connection.clone(),
+            self.pipeline_id,
+        )
+        .await?;
 
         let start_lsn = get_start_lsn(
             self.pipeline_id,

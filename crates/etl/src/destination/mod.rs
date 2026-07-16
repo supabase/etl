@@ -18,7 +18,8 @@ pub(crate) use async_result::{
     PendingWriteEventsResult,
 };
 pub use async_result::{
-    DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
+    DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability, WriteEventsResult,
+    WriteTableRowsResult,
 };
 pub use base::Destination;
 pub use capabilities::PipelineDestination;
@@ -26,4 +27,4 @@ pub use metadata::{
     AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
 };
 
-pub use crate::runtime::concurrency::TaskSet;
+pub use crate::runtime::concurrency::{TaskSet, TaskSetDrainGuard};

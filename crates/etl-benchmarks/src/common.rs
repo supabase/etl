@@ -16,7 +16,7 @@ use etl::{
     data::{SizeHint, TableRow},
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
-        WriteEventsResult, WriteTableRowsResult,
+        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -408,10 +408,11 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
+        durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         let counts = classify_events(&events);
-        self.inner.write_events(events, async_result).await?;
+        self.inner.write_events(events, durability, async_result).await?;
 
         Self::count_events(&self.stats, &counts);
         let target = self.stats.cdc_target.load(Ordering::Acquire);
@@ -454,6 +455,7 @@ impl Destination for NullDestination {
     async fn write_events(
         &self,
         _events: Vec<Event>,
+        _durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         async_result.send(Ok(DestinationWriteStatus::Durable));
@@ -720,18 +722,25 @@ impl Destination for BenchDestination {
     async fn write_events(
         &self,
         events: Vec<Event>,
+        durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         match self {
-            Self::Null(destination) => destination.write_events(events, async_result).await,
+            Self::Null(destination) => {
+                destination.write_events(events, durability, async_result).await
+            }
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => {
-                Box::pin(destination.write_events(events, async_result)).await
+                Box::pin(destination.write_events(events, durability, async_result)).await
             }
             #[cfg(feature = "clickhouse")]
-            Self::ClickHouse(destination) => destination.write_events(events, async_result).await,
+            Self::ClickHouse(destination) => {
+                destination.write_events(events, durability, async_result).await
+            }
             #[cfg(feature = "snowflake")]
-            Self::Snowflake(destination) => destination.write_events(events, async_result).await,
+            Self::Snowflake(destination) => {
+                destination.write_events(events, durability, async_result).await
+            }
         }
     }
 }

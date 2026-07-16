@@ -376,6 +376,18 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
+    pub(crate) async fn restart_pipeline(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!("{}/v1/pipelines/{pipeline_id}/restart", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
+    }
+
     pub(crate) async fn stop_all_pipelines(&self, tenant_id: &str) -> reqwest::Response {
         self.post_authenticated(format!("{}/v1/pipelines/stop", &self.address))
             .header("tenant_id", tenant_id)
@@ -624,6 +636,7 @@ async fn spawn_test_app_with_services(
             replicator_resources: DefaultReplicatorResourcesConfig {
                 memory_request_mib: 250,
                 cpu_request_millicores: 125,
+                destinations: Default::default(),
             },
             vector_resources: DefaultVectorResourcesConfig {
                 memory_request_mib: 192,

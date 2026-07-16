@@ -176,7 +176,8 @@ mod clickhouse {
 mod ducklake {
     use etl::pipeline::Pipeline;
     use etl_config::{
-        parse_ducklake_s3_data_path, parse_ducklake_url,
+        default_ducklake_s3_url_style, default_ducklake_s3_use_ssl, parse_ducklake_s3_data_path,
+        parse_ducklake_url,
         shared::{
             DestinationConfig, DuckLakeMaintenanceMode as ConfigDuckLakeMaintenanceMode,
             ReplicatorConfig,
@@ -223,8 +224,10 @@ mod ducklake {
                 secret_access_key: secret_access_key.expose_secret().to_owned(),
                 region: s3_region.clone().unwrap_or_else(|| "us-east-1".to_owned()),
                 endpoint: s3_endpoint.clone(),
-                url_style: s3_url_style.clone().unwrap_or_else(|| "path".to_owned()),
-                use_ssl: s3_use_ssl.unwrap_or(false),
+                url_style: s3_url_style.clone().unwrap_or_else(|| {
+                    default_ducklake_s3_url_style(s3_endpoint.as_deref()).to_owned()
+                }),
+                use_ssl: s3_use_ssl.unwrap_or_else(default_ducklake_s3_use_ssl),
             }),
             (None, None) => None,
             _ => {

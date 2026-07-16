@@ -756,7 +756,13 @@ where
                 destination
                     .write_table_rows(&replicated_table_schema, table_rows, flush_result)
                     .await?;
-                let write_status = pending_flush_result.await.into_result()?;
+                let ShutdownResult::Ok(completed_flush_result) = pending_flush_result
+                    .with_shutdown(&mut shutdown_rx)
+                    .await
+                else {
+                    return Ok(ShutdownResult::Shutdown(progress));
+                };
+                let write_status = completed_flush_result.into_result()?;
 
                 progress.record_batch(batch_size, write_status);
 

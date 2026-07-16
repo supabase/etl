@@ -1,6 +1,9 @@
 use std::{future::Future, sync::Arc};
 
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::{
+    sync::{Mutex, OwnedMutexGuard},
+    task::JoinSet,
+};
 use tracing::{error, warn};
 
 use crate::{
@@ -19,10 +22,9 @@ const TASK_REAP_THRESHOLD: usize = 32;
 /// This helper is for components that want to offload accepted work to
 /// background tasks while still keeping task handles owned and observable.
 ///
-/// It intentionally does not add its own concurrency control. ETL already
-/// limits concurrent work at higher levels, so this type only manages the
-/// lifecycle of spawned tasks: reap completed work during normal operation and
-/// shut down outstanding tasks safely.
+/// This type does not impose a work-concurrency policy, higher layers decide
+/// when work is submitted and how much may run concurrently. It coordinates
+/// task registration with reaping, draining, and shutdown.
 #[derive(Debug)]
 struct TaskSetInner {
     join_set: JoinSet<()>,
@@ -34,6 +36,18 @@ struct TaskSetInner {
 #[derive(Debug, Clone)]
 pub struct TaskSet {
     inner: Arc<Mutex<TaskSetInner>>,
+}
+
+/// Exclusive task-registration boundary retained after a [`TaskSet`] drains.
+///
+/// While this guard is alive, calls that access the same task registry wait for
+/// it to be dropped. Dropping the guard restores access without aborting any
+/// task.
+#[must_use = "dropping this guard allows new tasks to register"]
+#[derive(Debug)]
+pub struct TaskSetDrainGuard {
+    /// Retained lock for the task registry.
+    _guard: OwnedMutexGuard<TaskSetInner>,
 }
 
 impl TaskSet {
@@ -66,18 +80,32 @@ impl TaskSet {
         Ok(())
     }
 
-    /// Waits for all remaining tasks to finish without aborting them.
+    /// Drains the task set and retains exclusive access to its task registry.
     ///
-    /// This is useful for callers that want shutdown to complete
-    /// already-accepted work before cleaning up related resources.
-    pub async fn drain(&self) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
+    /// Use this when resources used by registered tasks must be changed after
+    /// all previously registered work has finished and before later work can
+    /// start. The returned guard blocks [`TaskSet::spawn`] and other registry
+    /// operations until dropped.
+    ///
+    /// This method neither aborts tasks nor imposes a timeout. Cancelling it
+    /// releases the registry and leaves unfinished tasks tracked.
+    ///
+    /// The registry remains locked while registered tasks are awaited. Such
+    /// tasks must not directly or indirectly wait for an operation that
+    /// accesses this [`TaskSet`]. The caller must likewise not await any
+    /// operation that accesses this task registry while holding the returned
+    /// guard.
+    ///
+    /// If a tracked task panics, this method returns an error without a guard.
+    /// Tasks not yet joined remain tracked and continue running.
+    pub async fn drain(&self) -> EtlResult<TaskSetDrainGuard> {
+        let mut inner = Arc::clone(&self.inner).lock_owned().await;
 
         while let Some(result) = inner.join_set.join_next().await {
             self.handle_task_result(result)?;
         }
 
-        Ok(())
+        Ok(TaskSetDrainGuard { _guard: inner })
     }
 
     /// Aborts and reaps all remaining tasks during shutdown.

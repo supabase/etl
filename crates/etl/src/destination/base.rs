@@ -2,7 +2,9 @@ use std::future::Future;
 
 use crate::{
     data::TableRow,
-    destination::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+    destination::{
+        DropTableForCopyResult, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+    },
     error::EtlResult,
     event::Event,
     schema::ReplicatedTableSchema,
@@ -90,10 +92,10 @@ pub trait Destination {
     /// The method return value is reserved for immediate dispatch/setup
     /// failures before the work has been accepted.
     ///
-    /// ETL waits for each table-copy batch to finish before reading the next
-    /// batch for the same copy partition. When multiple copy workers are
-    /// configured, this method can still run concurrently across different
-    /// partitions.
+    /// Unless shutdown is requested, ETL waits for each table-copy batch to
+    /// finish before reading the next batch for the same copy partition. When
+    /// multiple copy workers are configured, this method can still run
+    /// concurrently across different partitions.
     ///
     /// [`crate::destination::DestinationWriteStatus::Durable`] means the batch
     /// and all earlier accepted writes it covers are durable.
@@ -155,6 +157,11 @@ pub trait Destination {
     /// destination accepted ownership of the write, but ETL must not advance
     /// durable progress for it yet.
     ///
+    /// [`WriteEventsDurability::MayDefer`] permits either status, while
+    /// [`WriteEventsDurability::RequireDurable`] requires `Durable` and its
+    /// cumulative guarantee for all earlier accepted writes in the same
+    /// apply-loop stream.
+    ///
     /// ETL keeps at most one streaming write result pending while it continues
     /// building the next batch. If a result completes as
     /// [`crate::destination::DestinationWriteStatus::Accepted`], ETL carries
@@ -189,6 +196,7 @@ pub trait Destination {
     fn write_events(
         &self,
         events: Vec<Event>,
+        durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }

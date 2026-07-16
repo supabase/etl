@@ -8,11 +8,12 @@ use std::{
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
 use tokio_postgres::types::PgLsn;
-use tracing::warn;
+use tracing::debug;
 
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
+    runtime::concurrency::{ShutdownResult, ShutdownRx},
 };
 
 /// Durability status reported by streaming and table-copy destination writes.
@@ -62,8 +63,8 @@ pub enum DestinationWriteStatus {
 /// Async completion handle used for
 /// [`crate::destination::Destination::write_table_rows`].
 ///
-/// ETL waits for this result before requesting the next row batch for the same
-/// copy partition. A destination may report
+/// Unless shutdown is requested, ETL waits for this result before requesting
+/// the next row batch for the same copy partition. A destination may report
 /// [`DestinationWriteStatus::Accepted`] to continue copying before the batch is
 /// durable. ETL then issues a terminal empty write as a table-wide durability
 /// barrier and requires [`DestinationWriteStatus::Durable`] before completing
@@ -73,20 +74,36 @@ pub type WriteTableRowsResult<T = DestinationWriteStatus> = AsyncResult<T>;
 /// Async completion handle used for
 /// [`crate::destination::Destination::drop_table_for_copy`].
 ///
-/// ETL waits for this result immediately before clearing stored table-copy
-/// metadata and starting a fresh copy.
+/// Unless shutdown is requested, ETL waits for this result immediately before
+/// clearing stored table-copy metadata and starting a fresh copy.
 pub type DropTableForCopyResult<T = ()> = AsyncResult<T>;
+
+/// Durability requirement for a streaming destination write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteEventsDurability {
+    /// The destination may report either
+    /// [`DestinationWriteStatus::Accepted`] or
+    /// [`DestinationWriteStatus::Durable`].
+    MayDefer,
+    /// The destination must report [`DestinationWriteStatus::Durable`] for the
+    /// write and all earlier accepted writes in the same ordered apply-loop
+    /// stream.
+    RequireDurable,
+}
 
 /// Async completion handle used for
 /// [`crate::destination::Destination::write_events`].
 ///
 /// This is the path where asynchronous completion changes ETL behavior the
 /// most: once dispatch succeeds, the apply loop may continue other work while
-/// the destination finishes the batch.
+/// the destination finishes the batch. [`WriteEventsDurability`] determines
+/// which successful completion statuses are valid for each call.
 pub type WriteEventsResult<T = DestinationWriteStatus> = AsyncResult<T>;
+
 /// Pending async completion used for `Destination::write_events`.
 pub(crate) type PendingWriteEventsResult<T = DestinationWriteStatus> =
     PendingAsyncResult<T, ApplyLoopAsyncResultMetadata>;
+
 /// Completed async completion used for `Destination::write_events`.
 pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
@@ -111,6 +128,8 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// [`DestinationWriteStatus::Accepted`] results and advances only when a
     /// later cumulative durable result covers the carried LSN.
     pub commit_end_lsn: Option<PgLsn>,
+    /// Durability requirement supplied with the dispatched write.
+    pub durability: WriteEventsDurability,
     /// Dispatch-time metrics for the batch.
     pub metrics: DispatchMetrics,
 }
@@ -145,21 +164,8 @@ impl<T> AsyncResult<T> {
         };
 
         if tx.send(result).is_err() {
-            warn!("could not send async result because receiver was already closed");
+            debug!("async result receiver was already closed");
         }
-    }
-}
-
-impl<T> Drop for AsyncResult<T> {
-    fn drop(&mut self) {
-        let Some(tx) = self.tx.take() else {
-            return;
-        };
-
-        let _ = tx.send(Err(etl_error!(
-            ErrorKind::DestinationError,
-            "Async result dropped without sending"
-        )));
     }
 }
 
@@ -196,6 +202,22 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
     }
 }
 
+impl<T, M> PendingAsyncResult<T, M> {
+    /// Waits for completion or returns when shutdown is requested.
+    pub(crate) async fn with_shutdown(
+        self,
+        shutdown_rx: &mut ShutdownRx,
+    ) -> ShutdownResult<CompletedAsyncResult<T, M>, ()> {
+        tokio::select! {
+            biased;
+
+            _ = shutdown_rx.changed() => ShutdownResult::Shutdown(()),
+
+            completed = self => ShutdownResult::Ok(completed),
+        }
+    }
+}
+
 /// Completed typed asynchronous result.
 #[derive(Debug)]
 pub(crate) struct CompletedAsyncResult<T, M> {
@@ -218,11 +240,13 @@ impl<T, M> CompletedAsyncResult<T, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::concurrency::create_shutdown_channel;
 
     #[tokio::test]
     async fn async_result_round_trips_success() {
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: Some(PgLsn::from(42)),
+            durability: WriteEventsDurability::MayDefer,
             metrics: DispatchMetrics { items_count: 1, dispatched_at: Instant::now() },
         };
         let (result_tx, pending_result) = WriteEventsResult::new(metadata);
@@ -234,6 +258,7 @@ mod tests {
 
         let metadata = metadata.expect("metadata should be present");
         assert_eq!(metadata.commit_end_lsn, Some(PgLsn::from(42)));
+        assert_eq!(metadata.durability, WriteEventsDurability::MayDefer);
         assert_eq!(result.unwrap(), 7);
     }
 
@@ -244,7 +269,7 @@ mod tests {
 
         let err = pending_result.await.into_result().unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationError);
-        assert_eq!(err.description(), Some("Async result dropped without sending"));
+        assert_eq!(err.description(), Some("Async result channel closed before sending"));
     }
 
     #[tokio::test]
@@ -260,5 +285,42 @@ mod tests {
 
         assert!(metadata.is_none());
         assert_eq!(result.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn pending_async_result_completes_before_shutdown() {
+        let (_shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
+        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
+        result_tx.send(Ok(7));
+
+        let ShutdownResult::Ok(completed) = pending_result.with_shutdown(&mut shutdown_rx).await
+        else {
+            panic!("async result should complete before shutdown");
+        };
+
+        assert_eq!(completed.into_result().unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn pending_async_result_stops_waiting_on_shutdown() {
+        let (shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
+        let (_result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
+        shutdown_tx.shutdown().unwrap();
+
+        let result = pending_result.with_shutdown(&mut shutdown_rx).await;
+
+        assert!(matches!(result, ShutdownResult::Shutdown(())));
+    }
+
+    #[tokio::test]
+    async fn pending_async_result_prioritizes_shutdown_over_completion() {
+        let (shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
+        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
+        result_tx.send(Ok(7));
+        shutdown_tx.shutdown().unwrap();
+
+        let result = pending_result.with_shutdown(&mut shutdown_rx).await;
+
+        assert!(matches!(result, ShutdownResult::Shutdown(())));
     }
 }

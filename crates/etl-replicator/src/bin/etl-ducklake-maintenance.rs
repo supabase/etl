@@ -3,7 +3,8 @@
 use std::{env, error::Error, process::ExitCode};
 
 use etl_config::{
-    load_config, parse_ducklake_s3_data_path, parse_ducklake_url,
+    default_ducklake_s3_url_style, default_ducklake_s3_use_ssl, load_config,
+    parse_ducklake_s3_data_path, parse_ducklake_url,
     shared::{DestinationConfig, ReplicatorConfig},
 };
 use etl_maintenance::ducklake::{
@@ -64,9 +65,11 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
             access_key_id: access_key_id.expose_secret().to_owned(),
             secret_access_key: secret_access_key.expose_secret().to_owned(),
             region: s3_region.unwrap_or_else(|| "us-east-1".to_owned()),
+            url_style: s3_url_style.unwrap_or_else(|| {
+                default_ducklake_s3_url_style(s3_endpoint.as_deref()).to_owned()
+            }),
             endpoint: s3_endpoint,
-            url_style: s3_url_style.unwrap_or_else(|| "path".to_owned()),
-            use_ssl: s3_use_ssl.unwrap_or(false),
+            use_ssl: s3_use_ssl.unwrap_or_else(default_ducklake_s3_use_ssl),
         }),
         (None, None) => None,
         _ => {

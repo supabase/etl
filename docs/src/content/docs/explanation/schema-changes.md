@@ -26,7 +26,7 @@ changes:
 | Rename a replicated column | Rename column |
 | Change a replicated column default | Column default modification |
 | Drop a replicated column default | Column default removal |
-| Drop `NOT NULL` from a replicated column | Detected in the schema snapshot, but not applied to built-in destinations |
+| Drop `NOT NULL` from a replicated column | BigQuery relaxes an existing `REQUIRED` column to `NULLABLE`; other built-in destinations currently leave nullability unchanged |
 | Set `NOT NULL` on a replicated column | Detected in the schema snapshot, but not applied to built-in destinations |
 | Several of the above in one statement | One schema snapshot, diffed into column additions, removals, and grouped column modifications |
 
@@ -73,7 +73,7 @@ ETL has one shared schema-change signal, but **DDL behavior is implemented per d
 
 | Destination | Current DDL behavior |
 |-------------|----------------------|
-| BigQuery | Supports add, drop, rename, and supported literal default metadata. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. |
+| BigQuery | Supports add, drop, rename, `REQUIRED` to `NULLABLE` relaxation, and supported literal default metadata. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. PostgreSQL remains responsible for enforcing later `SET NOT NULL` changes because BigQuery cannot tighten an existing column in place. |
 | ClickHouse | Supports add, drop, rename, and supported literal defaults. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. |
 | DuckLake | Supports add, drop, rename, and supported literal defaults. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
 | Snowflake | Supports add, drop, rename, create-table literal defaults, and literal add-column defaults. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. |
@@ -294,10 +294,12 @@ These behaviors are **not full destination DDL semantics** yet:
   without ETL issuing a materialization rewrite. Snowflake only receives
   add-column defaults for source defaults that can be rendered as Snowflake
   literals.
-- Built-in destinations only enforce source column nullability when creating a
-  destination table. Streaming schema changes do not apply `SET NOT NULL` or
-  `DROP NOT NULL`; newly added columns remain nullable where the destination
-  requires that for historical rows.
+- BigQuery applies streaming `DROP NOT NULL` changes so future source NULL values
+  remain writable. BigQuery cannot change an existing `NULLABLE` column to
+  `REQUIRED`, so PostgreSQL enforces later `SET NOT NULL` changes while the
+  destination column remains nullable. Other built-in destinations currently
+  leave streaming nullability changes unchanged. Newly added columns remain
+  nullable where the destination requires that for historical rows.
 - The trigger payload includes `current_query` for debugging only. It can
   contain literals and multiple statements, so it must not be treated as
   replayable DDL.

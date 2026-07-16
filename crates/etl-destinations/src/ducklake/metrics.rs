@@ -158,7 +158,7 @@ pub(crate) fn register_metrics() {
         describe_gauge!(
             ETL_DUCKLAKE_POOL_SIZE,
             Unit::Count,
-            "Configured size of the warm DuckLake connection pool."
+            "Configured size of each warm DuckLake connection pool."
         );
 
         describe_histogram!(
