@@ -10,19 +10,22 @@ use etl_api::{
             CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
             GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
             RollbackTablesRequest, RollbackTablesResponse, RollbackTablesTarget, RollbackType,
-            SimpleTableState, UpdatePipelineRequest, UpdatePipelineVersionRequest,
+            SimpleTableState, TableStatus, UpdatePipelineRequest, UpdatePipelineVersionRequest,
+            ValidatePipelineRequest, ValidatePipelineResponse,
         },
     },
     startup::get_connection_pool,
+    validation::FailureType,
 };
 use etl_config::shared::{
-    BatchConfig, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig,
+    BatchConfig, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
 };
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
 use reqwest::StatusCode;
-use sqlx::{AssertSqlSafe, PgPool, postgres::types::Oid};
+use sqlx::{AssertSqlSafe, Executor, PgPool, postgres::types::Oid};
+use utoipa::OpenApi;
 
 use crate::support::{
     database::{create_test_source_database, run_etl_migrations_on_source_database},
@@ -40,6 +43,55 @@ use crate::support::{
         TestApp, spawn_test_app, spawn_test_app_with_k8s_state, spawn_test_app_without_k8s_client,
     },
 };
+
+/// Finds a named property in a possibly composed OpenAPI schema.
+fn find_schema_property<'a>(
+    schema: &'a serde_json::Value,
+    name: &str,
+) -> Option<&'a serde_json::Value> {
+    match schema {
+        serde_json::Value::Array(values) => {
+            values.iter().find_map(|value| find_schema_property(value, name))
+        }
+        serde_json::Value::Object(values) => {
+            if let Some(property) =
+                values.get("properties").and_then(|properties| properties.get(name))
+            {
+                return Some(property);
+            }
+
+            values.values().find_map(|value| find_schema_property(value, name))
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn table_status_openapi_schema_is_flat_and_deprecates_legacy_fields() {
+    #[derive(OpenApi)]
+    #[openapi(components(schemas(TableStatus)))]
+    struct TestApi;
+
+    let openapi = serde_json::to_value(TestApi::openapi()).unwrap();
+    let schemas = &openapi["components"]["schemas"];
+    let source_table = &schemas["SourceTable"];
+
+    for property in ["id", "schema", "name"] {
+        assert!(find_schema_property(source_table, property).is_some());
+    }
+
+    let table_status = &schemas["TableStatus"];
+    assert_eq!(
+        find_schema_property(table_status, "table_id")
+            .and_then(|value| value["deprecated"].as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        find_schema_property(table_status, "table_name")
+            .and_then(|value| value["deprecated"].as_bool()),
+        Some(true)
+    );
+}
 
 /// Creates a basic pipeline setup for tests that don't need source databases.
 async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {
@@ -434,6 +486,160 @@ async fn an_existing_pipeline_can_be_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn selective_table_copy_reads_return_table_ids() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    source_pool
+        .execute("create table public.copy_selection_test (id bigint primary key)")
+        .await
+        .expect("failed to create source table");
+    source_pool
+        .execute("create publication copy_selection_pub for table public.copy_selection_test")
+        .await
+        .expect("failed to create source publication");
+    let table_id: i64 =
+        sqlx::query_scalar("select 'public.copy_selection_test'::regclass::oid::bigint")
+            .fetch_one(&source_pool)
+            .await
+            .expect("failed to read source table oid");
+    let table_id = u32::try_from(table_id).expect("Postgres OIDs fit in u32");
+
+    let mut config = new_pipeline_config();
+    config.publication_name = "copy_selection_pub".to_owned();
+    config.table_sync_copy = Some(TableSyncCopyConfig::SkipTables { table_ids: vec![table_id] });
+    let pipeline_id =
+        create_pipeline_with_config(&app, tenant_id, source_id, destination_id, config).await;
+
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert!(response.status().is_success());
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize pipeline response");
+    let TableSyncCopyConfig::SkipTables { table_ids } =
+        response.config.table_sync_copy.expect("table_sync_copy should be set")
+    else {
+        panic!("expected skip_tables read config");
+    };
+    assert_eq!(table_ids, vec![table_id]);
+
+    let response = app.read_all_pipelines(tenant_id).await;
+    assert!(response.status().is_success());
+    let response: ReadPipelinesResponse =
+        response.json().await.expect("failed to deserialize pipelines response");
+    let TableSyncCopyConfig::SkipTables { table_ids } = response.pipelines[0]
+        .config
+        .table_sync_copy
+        .clone()
+        .expect("table_sync_copy should be set")
+    else {
+        panic!("expected skip_tables read config");
+    };
+    assert_eq!(table_ids, vec![table_id]);
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selective_table_copy_reads_retain_stale_ids_after_publication_removal() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    source_pool
+        .execute("create table public.copy_selection_test (id bigint primary key)")
+        .await
+        .expect("failed to create source table");
+    source_pool
+        .execute("create publication copy_selection_pub for table public.copy_selection_test")
+        .await
+        .expect("failed to create source publication");
+    let table_id: i64 =
+        sqlx::query_scalar("select 'public.copy_selection_test'::regclass::oid::bigint")
+            .fetch_one(&source_pool)
+            .await
+            .expect("failed to read source table oid");
+    let table_id = u32::try_from(table_id).expect("Postgres OIDs fit in u32");
+
+    let mut config = new_pipeline_config();
+    config.publication_name = "copy_selection_pub".to_owned();
+    config.table_sync_copy = Some(TableSyncCopyConfig::SkipTables { table_ids: vec![table_id] });
+    let pipeline_id =
+        create_pipeline_with_config(&app, tenant_id, source_id, destination_id, config).await;
+
+    source_pool
+        .execute("alter publication copy_selection_pub drop table public.copy_selection_test")
+        .await
+        .expect("failed to remove source table from publication");
+    source_pool
+        .execute("drop table public.copy_selection_test")
+        .await
+        .expect("failed to drop source table");
+
+    // The stale id is preserved verbatim: pipeline reads never resolve or
+    // validate table_sync_copy ids against the source database.
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert!(response.status().is_success());
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize pipeline response");
+    let TableSyncCopyConfig::SkipTables { table_ids } =
+        response.config.table_sync_copy.expect("table_sync_copy should be set")
+    else {
+        panic!("expected skip_tables read config");
+    };
+    assert_eq!(table_ids, vec![table_id]);
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_reads_succeed_while_source_database_is_unreachable() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    let mut config = new_pipeline_config();
+    config.table_sync_copy = Some(TableSyncCopyConfig::SkipTables { table_ids: vec![16384] });
+    let pipeline_id =
+        create_pipeline_with_config(&app, tenant_id, source_id, destination_id, config).await;
+
+    // Drop the source database entirely: pipeline reads must not depend on
+    // the source database being reachable, unlike endpoints that discover or
+    // resolve tables (source-table and publication reads, replication
+    // status).
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
+
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert!(response.status().is_success());
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize pipeline response");
+    let TableSyncCopyConfig::SkipTables { table_ids } =
+        response.config.table_sync_copy.expect("table_sync_copy should be set")
+    else {
+        panic!("expected skip_tables read config");
+    };
+    assert_eq!(table_ids, vec![16384]);
+
+    let response = app.read_all_pipelines(tenant_id).await;
+    assert!(response.status().is_success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn non_existing_pipeline_cannot_be_read() {
     init_test_tracing();
     // Arrange
@@ -609,7 +815,7 @@ async fn pipeline_config_update_clears_optional_fields_and_resets_default_fields
     let response: ReadPipelineResponse =
         response.json().await.expect("failed to deserialize response");
     assert!(response.config.log_level.is_none());
-    let batch = response.config.batch.expect("batch config should be present");
+    let batch = response.config.batch.expect("batch should be set");
     assert_eq!(batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
     assert_eq!(batch.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
     assert_eq!(response.config.memory_backpressure, Some(MemoryBackpressureConfig::default()));
@@ -749,6 +955,47 @@ async fn invalid_replicator_resources_are_rejected() {
         body.message,
         "Invalid pipeline request: Replicator cpu request must be greater than 0"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_validation_rejects_selected_table_ids_not_in_publication() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+
+    source_pool
+        .execute("create table public.copy_selection_test (id bigint primary key)")
+        .await
+        .expect("failed to create source table");
+    source_pool
+        .execute("create publication copy_selection_pub for table public.copy_selection_test")
+        .await
+        .expect("failed to create source publication");
+
+    let mut config = new_pipeline_config();
+    config.publication_name = "copy_selection_pub".to_owned();
+    // An id that does not belong to any table in the publication.
+    config.table_sync_copy = Some(TableSyncCopyConfig::IncludeTables { table_ids: vec![999_999] });
+    let request = ValidatePipelineRequest { source_id, config };
+
+    let response = app.validate_pipeline(tenant_id, &request).await;
+
+    assert!(response.status().is_success());
+    let response: ValidatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let failure = response
+        .validation_failures
+        .iter()
+        .find(|failure| failure.name == "Selected Tables Not In Publication")
+        .expect("expected a selected-tables-not-in-publication validation failure");
+    assert_eq!(failure.failure_type, FailureType::Critical);
+    assert!(failure.reason.contains("999999"));
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1325,7 +1572,10 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
 
     // Test the endpoint
     let response = app.get_pipeline_replication_status(&tenant_id, pipeline_id).await;
-    let response: GetPipelineReplicationStatusResponse = response.json().await.unwrap();
+    let response_body = response.text().await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+    let response: GetPipelineReplicationStatusResponse =
+        serde_json::from_str(&response_body).unwrap();
 
     assert_eq!(response.pipeline_id, pipeline_id);
     assert_eq!(response.table_statuses.len(), 2);
@@ -1340,7 +1590,22 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
             .expect("Table not found in response");
 
         assert_eq!(table_status.table_id, table_oid.0);
+        assert_eq!(table_status.table.id, table_oid.0);
+        assert_eq!(table_status.table.schema, "test");
+        assert_eq!(table_status.table.name, table_name.trim_start_matches("test."));
         assert!(table_status.table_sync_lag.is_none());
+
+        let table_json = response_json["table_statuses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|status| status["table_name"] == *table_name)
+            .expect("Table not found in JSON response");
+        assert_eq!(table_json["id"], table_oid.0);
+        assert_eq!(table_json["schema"], "test");
+        assert_eq!(table_json["name"], table_name.trim_start_matches("test."));
+        assert_eq!(table_json["table_id"], table_oid.0);
+        assert_eq!(table_json["table_name"], *table_name);
 
         match table_name.as_str() {
             "test.test_table_users" => {
