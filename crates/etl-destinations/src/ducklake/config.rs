@@ -574,7 +574,14 @@ pub(super) fn build_setup_sql(
     s3: Option<&S3Config>,
     metadata_schema: Option<&str>,
 ) -> EtlResult<String> {
-    Ok(build_setup_plan(catalog_url, data_path, s3, metadata_schema)?.combined_sql())
+    Ok(build_setup_plan(
+        catalog_url,
+        data_path,
+        s3,
+        metadata_schema,
+        super::ATTACH_DATA_INLINING_ROW_LIMIT,
+    )?
+    .combined_sql())
 }
 
 /// Builds the ordered setup phases executed for each new pool connection.
@@ -583,6 +590,7 @@ pub(super) fn build_setup_plan(
     data_path: &Url,
     s3: Option<&S3Config>,
     metadata_schema: Option<&str>,
+    data_inlining_row_limit: u64,
 ) -> EtlResult<DuckLakeSetupPlan> {
     let strategy = current_duckdb_extension_strategy()?;
     let vendored_root = match strategy {
@@ -603,6 +611,7 @@ pub(super) fn build_setup_plan(
         metadata_schema,
         strategy,
         vendored_root.as_deref(),
+        data_inlining_row_limit,
     )
 }
 
@@ -622,6 +631,7 @@ fn build_setup_sql_with_strategy(
         metadata_schema,
         strategy,
         vendored_root,
+        super::ATTACH_DATA_INLINING_ROW_LIMIT,
     )?
     .combined_sql())
 }
@@ -633,6 +643,7 @@ fn build_setup_plan_with_strategy(
     metadata_schema: Option<&str>,
     strategy: DuckDbExtensionStrategy,
     vendored_root: Option<&Path>,
+    data_inlining_row_limit: u64,
 ) -> EtlResult<DuckLakeSetupPlan> {
     let catalog_target = catalog_attach_target(catalog_url)?;
     let data_path = validate_data_path(data_path)?;
@@ -723,7 +734,7 @@ fn build_setup_plan_with_strategy(
              AUTOMATIC_MIGRATION true{metadata_schema_clause});",
             quote_literal(&format!("ducklake:{catalog_target}")),
             quote_literal(data_path),
-            super::ATTACH_DATA_INLINING_ROW_LIMIT
+            data_inlining_row_limit
         ),
     });
     steps.push(DuckLakeSetupStep {
@@ -1242,6 +1253,7 @@ mod tests {
             Some("ducklake"),
             DuckDbExtensionStrategy::VendoredLocal { platform_dir: "linux_arm64" },
             Some(&extension_dir),
+            crate::ducklake::COPY_DATA_INLINING_ROW_LIMIT,
         )
         .unwrap();
 
@@ -1251,6 +1263,7 @@ mod tests {
         assert_eq!(plan.steps()[2].label, "configure_object_store");
         assert_eq!(plan.steps()[3].label, "attach_catalog");
         assert_eq!(plan.steps()[4].label, "configure_parquet");
+        assert!(plan.steps()[3].sql.contains("DATA_INLINING_ROW_LIMIT 0"));
         assert_eq!(plan.steps()[0].sql, configure_writer_session_sql());
         assert!(plan.steps()[1].sql.contains(HTTPFS_EXTENSION_FILE));
         assert!(!plan.steps()[1].sql.contains("json"));

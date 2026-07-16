@@ -138,7 +138,7 @@ async fn async_main(
     info!("replicator bootstrap completed");
 
     if let Err(err) =
-        start_replicator_with_config(replicator_config, notification_client.clone()).await
+        Box::pin(start_replicator_with_config(replicator_config, notification_client.clone())).await
     {
         // We send the error to Sentry.
         sentry::capture_error(&err);
