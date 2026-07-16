@@ -408,7 +408,9 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
     hold.release_ok();
 
     first_insert_recorded.notified().await;
-    let first_commit_lsn = table_insert_commit_lsns(&destination.get_events().await, table_id)[0];
+    let first_commit_lsn = *table_insert_commit_lsns(&destination.get_events().await, table_id)
+        .first()
+        .expect("released insert should be recorded");
 
     wait_for_new_walsender(client, &apply_slot_name, old_pid).await;
 
