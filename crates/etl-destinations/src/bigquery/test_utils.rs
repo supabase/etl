@@ -300,10 +300,12 @@ impl BigQueryDatabase {
 
     /// Polls until a query against the table reports zero visible rows.
     ///
-    /// Returns true once an empty result is observed and false if rows are
-    /// still present when the retry budget runs out. A 404 counts as no rows
-    /// visible. Use this to assert that deletes emptied a table;
-    /// [`BigQueryDatabase::query_table`] waits for data instead.
+    /// Returns true once an empty result is observed and false if no empty
+    /// result is seen before the retry budget runs out. A 404 is retried
+    /// like a non-empty result: stale metadata can serve NOT_FOUND for a
+    /// table that still has rows, so only an actual empty response proves
+    /// the deletes were applied. Use this to assert that deletes emptied a
+    /// table; [`BigQueryDatabase::query_table`] waits for data instead.
     pub async fn wait_for_no_rows(&self, table_name: TableName) -> bool {
         let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
         let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
@@ -312,18 +314,21 @@ impl BigQueryDatabase {
         let mut attempts_remaining = BIGQUERY_NO_ROWS_MAX_ATTEMPTS;
 
         loop {
-            let no_rows_visible = match retry_bigquery_test_operation("table no-rows check", || {
+            // Only an observed empty result proves emptiness: a stale 404
+            // could hide a table that still has rows, so it is retried like
+            // a non-empty result.
+            let observed_empty = match retry_bigquery_test_operation("table no-rows check", || {
                 let request = QueryRequest::new(query.clone());
                 async { self.client.job().query(&self.project_id, request).await }
             })
             .await
             {
                 Ok(response) => response.rows.is_none_or(|rows| rows.is_empty()),
-                Err(BQError::ResponseError { error }) if error.error.code == 404 => true,
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => false,
                 Err(err) => panic!("Failed to query BigQuery table: {err:?}"),
             };
 
-            if no_rows_visible {
+            if observed_empty {
                 return true;
             }
 
