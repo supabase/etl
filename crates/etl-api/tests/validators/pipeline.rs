@@ -157,6 +157,83 @@ async fn validate_pipeline_selected_table_ids_follow_relation_lifecycle() {
 }
 
 #[tokio::test]
+async fn validate_pipeline_selected_partition_ids_follow_publication_identity() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    pool.execute("create table selected_partition_root (id bigint) partition by range (id)")
+        .await
+        .unwrap();
+    pool.execute(
+        "create table selected_partition_low partition of selected_partition_root for values from \
+         (minvalue) to (100)",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create table selected_partition_high partition of selected_partition_root for values \
+         from (100) to (maxvalue)",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create publication selected_partition_root_pub for table selected_partition_root with \
+         (publish_via_partition_root = true)",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create publication selected_partition_leaf_pub for table selected_partition_root with \
+         (publish_via_partition_root = false)",
+    )
+    .await
+    .unwrap();
+
+    let root_table_id =
+        sqlx::query_scalar::<_, Oid>("select 'selected_partition_root'::regclass::oid")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
+    let leaf_table_ids = sqlx::query_scalar::<_, Oid>(
+        r#"
+        select c.oid
+        from pg_class c
+        where c.relname in ('selected_partition_high', 'selected_partition_low')
+        order by c.relname
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|oid| oid.0)
+    .collect::<Vec<_>>();
+    assert_eq!(leaf_table_ids.len(), 2);
+
+    let cases = [
+        ("selected_partition_root_pub", vec![root_table_id], false),
+        ("selected_partition_root_pub", vec![leaf_table_ids[0]], true),
+        ("selected_partition_leaf_pub", leaf_table_ids, false),
+        ("selected_partition_leaf_pub", vec![root_table_id], true),
+    ];
+
+    for (publication_name, table_ids, expect_selected_id_failure) in cases {
+        let mut pipeline_config = create_pipeline_config(publication_name);
+        pipeline_config.table_sync_copy = Some(TableSyncCopyConfig::IncludeTables { table_ids });
+
+        let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
+        let has_selected_id_failure =
+            failures.iter().any(|failure| failure.name == "Selected Tables Not In Publication");
+        assert_eq!(
+            has_selected_id_failure, expect_selected_id_failure,
+            "Unexpected selected-id validation result for publication `{publication_name}`"
+        );
+    }
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
 async fn validate_pipeline_rejects_explicit_etl_tables() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 

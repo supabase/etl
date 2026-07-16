@@ -23,7 +23,10 @@ pub struct Table {
 /// The `id` is the table's Postgres OID. It is stable across renames for the
 /// lifetime of the relation, but it is scoped to this source database and may
 /// change if the table is dropped and recreated. Callers should use `schema`
-/// and `name` for display and `id` for selective table-copy configuration.
+/// and `name` for display. For selective table-copy configuration, use the
+/// IDs returned by the publication response: the generic source-tables
+/// response contains both partition roots and leaves, while the publication
+/// response follows its `publish_via_partition_root` setting.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SourceTable {
     /// The table's Postgres OID in this source database.
