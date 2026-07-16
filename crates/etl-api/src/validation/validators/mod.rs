@@ -19,7 +19,7 @@ pub(super) use destination::DestinationValidator;
 use pipeline::{
     GeneratedColumnsValidator, LogicalReplicationSettingsValidator,
     PublicationExcludesEtlTablesValidator, PublicationExistsValidator,
-    PublicationHasTablesValidator,
+    PublicationHasTablesValidator, SelectedTableIdsInPublicationValidator,
 };
 pub(super) use source::SourceValidator;
 
@@ -40,12 +40,17 @@ impl PipelineValidator {
     fn sub_validators(&self) -> Vec<Box<dyn Validator>> {
         let max_table_sync_workers = self.config.max_table_sync_workers.unwrap_or(4);
         let publication_name = self.config.publication_name.clone();
+        let table_sync_copy = self.config.table_sync_copy.clone().unwrap_or_default();
 
         vec![
             Box::new(LogicalReplicationSettingsValidator::new(max_table_sync_workers)),
             Box::new(PublicationExistsValidator::new(publication_name.clone())),
             Box::new(PublicationHasTablesValidator::new(publication_name.clone())),
             Box::new(PublicationExcludesEtlTablesValidator::new(publication_name.clone())),
+            Box::new(SelectedTableIdsInPublicationValidator::new(
+                publication_name.clone(),
+                table_sync_copy,
+            )),
             Box::new(GeneratedColumnsValidator::new(publication_name)),
         ]
     }

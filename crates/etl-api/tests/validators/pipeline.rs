@@ -1,10 +1,10 @@
 use etl_api::validation::{FailureType, ValidationContext, validate_pipeline, validate_source};
-use etl_config::Environment;
+use etl_config::{Environment, shared::TableSyncCopyConfig};
 use etl_postgres::{
     below_version, source::extract_server_version, sqlx::test_utils::drop_pg_database,
     version::POSTGRES_15,
 };
-use sqlx::Executor;
+use sqlx::{Executor, postgres::types::Oid};
 
 use super::{create_pipeline_config, create_validation_context_with_source};
 use crate::support::database::get_test_db_config;
@@ -48,12 +48,25 @@ async fn validate_source_with_trusted_username_mismatch() {
 async fn validate_pipeline_publication_not_found() {
     let (ctx, _pool, config) = create_validation_context_with_source().await;
 
-    let pipeline_config = create_pipeline_config("nonexistent_publication");
+    let mut pipeline_config = create_pipeline_config("nonexistent_publication");
+    pipeline_config.table_sync_copy =
+        Some(TableSyncCopyConfig::IncludeTables { table_ids: vec![42] });
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let pub_failure = failures.iter().find(|f| f.name == "Publication Not Found");
-    assert!(pub_failure.is_some(), "Should fail for nonexistent publication");
-    assert_eq!(pub_failure.unwrap().failure_type, FailureType::Critical);
+    let publication_failures = failures
+        .iter()
+        .filter(|failure| {
+            matches!(
+                failure.name.as_str(),
+                "Publication Not Found"
+                    | "Publication Empty"
+                    | "Selected Tables Not In Publication"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(publication_failures.len(), 1);
+    assert_eq!(publication_failures[0].name, "Publication Not Found");
+    assert_eq!(publication_failures[0].failure_type, FailureType::Critical);
 
     drop_pg_database(&config).await;
 }
@@ -64,12 +77,158 @@ async fn validate_pipeline_publication_empty() {
 
     pool.execute("create publication empty_pub").await.unwrap();
 
-    let pipeline_config = create_pipeline_config("empty_pub");
+    let mut pipeline_config = create_pipeline_config("empty_pub");
+    pipeline_config.table_sync_copy =
+        Some(TableSyncCopyConfig::IncludeTables { table_ids: vec![42] });
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let empty_failure = failures.iter().find(|f| f.name == "Publication Empty");
-    assert!(empty_failure.is_some(), "Should fail for empty publication");
-    assert_eq!(empty_failure.unwrap().failure_type, FailureType::Critical);
+    let publication_failures = failures
+        .iter()
+        .filter(|failure| {
+            matches!(
+                failure.name.as_str(),
+                "Publication Not Found"
+                    | "Publication Empty"
+                    | "Selected Tables Not In Publication"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(publication_failures.len(), 1);
+    assert_eq!(publication_failures[0].name, "Publication Empty");
+    assert_eq!(publication_failures[0].failure_type, FailureType::Critical);
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_pipeline_selected_table_ids_follow_relation_lifecycle() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    pool.execute("create table selected_table (id bigint primary key)").await.unwrap();
+    pool.execute("create publication selected_table_pub for table selected_table").await.unwrap();
+
+    let old_table_id = sqlx::query_scalar::<_, Oid>("select 'selected_table'::regclass::oid")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .0;
+    let mut pipeline_config = create_pipeline_config("selected_table_pub");
+    pipeline_config.table_sync_copy =
+        Some(TableSyncCopyConfig::IncludeTables { table_ids: vec![old_table_id] });
+
+    let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
+    assert!(
+        failures.iter().all(|failure| failure.name != "Selected Tables Not In Publication"),
+        "The current published table id should be accepted"
+    );
+
+    pool.execute("drop table selected_table").await.unwrap();
+    pool.execute("create table selected_table (id bigint primary key)").await.unwrap();
+    pool.execute("alter publication selected_table_pub add table selected_table").await.unwrap();
+
+    let new_table_id = sqlx::query_scalar::<_, Oid>("select 'selected_table'::regclass::oid")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .0;
+    assert_ne!(old_table_id, new_table_id);
+
+    pipeline_config.table_sync_copy =
+        Some(TableSyncCopyConfig::IncludeTables { table_ids: vec![old_table_id, old_table_id] });
+    let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
+    let failure = failures
+        .iter()
+        .find(|failure| failure.name == "Selected Tables Not In Publication")
+        .expect("The stale table id should be rejected");
+    assert_eq!(failure.failure_type, FailureType::Critical);
+    assert_eq!(failure.reason.matches(&old_table_id.to_string()).count(), 1);
+    assert!(failure.reason.contains("Refresh the publication table list"));
+    assert!(failure.reason.contains("replace stale publication IDs"));
+
+    pipeline_config.table_sync_copy =
+        Some(TableSyncCopyConfig::IncludeTables { table_ids: vec![new_table_id] });
+    let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
+    assert!(
+        failures.iter().all(|failure| failure.name != "Selected Tables Not In Publication"),
+        "The recreated table's current published id should be accepted"
+    );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_pipeline_selected_partition_ids_follow_publication_identity() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    pool.execute("create table selected_partition_root (id bigint) partition by range (id)")
+        .await
+        .unwrap();
+    pool.execute(
+        "create table selected_partition_low partition of selected_partition_root for values from \
+         (minvalue) to (100)",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create table selected_partition_high partition of selected_partition_root for values \
+         from (100) to (maxvalue)",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create publication selected_partition_root_pub for table selected_partition_root with \
+         (publish_via_partition_root = true)",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create publication selected_partition_leaf_pub for table selected_partition_root with \
+         (publish_via_partition_root = false)",
+    )
+    .await
+    .unwrap();
+
+    let root_table_id =
+        sqlx::query_scalar::<_, Oid>("select 'selected_partition_root'::regclass::oid")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
+    let leaf_table_ids = sqlx::query_scalar::<_, Oid>(
+        r#"
+        select c.oid
+        from pg_class c
+        where c.relname in ('selected_partition_high', 'selected_partition_low')
+        order by c.relname
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|oid| oid.0)
+    .collect::<Vec<_>>();
+    assert_eq!(leaf_table_ids.len(), 2);
+
+    let cases = [
+        ("selected_partition_root_pub", vec![root_table_id], false),
+        ("selected_partition_root_pub", vec![leaf_table_ids[0]], true),
+        ("selected_partition_leaf_pub", leaf_table_ids, false),
+        ("selected_partition_leaf_pub", vec![root_table_id], true),
+    ];
+
+    for (publication_name, table_ids, expect_selected_id_failure) in cases {
+        let mut pipeline_config = create_pipeline_config(publication_name);
+        pipeline_config.table_sync_copy = Some(TableSyncCopyConfig::IncludeTables { table_ids });
+
+        let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
+        let has_selected_id_failure =
+            failures.iter().any(|failure| failure.name == "Selected Tables Not In Publication");
+        assert_eq!(
+            has_selected_id_failure, expect_selected_id_failure,
+            "Unexpected selected-id validation result for publication `{publication_name}`"
+        );
+    }
 
     drop_pg_database(&config).await;
 }

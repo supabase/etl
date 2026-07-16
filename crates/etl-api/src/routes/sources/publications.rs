@@ -15,7 +15,7 @@ use crate::{
     configs::encryption::EncryptionKeyring,
     data::{
         self,
-        publications::{Publication, PublicationsDbError},
+        publications::{Publication, PublicationDefinition, PublicationsDbError},
         source_database,
         sources::SourcesDbError,
         tables::Table,
@@ -79,23 +79,31 @@ impl IntoResponse for PublicationError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
+/// Request to create a publication from schema-qualified table names.
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePublicationRequest {
+    /// The publication name to create.
     #[schema(example = "my_publication", required = true)]
     #[serde(deserialize_with = "crate::utils::trim_string")]
     name: String,
+    /// Schema-qualified tables to publish.
     #[schema(required = true)]
     tables: Vec<Table>,
 }
 
-#[derive(Deserialize, ToSchema)]
+/// Request to change a publication's schema-qualified table list.
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdatePublicationRequest {
+    /// Schema-qualified tables to add, remove, or set.
     #[schema(required = true)]
     tables: Vec<Table>,
 }
 
-#[derive(Serialize, ToSchema)]
+/// Response containing all publications in a source database.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ReadPublicationsResponse {
+    /// Publications ordered by name, with each table list ordered by schema and
+    /// name.
     pub publications: Vec<Publication>,
 }
 
@@ -140,7 +148,7 @@ pub(crate) async fn create_publication(
     let source_pool =
         source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     let publication = publication.0;
-    let publication = Publication { name: publication.name, tables: publication.tables };
+    let publication = PublicationDefinition { name: publication.name, tables: publication.tables };
     data::publications::create_publication(&publication, &source_pool).await?;
 
     Ok(StatusCode::OK)
@@ -239,7 +247,7 @@ pub(crate) async fn update_publication(
     }
 
     let publication = publication.0;
-    let publication = Publication { name: publication_name, tables: publication.tables };
+    let publication = PublicationDefinition { name: publication_name, tables: publication.tables };
     data::publications::update_publication(&publication, &source_pool).await?;
 
     Ok(StatusCode::OK)
@@ -378,7 +386,7 @@ pub(crate) async fn add_tables_to_publication(
     }
 
     let publication = publication.0;
-    let publication = Publication { name: publication_name, tables: publication.tables };
+    let publication = PublicationDefinition { name: publication_name, tables: publication.tables };
     data::publications::add_tables_to_publication(&publication, &source_pool).await?;
 
     Ok(StatusCode::OK)
@@ -429,7 +437,7 @@ pub(crate) async fn drop_tables_from_publication(
     }
 
     let publication = publication.0;
-    let publication = Publication { name: publication_name, tables: publication.tables };
+    let publication = PublicationDefinition { name: publication_name, tables: publication.tables };
     data::publications::drop_tables_from_publication(&publication, &source_pool).await?;
 
     Ok(StatusCode::OK)
@@ -480,7 +488,7 @@ pub(crate) async fn set_publication_tables(
     }
 
     let publication = publication.0;
-    let publication = Publication { name: publication_name, tables: publication.tables };
+    let publication = PublicationDefinition { name: publication_name, tables: publication.tables };
     data::publications::update_publication(&publication, &source_pool).await?;
 
     Ok(StatusCode::OK)
