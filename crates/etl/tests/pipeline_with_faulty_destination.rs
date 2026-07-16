@@ -257,9 +257,9 @@ async fn shutdown_drains_pending_write_events_before_destination_shutdown() {
     let mut shutdown_task = tokio::spawn(pipeline.shutdown_and_wait());
 
     // THEN: shutdown waits on the pending response instead of proceeding
-    let still_draining =
-        tokio::time::timeout(Duration::from_secs(2), &mut shutdown_task).await.is_err();
-    assert!(still_draining);
+    if let Ok(result) = tokio::time::timeout(Duration::from_secs(2), &mut shutdown_task).await {
+        panic!("shutdown completed while the write response was withheld: {result:?}");
+    }
     assert!(!destination.shutdown_called().await);
 
     // WHEN: the held response is released
