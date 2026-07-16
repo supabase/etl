@@ -259,8 +259,9 @@ impl BigQueryDatabase {
     /// BigQuery surfaces the streamed data or the retry budget is exhausted.
     /// A 404 is retried within the same budget because a table queried right
     /// after being dropped and recreated can return a stale NOT_FOUND while
-    /// BigQuery metadata propagates. Use [`BigQueryDatabase::table_exists`]
-    /// to assert absence; this method treats absence as not-yet-visible.
+    /// BigQuery metadata propagates. Use
+    /// [`BigQueryDatabase::wait_for_no_rows`] to assert that a table is
+    /// empty; this method treats absence as not-yet-visible.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
         let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
         let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
@@ -333,25 +334,6 @@ impl BigQueryDatabase {
             attempts_remaining -= 1;
             sleep(Duration::from_millis(BIGQUERY_QUERY_RETRY_DELAY_MS)).await;
         }
-    }
-
-    /// Returns whether the table or view with the base name currently exists.
-    ///
-    /// Uses the tables metadata API, which answers existence consistently,
-    /// unlike query results for recently dropped or recreated names.
-    pub async fn table_exists(&self, table_name: TableName) -> bool {
-        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
-
-        retry_bigquery_test_operation("table existence check", || async {
-            match self.client.table().get(&self.project_id, &self.dataset_id, &table_id, None).await
-            {
-                Ok(_) => Ok(true),
-                Err(BQError::ResponseError { error }) if error.error.code == 404 => Ok(false),
-                Err(err) => Err(err),
-            }
-        })
-        .await
-        .unwrap_or_else(|err| panic!("Failed to check BigQuery table existence: {err:?}"))
     }
 
     /// Queries the schema (column metadata) for a table.
