@@ -812,9 +812,7 @@ where
                     bail!(
                         ErrorKind::InvalidState,
                         "Table sync apply loop completed before reaching SyncDone",
-                        format!(
-                            "Expected SyncDone before resource cleanup, found {table_state}"
-                        )
+                        format!("Expected SyncDone before resource cleanup, found {table_state}")
                     );
                 }
 
