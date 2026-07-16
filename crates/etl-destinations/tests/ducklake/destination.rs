@@ -584,7 +584,7 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
     .await
     .unwrap();
 
-    assert_eq!(destination.connection_open_count_for_tests(), 1);
+    assert_eq!(destination.copy_connection_open_count_for_tests(), 1);
 
     destination
         .write_table_rows(
@@ -593,7 +593,7 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
         )
         .await
         .unwrap();
-    assert_eq!(destination.connection_open_count_for_tests(), 1);
+    assert_eq!(destination.copy_connection_open_count_for_tests(), 1);
 
     destination
         .write_table_rows(
@@ -602,7 +602,7 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
         )
         .await
         .unwrap();
-    assert_eq!(destination.connection_open_count_for_tests(), 1);
+    assert_eq!(destination.copy_connection_open_count_for_tests(), 1);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
@@ -641,7 +641,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
     .await
     .unwrap();
 
-    assert_eq!(destination.connection_open_count_for_tests(), 1);
+    assert_eq!(destination.copy_connection_open_count_for_tests(), 1);
 
     arm_fail_after_copy_batch_commit_once_for_tests(&table_name.id());
     destination
@@ -651,7 +651,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
         )
         .await
         .unwrap();
-    assert_eq!(destination.connection_open_count_for_tests(), 2);
+    assert_eq!(destination.copy_connection_open_count_for_tests(), 2);
 
     destination
         .write_table_rows(
@@ -660,7 +660,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
         )
         .await
         .unwrap();
-    assert_eq!(destination.connection_open_count_for_tests(), 2);
+    assert_eq!(destination.copy_connection_open_count_for_tests(), 2);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);

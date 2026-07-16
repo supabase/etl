@@ -54,11 +54,12 @@ These explain the pressure your writer is putting on DuckLake:
 - `etl_ducklake_inline_flush_rows`
 - `etl_ducklake_inline_flush_duration_seconds`
 
-The destination attaches DuckLake with `DATA_INLINING_ROW_LIMIT = 1000000` for
-streaming writes. Initial copies temporarily set a table-scoped limit of `0`,
-so their batches are materialized as Parquet instead of accumulating in the
-metadata catalog. External maintenance jobs flush streaming inlined data during
-coordinated pauses. These metrics tell you whether that strategy is helping.
+The destination uses separate DuckLake connection pools for each write phase.
+Streaming connections attach with `DATA_INLINING_ROW_LIMIT = 1000000`, while
+initial-copy connections attach with a limit of `0` so COPY batches are
+materialized as Parquet without changing persistent catalog options. External
+maintenance jobs flush streaming inlined data during coordinated pauses. These
+metrics tell you whether that strategy is helping.
 
 The `result` label on these metrics uses:
 
