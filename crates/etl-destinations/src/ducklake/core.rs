@@ -154,6 +154,9 @@ fn should_request_file_maintenance(
 #[derive(Clone)]
 pub struct DuckLakeDestination<S> {
     manager: Arc<DuckLakeConnectionManager>,
+    /// Connection manager for the pool dedicated to initial-copy writes.
+    #[cfg(feature = "test-utils")]
+    copy_manager: DuckLakeConnectionManager,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     /// Connections attached with data inlining disabled for initial-copy
     /// transactions.
@@ -1116,6 +1119,8 @@ where
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         };
+        #[cfg(feature = "test-utils")]
+        let copy_manager_for_tests = copy_manager.clone();
 
         let pool =
             Arc::new(build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?);
@@ -1194,6 +1199,8 @@ where
         let checkpoint_gate = Arc::new(RwLock::new(()));
         let mut destination = Self {
             manager: Arc::clone(&manager),
+            #[cfg(feature = "test-utils")]
+            copy_manager: copy_manager_for_tests,
             pool: Arc::clone(&pool),
             copy_pool,
             blocking_slots: Arc::clone(&blocking_slots),
@@ -2640,10 +2647,11 @@ where
 
         Ok(())
     }
-    /// Returns how many DuckDB connections have been initialized for tests.
+    /// Returns how many COPY-pool DuckDB connections have been initialized for
+    /// tests.
     #[cfg(feature = "test-utils")]
-    pub fn connection_open_count_for_tests(&self) -> usize {
-        self.manager.open_count_for_tests()
+    pub fn copy_connection_open_count_for_tests(&self) -> usize {
+        self.copy_manager.open_count_for_tests()
     }
 }
 
