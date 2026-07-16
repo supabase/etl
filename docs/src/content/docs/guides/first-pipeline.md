@@ -221,7 +221,7 @@ DROP DATABASE etl_tutorial;
 - **Publications** define which tables to replicate via Postgres logical replication
 - **Pipeline configuration** controls batching behavior and error retry policies
 - **Custom destinations** are normal Rust types that implement the `Destination` trait
-- The pipeline performs an initial table copy, then streams changes in real-time
+- The pipeline performs an initial sync, then batches and writes ongoing changes
 
 ## Next Steps
 
