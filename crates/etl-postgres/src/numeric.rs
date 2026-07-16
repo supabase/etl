@@ -482,9 +482,18 @@ fn format_numeric_value(
     scale: u16,
     digits: &[i16],
 ) -> std::fmt::Result {
-    // Handle zero case.
+    // Handle zero case. Postgres preserves the display scale of zero values,
+    // so `0.000` keeps its three fractional zeros.
     if digits.is_empty() {
-        return write!(f, "0");
+        write!(f, "0")?;
+        if scale > 0 {
+            write!(f, ".")?;
+            for _ in 0..scale {
+                write!(f, "0")?;
+            }
+        }
+
+        return Ok(());
     }
 
     // Output negative sign if needed.
@@ -742,9 +751,9 @@ mod tests {
 
     #[test]
     fn zero_canonicalization_basic() {
-        for s in ["0", "0.0", "000", "000.000"] {
+        for (s, expected) in [("0", "0"), ("0.0", "0.0"), ("000", "0"), ("000.000", "0.000")] {
             let num = PgNumeric::from_str(s).unwrap();
-            assert_eq!(num.to_string(), "0");
+            assert_eq!(num.to_string(), expected);
 
             if let PgNumeric::Value { sign, weight, scale: _, digits } = num {
                 assert_eq!(sign, Sign::Positive);
@@ -758,9 +767,9 @@ mod tests {
 
     #[test]
     fn zero_canonicalization_negative_zero() {
-        for s in ["-0", "-0.00"] {
+        for (s, expected) in [("-0", "0"), ("-0.00", "0.00")] {
             let num = PgNumeric::from_str(s).unwrap();
-            assert_eq!(num.to_string(), "0");
+            assert_eq!(num.to_string(), expected);
 
             if let PgNumeric::Value { sign, weight, scale: _, digits } = num {
                 // Normalize to positive zero.
@@ -770,6 +779,17 @@ mod tests {
             } else {
                 panic!("Expected Value variant");
             }
+        }
+    }
+
+    #[test]
+    fn zero_display_preserves_scale_from_exponent() {
+        // Regression for the value-roundtrip property: Postgres renders
+        // `0e-1` as `0.0`, so the display scale of zero must survive the
+        // parse/format roundtrip.
+        for (s, expected) in [("0e-1", "0.0"), ("0e-6", "0.000000"), ("0.00e-1", "0.000")] {
+            let num = PgNumeric::from_str(s).unwrap();
+            assert_eq!(num.to_string(), expected);
         }
     }
 
