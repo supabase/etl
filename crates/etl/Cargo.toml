@@ -44,6 +44,7 @@ uuid = { workspace = true, features = ["v4"] }
 [dev-dependencies]
 etl-postgres = { workspace = true, features = ["tokio", "store", "test-utils"] }
 etl-telemetry = { workspace = true }
+proptest = { workspace = true }
 
 [[test]]
 name = "main"
