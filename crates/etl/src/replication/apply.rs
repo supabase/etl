@@ -682,9 +682,6 @@ struct ApplyLoopState {
     /// and new message intake until the in-flight flush resolves and the
     /// queued batch can be retried.
     processing_paused: bool,
-    /// Whether publication removal state is waiting for a destination
-    /// durability boundary.
-    pending_table_deletion: bool,
     /// Fallback snapshot used before a table has established shared protocol
     /// state.
     ///
@@ -726,7 +723,6 @@ impl ApplyLoopState {
             pending_flush_result: None,
             exit_intent: None,
             processing_paused: false,
-            pending_table_deletion: false,
             bootstrap_snapshot_id,
             slot_name,
             schema_cleanup_deadline: Arc::new(Mutex::new(Some(
@@ -815,22 +811,24 @@ impl ApplyLoopState {
     }
 
     /// Updates the last received LSN and snapshots replication lag metrics.
-    fn update_last_received_lsn(&mut self, lsn: PgLsn) {
+    fn update_last_received_lsn(&mut self, lsn: PgLsn, has_pending_table_deletions: bool) {
         self.replication_progress.update_last_received_lsn(lsn);
-        self.update_replication_lag_metrics_from_progress();
+        self.update_replication_lag_metrics_from_progress(has_pending_table_deletions);
     }
 
     /// Updates the last durable flush LSN and snapshots replication lag
     /// metrics.
-    fn update_last_flush_lsn(&mut self, lsn: PgLsn) {
+    fn update_last_flush_lsn(&mut self, lsn: PgLsn, has_pending_table_deletions: bool) {
         self.replication_progress.update_last_flush_lsn(lsn);
-        self.update_replication_lag_metrics_from_progress();
+        self.update_replication_lag_metrics_from_progress(has_pending_table_deletions);
     }
 
     /// Snapshots apply-loop progress into the replication lag metrics.
-    fn update_replication_lag_metrics_from_progress(&self) {
-        self.replication_lag_metrics
-            .update_from_progress(self.replication_progress, self.effective_flush_lsn());
+    fn update_replication_lag_metrics_from_progress(&self, has_pending_table_deletions: bool) {
+        self.replication_lag_metrics.update_from_progress(
+            self.replication_progress,
+            self.effective_flush_lsn(has_pending_table_deletions),
+        );
     }
 
     /// Returns the last received LSN that should be reported as written to the
@@ -846,9 +844,9 @@ impl ApplyLoopState {
     /// feedback keeps reporting the last durable flush LSN until a later
     /// durable write proves the carried LSN safe.
     ///
-    /// A pending publication deletion is also an explicit non-idle barrier.
-    /// The commit LSN normally provides the same protection, but tracking the
-    /// deletion independently prevents future batch-state changes from
+    /// Pending publication deletions are also an explicit non-idle barrier.
+    /// The commit LSN normally provides the same protection, but checking the
+    /// pending-deletion map directly prevents future batch-state changes from
     /// advancing feedback before the deletion's durable boundary.
     ///
     /// If no later batch arrives, durability for the accepted write is
@@ -856,11 +854,11 @@ impl ApplyLoopState {
     /// acknowledged through a separate side channel. This may increase the
     /// replay window while the stream is idle, but it preserves the single
     /// pending-result apply-loop model.
-    fn is_idle(&self) -> bool {
+    fn is_idle(&self, has_pending_table_deletions: bool) -> bool {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
             && self.last_commit_end_lsn.is_none()
-            && !self.pending_table_deletion
+            && !has_pending_table_deletions
     }
 
     /// Returns the effective flush LSN to report to PostgreSQL and use for
@@ -879,8 +877,8 @@ impl ApplyLoopState {
     /// used, and it might jump back compared to the last received LSN that
     /// we sent before, however this is fine since the status update logic
     /// guarantees monotonically increasing LSNs.
-    fn effective_flush_lsn(&self) -> PgLsn {
-        if self.is_idle() {
+    fn effective_flush_lsn(&self, has_pending_table_deletions: bool) -> PgLsn {
+        if self.is_idle(has_pending_table_deletions) {
             self.replication_progress.last_received_lsn()
         } else {
             self.replication_progress.last_flush_lsn()
@@ -1055,6 +1053,15 @@ where
     S: PipelineStore,
     D: PipelineDestination,
 {
+    /// Returns whether the apply worker has table deletions waiting for a
+    /// destination durability boundary.
+    fn has_pending_table_deletions(&self) -> bool {
+        matches!(
+            &self.worker_context,
+            WorkerContext::Apply(ctx) if !ctx.pending_table_deletions.is_empty()
+        )
+    }
+
     /// Starts the apply loop for processing replication events.
     ///
     /// This is the main entry point that creates the loop instance and runs it.
@@ -1555,7 +1562,7 @@ where
             .stream_mut()
             .send_status_update(
                 self.state.last_received_lsn(),
-                self.state.effective_flush_lsn(),
+                self.state.effective_flush_lsn(self.has_pending_table_deletions()),
                 force,
                 status_update_type,
             )
@@ -1960,10 +1967,11 @@ where
         match message {
             ReplicationMessage::XLogData(message) => {
                 let start_lsn = PgLsn::from(message.wal_start());
-                self.state.update_last_received_lsn(start_lsn);
+                let has_pending_table_deletions = self.has_pending_table_deletions();
+                self.state.update_last_received_lsn(start_lsn, has_pending_table_deletions);
 
                 let end_lsn = PgLsn::from(message.wal_end());
-                self.state.update_last_received_lsn(end_lsn);
+                self.state.update_last_received_lsn(end_lsn, has_pending_table_deletions);
 
                 debug!(
                     %start_lsn,
@@ -1975,7 +1983,8 @@ where
             }
             ReplicationMessage::PrimaryKeepAlive(message) => {
                 let end_lsn = PgLsn::from(message.wal_end());
-                self.state.update_last_received_lsn(end_lsn);
+                let has_pending_table_deletions = self.has_pending_table_deletions();
+                self.state.update_last_received_lsn(end_lsn, has_pending_table_deletions);
 
                 debug!(
                     wal_end = %end_lsn,
@@ -2257,7 +2266,6 @@ where
             "applying publication membership change"
         );
         Self::reconcile_publication_change(ctx, &publication_change).await?;
-        self.state.pending_table_deletion = !ctx.pending_table_deletions.is_empty();
 
         Ok(HandleMessageResult::no_event())
     }
@@ -2664,7 +2672,8 @@ where
         // to avoid writing to the customer database on every quiet heartbeat.
         let durable_flush_lsn =
             self.upsert_durable_replication_progress(last_commit_end_lsn).await?;
-        self.state.update_last_flush_lsn(durable_flush_lsn);
+        let has_pending_table_deletions = self.has_pending_table_deletions();
+        self.state.update_last_flush_lsn(durable_flush_lsn, has_pending_table_deletions);
 
         let current_lsn = self.state.replication_progress.last_flush_lsn();
         debug!(
@@ -2742,7 +2751,6 @@ where
                 "completed durable publication table deletion"
             );
         }
-        self.state.pending_table_deletion = !ctx.pending_table_deletions.is_empty();
 
         Ok(())
     }
@@ -2829,7 +2837,7 @@ where
     /// progress even if there are no events for the tables in the publication
     /// that this instance is interested in.
     async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
-        if !self.state.is_idle() {
+        if !self.state.is_idle(self.has_pending_table_deletions()) {
             debug!("skipping table sync processing because apply loop is not idle");
 
             return Ok(());
@@ -3781,7 +3789,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pending_table_deletion_keeps_feedback_at_durable_flush_lsn() {
+    fn pending_table_deletions_keep_feedback_at_durable_flush_lsn() {
         let initial_lsn = PgLsn::from(10);
         let mut state = ApplyLoopState::new(
             ReplicationProgress::new(initial_lsn),
@@ -3790,13 +3798,11 @@ mod tests {
             SnapshotId::from(initial_lsn),
             "test_slot".to_owned(),
         );
-        state.update_last_received_lsn(PgLsn::from(20));
+        state.update_last_received_lsn(PgLsn::from(20), false);
 
-        assert_eq!(state.effective_flush_lsn(), PgLsn::from(20));
+        assert_eq!(state.effective_flush_lsn(false), PgLsn::from(20));
 
-        state.pending_table_deletion = true;
-
-        assert!(!state.is_idle());
-        assert_eq!(state.effective_flush_lsn(), initial_lsn);
+        assert!(!state.is_idle(true));
+        assert_eq!(state.effective_flush_lsn(true), initial_lsn);
     }
 }
