@@ -1,9 +1,13 @@
+use std::time::Duration;
+
 use etl::{
     error::ErrorKind,
+    event::EventType,
     pipeline::PipelineId,
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
         database::spawn_source_database,
+        event::group_events_by_type_and_table_id,
         faults::{FaultAction, FaultyOp},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
@@ -197,4 +201,59 @@ async fn drop_table_for_copy_failure_after_write_keeps_table_restartable_until_r
     assert_eq!(table_rows.get(&table_id).unwrap().len(), initial_rows);
 
     pipeline.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_drains_pending_write_events_before_destination_shutdown() {
+    init_test_tracing();
+
+    // GIVEN: a streaming pipeline whose next write_events response is held
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+
+    let store = NotifyingStore::new();
+    let memory_destination = MemoryDestination::new(store.clone());
+    let destination = TestDestinationWrapper::wrap(memory_destination.clone());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready.notified().await;
+
+    let hold = destination.hold_next(FaultyOp::WriteEvents).await;
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    hold.wait_reached().await;
+
+    // WHEN: the pipeline shuts down while the write response is withheld
+    let mut shutdown_task = tokio::spawn(pipeline.shutdown_and_wait());
+
+    // THEN: shutdown waits on the pending response instead of proceeding
+    let still_draining =
+        tokio::time::timeout(Duration::from_secs(2), &mut shutdown_task).await.is_err();
+    assert!(still_draining);
+    assert!(!destination.shutdown_called().await);
+
+    // WHEN: the held response is released
+    hold.release_ok();
+
+    // THEN: shutdown completes and the write was acknowledged before it
+    shutdown_task.await.unwrap().unwrap();
+    assert!(destination.shutdown_called().await);
+
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    assert_eq!(grouped_events.get(&(EventType::Insert, table_id)).map_or(0, Vec::len), 1);
 }
