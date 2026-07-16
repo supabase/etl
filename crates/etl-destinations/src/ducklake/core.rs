@@ -69,7 +69,8 @@ use crate::ducklake::{
         spawn_ducklake_metrics_sampler,
     },
     replay_epoch::{
-        ensure_replay_epoch_table_exists, read_table_replay_epoch, rotate_table_replay_epoch,
+        begin_table_replay_epoch_transition, complete_table_replay_epoch_transition,
+        ensure_replay_epoch_table_exists, read_table_replay_epoch,
     },
     schema::{
         build_add_column_sql_ducklake, build_create_table_sql_ducklake,
@@ -1296,8 +1297,9 @@ where
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
-        let replay_epoch = self.rotate_table_replay_epoch(&table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let replay_epoch = self.begin_table_replay_epoch_transition(&table_name).await?;
+        let table_name_for_truncate = table_name.clone();
         self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
             conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
                 etl_error!(
@@ -1308,7 +1310,7 @@ where
             })?;
 
             let result = (|| -> EtlResult<()> {
-                let target_table = qualified_lake_table_name(&table_name);
+                let target_table = qualified_lake_table_name(&table_name_for_truncate);
                 let truncate_table_sql = format!("TRUNCATE TABLE {target_table};");
                 conn.execute_batch(&truncate_table_sql).map_err(|e| {
                     etl_error!(
@@ -1318,11 +1320,6 @@ where
                         source: e
                     )
                 })?;
-                debug!(
-                    table = %table_name,
-                    replay_epoch,
-                    "ducklake table replay epoch rotated after truncate"
-                );
                 Ok(())
             })();
 
@@ -1343,7 +1340,15 @@ where
                 }
             }
         })
-        .await
+        .await?;
+        self.complete_table_replay_epoch_transition(&table_name, &replay_epoch).await?;
+        debug!(
+            table = %table_name,
+            replay_epoch,
+            "ducklake table replay epoch rotated after truncate"
+        );
+
+        Ok(())
     }
 
     /// Drops the destination table and rotates replay state before restarting a
@@ -1356,8 +1361,8 @@ where
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
-        let replay_epoch = self.rotate_table_replay_epoch(&table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let replay_epoch = self.begin_table_replay_epoch_transition(&table_name).await?;
         let table_name_for_drop = table_name.clone();
 
         self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
@@ -1380,11 +1385,6 @@ where
                         source: e
                     )
                 })?;
-                debug!(
-                    table = %table_name_for_drop,
-                    replay_epoch,
-                    "ducklake table replay epoch rotated after drop-for-copy"
-                );
                 Ok(())
             })();
 
@@ -1406,6 +1406,12 @@ where
             }
         })
         .await?;
+        self.complete_table_replay_epoch_transition(&table_name, &replay_epoch).await?;
+        debug!(
+            table = %table_name,
+            replay_epoch,
+            "ducklake table replay epoch rotated after drop-for-copy"
+        );
 
         self.created_tables.lock().remove(&table_name);
 
@@ -2478,9 +2484,32 @@ where
             .await
     }
 
-    async fn rotate_table_replay_epoch(&self, table_name: &DuckLakeTableName) -> EtlResult<String> {
-        rotate_table_replay_epoch(&self.metadata_pg_pool, self.metadata_schema.as_ref(), table_name)
-            .await
+    /// Starts or resumes the replay epoch transition for a table reset.
+    async fn begin_table_replay_epoch_transition(
+        &self,
+        table_name: &DuckLakeTableName,
+    ) -> EtlResult<String> {
+        begin_table_replay_epoch_transition(
+            &self.metadata_pg_pool,
+            self.metadata_schema.as_ref(),
+            table_name,
+        )
+        .await
+    }
+
+    /// Promotes a pending replay epoch after its table reset commits.
+    async fn complete_table_replay_epoch_transition(
+        &self,
+        table_name: &DuckLakeTableName,
+        pending_replay_epoch: &str,
+    ) -> EtlResult<()> {
+        complete_table_replay_epoch_transition(
+            &self.metadata_pg_pool,
+            self.metadata_schema.as_ref(),
+            table_name,
+            pending_replay_epoch,
+        )
+        .await
     }
 
     /// Acquires exclusive DuckLake mutation access for an external maintenance
@@ -3455,6 +3484,75 @@ mod tests {
 
     mod postgres_backed {
         use super::*;
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn replay_epoch_transition_reuses_pending_epoch_until_reset_completes() {
+            let dir = TempDir::new().expect("failed to create temp dir");
+            let data = path_to_file_url(&dir.path().join("data"));
+            let (_catalog_database, catalog) = create_catalog_database().await;
+            let store = MemoryStore::new();
+            let schema = make_schema(1, "public", "users");
+            let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+            let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+            store.store_table_schema(schema).await.expect("failed to seed schema");
+            let destination =
+                DuckLakeDestination::new(catalog, data, 1, None, None, None, None, store)
+                    .await
+                    .expect("failed to create destination");
+            destination
+                .write_table_rows(
+                    &replicated_table_schema,
+                    vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())])],
+                )
+                .await
+                .expect("failed to write row");
+
+            let pending_replay_epoch = destination
+                .begin_table_replay_epoch_transition(&table_name)
+                .await
+                .expect("failed to begin replay epoch transition");
+            let resumed_replay_epoch = destination
+                .begin_table_replay_epoch_transition(&table_name)
+                .await
+                .expect("failed to resume replay epoch transition");
+            assert_eq!(resumed_replay_epoch, pending_replay_epoch);
+            assert_eq!(
+                destination
+                    .read_table_replay_epoch(&table_name)
+                    .await
+                    .expect("failed to read committed replay epoch"),
+                crate::ducklake::replay_epoch::LEGACY_REPLAY_EPOCH
+            );
+
+            // A retry repeats the idempotent table reset with the persisted
+            // pending epoch and promotes it only after DuckLake commits.
+            destination
+                .truncate_table(&replicated_table_schema)
+                .await
+                .expect("failed to retry table reset");
+            assert_eq!(
+                destination
+                    .read_table_replay_epoch(&table_name)
+                    .await
+                    .expect("failed to read promoted replay epoch"),
+                pending_replay_epoch
+            );
+
+            let epochs_table = format!(
+                "{}.{}",
+                quote_postgres_identifier(destination.metadata_schema.as_ref()),
+                quote_postgres_identifier("__etl_replay_epochs")
+            );
+            let sql =
+                format!("select pending_replay_epoch from {epochs_table} where table_name = $1;");
+            let pending_replay_epoch = sqlx::query_scalar::<_, Option<String>>(AssertSqlSafe(sql))
+                .bind(table_name.id())
+                .fetch_one(&destination.metadata_pg_pool)
+                .await
+                .expect("failed to read pending replay epoch");
+            assert_eq!(pending_replay_epoch, None);
+        }
 
         #[tokio::test(flavor = "multi_thread")]
         async fn query_table_storage_metrics_reads_ducklake_metadata() {
