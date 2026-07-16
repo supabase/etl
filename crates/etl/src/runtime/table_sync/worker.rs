@@ -776,7 +776,7 @@ where
 
         let worker_context = WorkerContext::TableSync(TableSyncWorkerContext {
             table_id: self.table_id,
-            table_sync_worker_state: state,
+            table_sync_worker_state: state.clone(),
             state_store: self.store.clone(),
         });
 
@@ -799,6 +799,25 @@ where
 
         match apply_loop_result {
             ApplyLoopResult::Completed => {
+                // The terminal commit requests `Complete` before its destination write has
+                // finished. That intent must not become `ApplyLoopResult::Completed` until
+                // the write reports `Durable` and `SyncDone` has been stored. Check the state
+                // again at the cleanup boundary so a future ordering regression cannot delete
+                // the progress row and replication slot prematurely.
+                //
+                // The apply worker may already have persisted `Ready`, but while this worker
+                // is active it leaves this shared in-memory state at `SyncDone`.
+                let table_state = state.lock().await.table_state().as_type();
+                if table_state != TableStateType::SyncDone {
+                    bail!(
+                        ErrorKind::InvalidState,
+                        "Table sync apply loop completed before reaching SyncDone",
+                        format!(
+                            "Expected SyncDone before resource cleanup, found {table_state}"
+                        )
+                    );
+                }
+
                 info!(
                     table_id = self.table_id.0,
                     "table sync apply loop completed successfully, deleting slot"
