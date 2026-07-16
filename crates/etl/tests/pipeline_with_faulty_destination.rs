@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use etl::{
     error::ErrorKind,
-    event::EventType,
+    event::{Event, EventType},
     pipeline::PipelineId,
+    schema::TableId,
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
         database::spawn_source_database,
@@ -16,8 +17,59 @@ use etl::{
         test_schema::{TableSelection, insert_users_data, setup_test_database_schema},
     },
 };
+use etl_postgres::slots::EtlReplicationSlot;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
+use tokio_postgres::{Client, types::PgLsn};
+
+/// Counts recorded insert events for the table.
+fn count_table_inserts(events: &[Event], table_id: TableId) -> usize {
+    table_insert_commit_lsns(events, table_id).len()
+}
+
+/// Returns the commit LSNs of recorded insert events for the table, in order.
+fn table_insert_commit_lsns(events: &[Event], table_id: TableId) -> Vec<PgLsn> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
+                Some(insert.commit_lsn)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Returns the apply slot's confirmed flush LSN and active walsender PID.
+async fn apply_slot_state(client: &Client, slot_name: &str) -> (PgLsn, Option<i32>) {
+    let row = client
+        .query_one(
+            "select confirmed_flush_lsn, active_pid from pg_replication_slots where slot_name = $1",
+            &[&slot_name],
+        )
+        .await
+        .unwrap();
+
+    (row.get(0), row.get(1))
+}
+
+/// Waits until the apply slot is served by a walsender other than `old_pid`.
+async fn wait_for_new_walsender(client: &Client, slot_name: &str, old_pid: i32) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let (_, active_pid) = apply_slot_state(client, slot_name).await;
+            if let Some(pid) = active_pid
+                && pid != old_pid
+            {
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the apply worker to reconnect");
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
@@ -256,4 +308,166 @@ async fn shutdown_drains_pending_write_events_before_destination_shutdown() {
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
     assert_eq!(grouped_events.get(&(EventType::Insert, table_id)).map_or(0, Vec::len), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_loss() {
+    init_test_tracing();
+
+    // GIVEN: a streaming pipeline whose next write_events response is held
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+
+    let store = NotifyingStore::new();
+    let memory_destination = MemoryDestination::new(store.clone());
+    let destination = TestDestinationWrapper::wrap(memory_destination.clone());
+
+    let pipeline_id: PipelineId = random();
+    let apply_slot_name: String =
+        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready.notified().await;
+
+    let hold = destination.hold_next(FaultyOp::WriteEvents).await;
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    hold.wait_reached().await;
+
+    // WHEN: the apply connection dies while the write response is withheld
+    let client = database.client.as_ref().unwrap();
+    let (flush_lsn_at_kill, active_pid) = apply_slot_state(client, &apply_slot_name).await;
+    let old_pid = active_pid.expect("apply walsender should be active");
+
+    client.query_one("select pg_terminate_backend($1)", &[&old_pid]).await.unwrap();
+
+    wait_for_new_walsender(client, &apply_slot_name, old_pid).await;
+
+    // WHEN: the held response is released only after the reconnect
+    let replay_recorded = destination
+        .notify_on_events(move |events| count_table_inserts(events, table_id) == 2)
+        .await;
+
+    hold.release_ok();
+
+    // THEN: the insert replays because the acknowledgement never reached the
+    // old apply loop
+    replay_recorded.notified().await;
+
+    let commit_lsns = table_insert_commit_lsns(&destination.get_events().await, table_id);
+    assert_eq!(commit_lsns.len(), 2);
+    assert_eq!(commit_lsns[0], commit_lsns[1]);
+    let first_commit_lsn = commit_lsns[0];
+
+    // THEN: durable progress never advanced past the unacknowledged write
+    assert!(flush_lsn_at_kill < first_commit_lsn);
+
+    // THEN: streaming continues without loss after the replay
+    let second_insert = destination
+        .notify_on_events(move |events| {
+            table_insert_commit_lsns(events, table_id)
+                .last()
+                .is_some_and(|last| *last > first_commit_lsn)
+        })
+        .await;
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 2..=2).await;
+
+    second_insert.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let final_lsns = table_insert_commit_lsns(&destination.get_events().await, table_id);
+    assert_eq!(final_lsns.iter().filter(|lsn| **lsn == first_commit_lsn).count(), 2);
+    assert_eq!(final_lsns.iter().filter(|lsn| **lsn > first_commit_lsn).count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_loss() {
+    init_test_tracing();
+
+    // GIVEN: a streaming pipeline whose next write_events response is held
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+
+    let store = NotifyingStore::new();
+    let memory_destination = MemoryDestination::new(store.clone());
+    let destination = TestDestinationWrapper::wrap(memory_destination.clone());
+
+    let pipeline_id: PipelineId = random();
+    let apply_slot_name: String =
+        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready.notified().await;
+
+    let hold = destination.hold_next(FaultyOp::WriteEvents).await;
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    hold.wait_reached().await;
+
+    // WHEN: the apply connection dies and the response releases before reconnect
+    let client = database.client.as_ref().unwrap();
+    let (_, active_pid) = apply_slot_state(client, &apply_slot_name).await;
+    let old_pid = active_pid.expect("apply walsender should be active");
+
+    let first_insert_recorded = destination
+        .notify_on_events(move |events| count_table_inserts(events, table_id) >= 1)
+        .await;
+
+    client.query_one("select pg_terminate_backend($1)", &[&old_pid]).await.unwrap();
+
+    hold.release_ok();
+
+    first_insert_recorded.notified().await;
+    let first_commit_lsn = table_insert_commit_lsns(&destination.get_events().await, table_id)[0];
+
+    wait_for_new_walsender(client, &apply_slot_name, old_pid).await;
+
+    // THEN: streaming continues without loss, replaying the insert at most once
+    let second_insert = destination
+        .notify_on_events(move |events| {
+            table_insert_commit_lsns(events, table_id)
+                .last()
+                .is_some_and(|last| *last > first_commit_lsn)
+        })
+        .await;
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 2..=2).await;
+
+    second_insert.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let final_lsns = table_insert_commit_lsns(&destination.get_events().await, table_id);
+    let first_count = final_lsns.iter().filter(|lsn| **lsn == first_commit_lsn).count();
+    assert!(
+        (1..=2).contains(&first_count),
+        "insert must survive with at most one replay, got {first_count} copies"
+    );
+    assert_eq!(final_lsns.iter().filter(|lsn| **lsn > first_commit_lsn).count(), 1);
 }
