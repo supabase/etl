@@ -5,7 +5,8 @@ use etl::{
     data::{OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         DestinationTableMetadata, DestinationTableSchemaStatus, DestinationWriteStatus,
-        DropTableForCopyResult, TaskSet, WriteEventsResult, WriteTableRowsResult,
+        DropTableForCopyResult, TaskSet, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -519,6 +520,7 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
+        durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
@@ -526,7 +528,23 @@ where
         let destination = self.clone();
         self.tasks
             .spawn(async move {
-                let result = destination.process_events(events).await;
+                let result = async {
+                    let status = destination.process_events(events).await?;
+                    if durability == WriteEventsDurability::RequireDurable
+                        && status == DestinationWriteStatus::Accepted
+                    {
+                        destination
+                            .client
+                            .wait_for_pending_durability()
+                            .await
+                            .map_err(EtlError::from)?;
+
+                        Ok(DestinationWriteStatus::Durable)
+                    } else {
+                        Ok(status)
+                    }
+                }
+                .await;
                 async_result.send(result);
             })
             .await;

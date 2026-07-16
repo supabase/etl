@@ -12,7 +12,10 @@ use std::{
 
 pub use etl_postgres::{
     default_expression::{DefaultExpression, parse_default_expression},
-    schema::{ColumnSchema, SchemaError, SnapshotId, TableId, TableName, TableSchema},
+    schema::{
+        ColumnSchema, NumericModifiers, SchemaError, SnapshotId, TableId, TableName, TableSchema,
+        numeric_modifiers,
+    },
     type_utils::is_array_type,
 };
 pub use tokio_postgres::types::{PgLsn, Type};

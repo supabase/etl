@@ -78,16 +78,32 @@ pub type WriteTableRowsResult<T = DestinationWriteStatus> = AsyncResult<T>;
 /// clearing stored table-copy metadata and starting a fresh copy.
 pub type DropTableForCopyResult<T = ()> = AsyncResult<T>;
 
+/// Durability requirement for a streaming destination write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteEventsDurability {
+    /// The destination may report either
+    /// [`DestinationWriteStatus::Accepted`] or
+    /// [`DestinationWriteStatus::Durable`].
+    MayDefer,
+    /// The destination must report [`DestinationWriteStatus::Durable`] for the
+    /// write and all earlier accepted writes in the same ordered apply-loop
+    /// stream.
+    RequireDurable,
+}
+
 /// Async completion handle used for
 /// [`crate::destination::Destination::write_events`].
 ///
 /// This is the path where asynchronous completion changes ETL behavior the
 /// most: once dispatch succeeds, the apply loop may continue other work while
-/// the destination finishes the batch.
+/// the destination finishes the batch. [`WriteEventsDurability`] determines
+/// which successful completion statuses are valid for each call.
 pub type WriteEventsResult<T = DestinationWriteStatus> = AsyncResult<T>;
+
 /// Pending async completion used for `Destination::write_events`.
 pub(crate) type PendingWriteEventsResult<T = DestinationWriteStatus> =
     PendingAsyncResult<T, ApplyLoopAsyncResultMetadata>;
+
 /// Completed async completion used for `Destination::write_events`.
 pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
@@ -112,6 +128,8 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// [`DestinationWriteStatus::Accepted`] results and advances only when a
     /// later cumulative durable result covers the carried LSN.
     pub commit_end_lsn: Option<PgLsn>,
+    /// Durability requirement supplied with the dispatched write.
+    pub durability: WriteEventsDurability,
     /// Dispatch-time metrics for the batch.
     pub metrics: DispatchMetrics,
 }
@@ -228,6 +246,7 @@ mod tests {
     async fn async_result_round_trips_success() {
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: Some(PgLsn::from(42)),
+            durability: WriteEventsDurability::MayDefer,
             metrics: DispatchMetrics { items_count: 1, dispatched_at: Instant::now() },
         };
         let (result_tx, pending_result) = WriteEventsResult::new(metadata);
@@ -239,6 +258,7 @@ mod tests {
 
         let metadata = metadata.expect("metadata should be present");
         assert_eq!(metadata.commit_end_lsn, Some(PgLsn::from(42)));
+        assert_eq!(metadata.durability, WriteEventsDurability::MayDefer);
         assert_eq!(result.unwrap(), 7);
     }
 

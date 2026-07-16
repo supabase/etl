@@ -23,6 +23,7 @@ use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::random;
+use rust_decimal::Decimal;
 use url::Url;
 
 use crate::support::ducklake::{
@@ -74,7 +75,7 @@ struct SimulatorDdlTypeRow {
     ddl_col_1_0: Option<i32>,
     ddl_col_2_0: Option<bool>,
     ddl_col_3_0_is_present: bool,
-    ddl_col_4_0: Option<String>,
+    ddl_col_4_0: Option<Decimal>,
 }
 
 /// Opens a DuckLake verification connection using blocking DuckDB APIs.
@@ -1589,7 +1590,7 @@ async fn schema_change_matches_simulator_generated_column_types() {
             ddl_col_1_0: Some(44),
             ddl_col_2_0: Some(true),
             ddl_col_3_0_is_present: true,
-            ddl_col_4_0: Some("12345.67".to_owned()),
+            ddl_col_4_0: Some(Decimal::new(1234567, 2)),
         }
     );
 }

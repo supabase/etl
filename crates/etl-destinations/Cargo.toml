@@ -141,6 +141,7 @@ etl-telemetry = { workspace = true }
 futures = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 rand = { workspace = true, features = ["thread_rng"] }
+rust_decimal = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
