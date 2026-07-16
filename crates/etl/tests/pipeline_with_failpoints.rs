@@ -620,15 +620,13 @@ async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
     // advance cluster WAL to T in another database. Logical decoding skips that
     // transaction entirely, so no event batch exists at T.
     insert_users_data(&mut database, &users_schema.name, 1..=1).await;
-    other_database
-        .insert_values(other_database_table, &["value"], &[&1_i32])
-        .await
-        .unwrap();
+    other_database.insert_values(other_database_table, &["value"], &[&1_i32]).await.unwrap();
     let client = database.client.as_ref().unwrap();
     let target_lsn: PgLsn =
         client.query_one("select pg_current_wal_flush_lsn()", &[]).await.unwrap().get(0);
 
-    // Ensure the apply worker observes T before choosing table sync's catchup target.
+    // Ensure the apply worker observes T before choosing table sync's catchup
+    // target.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let row = client
