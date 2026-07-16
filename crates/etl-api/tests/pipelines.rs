@@ -1,5 +1,8 @@
 use etl_api::{
-    configs::pipeline::ReplicatorResourcesConfig,
+    configs::{
+        pipeline::{ReplicatorResourcesConfig, UpdateApiPipelineConfig},
+        update::UpdateField,
+    },
     k8s::PodStatus,
     routes::{
         ErrorMessage,
@@ -10,8 +13,11 @@ use etl_api::{
             SimpleTableState, UpdatePipelineRequest, UpdatePipelineVersionRequest,
         },
     },
+    startup::get_connection_pool,
 };
-use etl_config::shared::PgConnectionConfig;
+use etl_config::shared::{
+    BatchConfig, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig,
+};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
@@ -461,8 +467,11 @@ async fn an_existing_pipeline_can_be_updated() {
     // Act
     let source_id = create_source(&app, tenant_id).await;
     let destination_id = create_destination(&app, tenant_id).await;
-    let updated_config =
-        UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config() };
+    let updated_config = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
+    };
     let response = app.update_pipeline(tenant_id, pipeline_id, &updated_config).await;
 
     // Assert
@@ -475,6 +484,153 @@ async fn an_existing_pipeline_can_be_updated() {
     assert_eq!(response.source_id, source_id);
     assert_eq!(response.destination_id, destination_id);
     insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_config_update_preserves_omitted_fields() {
+    init_test_tracing();
+    let (app, tenant_id, source_id, destination_id, pipeline_id) = setup_basic_pipeline().await;
+
+    let update_request = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig {
+            publication_name: UpdateField::Set("renamed_publication".to_owned()),
+            ..UpdateApiPipelineConfig::default()
+        },
+    };
+    let response = app.update_pipeline(&tenant_id, pipeline_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.config.publication_name, "renamed_publication");
+    assert_eq!(response.config.table_error_retry_delay_ms, Some(10000));
+    assert_eq!(response.config.max_table_sync_workers, Some(2));
+    assert!(matches!(response.config.log_level, Some(etl_api::configs::log::LogLevel::Info)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_config_update_materializes_stored_defaults() {
+    init_test_tracing();
+    let (app, tenant_id, source_id, destination_id, pipeline_id) = setup_basic_pipeline().await;
+    let pool = get_connection_pool(app.database_config());
+
+    sqlx::query(
+        r#"
+        update app.pipelines
+        set config = jsonb_build_object(
+            'publication_name',
+            'stored_publication',
+            'batch',
+            jsonb_build_object('max_fill_ms', 42)
+        )
+        where id = $1
+        "#,
+    )
+    .bind(pipeline_id)
+    .execute(&pool)
+    .await
+    .expect("failed to replace stored pipeline config");
+
+    let update_request = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig {
+            publication_name: UpdateField::Set("renamed_publication".to_owned()),
+            ..UpdateApiPipelineConfig::default()
+        },
+    };
+    let response = app.update_pipeline(&tenant_id, pipeline_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let stored_config = sqlx::query_scalar::<_, serde_json::Value>(
+        "select config from app.pipelines where id = $1",
+    )
+    .bind(pipeline_id)
+    .fetch_one(&pool)
+    .await
+    .expect("failed to read stored pipeline config");
+    assert_eq!(stored_config["publication_name"], "renamed_publication");
+    assert_eq!(stored_config["batch"]["max_fill_ms"], 42);
+    assert_eq!(
+        stored_config["batch"]["memory_budget_ratio"],
+        BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO
+    );
+    assert_eq!(stored_config["batch"]["max_bytes"], BatchConfig::DEFAULT_MAX_BYTES);
+    assert_eq!(
+        stored_config["table_error_retry_delay_ms"],
+        PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
+    );
+    assert_eq!(
+        stored_config["max_table_sync_workers"],
+        PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
+    );
+    assert_eq!(
+        stored_config["memory_backpressure"]["activate_threshold"],
+        MemoryBackpressureConfig::default().activate_threshold
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_config_update_clears_optional_fields_and_resets_default_fields() {
+    init_test_tracing();
+    let (app, tenant_id, source_id, destination_id, pipeline_id) = setup_basic_pipeline().await;
+
+    let set_request = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig {
+            memory_backpressure: UpdateField::Set(MemoryBackpressureConfig {
+                activate_threshold: 0.95,
+                resume_threshold: 0.9,
+            }),
+            ..UpdateApiPipelineConfig::default()
+        },
+    };
+    let response = app.update_pipeline(&tenant_id, pipeline_id, &set_request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let update_request = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig {
+            log_level: UpdateField::Clear,
+            batch: UpdateField::Clear,
+            memory_backpressure: UpdateField::Clear,
+            ..UpdateApiPipelineConfig::default()
+        },
+    };
+    let response = app.update_pipeline(&tenant_id, pipeline_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert!(response.config.log_level.is_none());
+    let batch = response.config.batch.expect("batch config should be present");
+    assert_eq!(batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
+    assert_eq!(batch.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
+    assert_eq!(response.config.memory_backpressure, Some(MemoryBackpressureConfig::default()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_config_update_rejects_null_required_field() {
+    init_test_tracing();
+    let (app, tenant_id, source_id, destination_id, pipeline_id) = setup_basic_pipeline().await;
+
+    let update_request = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig {
+            publication_name: UpdateField::Clear,
+            ..UpdateApiPipelineConfig::default()
+        },
+    };
+    let response = app.update_pipeline(&tenant_id, pipeline_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -500,8 +656,11 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
         memory_request_mib: Some(2048),
         ..ReplicatorResourcesConfig::default()
     });
-    let update_request =
-        UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config };
+    let update_request = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config),
+    };
 
     let response = app.update_pipeline(tenant_id, pipeline_id, &update_request).await;
 
@@ -540,8 +699,11 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
         memory_request_mib: Some(444),
         ..ReplicatorResourcesConfig::default()
     });
-    let update_request =
-        UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config };
+    let update_request = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config),
+    };
 
     let response = app.update_pipeline(tenant_id, pipeline_id, &update_request).await;
 
@@ -625,7 +787,7 @@ async fn pipeline_with_another_tenants_source_cannot_be_updated() {
     let updated_config = UpdatePipelineRequest {
         source_id: source2_id,
         destination_id: destination1_id,
-        config: updated_pipeline_config(),
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app.update_pipeline(tenant1_id, pipeline_id, &updated_config).await;
 
@@ -669,7 +831,7 @@ async fn pipeline_with_another_tenants_destination_cannot_be_updated() {
     let updated_config = UpdatePipelineRequest {
         source_id: source1_id,
         destination_id: destination2_id,
-        config: updated_pipeline_config(),
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
     };
     let response = app.update_pipeline(tenant1_id, pipeline_id, &updated_config).await;
 
@@ -687,8 +849,11 @@ async fn non_existing_pipeline_cannot_be_updated() {
     let destination_id = create_destination(&app, tenant_id).await;
 
     // Act
-    let updated_config =
-        UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config() };
+    let updated_config = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),
+    };
     let response = app.update_pipeline(tenant_id, 42, &updated_config).await;
 
     // Assert
@@ -824,8 +989,8 @@ async fn all_pipelines_can_be_read() {
 // destination     let duplicate_pipeline = CreatePipelineRequest {
 //         source_id,
 //         destination_id,
-//         config: updated_pipeline_config(),
-//     };
+//         config:
+// UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),     };
 //     let response = app.create_pipeline(tenant_id, &duplicate_pipeline).await;
 //
 //     // Assert
@@ -869,8 +1034,8 @@ async fn all_pipelines_can_be_read() {
 //     let updated_config = UpdatePipelineRequest {
 //         source_id: source1_id, // This would create a duplicate
 //         destination_id,
-//         config: updated_pipeline_config(),
-//     };
+//         config:
+// UpdateApiPipelineConfig::from_api_config(updated_pipeline_config()),     };
 //     let response = app
 //         .update_pipeline(tenant_id, pipeline2_id, &updated_config)
 //         .await;
@@ -1042,6 +1207,56 @@ async fn an_existing_pipeline_can_be_started() {
 
     // Assert
     assert!(response.status().is_success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_pipeline_can_be_restarted() {
+    init_test_tracing();
+    let k8s_state = MockK8sState::default();
+    let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
+    create_default_image(&app).await;
+    let tenant_id = create_tenant(&app).await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+    let pipeline_id = create_pipeline_with_config(
+        &app,
+        &tenant_id,
+        source_id,
+        destination_id,
+        new_pipeline_config(),
+    )
+    .await;
+    let create_calls_before = k8s_state.create_calls();
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(k8s_state.create_calls() > create_calls_before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_pipeline_cannot_be_restarted() {
+    init_test_tracing();
+    let k8s_state = MockK8sState::default();
+    k8s_state.set_pod_status(PodStatus::Stopped).await;
+    let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
+    create_default_image(&app).await;
+    let tenant_id = create_tenant(&app).await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+    let pipeline_id = create_pipeline_with_config(
+        &app,
+        &tenant_id,
+        source_id,
+        destination_id,
+        new_pipeline_config(),
+    )
+    .await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(k8s_state.create_calls(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

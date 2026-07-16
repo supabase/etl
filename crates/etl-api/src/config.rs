@@ -1,9 +1,9 @@
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::{
     Config,
-    shared::{PgConnectionConfig, SentryConfig, TlsConfig},
+    shared::{DestinationKind, PgConnectionConfig, SentryConfig, TlsConfig},
 };
 use serde::{
     Deserialize, Deserializer,
@@ -56,8 +56,8 @@ pub struct K8sConfig {
     ///
     /// This key remains `replicator_resources` in API configuration files. It
     /// provides the mandatory baseline CPU and memory requests used for every
-    /// replicator pod unless a pipeline-level override supplies one of those
-    /// request values.
+    /// replicator pod unless a destination-kind default or pipeline-level
+    /// override supplies one of those request values.
     pub replicator_resources: DefaultReplicatorResourcesConfig,
     /// Default request sizing for the Vector sidecar.
     pub vector_resources: DefaultVectorResourcesConfig,
@@ -67,15 +67,40 @@ pub struct K8sConfig {
 ///
 /// These values are part of the ETL API service configuration, not the
 /// customer-facing pipeline configuration. They define the baseline Kubernetes
-/// requests for replicator containers. Resource limits are not configurable
-/// here; the ETL API sets them equal to requests unless a pipeline-level
-/// override provides explicit limits.
-#[derive(Debug, Clone, Deserialize)]
+/// requests for replicator containers. Destination-kind defaults may override
+/// these values. Resource limits are not configurable here; the ETL API sets
+/// them equal to requests unless a pipeline-level override provides explicit
+/// limits.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DefaultReplicatorResourcesConfig {
     /// Replicator memory request, in Mi.
     pub memory_request_mib: i32,
     /// Replicator CPU request, in millicores.
     pub cpu_request_millicores: i32,
+    /// Partial default request overrides keyed by destination kind.
+    #[serde(default)]
+    pub destinations: BTreeMap<DestinationKind, DefaultReplicatorResourcesOverrideConfig>,
+}
+
+/// Partial default request sizing for one destination kind.
+///
+/// Omitted fields inherit their values from the global
+/// [`DefaultReplicatorResourcesConfig`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct DefaultReplicatorResourcesOverrideConfig {
+    /// Optional replicator memory request, in Mi.
+    pub memory_request_mib: Option<i32>,
+    /// Optional replicator CPU request, in millicores.
+    pub cpu_request_millicores: Option<i32>,
+}
+
+/// Fully resolved default request sizing for one replicator workload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolvedReplicatorResourcesConfig {
+    /// Replicator memory request, in Mi.
+    pub(crate) memory_request_mib: i32,
+    /// Replicator CPU request, in millicores.
+    pub(crate) cpu_request_millicores: i32,
 }
 
 /// Mandatory default request sizing for Vector sidecars.
@@ -101,11 +126,55 @@ impl ApiConfig {
     }
 }
 
+impl K8sConfig {
+    /// Resolves default replicator requests for a destination kind.
+    pub(crate) fn replicator_resources_for(
+        &self,
+        destination_kind: DestinationKind,
+    ) -> ResolvedReplicatorResourcesConfig {
+        let resources = self.replicator_resources.destinations.get(&destination_kind);
+
+        ResolvedReplicatorResourcesConfig {
+            memory_request_mib: resources
+                .and_then(|resources| resources.memory_request_mib)
+                .unwrap_or(self.replicator_resources.memory_request_mib),
+            cpu_request_millicores: resources
+                .and_then(|resources| resources.cpu_request_millicores)
+                .unwrap_or(self.replicator_resources.cpu_request_millicores),
+        }
+    }
+}
+
 impl DefaultReplicatorResourcesConfig {
     /// Validates that configured request values are positive.
     pub fn validate(&self) -> Result<(), String> {
         validate_positive_request("K8s replicator memory request", self.memory_request_mib)?;
         validate_positive_request("K8s replicator cpu request", self.cpu_request_millicores)?;
+        for (destination_kind, resources) in &self.destinations {
+            resources.validate(*destination_kind)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl DefaultReplicatorResourcesOverrideConfig {
+    /// Validates that configured request overrides are positive.
+    fn validate(&self, destination_kind: DestinationKind) -> Result<(), String> {
+        let destination_kind = destination_kind.as_str();
+
+        if let Some(memory_request_mib) = self.memory_request_mib {
+            validate_positive_request(
+                &format!("K8s {destination_kind} replicator memory request"),
+                memory_request_mib,
+            )?;
+        }
+        if let Some(cpu_request_millicores) = self.cpu_request_millicores {
+            validate_positive_request(
+                &format!("K8s {destination_kind} replicator cpu request"),
+                cpu_request_millicores,
+            )?;
+        }
 
         Ok(())
     }
@@ -279,5 +348,84 @@ impl<'de> Deserialize<'de> for ApiKey {
 
         const FIELDS: &[&str] = &["key"];
         deserializer.deserialize_struct("ApiKey", FIELDS, ApiKeyVisitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn destination_replicator_resources_override_selected_global_fields() {
+        let config: K8sConfig = serde_json::from_value(json!({
+            "replicator_resources": {
+                "memory_request_mib": 2000,
+                "cpu_request_millicores": 500,
+                "destinations": {
+                    "ducklake": {
+                        "memory_request_mib": 4000
+                    }
+                }
+            },
+            "vector_resources": {
+                "memory_request_mib": 192,
+                "cpu_request_millicores": 75
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            config.replicator_resources_for(DestinationKind::Ducklake),
+            ResolvedReplicatorResourcesConfig {
+                memory_request_mib: 4000,
+                cpu_request_millicores: 500,
+            }
+        );
+        assert_eq!(
+            config.replicator_resources_for(DestinationKind::BigQuery),
+            ResolvedReplicatorResourcesConfig {
+                memory_request_mib: 2000,
+                cpu_request_millicores: 500,
+            }
+        );
+    }
+
+    #[test]
+    fn destination_replicator_resources_are_optional() {
+        let config: K8sConfig = serde_json::from_value(json!({
+            "replicator_resources": {
+                "memory_request_mib": 2000,
+                "cpu_request_millicores": 500
+            },
+            "vector_resources": {
+                "memory_request_mib": 192,
+                "cpu_request_millicores": 75
+            }
+        }))
+        .unwrap();
+
+        assert!(config.replicator_resources.destinations.is_empty());
+        assert_eq!(
+            config.replicator_resources_for(DestinationKind::Ducklake),
+            ResolvedReplicatorResourcesConfig {
+                memory_request_mib: 2000,
+                cpu_request_millicores: 500,
+            }
+        );
+    }
+
+    #[test]
+    fn destination_replicator_resource_overrides_must_be_positive() {
+        let resources = DefaultReplicatorResourcesOverrideConfig {
+            memory_request_mib: Some(0),
+            cpu_request_millicores: None,
+        };
+
+        assert_eq!(
+            resources.validate(DestinationKind::Ducklake),
+            Err("K8s ducklake replicator memory request must be greater than 0".to_owned())
+        );
     }
 }

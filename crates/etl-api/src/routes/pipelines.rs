@@ -22,7 +22,10 @@ use utoipa::ToSchema;
 
 use crate::{
     config::ApiConfig,
-    configs::{encryption::EncryptionKeyring, pipeline::FullApiPipelineConfig},
+    configs::{
+        encryption::EncryptionKeyring,
+        pipeline::{ApiPipelineConfig, UpdateApiPipelineConfig},
+    },
     data,
     data::{
         destinations::{DestinationsDbError, destination_exists},
@@ -60,6 +63,9 @@ pub enum PipelineError {
 
     #[error("The pipeline with id {0} is active; stop it before deleting it")]
     ActivePipeline(i64),
+
+    #[error("The pipeline with id {0} is not running; start it before restarting it")]
+    InactivePipeline(i64),
 
     #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
@@ -154,6 +160,9 @@ impl From<PipelinesDbError> for PipelineError {
             {
                 Self::DuplicatePipeline
             }
+            PipelinesDbError::PipelineConfigUpdate(error) => {
+                Self::InvalidPipelineRequest(error.to_string())
+            }
             e => Self::PipelinesDb(e),
         }
     }
@@ -247,9 +256,9 @@ impl IntoResponse for PipelineError {
                 TableLookupError::TableNotFound(_) => StatusCode::BAD_GATEWAY,
             },
             PipelineError::Validation(error) => route_utils::validation_error_status_code(error),
-            PipelineError::ActivePipeline(_) | PipelineError::DuplicatePipeline => {
-                StatusCode::CONFLICT
-            }
+            PipelineError::ActivePipeline(_)
+            | PipelineError::InactivePipeline(_)
+            | PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             PipelineError::PipelineNotFound(_)
             | PipelineError::EtlStateNotInitialized
             | PipelineError::ImageIdNotDefault(_)
@@ -273,7 +282,7 @@ pub struct CreatePipelineRequest {
     #[schema(example = 1, required = true)]
     pub destination_id: i64,
     #[schema(required = true)]
-    pub config: FullApiPipelineConfig,
+    pub config: ApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -289,7 +298,7 @@ pub struct UpdatePipelineRequest {
     #[schema(example = 1, required = true)]
     pub destination_id: i64,
     #[schema(required = true)]
-    pub config: FullApiPipelineConfig,
+    pub config: UpdateApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -308,7 +317,7 @@ pub struct ReadPipelineResponse {
     pub destination_name: String,
     #[schema(example = 1)]
     pub replicator_id: i64,
-    pub config: FullApiPipelineConfig,
+    pub config: ApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -574,7 +583,7 @@ pub struct ValidatePipelineRequest {
     #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
-    pub config: FullApiPipelineConfig,
+    pub config: ApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -587,7 +596,11 @@ pub struct ValidationFailureResponse {
     pub failure_type: FailureType,
 }
 
-fn validate_pipeline_request(config: &FullApiPipelineConfig) -> Result<(), PipelineError> {
+fn validate_create_pipeline_request(config: &ApiPipelineConfig) -> Result<(), PipelineError> {
+    config.validate().map_err(PipelineError::InvalidPipelineRequest)
+}
+
+fn validate_update_pipeline_request(config: &UpdateApiPipelineConfig) -> Result<(), PipelineError> {
     config.validate().map_err(PipelineError::InvalidPipelineRequest)
 }
 
@@ -629,7 +642,7 @@ pub(crate) async fn create_pipeline(
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline = pipeline.into_inner();
-    validate_pipeline_request(&pipeline.config)?;
+    validate_create_pipeline_request(&pipeline.config)?;
 
     let mut txn = pool.begin().await?;
 
@@ -754,7 +767,7 @@ pub(crate) async fn update_pipeline(
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
     let pipeline = pipeline.into_inner();
-    validate_pipeline_request(&pipeline.config)?;
+    validate_update_pipeline_request(&pipeline.config)?;
 
     let mut txn = pool.begin().await?;
 
@@ -974,6 +987,55 @@ pub(crate) async fn start_pipeline(
     txn.commit().await?;
 
     Ok(StatusCode::OK)
+}
+
+#[utoipa::path(
+    post,
+    path = "/pipelines/{pipeline_id}/restart",
+    summary = "Restart a pipeline",
+    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator.",
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 202, description = "Pipeline restart initiated successfully"),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Pipeline, source, or destination not found", body = ErrorMessage),
+        (status = 409, description = "Pipeline is not running", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+pub(crate) async fn restart_pipeline(
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    pipeline_id: Path<i64>,
+) -> Result<impl IntoResponse, PipelineError> {
+    let tenant_id = extract_tenant_id(&headers)?;
+    let pipeline_id = pipeline_id.into_inner();
+
+    let mut connection = pool.acquire().await?;
+    let restarted = restart_pipeline_replicator_if_running(
+        &mut connection,
+        tenant_id,
+        pipeline_id,
+        &encryption_key,
+        k8s_client.as_deref(),
+        &source_tls_config,
+        &api_config,
+    )
+    .await?;
+
+    if !restarted {
+        return Err(PipelineError::InactivePipeline(pipeline_id));
+    }
+
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[utoipa::path(
@@ -1539,7 +1601,7 @@ pub(crate) async fn validate_pipeline(
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
     let request = request.into_inner();
-    validate_pipeline_request(&request.config)?;
+    validate_create_pipeline_request(&request.config)?;
 
     let source = data::sources::read_source(&pool, tenant_id, request.source_id, &encryption_key)
         .await?

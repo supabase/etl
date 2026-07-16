@@ -110,10 +110,10 @@ impl Destination for LoggingDestination {
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
         rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         println!("copied {} rows", rows.len());
-        async_result.send(Ok(()));
+        async_result.send(Ok(DestinationWriteStatus::Durable));
         Ok(())
     }
 

@@ -72,7 +72,8 @@ impl Validator for DucklakeValidator {
                     return Ok(vec![ValidationFailure::critical(
                         "DuckLake S3 Configuration Invalid",
                         "DuckLake needs both an `S3 access key ID` and `S3 secret access key` to \
-                         read and write the data path.",
+                         read and write the data path. Add both credentials to the destination \
+                         configuration and run validation again.",
                     )]);
                 }
             };
@@ -81,7 +82,8 @@ impl Validator for DucklakeValidator {
             return Ok(vec![ValidationFailure::critical(
                 "DuckLake S3 Configuration Invalid",
                 "DuckLake needs both an `S3 access key ID` and `S3 secret access key` to read and \
-                 write the data path.",
+                 write the data path. Add non-empty values for both credentials to the \
+                 destination configuration and run validation again.",
             )]);
         }
 
@@ -90,7 +92,10 @@ impl Validator for DucklakeValidator {
             Err(error) => {
                 return Ok(vec![ValidationFailure::critical(
                     "DuckLake Catalog URL Invalid",
-                    error.to_string(),
+                    format!(
+                        "{error}.\n\nUpdate the catalog URL in the destination configuration to \
+                         use a supported PostgreSQL connection URL."
+                    ),
                 )]);
             }
         };
@@ -100,7 +105,10 @@ impl Validator for DucklakeValidator {
             Err(error) => {
                 return Ok(vec![ValidationFailure::critical(
                     "DuckLake Data Path Invalid",
-                    error.to_string(),
+                    format!(
+                        "{error}.\n\nUpdate the data path in the destination configuration to a \
+                         valid `s3://<bucket>/<prefix>` URL."
+                    ),
                 )]);
             }
         };
@@ -274,6 +282,10 @@ mod tests {
 
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].name, "DuckLake Data Path Invalid");
-        assert_eq!(failures[0].reason, "DuckLake data path must use the s3:// scheme, got file://");
+        assert_eq!(
+            failures[0].reason,
+            "DuckLake data path must use the s3:// scheme, got file://.\n\nUpdate the data path \
+             in the destination configuration to a valid `s3://<bucket>/<prefix>` URL."
+        );
     }
 }

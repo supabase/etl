@@ -88,15 +88,21 @@ k8s:
   replicator_resources:
     cpu_request_millicores: 500
     memory_request_mib: 2000
+    destinations:
+      ducklake:
+        cpu_request_millicores: 1000
+        memory_request_mib: 4000
   vector_resources:
     cpu_request_millicores: 75
     memory_request_mib: 192
 ```
 
-These defaults are mandatory and request-only. The ETL API derives Kubernetes
-limits from the final request values with static multipliers in the Kubernetes
-materializer. Vector resources are configured only at the API level; pipeline
-configuration may override replicator resources only.
+The global replicator and Vector defaults are mandatory and request-only.
+Destination defaults are optional and may override either request field for
+`bigquery`, `clickhouse`, `ducklake`, `iceberg`, or `snowflake`. Missing
+destination fields fall back to the global replicator defaults. Vector
+resources are configured only at the API level; pipeline configuration may
+override replicator resources only.
 
 Pipeline configuration may override any replicator resource field:
 
@@ -108,11 +114,11 @@ replicator_resources:
   memory_limit_mib: 1843
 ```
 
-All pipeline resource fields are optional. If a request is omitted, the API
-configuration default is used. If a limit is omitted, the ETL API computes it
-from the final request and the static multiplier. Before Kubernetes resources
-are applied, final requests are clamped to at least `1m` CPU and `1Mi` memory,
-and final limits are clamped so they are never below their paired requests.
+All pipeline resource fields are optional. Request precedence is pipeline
+override, destination-kind default, then global default. If a limit is omitted,
+it matches the final request. Before Kubernetes resources are applied, final
+requests are clamped to at least `1m` CPU and `1Mi` memory, and final limits are
+clamped so they are never below their paired requests.
 
 ### Encryption Keys
 

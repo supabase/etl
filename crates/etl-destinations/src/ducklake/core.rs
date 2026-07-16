@@ -20,7 +20,7 @@ use etl::{
         ColumnModification, ColumnSchema, ReplicatedTableSchema, ReplicationMask, SchemaDiff,
         SnapshotId, TableId, TableName, TableSchema,
     },
-    store::DestinationStore,
+    store::{DestinationStore, TableStateType},
 };
 use etl_config::ducklake_catalog_metadata_connect_options;
 use metrics::gauge;
@@ -42,13 +42,13 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::ducklake::{
-    DuckLakeTableName, LAKE_CATALOG, S3Config,
+    ATTACH_DATA_INLINING_ROW_LIMIT, COPY_DATA_INLINING_ROW_LIMIT, DuckLakeTableName, LAKE_CATALOG,
+    S3Config,
     batches::{
-        DuckLakeTableBatchKind, TableMutation, TrackedTableMutation, TrackedTruncateEvent,
-        apply_table_batch_with_retry, apply_table_batches_with_retry,
-        clear_applied_batch_markers_for_kind, clear_table_streaming_progress,
-        ensure_applied_batches_table_exists, ensure_streaming_progress_table_exists,
-        prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
+        TableMutation, TrackedTableMutation, TrackedTruncateEvent, apply_table_batch_with_retry,
+        apply_table_batches_with_retry, ensure_applied_batches_table_exists,
+        ensure_streaming_progress_table_exists, prepare_copy_table_batch,
+        prepare_mutation_table_batches, prepare_truncate_table_batch,
         read_table_streaming_progress_sequence_key, retain_mutations_after_sequence_key,
         retain_truncates_after_sequence_key,
     },
@@ -67,6 +67,9 @@ use crate::ducklake::{
         DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
         query_table_storage_metrics, register_metrics, resolve_ducklake_metadata_schema_blocking,
         spawn_ducklake_metrics_sampler,
+    },
+    replay_epoch::{
+        ensure_replay_epoch_table_exists, read_table_replay_epoch, rotate_table_replay_epoch,
     },
     schema::{
         build_add_column_sql_ducklake, build_create_table_sql_ducklake,
@@ -121,6 +124,19 @@ fn expire_snapshots_retention_seconds(value: &str) -> Option<i64> {
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
 }
 
+/// Returns whether file maintenance should run for a table.
+///
+/// Initial COPY deliberately creates Parquet files in each batch. Deferring
+/// rewrites and compaction until every copy completes keeps maintenance from
+/// competing with the writer and avoids repeatedly compacting a growing table.
+fn should_request_file_maintenance(
+    copy_phase_active: bool,
+    active_data_files: i64,
+    rewrite_data_files_min_active_data_files: i64,
+) -> bool {
+    !copy_phase_active && active_data_files > rewrite_data_files_min_active_data_files
+}
+
 // ── destination
 // ───────────────────────────────────────────────────────────────
 
@@ -150,6 +166,8 @@ pub struct DuckLakeDestination<S> {
     metadata_pg_pool: PgPool,
     table_creation_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    /// Cache of table-level inlining limits installed by this process.
+    table_data_inlining_limits: Arc<Mutex<HashMap<DuckLakeTableName, u64>>>,
     store: S,
     /// Cache of table names whose DDL has already been executed.
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
@@ -164,6 +182,14 @@ pub struct DuckLakeDestination<S> {
 /// mutations must be quiesced.
 pub struct DuckLakeExternalMaintenancePause {
     _guard: OwnedRwLockWriteGuard<()>,
+}
+
+/// Maintenance operations sampled from DuckLake catalog state.
+pub(super) struct ExternalMaintenanceOperationSample {
+    /// Operations the replicator should request.
+    pub operations: ExternalMaintenanceOperations,
+    /// Whether any table is currently in initial copy.
+    pub copy_phase_active: bool,
 }
 
 /// Runtime backend used for DuckLake external maintenance coordination.
@@ -210,6 +236,16 @@ fn table_write_slot(
     let mut slots = table_write_slots.lock();
     let slot = slots.entry(table_name.clone()).or_insert_with(|| Arc::new(Semaphore::new(1)));
     Arc::clone(slot)
+}
+
+/// Builds a table-scoped DuckLake inlining option statement.
+fn table_data_inlining_row_limit_sql(table_name: &DuckLakeTableName, row_limit: u64) -> String {
+    format!(
+        "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {row_limit}, schema => {}, \
+         table_name => {});",
+        quote_literal(table_name.schema()),
+        quote_literal(table_name.table()),
+    )
 }
 
 /// Waits for process shutdown signals and interrupts active DuckDB calls.
@@ -292,10 +328,10 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         let result = self.write_table_rows(replicated_table_schema, table_rows).await;
-        async_result.send(result);
+        async_result.send(result.map(|_| DestinationWriteStatus::Durable));
 
         Ok(())
     }
@@ -1143,6 +1179,7 @@ where
         };
         let metadata_schema = Arc::<str>::from(metadata_schema);
         let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog_url)?;
+        ensure_replay_epoch_table_exists(&metadata_pg_pool, metadata_schema.as_ref()).await?;
         let created_tables = Arc::default();
         let checkpoint_gate = Arc::new(RwLock::new(()));
         let mut destination = Self {
@@ -1157,6 +1194,7 @@ where
             metadata_pg_pool: metadata_pg_pool.clone(),
             table_creation_slots: Arc::new(Semaphore::new(1)),
             table_write_slots: Arc::default(),
+            table_data_inlining_limits: Arc::default(),
             store,
             created_tables: Arc::clone(&created_tables),
             applied_batches_table_created: Arc::default(),
@@ -1238,8 +1276,10 @@ where
     ) -> EtlResult<()> {
         let table_name = self.ensure_table_exists(replicated_table_schema).await?;
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+        self.ensure_streaming_data_inlining_limit(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
+        let replay_epoch = self.rotate_table_replay_epoch(&table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
             conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
@@ -1261,23 +1301,11 @@ where
                         source: e
                     )
                 })?;
-
-                clear_applied_batch_markers_for_kind(
-                    conn,
-                    &table_name,
-                    DuckLakeTableBatchKind::Copy,
-                )?;
-                clear_applied_batch_markers_for_kind(
-                    conn,
-                    &table_name,
-                    DuckLakeTableBatchKind::Mutation,
-                )?;
-                clear_applied_batch_markers_for_kind(
-                    conn,
-                    &table_name,
-                    DuckLakeTableBatchKind::Truncate,
-                )?;
-                clear_table_streaming_progress(conn, &table_name)?;
+                debug!(
+                    table = %table_name,
+                    replay_epoch,
+                    "ducklake table replay epoch rotated after truncate"
+                );
                 Ok(())
             })();
 
@@ -1301,7 +1329,8 @@ where
         .await
     }
 
-    /// Drops the destination table and replay markers before restarting a copy.
+    /// Drops the destination table and rotates replay state before restarting a
+    /// copy.
     async fn drop_table_for_copy_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -1310,6 +1339,7 @@ where
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
+        let replay_epoch = self.rotate_table_replay_epoch(&table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         let table_name_for_drop = table_name.clone();
 
@@ -1333,23 +1363,11 @@ where
                         source: e
                     )
                 })?;
-
-                clear_applied_batch_markers_for_kind(
-                    conn,
-                    &table_name_for_drop,
-                    DuckLakeTableBatchKind::Copy,
-                )?;
-                clear_applied_batch_markers_for_kind(
-                    conn,
-                    &table_name_for_drop,
-                    DuckLakeTableBatchKind::Mutation,
-                )?;
-                clear_applied_batch_markers_for_kind(
-                    conn,
-                    &table_name_for_drop,
-                    DuckLakeTableBatchKind::Truncate,
-                )?;
-                clear_table_streaming_progress(conn, &table_name_for_drop)?;
+                debug!(
+                    table = %table_name_for_drop,
+                    replay_epoch,
+                    "ducklake table replay epoch rotated after drop-for-copy"
+                );
                 Ok(())
             })();
 
@@ -1373,6 +1391,7 @@ where
         .await?;
 
         self.created_tables.lock().remove(&table_name);
+        self.table_data_inlining_limits.lock().remove(&table_name);
 
         Ok(())
     }
@@ -1386,8 +1405,9 @@ where
     /// Copy batches are recorded in the replay marker table so a retry after an
     /// ambiguous post-commit failure can detect already applied rows.
     ///
-    /// Small copy batches may stay inlined until external maintenance
-    /// materializes them during a coordinated pause.
+    /// Initial-copy rows are written directly to Parquet files. This avoids
+    /// accumulating large snapshot loads in the catalog when source batches
+    /// are smaller than the regular streaming inline threshold.
     async fn write_table_rows_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -1403,9 +1423,15 @@ where
         // callers do not race each other inside DuckDB.
         self.ensure_applied_batches_table_exists().await?;
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+        self.ensure_copy_data_inlining_limit(&table_name).await?;
+        let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
-        let prepared_batch =
-            prepare_copy_table_batch(replicated_table_schema, table_name, table_rows)?;
+        let prepared_batch = prepare_copy_table_batch(
+            replicated_table_schema,
+            table_name,
+            replay_epoch,
+            table_rows,
+        )?;
         apply_table_batch_with_retry(
             Arc::clone(&self.pool),
             Arc::clone(&self.blocking_slots),
@@ -1533,6 +1559,10 @@ where
 
     /// Applies a schema diff while serializing with table-local writes and
     /// external maintenance.
+    ///
+    /// A table that was copied with data inlining disabled must restore its
+    /// streaming setting before DuckLake applies a later schema change. This
+    /// lets DuckLake update its inlined-data representation with the DDL.
     async fn apply_schema_diff(
         &self,
         table_name: &DuckLakeTableName,
@@ -1552,6 +1582,7 @@ where
         );
 
         let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        self.ensure_streaming_data_inlining_limit(table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         let table_name = table_name.clone();
         let diff = diff.clone();
@@ -1915,6 +1946,12 @@ where
                             let _table_write_permit = destination
                                 .acquire_table_write_slot(&destination_table_name)
                                 .await?;
+                            destination
+                                .ensure_streaming_data_inlining_limit(&destination_table_name)
+                                .await?;
+                            let replay_epoch = destination
+                                .read_table_replay_epoch(&destination_table_name)
+                                .await?;
                             let checkpoint_wait_started = tokio::time::Instant::now();
                             let _checkpoint_guard =
                                 Arc::clone(&destination.checkpoint_gate).read_owned().await;
@@ -1931,6 +1968,7 @@ where
                                     Arc::clone(&destination.pool),
                                     Arc::clone(&destination.blocking_slots),
                                     destination_table_name.clone(),
+                                    replay_epoch.clone(),
                                 )
                                 .await?;
                             let pending_mutations = retain_mutations_after_sequence_key(
@@ -1955,6 +1993,7 @@ where
                             let prepared_batches = prepare_mutation_table_batches(
                                 &segment.replicated_table_schema,
                                 destination_table_name.clone(),
+                                replay_epoch,
                                 pending_mutations,
                             )?;
                             apply_table_batches_with_retry(
@@ -2020,6 +2059,8 @@ where
                 for (_, (replicated_table_schema, truncates)) in truncate_table_ids {
                     let table_name = self.ensure_table_exists(&replicated_table_schema).await?;
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+                    self.ensure_streaming_data_inlining_limit(&table_name).await?;
+                    let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
                     let checkpoint_gate = Arc::clone(&self.checkpoint_gate);
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
@@ -2031,6 +2072,7 @@ where
                                 Arc::clone(&pool),
                                 Arc::clone(&blocking_slots),
                                 table_name.clone(),
+                                replay_epoch.clone(),
                             )
                             .await?;
                         let pending_truncates =
@@ -2043,8 +2085,11 @@ where
                             return Ok(());
                         }
 
-                        let prepared_batch =
-                            prepare_truncate_table_batch(table_name, pending_truncates);
+                        let prepared_batch = prepare_truncate_table_batch(
+                            table_name,
+                            replay_epoch,
+                            pending_truncates,
+                        );
                         apply_table_batch_with_retry(pool, blocking_slots, prepared_batch).await
                     });
                 }
@@ -2412,10 +2457,68 @@ where
         }
     }
 
-    /// Acquires shared mutation access so exclusive background maintenance
-    /// cannot start in the middle of a foreground write sequence.
+    /// Disables data inlining for one table while its initial copy is active.
+    async fn ensure_copy_data_inlining_limit(
+        &self,
+        table_name: &DuckLakeTableName,
+    ) -> EtlResult<()> {
+        self.set_table_data_inlining_row_limit(table_name, COPY_DATA_INLINING_ROW_LIMIT).await
+    }
+
+    /// Restores the regular streaming inlining limit for one table.
+    async fn ensure_streaming_data_inlining_limit(
+        &self,
+        table_name: &DuckLakeTableName,
+    ) -> EtlResult<()> {
+        self.set_table_data_inlining_row_limit(table_name, ATTACH_DATA_INLINING_ROW_LIMIT).await
+    }
+
+    /// Sets one table's DuckLake inlining limit once per process and phase.
+    ///
+    /// Callers hold the table write slot, so there is no concurrent phase
+    /// transition for the same destination table.
+    async fn set_table_data_inlining_row_limit(
+        &self,
+        table_name: &DuckLakeTableName,
+        row_limit: u64,
+    ) -> EtlResult<()> {
+        if self.table_data_inlining_limits.lock().get(table_name) == Some(&row_limit) {
+            return Ok(());
+        }
+
+        let table_name_for_sql = table_name.clone();
+        self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
+            let sql = table_data_inlining_row_limit_sql(&table_name_for_sql, row_limit);
+            conn.execute_batch(&sql).map_err(|source| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake set table data inlining limit failed",
+                    format_query_error_detail(&sql),
+                    source: source
+                )
+            })
+        })
+        .await?;
+
+        self.table_data_inlining_limits.lock().insert(table_name.clone(), row_limit);
+
+        Ok(())
+    }
+
+    /// Acquires shared mutation access so exclusive external maintenance cannot
+    /// start in the middle of a foreground write sequence.
     async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
         Arc::clone(&self.checkpoint_gate).read_owned().await
+    }
+
+    async fn read_table_replay_epoch(&self, table_name: &DuckLakeTableName) -> EtlResult<String> {
+        read_table_replay_epoch(&self.metadata_pg_pool, self.metadata_schema.as_ref(), table_name)
+            .await
+    }
+
+    async fn rotate_table_replay_epoch(&self, table_name: &DuckLakeTableName) -> EtlResult<String> {
+        rotate_table_replay_epoch(&self.metadata_pg_pool, self.metadata_schema.as_ref(), table_name)
+            .await
     }
 
     /// Acquires exclusive DuckLake mutation access for an external maintenance
@@ -2433,12 +2536,13 @@ where
         &self,
         inline_flush_min_inlined_bytes: u64,
         rewrite_data_files_min_active_data_files: i64,
-    ) -> EtlResult<ExternalMaintenanceOperations> {
+    ) -> EtlResult<ExternalMaintenanceOperationSample> {
         let table_names = self.list_active_ducklake_tables().await?;
         let inline_sampler = DuckLakePendingInlineSizeSampler::new(
             self.metadata_schema.to_string(),
             self.metadata_pg_pool.clone(),
         );
+        let copy_phase_active = self.has_active_table_copy().await?;
         let mut operations = ExternalMaintenanceOperations::default();
         let catalog_metrics = query_catalog_maintenance_metrics(
             &self.metadata_pg_pool,
@@ -2490,15 +2594,18 @@ where
                 operations.inline_flush = sizes.inlined_bytes >= inline_flush_min_inlined_bytes;
             }
 
-            if !operations.rewrite_data_files {
+            if !operations.rewrite_data_files && !copy_phase_active {
                 let metrics = query_table_storage_metrics(
                     &self.metadata_pg_pool,
                     self.metadata_schema.as_ref(),
                     &table_name,
                 )
                 .await?;
-                operations.rewrite_data_files =
-                    metrics.active_data_files > rewrite_data_files_min_active_data_files;
+                operations.rewrite_data_files = should_request_file_maintenance(
+                    copy_phase_active,
+                    metrics.active_data_files,
+                    rewrite_data_files_min_active_data_files,
+                );
             }
 
             if operations.inline_flush && operations.rewrite_data_files {
@@ -2506,12 +2613,18 @@ where
             }
         }
 
-        if operations.rewrite_data_files {
+        if !copy_phase_active && operations.rewrite_data_files {
             operations.merge_adjacent_files = true;
             operations.cleanup_old_files = true;
         }
 
-        Ok(operations)
+        Ok(ExternalMaintenanceOperationSample { operations, copy_phase_active })
+    }
+
+    /// Returns whether any table is currently in initial copy.
+    async fn has_active_table_copy(&self) -> EtlResult<bool> {
+        let table_states = self.store.get_table_states().await?;
+        Ok(table_states.values().any(|state| state.as_type() == TableStateType::DataSync))
     }
 
     /// Lists active DuckLake table names from the metadata catalog.
@@ -2586,9 +2699,10 @@ async fn read_table_streaming_progress_sequence_key_blocking(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
     table_name: DuckLakeTableName,
+    replay_epoch: String,
 ) -> EtlResult<Option<EventSequenceKey>> {
     run_duckdb_blocking(pool, blocking_slots, move |conn| {
-        read_table_streaming_progress_sequence_key(conn, &table_name)
+        read_table_streaming_progress_sequence_key(conn, &table_name, &replay_epoch)
     })
     .await
 }
@@ -2687,6 +2801,27 @@ mod tests {
     };
 
     const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
+
+    /// Keeps compaction from competing with batches that are creating Parquet
+    /// files during an initial copy.
+    #[test]
+    fn file_maintenance_is_deferred_during_copy() {
+        assert!(!should_request_file_maintenance(true, 41, 40));
+        assert!(!should_request_file_maintenance(false, 40, 40));
+        assert!(should_request_file_maintenance(false, 41, 40));
+    }
+
+    #[test]
+    fn copy_data_inlining_limit_targets_the_destination_table() {
+        let sql =
+            table_data_inlining_row_limit_sql(&ducklake_table_name(), COPY_DATA_INLINING_ROW_LIMIT);
+
+        assert_eq!(
+            sql,
+            "CALL lake.set_option('data_inlining_row_limit', 0, schema => 'public', table_name => \
+             'users');"
+        );
+    }
 
     #[test]
     fn expire_snapshots_retention_seconds_uses_humantime_duration_syntax() {

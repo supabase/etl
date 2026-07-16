@@ -1,15 +1,22 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use etl::{
-    error::ErrorKind,
+    data::TableRow,
+    destination::{
+        Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
+        WriteEventsResult, WriteTableRowsResult,
+    },
+    error::{ErrorKind, EtlResult},
     event::{Event, EventType, InsertEvent},
     pipeline::PipelineId,
-    schema::{ColumnSchema, TableId},
-    store::{SchemaStore, TableState, TableStateType},
+    schema::{ColumnSchema, ReplicatedTableSchema, TableId},
+    store::{SchemaStore, StateStore, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
+        faults::FaultyOp,
         memory_destination::MemoryDestination,
+        notify::TimedNotify,
         notifying_store::NotifyingStore,
         pipeline::{
             PipelineBuilder, create_pipeline, create_pipeline_with_batch_config,
@@ -34,7 +41,10 @@ use etl_postgres::{
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::random;
-use tokio::time::sleep;
+use tokio::{
+    sync::{Mutex, Notify},
+    time::sleep,
+};
 use tokio_postgres::types::{PgLsn, Type};
 
 /// Creates a test column schema with sensible defaults.
@@ -47,6 +57,270 @@ fn test_column(
 ) -> ColumnSchema {
     ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, nullable)
         .with_primary_key_ordinal_position(if primary_key { Some(1) } else { None })
+}
+
+/// State used by [`DeferredCopyDestination`] to control copy durability.
+#[derive(Default)]
+struct DeferredCopyDestinationState {
+    /// Number of nonempty copy writes received.
+    nonempty_writes: usize,
+    /// Rows retained after the first copy write is accepted.
+    accepted_rows: Vec<TableRow>,
+    /// Held terminal durability barrier result.
+    barrier_result: Option<WriteTableRowsResult>,
+}
+
+/// Destination test double that defers the first copy write's durability.
+#[derive(Clone)]
+struct DeferredCopyDestination<D> {
+    /// Immediate destination used for writes after the first copy batch.
+    inner: D,
+    /// Shared durability-control state.
+    state: Arc<Mutex<DeferredCopyDestinationState>>,
+    /// Notification emitted after the terminal barrier is held.
+    barrier_reached: Arc<Notify>,
+}
+
+impl<D> DeferredCopyDestination<D> {
+    /// Wraps an immediate destination with deferred copy durability behavior.
+    fn wrap(inner: D) -> Self {
+        Self {
+            inner,
+            state: Arc::new(Mutex::new(DeferredCopyDestinationState::default())),
+            barrier_reached: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Returns a notification for the next terminal durability barrier.
+    fn notify_on_barrier(&self) -> TimedNotify {
+        TimedNotify::new(Arc::clone(&self.barrier_reached))
+    }
+
+    /// Returns the number of nonempty copy writes received.
+    async fn nonempty_writes(&self) -> usize {
+        self.state.lock().await.nonempty_writes
+    }
+
+    /// Completes the held terminal durability barrier with `status`.
+    async fn complete_barrier(&self, status: DestinationWriteStatus) {
+        let barrier_result = self
+            .state
+            .lock()
+            .await
+            .barrier_result
+            .take()
+            .expect("terminal copy durability barrier should be held");
+        barrier_result.send(Ok(status));
+    }
+}
+
+impl<D> Destination for DeferredCopyDestination<D>
+where
+    D: PipelineDestination,
+{
+    fn name() -> &'static str {
+        "deferred_copy"
+    }
+
+    async fn startup(&self) -> EtlResult<()> {
+        self.inner.startup().await
+    }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.inner.shutdown().await
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        async_result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        self.inner.drop_table_for_copy(replicated_table_schema, async_result).await
+    }
+
+    async fn write_table_rows(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        mut table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        if table_rows.is_empty() {
+            // Hold the terminal empty write so the test can inspect table state
+            // before durability is confirmed.
+            let mut state = self.state.lock().await;
+            assert!(
+                state.barrier_result.is_none(),
+                "only one terminal copy durability barrier should be pending"
+            );
+            state.barrier_result = Some(async_result);
+            drop(state);
+
+            self.barrier_reached.notify_one();
+
+            return Ok(());
+        }
+
+        let table_rows = {
+            let mut state = self.state.lock().await;
+            state.nonempty_writes += 1;
+
+            if state.nonempty_writes == 1 {
+                // Take ownership of the first batch without making it durable.
+                state.accepted_rows = table_rows;
+                None
+            } else {
+                // Make the accepted rows durable with a later batch. ETL must
+                // still remember that the terminal barrier is required.
+                state.accepted_rows.append(&mut table_rows);
+                Some(std::mem::take(&mut state.accepted_rows))
+            }
+        };
+
+        let Some(table_rows) = table_rows else {
+            async_result.send(Ok(DestinationWriteStatus::Accepted));
+
+            return Ok(());
+        };
+
+        self.inner.write_table_rows(replicated_table_schema, table_rows, async_result).await
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        self.inner.write_events(events, async_result).await
+    }
+}
+
+/// Destination operation stalled by [`StalledCopyDestination`].
+#[derive(Clone, Copy)]
+enum StallTarget {
+    /// A destination drop before a fresh table copy.
+    DropTableForCopy,
+    /// A nonempty table-copy row write.
+    WriteTableRows,
+}
+
+/// Behavior used by [`StalledCopyDestination`] for the selected operation.
+#[derive(Clone, Copy)]
+enum StallMode {
+    /// Drops the result without completing it.
+    DropResult,
+    /// Retains the result without completing it.
+    HoldResult,
+}
+
+/// Destination test double that drops or indefinitely holds a copy result.
+#[derive(Clone)]
+struct StalledCopyDestination<D> {
+    /// Destination used for operations other than the selected stall target.
+    inner: D,
+    /// Destination operation to stall.
+    target: StallTarget,
+    /// Behavior applied to the selected operation.
+    mode: StallMode,
+    /// Held result that keeps a destination drop pending.
+    pending_drop_result: Arc<Mutex<Option<DropTableForCopyResult<()>>>>,
+    /// Held result that keeps a table-copy write pending.
+    pending_write_result: Arc<Mutex<Option<WriteTableRowsResult>>>,
+    /// Notification emitted after the result is dropped or held.
+    stall_reached: Arc<Notify>,
+}
+
+impl<D> StalledCopyDestination<D> {
+    /// Wraps a destination with the selected stall behavior.
+    fn wrap(inner: D, target: StallTarget, mode: StallMode) -> Self {
+        Self {
+            inner,
+            target,
+            mode,
+            pending_drop_result: Arc::new(Mutex::new(None)),
+            pending_write_result: Arc::new(Mutex::new(None)),
+            stall_reached: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Returns a notification for the next stalled operation.
+    fn notify_on_stall(&self) -> TimedNotify {
+        TimedNotify::new(Arc::clone(&self.stall_reached))
+    }
+}
+
+impl<D> Destination for StalledCopyDestination<D>
+where
+    D: PipelineDestination,
+{
+    fn name() -> &'static str {
+        "stalled_copy"
+    }
+
+    async fn startup(&self) -> EtlResult<()> {
+        self.inner.startup().await
+    }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.inner.shutdown().await
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        async_result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        if !matches!(self.target, StallTarget::DropTableForCopy) {
+            return self.inner.drop_table_for_copy(replicated_table_schema, async_result).await;
+        }
+
+        match self.mode {
+            StallMode::DropResult => drop(async_result),
+            StallMode::HoldResult => {
+                let mut pending_result = self.pending_drop_result.lock().await;
+                assert!(pending_result.is_none(), "only one destination drop should be pending");
+                *pending_result = Some(async_result);
+            }
+        }
+
+        self.stall_reached.notify_one();
+
+        Ok(())
+    }
+
+    async fn write_table_rows(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        if !matches!(self.target, StallTarget::WriteTableRows) {
+            return self
+                .inner
+                .write_table_rows(replicated_table_schema, table_rows, async_result)
+                .await;
+        }
+
+        match self.mode {
+            StallMode::DropResult => drop(async_result),
+            StallMode::HoldResult => {
+                let mut pending_result = self.pending_write_result.lock().await;
+                assert!(pending_result.is_none(), "only one table-copy write should be pending");
+                *pending_result = Some(async_result);
+            }
+        }
+
+        self.stall_reached.notify_one();
+
+        Ok(())
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        self.inner.write_events(events, async_result).await
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -84,6 +358,239 @@ async fn pipeline_shutdown_calls_destination_shutdown() {
 
     // Verify that shutdown was called on the destination.
     assert!(destination.shutdown_called().await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_errors_when_async_result_is_dropped() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let destination = StalledCopyDestination::wrap(
+        immediate_destination,
+        StallTarget::WriteTableRows,
+        StallMode::DropResult,
+    );
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+
+    let table_errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+
+    pipeline.start().await.unwrap();
+
+    table_errored.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    let TableState::Errored { source_err, .. } = table_state else {
+        panic!("dropped async result should put the table in an errored state");
+    };
+    assert_eq!(source_err.kind(), ErrorKind::DestinationError);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_shutdown_interrupts_pending_result_wait() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let destination = StalledCopyDestination::wrap(
+        immediate_destination,
+        StallTarget::WriteTableRows,
+        StallMode::HoldResult,
+    );
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let write_reached = destination.notify_on_stall();
+
+    pipeline.start().await.unwrap();
+
+    write_reached.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    assert!(matches!(table_state, TableState::DataSync));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drop_table_for_copy_errors_when_async_result_is_dropped() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let destination = StalledCopyDestination::wrap(
+        immediate_destination,
+        StallTarget::DropTableForCopy,
+        StallMode::DropResult,
+    );
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    store.reset_table_state(table_id).await.unwrap();
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+
+    let table_errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+
+    pipeline.start().await.unwrap();
+
+    table_errored.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    let TableState::Errored { source_err, .. } = table_state else {
+        panic!("dropped destination-drop result should put the table in an errored state");
+    };
+    assert_eq!(source_err.kind(), ErrorKind::DestinationError);
+    assert!(store.get_destination_table_metadata(table_id).await.unwrap().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drop_table_for_copy_shutdown_interrupts_pending_result_wait() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let destination = StalledCopyDestination::wrap(
+        immediate_destination,
+        StallTarget::DropTableForCopy,
+        StallMode::HoldResult,
+    );
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    let drop_reached = destination.notify_on_stall();
+
+    store.reset_table_state(table_id).await.unwrap();
+
+    drop_reached.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    assert!(matches!(table_state, TableState::Init));
+    assert!(store.get_destination_table_metadata(table_id).await.unwrap().is_some());
+}
+
+/// Verifies that resetting a table during an active copy is overwritten by the
+/// active worker.
+///
+/// Real-time resets are not supported yet: the active worker currently owns a
+/// separate in-memory state and can overwrite the stored `Init` state when it
+/// advances. Supporting resets without restarting the pipeline requires
+/// coordinating the reset with that worker and changing this expectation so a
+/// fresh copy drops the existing destination table.
+#[tokio::test(flavor = "multi_thread")]
+async fn reset_during_active_copy_is_overwritten_by_active_worker() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let held_write = destination.hold_next(FaultyOp::WriteTableRows).await;
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    held_write.wait_reached().await;
+
+    // We reset the table state while the write table rows method is blocked.
+    store.reset_table_state(table_id).await.unwrap();
+
+    // We release the hold, which causes the system to continue its work and
+    // overrides the `Init` state which was set by the reset.
+    held_write.release_ok();
+
+    // The table becomes ready since naturally since the copy just continued.
+    table_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert!(!destination.was_table_dropped_for_copy(table_id).await);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -375,6 +882,61 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     let table_rows = destination.get_table_rows().await;
     let copied_rows = table_rows.get(&table_id).map_or(0, Vec::len);
     assert_eq!(copied_rows, total_rows as usize);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_waits_for_durable_terminal_barrier_after_accepted_write() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    let table_name = database_schema.users_schema().name.clone();
+
+    // Force at least two copy batches so the first can return Accepted and a
+    // later batch Durable. The terminal barrier must still be required.
+    insert_users_data(&mut database, &table_name, 0..=2).await;
+
+    let store = NotifyingStore::new();
+    let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let destination = DeferredCopyDestination::wrap(immediate_destination);
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_max_copy_connections_per_table(1)
+    .with_batch_config(BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2, max_bytes: 1 })
+    .build();
+
+    // Arm notifications before starting because they only observe future
+    // transitions.
+    let barrier_reached = destination.notify_on_barrier();
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    // The destination now holds the terminal barrier result.
+    barrier_reached.notified().await;
+
+    // A later Durable batch must not advance the table while the terminal
+    // barrier remains pending.
+    assert!(destination.nonempty_writes().await >= 2);
+    let table_states = store.get_table_states().await;
+    assert_eq!(
+        table_states.get(&table_id).map(TableState::as_type),
+        Some(TableStateType::DataSync)
+    );
+
+    // Confirming the terminal barrier unlocks normal table-state progression.
+    destination.complete_barrier(DestinationWriteStatus::Durable).await;
+    table_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -8,53 +8,74 @@ use std::{
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
 use tokio_postgres::types::PgLsn;
-use tracing::warn;
+use tracing::debug;
 
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
+    runtime::concurrency::{ShutdownResult, ShutdownRx},
 };
 
-/// Status reported by a streaming destination write.
+/// Durability status reported by streaming and table-copy destination writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestinationWriteStatus {
     /// The destination accepted ownership of the write, but ETL must not
-    /// advance durable replication progress for it yet.
+    /// consider it durable yet.
     ///
     /// Completing a result as `Accepted` consumes that result. After that
     /// point, ETL cannot wait on the same result for a later durability signal.
-    /// ETL carries the write's commit end LSN into the next streaming write and
-    /// advances durable progress only when a later cumulative
-    /// [`DestinationWriteStatus::Durable`] result proves it durable.
     ///
-    /// If no later streaming write is dispatched before shutdown, ETL exits
-    /// without acknowledging the accepted write as durable. Restart then
-    /// replays from the last durable checkpoint.
+    /// For streaming writes through
+    /// [`crate::destination::Destination::write_events`], ETL does not advance
+    /// the batch's commit end LSN. It carries that LSN into the next streaming
+    /// write and advances durable progress only when a later cumulative
+    /// [`DestinationWriteStatus::Durable`] result covers it. If no later write
+    /// is dispatched before shutdown, ETL leaves progress at the last durable
+    /// checkpoint so restart can replay the accepted write.
+    ///
+    /// For table-copy writes through
+    /// [`crate::destination::Destination::write_table_rows`], ETL may request
+    /// the next batch for the same copy partition, but records that the table
+    /// requires a terminal durability barrier. After all copy workers finish,
+    /// ETL sends an empty table-copy write and refuses to store `FinishedCopy`
+    /// until that barrier returns [`DestinationWriteStatus::Durable`].
+    /// Returning `Accepted` from the terminal barrier fails the table copy.
     Accepted,
-    /// This write and all earlier accepted writes in the same ordered
-    /// apply-loop stream are durable according to the destination contract.
+    /// The destination confirms the write is durable.
     ///
-    /// The cumulative meaning is required for deferred destinations. When the
-    /// apply loop observes this status, it may advance durable progress through
-    /// the greatest commit end LSN carried by this write or by earlier accepted
-    /// writes that were attached to this write.
+    /// For streaming writes through
+    /// [`crate::destination::Destination::write_events`], this write and all
+    /// earlier `Accepted` writes in the same ordered apply-loop stream are
+    /// durable. ETL may advance through the greatest commit end LSN carried by
+    /// this write or reattached from those earlier writes.
+    ///
+    /// For a nonempty table-copy write through
+    /// [`crate::destination::Destination::write_table_rows`], this status
+    /// confirms that batch is durable. If any table-copy batch returned
+    /// `Accepted`, ETL still sends a terminal empty write after every copy
+    /// worker finishes. `Durable` from that barrier must cover every accepted
+    /// write in the current table-copy attempt before ETL stores
+    /// `FinishedCopy`. Empty and skipped tables must also return `Durable`
+    /// from their empty initialization write before the copy can finish.
     Durable,
 }
 
 /// Async completion handle used for
 /// [`crate::destination::Destination::write_table_rows`].
 ///
-/// ETL waits for this result before requesting the next row batch for the same
-/// copy partition. The handle exists mostly to keep the destination API aligned
-/// with [`WriteEventsResult`], so destinations may still choose to structure
-/// their internal write paths in a similar way.
-pub type WriteTableRowsResult<T = ()> = AsyncResult<T>;
+/// Unless shutdown is requested, ETL waits for this result before requesting
+/// the next row batch for the same copy partition. A destination may report
+/// [`DestinationWriteStatus::Accepted`] to continue copying before the batch is
+/// durable. ETL then issues a terminal empty write as a table-wide durability
+/// barrier and requires [`DestinationWriteStatus::Durable`] before completing
+/// the copy.
+pub type WriteTableRowsResult<T = DestinationWriteStatus> = AsyncResult<T>;
 
 /// Async completion handle used for
 /// [`crate::destination::Destination::drop_table_for_copy`].
 ///
-/// ETL waits for this result immediately before clearing stored table-copy
-/// metadata and starting a fresh copy.
+/// Unless shutdown is requested, ETL waits for this result immediately before
+/// clearing stored table-copy metadata and starting a fresh copy.
 pub type DropTableForCopyResult<T = ()> = AsyncResult<T>;
 
 /// Async completion handle used for
@@ -125,21 +146,8 @@ impl<T> AsyncResult<T> {
         };
 
         if tx.send(result).is_err() {
-            warn!("could not send async result because receiver was already closed");
+            debug!("async result receiver was already closed");
         }
-    }
-}
-
-impl<T> Drop for AsyncResult<T> {
-    fn drop(&mut self) {
-        let Some(tx) = self.tx.take() else {
-            return;
-        };
-
-        let _ = tx.send(Err(etl_error!(
-            ErrorKind::DestinationError,
-            "Async result dropped without sending"
-        )));
     }
 }
 
@@ -176,6 +184,22 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
     }
 }
 
+impl<T, M> PendingAsyncResult<T, M> {
+    /// Waits for completion or returns when shutdown is requested.
+    pub(crate) async fn with_shutdown(
+        self,
+        shutdown_rx: &mut ShutdownRx,
+    ) -> ShutdownResult<CompletedAsyncResult<T, M>, ()> {
+        tokio::select! {
+            biased;
+
+            _ = shutdown_rx.changed() => ShutdownResult::Shutdown(()),
+
+            completed = self => ShutdownResult::Ok(completed),
+        }
+    }
+}
+
 /// Completed typed asynchronous result.
 #[derive(Debug)]
 pub(crate) struct CompletedAsyncResult<T, M> {
@@ -198,6 +222,7 @@ impl<T, M> CompletedAsyncResult<T, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::concurrency::create_shutdown_channel;
 
     #[tokio::test]
     async fn async_result_round_trips_success() {
@@ -224,7 +249,7 @@ mod tests {
 
         let err = pending_result.await.into_result().unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationError);
-        assert_eq!(err.description(), Some("Async result dropped without sending"));
+        assert_eq!(err.description(), Some("Async result channel closed before sending"));
     }
 
     #[tokio::test]
@@ -240,5 +265,42 @@ mod tests {
 
         assert!(metadata.is_none());
         assert_eq!(result.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn pending_async_result_completes_before_shutdown() {
+        let (_shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
+        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
+        result_tx.send(Ok(7));
+
+        let ShutdownResult::Ok(completed) = pending_result.with_shutdown(&mut shutdown_rx).await
+        else {
+            panic!("async result should complete before shutdown");
+        };
+
+        assert_eq!(completed.into_result().unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn pending_async_result_stops_waiting_on_shutdown() {
+        let (shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
+        let (_result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
+        shutdown_tx.shutdown().unwrap();
+
+        let result = pending_result.with_shutdown(&mut shutdown_rx).await;
+
+        assert!(matches!(result, ShutdownResult::Shutdown(())));
+    }
+
+    #[tokio::test]
+    async fn pending_async_result_prioritizes_shutdown_over_completion() {
+        let (shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
+        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
+        result_tx.send(Ok(7));
+        shutdown_tx.shutdown().unwrap();
+
+        let result = pending_result.with_shutdown(&mut shutdown_rx).await;
+
+        assert!(matches!(result, ShutdownResult::Shutdown(())));
     }
 }

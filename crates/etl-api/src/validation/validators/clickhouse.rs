@@ -40,7 +40,9 @@ impl Validator for ClickHouseValidator {
                 "ClickHouse URL Invalid",
                 format!(
                     "ClickHouse URL must use `https`, but this URL uses `{scheme}`.\n\nETL \
-                     requires TLS to protect credentials and replicated rows."
+                     requires TLS to protect credentials and replicated rows. Update the \
+                     destination URL to the ClickHouse HTTPS endpoint, including its port when \
+                     required."
                 ),
             )]);
         }
