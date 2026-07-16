@@ -1,5 +1,6 @@
 ---
 source: crates/etl-api/tests/destinations_pipelines.rs
+assertion_line: 335
 expression: response.config
 ---
 ApiPipelineConfig {

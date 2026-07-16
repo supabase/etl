@@ -496,15 +496,6 @@ pub struct StoredPipelineConfig {
 }
 
 impl StoredPipelineConfig {
-    /// Returns the table OIDs configured for selective initial copy.
-    pub fn table_sync_copy_ids(&self) -> &[u32] {
-        match &self.table_sync_copy {
-            TableSyncCopyConfig::IncludeAllTables | TableSyncCopyConfig::SkipAllTables => &[],
-            TableSyncCopyConfig::IncludeTables { table_ids }
-            | TableSyncCopyConfig::SkipTables { table_ids } => table_ids,
-        }
-    }
-
     pub fn into_etl_config(
         self,
         pipeline_id: u64,
