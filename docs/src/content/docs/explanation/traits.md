@@ -18,7 +18,7 @@ pub trait Destination {
     fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
     fn drop_table_for_copy(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: DropTableForCopyResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, table_rows: Vec<TableRow>, async_result: WriteTableRowsResult) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_events(&self, events: Vec<Event>, durability: WriteEventsDurability, async_result: WriteEventsResult) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
@@ -38,6 +38,7 @@ pub trait Destination {
 - `drop_table_for_copy()` should be **idempotent**. ETL calls it before clearing copy-scoped store state, so implementations can still use the supplied schema and existing destination metadata to locate the old object. Before returning success, it must also drain or invalidate writes accepted by an earlier copy attempt so stale work cannot mutate the recreated table.
 - `write_table_rows()` is called even for empty source tables so destinations can create or prepare initial destination state before streaming begins.
 - An immediate `write_table_rows()` implementation returns `DestinationWriteStatus::Durable` after the batch is durable. A deferred implementation may return `Accepted` after taking ownership of a nonempty batch. It must bound its accepted-but-not-durable backlog and delay `Accepted` when no capacity is available. If any batch returns `Accepted`, ETL sends an empty batch after all copy workers finish; the destination must return `Durable` from that call only after all rows accepted during the current copy attempt are durable.
+- `WriteEventsDurability::MayDefer` permits `write_events()` to return `Accepted` or `Durable`. `WriteEventsDurability::RequireDurable` cannot return `Accepted`: it must return `Durable` only after the current write and all earlier accepted writes in the same ordered apply-loop stream are durable.
 - `write_table_rows()` and `write_events()` must tolerate **duplicate delivery** because ETL may retry or replay after failure.
 - Handle **concurrent calls** safely, especially from parallel table sync workers.
 - Preserve **per-table event order**. During initial copy and catch-up, transaction markers are not a reliable all-tables transaction boundary.

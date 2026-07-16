@@ -329,7 +329,7 @@ There are also optional `startup()` and `shutdown()` methods with default no-op 
 
 ETL clears its own schema versions, destination metadata, and table-sync progress **only after `drop_table_for_copy()` succeeds**. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. Before returning success, also drain or invalidate writes accepted by an earlier copy attempt so stale work cannot mutate the recreated object. If the object is already gone and no stale write can recreate or mutate it, return success.
 
-All write-like methods must complete their async result handle. Treat the method return value as the place for immediate dispatch or setup failures, and send the final write result through `async_result`. Immediate destinations should send `DestinationWriteStatus::Durable` after successful `write_table_rows()` and `write_events()` calls. A copy destination that returns `DestinationWriteStatus::Accepted` must take ownership of the rows, bound its accepted-but-not-durable backlog, and delay `Accepted` until it has capacity. It must later treat an empty `write_table_rows()` call as a same-table durability barrier: return `Durable` only when every row accepted during that copy attempt is durable. ETL is **at least once**, so make row and event writes idempotent. `write_events()` preserves per-table ordering, but batches can include multiple tables and transaction markers are not a complete all-tables boundary during initial copy and catch-up.
+All write-like methods must complete their async result handle. Treat the method return value as the place for immediate dispatch or setup failures, and send the final write result through `async_result`. Immediate destinations should send `DestinationWriteStatus::Durable` after successful `write_table_rows()` and `write_events()` calls. A copy destination that returns `DestinationWriteStatus::Accepted` must take ownership of the rows, bound its accepted-but-not-durable backlog, and delay `Accepted` until it has capacity. It must later treat an empty `write_table_rows()` call as a same-table durability barrier: return `Durable` only when every row accepted during that copy attempt is durable. For streaming writes, `WriteEventsDurability::MayDefer` permits either `Accepted` or `Durable`, but `WriteEventsDurability::RequireDurable` cannot return `Accepted`: it must cover the current write and all earlier accepted writes in that ordered apply-loop stream. ETL is **at least once**, so make row and event writes idempotent. `write_events()` preserves per-table ordering, but batches can include multiple tables and transaction markers are not a complete all-tables boundary during initial copy and catch-up.
 
 ```rust
 use reqwest::Client;
@@ -338,8 +338,8 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use etl::destination::{
-    Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult,
-    WriteTableRowsResult,
+    Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
+    WriteEventsResult, WriteTableRowsResult,
 };
 use etl::error::{ErrorKind, EtlResult};
 use etl::{data::TableRow, event::Event, schema::ReplicatedTableSchema};
@@ -430,6 +430,7 @@ impl Destination for HttpDestination {
     async fn write_events(
         &self,
         events: Vec<Event>,
+        _durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         if events.is_empty() {

@@ -44,7 +44,8 @@ use crate::{
     data::SizeHint,
     destination::{
         ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DestinationWriteStatus,
-        DispatchMetrics, PendingWriteEventsResult, PipelineDestination, WriteEventsResult,
+        DispatchMetrics, PendingWriteEventsResult, PipelineDestination, WriteEventsDurability,
+        WriteEventsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -1728,7 +1729,16 @@ where
         // If there was an error in the flushing, we return it immediately.
         let status = result?;
 
-        if let Some(metadata) = metadata {
+        if let Some(metadata) = metadata.as_ref() {
+            if metadata.durability == WriteEventsDurability::RequireDurable
+                && status == DestinationWriteStatus::Accepted
+            {
+                bail!(
+                    ErrorKind::DestinationError,
+                    "Destination was expected to durably persist last batch but it didn't do it"
+                );
+            }
+
             counter!(
                 ETL_EVENTS_PROCESSED_TOTAL,
                 WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
@@ -1765,6 +1775,16 @@ where
         // If processing was paused, there must be a queued batch that still needs to be
         // flushed now that the previous in-flight result has resolved.
         if processing_paused {
+            if let Some(metadata) = metadata.as_ref() {
+                // A required-durability write is terminal, so `Complete` must have
+                // stopped intake before a successor batch could be queued behind it.
+                debug_assert_ne!(
+                    metadata.durability,
+                    WriteEventsDurability::RequireDurable,
+                    "required-durability write must not have a queued successor batch"
+                );
+            }
+
             self.flush_batch("pending flush result received").await?;
         }
 
@@ -1881,6 +1901,13 @@ where
 
         let (events_batch, events_batch_bytes) = self.state.take_events_batch();
         let events_batch_size = events_batch.len();
+        // `Complete` is terminal, so no later write is guaranteed to settle an
+        // `Accepted` result. Its final batch must confirm cumulative durability
+        // before the apply loop can complete.
+        let durability = match self.state.exit_intent {
+            Some(ExitIntent::Complete) => WriteEventsDurability::RequireDurable,
+            Some(ExitIntent::Pause) | None => WriteEventsDurability::MayDefer,
+        };
         debug!(
             worker_type = %self.worker_context.worker_type(),
             batch_size = events_batch_size,
@@ -1893,6 +1920,7 @@ where
         // and recorded once the destination acknowledges the batch.
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: self.state.last_commit_end_lsn.take(),
+            durability,
             metrics: DispatchMetrics {
                 items_count: events_batch_size,
                 dispatched_at: Instant::now(),
@@ -1903,7 +1931,7 @@ where
         // the pending receiver is stored on the loop state until the
         // destination signals completion.
         let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
-        self.destination.write_events(events_batch, flush_result).await?;
+        self.destination.write_events(events_batch, durability, flush_result).await?;
         self.state.pending_flush_result = Some(pending_flush_result);
 
         // We reset the deadline for the batch, since we are now flushing a new batch.

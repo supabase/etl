@@ -4,7 +4,7 @@ use etl::{
     data::TableRow,
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
-        WriteEventsResult, WriteTableRowsResult,
+        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     event::{Event, EventType, InsertEvent},
@@ -190,9 +190,10 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
+        durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        self.inner.write_events(events, async_result).await
+        self.inner.write_events(events, durability, async_result).await
     }
 }
 
@@ -319,9 +320,10 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
+        durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        self.inner.write_events(events, async_result).await
+        self.inner.write_events(events, durability, async_result).await
     }
 }
 

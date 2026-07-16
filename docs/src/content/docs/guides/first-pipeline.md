@@ -77,8 +77,8 @@ use etl::{
     },
     data::TableRow,
     destination::{
-        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult,
-        WriteTableRowsResult,
+        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -120,6 +120,7 @@ impl Destination for LoggingDestination {
     async fn write_events(
         &self,
         events: Vec<Event>,
+        _durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         println!("received {} streaming events", events.len());
