@@ -11,11 +11,12 @@ use etl::{
         event::group_events_by_type_and_table_id,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::{PipelineBuilder, create_pipeline},
+        pipeline::{PipelineBuilder, create_pipeline, create_pipeline_with_table_sync_copy_config},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::create_partitioned_table,
     },
 };
+use etl_config::shared::TableSyncCopyConfig;
 use etl_postgres::{below_version, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
@@ -57,6 +58,107 @@ fn assert_table_row_counts(
     assert_eq!(table_rows.len(), expected_counts.len());
     for (table_id, expected_count) in expected_counts {
         assert_eq!(table_rows.get(table_id).map_or(0, Vec::len), *expected_count);
+    }
+}
+
+/// Runs a selective initial-copy case for one partition identity mode.
+async fn assert_selective_partition_initial_copy_case(
+    test_name: &str,
+    publish_via_partition_root: bool,
+) {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name(test_name);
+    let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
+    let (parent_table_id, partition_table_ids) =
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
+    let [p1_table_id, p2_table_id] = partition_table_ids.as_slice() else {
+        panic!("Test partition setup should create exactly two partitions");
+    };
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('initial_p1', 50), ('initial_p2', 150)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let publication_name = format!("pub_{test_name}");
+    database
+        .create_publication_with_config(
+            &publication_name,
+            std::slice::from_ref(&table_name),
+            publish_via_partition_root,
+        )
+        .await
+        .unwrap();
+
+    let (selected_table_id, expected_copy_counts, expected_cdc_counts) =
+        if publish_via_partition_root {
+            (parent_table_id, vec![(parent_table_id, 2)], vec![(parent_table_id, 2)])
+        } else {
+            (
+                *p1_table_id,
+                vec![(*p1_table_id, 1), (*p2_table_id, 0)],
+                vec![(*p1_table_id, 1), (*p2_table_id, 1)],
+            )
+        };
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
+
+    let mut ready_notifies = Vec::new();
+    for (table_id, _) in &expected_copy_counts {
+        ready_notifies
+            .push(state_store.notify_on_table_state_type(*table_id, TableStateType::Ready).await);
+    }
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline_with_table_sync_copy_config(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+        TableSyncCopyConfig::IncludeTables { table_ids: vec![selected_table_id.into_inner()] },
+    );
+
+    pipeline.start().await.unwrap();
+
+    for notify in &ready_notifies {
+        notify.notified().await;
+    }
+
+    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('new_p1', 50), ('new_p2', 150)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    inserts_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_states = state_store.get_table_states().await;
+    assert_eq!(table_states.len(), expected_copy_counts.len());
+    for (table_id, _) in &expected_copy_counts {
+        assert!(table_states.contains_key(table_id));
+    }
+
+    let table_rows = destination.get_table_rows().await;
+    assert_table_row_counts(&table_rows, &expected_copy_counts);
+
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    for (table_id, expected_count) in expected_cdc_counts {
+        let inserts =
+            grouped_events.get(&(EventType::Insert, table_id)).cloned().unwrap_or_default();
+        assert_eq!(inserts.len(), expected_count);
     }
 }
 
@@ -362,6 +464,19 @@ async fn partitioned_table_copy_replicates_existing_data() {
         .map(|(_, rows)| rows.len())
         .sum::<usize>();
     assert_eq!(parent_table_rows, 3);
+}
+
+/// Tests that selecting a partition root copies existing rows from every leaf.
+#[tokio::test(flavor = "multi_thread")]
+async fn selective_partition_initial_copy_uses_root_table_id() {
+    assert_selective_partition_initial_copy_case("selective_copy_root", true).await;
+}
+
+/// Tests that selecting one leaf copies only that leaf while CDC streams every
+/// leaf.
+#[tokio::test(flavor = "multi_thread")]
+async fn selective_partition_initial_copy_uses_leaf_table_id() {
+    assert_selective_partition_initial_copy_case("selective_copy_leaf", false).await;
 }
 
 /// Tests that CDC streams inserts to partitions created after pipeline startup.

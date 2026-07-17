@@ -122,7 +122,7 @@ ETL provides **at-least-once delivery**. If restarts occur, some events may be d
 
 Exactly-once delivery requires distributed transactions between Postgres and the destination, adding complexity and latency. Instead, ETL optimizes for throughput and simplicity while minimizing duplicates through:
 
-- **Controlled shutdown**: The pipeline gracefully drains in-flight events before stopping
+- **Controlled shutdown**: The pipeline attempts to finish in-flight work before its shutdown deadline; interrupted work can be replayed after restart
 - **Frequent status updates**: Progress is reported to Postgres regularly, reducing the replay window after restarts
 
 ### Handling Duplicates

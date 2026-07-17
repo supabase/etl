@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use pg_escape::quote_identifier;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{AssertSqlSafe, PgPool, Row};
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::data::tables::Table;
+use crate::data::tables::{SourceTable, Table};
 
 #[derive(Debug, Error)]
 pub enum PublicationsDbError {
@@ -14,14 +14,26 @@ pub enum PublicationsDbError {
     Database(#[from] sqlx::Error),
 }
 
-#[derive(Serialize, ToSchema)]
+/// A source publication and the tables it currently exposes.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Publication {
+    /// The publication name in the source database.
     pub name: String,
+    /// Tables currently exposed by the publication.
+    pub tables: Vec<SourceTable>,
+}
+
+/// A schema-qualified publication definition used by write operations.
+#[derive(Debug)]
+pub struct PublicationDefinition {
+    /// The publication name in the source database.
+    pub name: String,
+    /// Tables to add, remove, or set on the publication.
     pub tables: Vec<Table>,
 }
 
 pub async fn create_publication(
-    publication: &Publication,
+    publication: &PublicationDefinition,
     pool: &PgPool,
 ) -> Result<(), PublicationsDbError> {
     let mut query = String::new();
@@ -52,7 +64,7 @@ pub async fn create_publication(
 }
 
 pub async fn update_publication(
-    publication: &Publication,
+    publication: &PublicationDefinition,
     pool: &PgPool,
 ) -> Result<(), PublicationsDbError> {
     let mut query = String::new();
@@ -96,12 +108,16 @@ pub async fn read_publication(
 ) -> Result<Option<Publication>, PublicationsDbError> {
     let query = r#"
         select p.pubname,
+            c.oid::bigint as "table_id?",
             pt.schemaname as "schemaname?",
             pt.tablename as "tablename?"
         from pg_publication p
         left join pg_publication_tables pt on p.pubname = pt.pubname
-        where p.pubname = $1;
-	   "#;
+        left join pg_namespace n on n.nspname = pt.schemaname
+        left join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
+        where p.pubname = $1
+        order by pt.schemaname, pt.tablename;
+        "#;
 
     let mut tables = vec![];
     let mut name: Option<String> = None;
@@ -113,10 +129,15 @@ pub async fn read_publication(
         } else {
             name = Some(pub_name);
         }
+        let table_id: Option<i64> = row.get("table_id?");
         let schema: Option<String> = row.get("schemaname?");
         let table_name: Option<String> = row.get("tablename?");
-        if let (Some(schema), Some(table_name)) = (schema, table_name) {
-            tables.push(Table { schema, name: table_name });
+        if let (Some(table_id), Some(schema), Some(table_name)) = (table_id, schema, table_name) {
+            tables.push(SourceTable {
+                id: u32::try_from(table_id).expect("Postgres OIDs fit in u32"),
+                schema,
+                name: table_name,
+            });
         }
     }
 
@@ -127,22 +148,31 @@ pub async fn read_publication(
 pub async fn read_all_publications(pool: &PgPool) -> Result<Vec<Publication>, PublicationsDbError> {
     let query = r#"
         select p.pubname,
+            c.oid::bigint as "table_id?",
             pt.schemaname as "schemaname?",
             pt.tablename as "tablename?"
         from pg_publication p
-        left join pg_publication_tables pt on p.pubname = pt.pubname;
-	   "#;
+        left join pg_publication_tables pt on p.pubname = pt.pubname
+        left join pg_namespace n on n.nspname = pt.schemaname
+        left join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
+        order by p.pubname, pt.schemaname, pt.tablename;
+        "#;
 
-    let mut pub_name_to_tables: HashMap<String, Vec<Table>> = HashMap::new();
+    let mut pub_name_to_tables: BTreeMap<String, Vec<SourceTable>> = BTreeMap::new();
 
     for row in sqlx::query(query).fetch_all(pool).await? {
         let pub_name: String = row.get("pubname");
+        let table_id: Option<i64> = row.get("table_id?");
         let schema: Option<String> = row.get("schemaname?");
         let table_name: Option<String> = row.get("tablename?");
         let tables = pub_name_to_tables.entry(pub_name).or_default();
 
-        if let (Some(schema), Some(table_name)) = (schema, table_name) {
-            tables.push(Table { schema, name: table_name });
+        if let (Some(table_id), Some(schema), Some(table_name)) = (table_id, schema, table_name) {
+            tables.push(SourceTable {
+                id: u32::try_from(table_id).expect("Postgres OIDs fit in u32"),
+                schema,
+                name: table_name,
+            });
         }
     }
 
@@ -153,7 +183,7 @@ pub async fn read_all_publications(pool: &PgPool) -> Result<Vec<Publication>, Pu
 }
 
 pub async fn add_tables_to_publication(
-    publication: &Publication,
+    publication: &PublicationDefinition,
     pool: &PgPool,
 ) -> Result<(), PublicationsDbError> {
     let query = format!(
@@ -166,7 +196,7 @@ pub async fn add_tables_to_publication(
 }
 
 pub async fn drop_tables_from_publication(
-    publication: &Publication,
+    publication: &PublicationDefinition,
     pool: &PgPool,
 ) -> Result<(), PublicationsDbError> {
     let query = format!(

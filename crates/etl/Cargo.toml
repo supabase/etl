@@ -10,7 +10,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-test-utils = ["etl-postgres/test-utils"]
+test-utils = ["etl-postgres/test-utils", "dep:proptest"]
 failpoints = ["fail/failpoints"]
 egress = []
 fuzzing = []
@@ -29,6 +29,7 @@ metrics = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
+proptest = { workspace = true, optional = true }
 rand = { workspace = true, features = ["thread_rng"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive", "alloc"] }
