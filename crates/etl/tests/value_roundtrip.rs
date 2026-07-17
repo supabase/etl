@@ -13,8 +13,8 @@
 //!
 //! Known codec gaps stay outside the generated envelope and are documented on
 //! the strategies that would otherwise reach them: temporal `infinity`
-//! values, `BC` dates, and years above 9999 are all legal in Postgres but are
-//! rejected by the codec today.
+//! values, `BC` dates, years above 9999, and the `24:00:00` time are all
+//! legal in Postgres but are rejected by the codec today.
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
@@ -226,10 +226,25 @@ async fn float8_array_values_roundtrip_through_text_codec() {
 
 /// Decimal literal strings covering integers, fractions, scientific notation,
 /// and the numeric specials.
+///
+/// Exponents are tiered: most cases stay small so typical magnitudes
+/// dominate, while the two boundary tiers reach the extremes the codec and
+/// Postgres share, `1e131071` on the weight side and `1e-16383` on the
+/// scale side. With up to 45 integer and 45 fractional digits, exponents in
+/// `[-16_338, 131_027]` always stay inside Postgres's accepted range
+/// (verified empirically: one step past either bound overflows the numeric
+/// format), so Postgres stays a render oracle and never rejects a generated
+/// literal.
 fn numeric_literal() -> impl Strategy<Value = String> {
     let digits = |max: usize| proptest::collection::vec(0u8..=9, 1..=max);
 
-    let finite = (any::<bool>(), digits(45), option::of(digits(45)), option::of(-60i32..=60))
+    let exponent = prop_oneof![
+        8 => -60i32..=60,
+        1 => -16_338i32..=-16_200,
+        1 => 130_900i32..=131_027,
+    ];
+
+    let finite = (any::<bool>(), digits(45), option::of(digits(45)), option::of(exponent))
         .prop_map(|(negative, int_digits, frac_digits, exponent)| {
             let mut literal = String::new();
             if negative {
@@ -302,6 +317,12 @@ fn pg_date() -> impl Strategy<Value = NaiveDate> {
 }
 
 /// Microsecond-precision times of day, matching Postgres's time resolution.
+///
+/// Postgres also accepts and stores `24:00:00`, but `chrono::NaiveTime`
+/// cannot represent it and the codec rejects it (a pinned known gap; see
+/// `time_falls_back_for_non_iso_shapes` in the codec tests). It stays
+/// outside the envelope until the codec and destinations decide how to
+/// carry it.
 fn pg_time() -> impl Strategy<Value = NaiveTime> {
     (0u32..86_400, 0u32..1_000_000).prop_map(|(seconds, micros)| {
         NaiveTime::from_num_seconds_from_midnight_opt(seconds, micros * 1_000).unwrap()
