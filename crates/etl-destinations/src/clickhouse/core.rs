@@ -684,6 +684,18 @@ where
         Ok(())
     }
 
+    /// Writes an initial-copy batch directly to the destination table.
+    ///
+    /// This convenience wrapper preserves the pre-async-result direct-call API
+    /// by awaiting the write inline.
+    pub async fn write_table_rows(
+        &self,
+        schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        self.write_table_rows_inner(schema, table_rows).await
+    }
+
     async fn write_table_rows_inner(
         &self,
         schema: &ReplicatedTableSchema,

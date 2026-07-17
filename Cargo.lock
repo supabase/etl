@@ -2087,6 +2087,7 @@ dependencies = [
  "parquet",
  "pg_escape",
  "pkcs8",
+ "proptest",
  "prost",
  "r2d2",
  "rand 0.9.4",
