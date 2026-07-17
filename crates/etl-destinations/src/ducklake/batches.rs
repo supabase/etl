@@ -79,10 +79,13 @@ const SQL_DELETE_BATCH_SIZE: usize = 16;
 const CDC_MUTATION_BATCH_SIZE: usize = 16;
 /// ETL-managed marker table storing per-table applied copy batches.
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
-/// Disable helper-table data inlining. These tables are shared by all
-/// replicated tables, so keeping their writes out of DuckLake inline metadata
-/// avoids a catalog-level conflict hotspot.
-const APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT: usize = 0;
+/// Data inlining limit for append-only DuckLake helper tables.
+///
+/// This per-table option intentionally overrides the COPY pool's attach-level
+/// limit of zero. Helper markers and progress stay inline, while rows written
+/// to the replicated table during COPY still become Parquet files. Maintenance
+/// performs helper-table deletions while foreground mutations are paused.
+const HELPER_TABLE_DATA_INLINING_ROW_LIMIT: usize = 256;
 /// Replay epoch column shared by ETL helper tables.
 const REPLAY_EPOCH_COLUMN: &str = "replay_epoch";
 
@@ -143,9 +146,6 @@ fn format_update_mutation_error_detail(
 /// ETL-managed per-table streaming replay progress for steady-state CDC
 /// retries.
 const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
-/// Disable helper-table data inlining for the same reason as
-/// [`APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT`].
-const STREAMING_PROGRESS_TABLE_DATA_INLINING_ROW_LIMIT: usize = 0;
 /// Maximum number of times a failed write attempt is retried before giving up.
 const MAX_COMMIT_RETRIES: u32 = 10;
 /// Initial backoff duration before the first retry.
@@ -409,7 +409,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
 
         let set_option_sql = format!(
             "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
-            APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT,
+            HELPER_TABLE_DATA_INLINING_ROW_LIMIT,
             quote_literal(APPLIED_BATCHES_TABLE),
         );
         conn.execute_batch(&set_option_sql).map_err(|err| {
@@ -475,7 +475,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
 
         let set_option_sql = format!(
             "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
-            STREAMING_PROGRESS_TABLE_DATA_INLINING_ROW_LIMIT,
+            HELPER_TABLE_DATA_INLINING_ROW_LIMIT,
             quote_literal(STREAMING_PROGRESS_TABLE),
         );
         conn.execute_batch(&set_option_sql).map_err(|error| {

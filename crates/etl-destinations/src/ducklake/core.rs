@@ -1126,7 +1126,6 @@ where
 
         let pool =
             Arc::new(build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?);
-        let copy_pool = Arc::new(build_warm_ducklake_pool(copy_manager, pool_size, "copy").await?);
         let blocking_slots = Arc::new(Semaphore::new(pool_size as usize));
 
         // `target_file_size` is a catalog-wide DuckLake option consumed during
@@ -1197,6 +1196,30 @@ where
         let metadata_schema = Arc::<str>::from(metadata_schema);
         let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog_url)?;
         ensure_replay_epoch_table_exists(&metadata_pg_pool, metadata_schema.as_ref()).await?;
+        let table_creation_slots = Arc::new(Semaphore::new(1));
+        let applied_batches_table_created = Arc::new(AtomicBool::new(false));
+        let streaming_progress_table_created = Arc::new(AtomicBool::new(false));
+
+        // Persist helper-table inlining options before warming COPY
+        // connections. The COPY pool remains attached with inlining disabled,
+        // while the more specific helper-table options keep only ETL metadata
+        // rows inline.
+        ensure_applied_batches_table_exists(
+            Arc::clone(&pool),
+            Arc::clone(&blocking_slots),
+            Arc::clone(&table_creation_slots),
+            Arc::clone(&applied_batches_table_created),
+        )
+        .await?;
+        ensure_streaming_progress_table_exists(
+            Arc::clone(&pool),
+            Arc::clone(&blocking_slots),
+            Arc::clone(&table_creation_slots),
+            Arc::clone(&streaming_progress_table_created),
+        )
+        .await?;
+
+        let copy_pool = Arc::new(build_warm_ducklake_pool(copy_manager, pool_size, "copy").await?);
         let created_tables = Arc::default();
         let checkpoint_gate = Arc::new(RwLock::new(()));
         let mut destination = Self {
@@ -1212,12 +1235,12 @@ where
             metadata_schema: Arc::clone(&metadata_schema),
             expire_snapshots_older_than: Arc::clone(&expire_snapshots_older_than),
             metadata_pg_pool: metadata_pg_pool.clone(),
-            table_creation_slots: Arc::new(Semaphore::new(1)),
+            table_creation_slots,
             table_write_slots: Arc::default(),
             store,
             created_tables: Arc::clone(&created_tables),
-            applied_batches_table_created: Arc::default(),
-            streaming_progress_table_created: Arc::default(),
+            applied_batches_table_created,
+            streaming_progress_table_created,
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
         let shutdown_signal_manager = Arc::clone(&manager);
@@ -1227,8 +1250,6 @@ where
                 interrupt_duckdb_connections_on_process_shutdown(shutdown_signal_manager).await;
             })
             .await;
-        destination.ensure_applied_batches_table_exists().await?;
-        destination.ensure_streaming_progress_table_exists().await?;
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
                 metadata_schema.to_string(),

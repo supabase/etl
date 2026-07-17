@@ -2240,17 +2240,33 @@ async fn run_replay_helper_cleanup(
     let helper_table_count = helper_tables.len();
     let cleanup = duckdb
         .run_with_timeout(REPLAY_HELPER_MAINTENANCE_TIMEOUT, move |conn| {
+            // Compact before inspecting helper rows. A catalog that has
+            // accumulated thousands of tiny progress files can otherwise time
+            // out while finding the latest watermark, preventing the very
+            // maintenance needed to repair it.
+            for table_name in &helper_tables {
+                info!(table = %table_name, "ducklake ETL helper table pre-cleanup compaction executing");
+                merge_adjacent_files(conn, table_name, max_compacted_files)?;
+                rewrite_data_files(conn, table_name)?;
+                info!(table = %table_name, "ducklake ETL helper table pre-cleanup compaction completed");
+            }
+
             let cleanup = cleanup_replay_helper_rows(
                 conn,
                 &current_epochs,
                 &active_table_ids,
                 &pending_table_names,
             )?;
-            for table_name in &helper_tables {
-                info!(table = %table_name, "ducklake ETL helper table compaction executing");
-                merge_adjacent_files(conn, table_name, max_compacted_files)?;
-                rewrite_data_files(conn, table_name)?;
-                info!(table = %table_name, "ducklake ETL helper table compaction completed");
+
+            // Materialize the cleanup deletes immediately so the next
+            // maintenance or restart does not have to scan rows that are only
+            // logically removed by delete files.
+            if cleanup.total_rows() > 0 {
+                for table_name in &helper_tables {
+                    info!(table = %table_name, "ducklake ETL helper table post-cleanup rewrite executing");
+                    rewrite_data_files(conn, table_name)?;
+                    info!(table = %table_name, "ducklake ETL helper table post-cleanup rewrite completed");
+                }
             }
             Ok(cleanup)
         })
