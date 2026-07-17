@@ -21,11 +21,14 @@ use proptest::{
 const CASES_PER_CHUNK: u32 = 64;
 
 /// Returns the wall-clock budget for one property.
+///
+/// Panics on a malformed value instead of falling back to the default, so a
+/// deep run with a typoed budget fails loudly rather than silently running
+/// the shallow default.
 fn property_budget() -> Duration {
-    let secs = std::env::var("PROPERTY_TEST_BUDGET_SECS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(2);
+    let secs = std::env::var("PROPERTY_TEST_BUDGET_SECS").map_or(2, |value| {
+        value.parse().expect("PROPERTY_TEST_BUDGET_SECS must be an integer number of seconds")
+    });
 
     Duration::from_secs(secs)
 }
