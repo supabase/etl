@@ -11,6 +11,10 @@
 //! regular suite pays a few seconds per property while CI chaos jobs or local
 //! deep runs can raise it to minutes.
 //!
+//! On failure the panic names the chunk's RNG seed; set
+//! `ROUNDTRIP_PROPERTY_SEED` to that value to replay the failing chunk
+//! deterministically.
+//!
 //! Known codec gaps stay outside the generated envelope and are documented on
 //! the strategies that would otherwise reach them: temporal `infinity`
 //! values, `BC` dates, and years above 9999 are all legal in Postgres but are
@@ -30,7 +34,11 @@ use etl::{
 use etl_postgres::time::PgTimeTz;
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
-use proptest::{option, prelude::*, test_runner::TestRunner as PropTestRunner};
+use proptest::{
+    option,
+    prelude::*,
+    test_runner::{RngAlgorithm, TestRng, TestRunner as PropTestRunner},
+};
 use tokio_postgres::{
     Client, Statement,
     types::{Kind, ToSql, Type},
@@ -50,34 +58,54 @@ fn property_budget() -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Returns the pinned chunk seed from `ROUNDTRIP_PROPERTY_SEED`, if set.
+fn replay_seed() -> Option<u64> {
+    let value = std::env::var("ROUNDTRIP_PROPERTY_SEED").ok()?;
+    Some(value.parse().expect("ROUNDTRIP_PROPERTY_SEED must be a u64 seed"))
+}
+
+/// Builds the deterministic RNG for one chunk of cases from a `u64` seed.
+fn chunk_rng(seed: u64) -> TestRng {
+    let mut bytes = [0u8; 32];
+    bytes[..8].copy_from_slice(&seed.to_le_bytes());
+    TestRng::from_seed(RngAlgorithm::ChaCha, &bytes)
+}
+
 /// Runs `check` on freshly generated values until the property budget elapses.
 ///
-/// Each chunk uses a new random seed. On failure the value is shrunk by
-/// proptest and reported through a panic, so the minimal failing input shows
-/// up in the test output and can be turned into a regression test.
+/// Each chunk runs [`CASES_PER_CHUNK`] cases from a fresh random seed. On
+/// failure the value is shrunk by proptest and reported through a panic that
+/// also names the chunk seed, so the minimal failing input shows up in the
+/// test output and the chunk can be replayed with `ROUNDTRIP_PROPERTY_SEED`.
 fn run_property<S>(name: &str, strategy: &S, check: impl Fn(&S::Value) -> Result<(), TestCaseError>)
 where
     S: Strategy,
     S::Value: std::fmt::Debug,
 {
     let deadline = Instant::now() + property_budget();
+    let replay_seed = replay_seed();
     let mut total_cases = 0u64;
 
     loop {
-        let mut runner = PropTestRunner::new(proptest::test_runner::Config {
+        let seed = replay_seed.unwrap_or_else(rand::random);
+        let config = proptest::test_runner::Config {
             cases: CASES_PER_CHUNK,
             failure_persistence: None,
             ..Default::default()
-        });
+        };
+        let mut runner = PropTestRunner::new_with_rng(config, chunk_rng(seed));
 
         match runner.run(strategy, |value| check(&value)) {
             Ok(()) => total_cases += u64::from(CASES_PER_CHUNK),
-            Err(err) => {
-                panic!("property '{name}' failed after ~{total_cases} passing cases:\n{err}")
-            }
+            Err(err) => panic!(
+                "property '{name}' failed after ~{total_cases} passing cases; rerun with \
+                 ROUNDTRIP_PROPERTY_SEED={seed} to replay the failing chunk:\n{err}"
+            ),
         }
 
-        if Instant::now() >= deadline {
+        // A pinned replay seed regenerates the same cases, so it runs exactly
+        // one chunk.
+        if replay_seed.is_some() || Instant::now() >= deadline {
             break;
         }
     }
