@@ -13,6 +13,10 @@ pub mod memory_destination;
 pub mod notify;
 pub mod notifying_store;
 pub mod pipeline;
+// Gated on the feature alone (not `cfg(test)`) because the runner needs the
+// optional `proptest` dependency that only the `test-utils` feature enables.
+#[cfg(feature = "test-utils")]
+pub mod property;
 pub mod replication_stream;
 pub mod schema;
 pub mod test_destination_wrapper;
