@@ -72,8 +72,8 @@
 //!     },
 //!     data::TableRow,
 //!     destination::{
-//!         Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult,
-//!         WriteTableRowsResult,
+//!         Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
+//!         WriteEventsResult, WriteTableRowsResult,
 //!     },
 //!     error::EtlResult,
 //!     event::Event,
@@ -109,6 +109,7 @@
 //!     async fn write_events(
 //!         &self,
 //!         _events: Vec<Event>,
+//!         _durability: WriteEventsDurability,
 //!         async_result: WriteEventsResult,
 //!     ) -> EtlResult<()> {
 //!         async_result.send(Ok(DestinationWriteStatus::Durable));

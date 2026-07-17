@@ -42,9 +42,9 @@ snowflake = ["etl-destinations/snowflake"]
 [dependencies]
 
 clap = { workspace = true, default-features = true, features = [
-  "std",
-  "derive",
-  "env",
+    "std",
+    "derive",
+    "env",
 ] }
 etl = { workspace = true }
 etl-config = { workspace = true }
@@ -54,7 +54,7 @@ rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 tokio = { workspace = true, features = ["macros", "signal", "time"] }
 tracing = { workspace = true, default-features = true }
 tracing-subscriber = { workspace = true, default-features = true, features = [
-  "env-filter",
+    "env-filter",
 ] }
 url = { workspace = true }
 

@@ -6,6 +6,7 @@ use etl_api::{
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
             UpdateSourceRequest, ValidateSourceRequest, ValidateSourceResponse,
+            publications::ReadPublicationsResponse, tables::ReadTablesResponse,
         },
     },
 };
@@ -80,6 +81,237 @@ async fn source_can_be_created() {
     let response: CreateSourceResponse =
         response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_table_and_publication_responses_use_partition_identity_ids() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+
+    source_pool
+        .execute(
+            "create table public.partitioned_copy_selection_test (id bigint) partition by range \
+             (id)",
+        )
+        .await
+        .expect("failed to create partitioned source table");
+    source_pool
+        .execute(
+            "create table public.partitioned_copy_selection_test_low partition of \
+             public.partitioned_copy_selection_test for values from (minvalue) to (100)",
+        )
+        .await
+        .expect("failed to create low source table partition");
+    source_pool
+        .execute(
+            "create table public.partitioned_copy_selection_test_high partition of \
+             public.partitioned_copy_selection_test for values from (100) to (maxvalue)",
+        )
+        .await
+        .expect("failed to create high source table partition");
+    source_pool
+        .execute(
+            "create publication root_copy_selection_pub for table \
+             public.partitioned_copy_selection_test with (publish_via_partition_root = true)",
+        )
+        .await
+        .expect("failed to create partition-root source publication");
+    source_pool
+        .execute(
+            "create publication leaf_copy_selection_pub for table \
+             public.partitioned_copy_selection_test with (publish_via_partition_root = false)",
+        )
+        .await
+        .expect("failed to create partition-leaf source publication");
+    source_pool
+        .execute("create publication a_empty_copy_selection_pub")
+        .await
+        .expect("failed to create leading empty source publication");
+    source_pool
+        .execute("create publication z_empty_copy_selection_pub")
+        .await
+        .expect("failed to create trailing empty source publication");
+
+    let expected_partition_tables: Vec<(i64, String, String)> = sqlx::query_as(
+        r#"
+        select c.oid::bigint, n.nspname, c.relname
+        from pg_catalog.pg_class c
+        join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public'
+            and c.relname in (
+                'partitioned_copy_selection_test',
+                'partitioned_copy_selection_test_high',
+                'partitioned_copy_selection_test_low'
+            )
+        order by n.nspname, c.relname
+        "#,
+    )
+    .fetch_all(&source_pool)
+    .await
+    .expect("failed to read partition table oids");
+    let expected_partition_tables: Vec<(u32, String, String)> = expected_partition_tables
+        .into_iter()
+        .map(|(id, schema, name)| {
+            (u32::try_from(id).expect("Postgres OIDs fit in u32"), schema, name)
+        })
+        .collect();
+    assert_eq!(expected_partition_tables.len(), 3);
+    let expected_root_table = expected_partition_tables
+        .iter()
+        .find(|(_, _, name)| name == "partitioned_copy_selection_test")
+        .cloned()
+        .expect("partition root missing from pg_class");
+    let expected_leaf_tables: Vec<_> = expected_partition_tables
+        .iter()
+        .filter(|(_, _, name)| name != "partitioned_copy_selection_test")
+        .cloned()
+        .collect();
+
+    let tables_response = app.read_source_tables(tenant_id, source_id).await;
+    assert!(tables_response.status().is_success());
+    let tables_response: ReadTablesResponse =
+        tables_response.json().await.expect("failed to deserialize table response");
+    assert!(tables_response.tables.is_sorted_by(|left, right| {
+        (&left.schema, &left.name) <= (&right.schema, &right.name)
+    }));
+    let partition_tables: Vec<_> = tables_response
+        .tables
+        .iter()
+        .filter(|table| {
+            table.schema == "public"
+                && matches!(
+                    table.name.as_str(),
+                    "partitioned_copy_selection_test"
+                        | "partitioned_copy_selection_test_high"
+                        | "partitioned_copy_selection_test_low"
+                )
+        })
+        .map(|table| (table.id, table.schema.clone(), table.name.clone()))
+        .collect();
+    assert_eq!(partition_tables, expected_partition_tables);
+
+    let publications_response = app.read_source_publications(tenant_id, source_id).await;
+    assert!(publications_response.status().is_success());
+    let publications_response: ReadPublicationsResponse =
+        publications_response.json().await.expect("failed to deserialize publication response");
+    assert!(
+        publications_response
+            .publications
+            .is_sorted_by(|left, right| left.name.as_str() <= right.name.as_str())
+    );
+    assert_eq!(
+        publications_response
+            .publications
+            .iter()
+            .map(|publication| publication.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "a_empty_copy_selection_pub",
+            "leaf_copy_selection_pub",
+            "root_copy_selection_pub",
+            "z_empty_copy_selection_pub",
+        ]
+    );
+    assert!(publications_response.publications.iter().all(|publication| {
+        publication
+            .tables
+            .is_sorted_by(|left, right| (&left.schema, &left.name) <= (&right.schema, &right.name))
+    }));
+    assert!(
+        publications_response
+            .publications
+            .iter()
+            .filter(|publication| publication.name.contains("empty_copy_selection_pub"))
+            .all(|publication| publication.tables.is_empty())
+    );
+
+    let root_publication = publications_response
+        .publications
+        .iter()
+        .find(|publication| publication.name == "root_copy_selection_pub")
+        .expect("partition-root publication missing from response");
+    let root_publication_tables: Vec<_> = root_publication
+        .tables
+        .iter()
+        .map(|table| (table.id, table.schema.clone(), table.name.clone()))
+        .collect();
+    assert_eq!(root_publication_tables, vec![expected_root_table.clone()]);
+
+    let leaf_publication = publications_response
+        .publications
+        .iter()
+        .find(|publication| publication.name == "leaf_copy_selection_pub")
+        .expect("partition-leaf publication missing from response");
+    let leaf_publication_tables: Vec<_> = leaf_publication
+        .tables
+        .iter()
+        .map(|table| (table.id, table.schema.clone(), table.name.clone()))
+        .collect();
+    assert_eq!(leaf_publication_tables, expected_leaf_tables);
+    assert!(
+        leaf_publication.tables.iter().all(|table| table.id != expected_root_table.0),
+        "partition-leaf publication should not expose the partition root id"
+    );
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_and_recreating_a_table_yields_a_different_id() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+
+    source_pool
+        .execute("create table public.recreated_table (id bigint primary key)")
+        .await
+        .expect("failed to create source table");
+    let original_id: i64 =
+        sqlx::query_scalar("select 'public.recreated_table'::regclass::oid::bigint")
+            .fetch_one(&source_pool)
+            .await
+            .expect("failed to read source table oid");
+
+    source_pool
+        .execute("drop table public.recreated_table")
+        .await
+        .expect("failed to drop source table");
+    source_pool
+        .execute("create table public.recreated_table (id bigint primary key)")
+        .await
+        .expect("failed to recreate source table");
+    let recreated_id: i64 =
+        sqlx::query_scalar("select 'public.recreated_table'::regclass::oid::bigint")
+            .fetch_one(&source_pool)
+            .await
+            .expect("failed to read recreated source table oid");
+
+    assert_ne!(
+        original_id, recreated_id,
+        "recreating a table should assign a new OID, since a pipeline's table_sync_copy ids are \
+         only meaningful for the relation that held them when selected"
+    );
+
+    let tables_response = app.read_source_tables(tenant_id, source_id).await;
+    assert!(tables_response.status().is_success());
+    let tables_response: ReadTablesResponse =
+        tables_response.json().await.expect("failed to deserialize table response");
+    let recreated_id = u32::try_from(recreated_id).expect("Postgres OIDs fit in u32");
+    let table = tables_response
+        .tables
+        .iter()
+        .find(|table| table.schema == "public" && table.name == "recreated_table")
+        .expect("recreated table missing from response");
+    assert_eq!(table.id, recreated_id);
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

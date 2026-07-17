@@ -2092,6 +2092,7 @@ dependencies = [
  "rand 0.9.4",
  "regex",
  "reqwest",
+ "rust_decimal",
  "rustls",
  "secrecy",
  "serde",

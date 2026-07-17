@@ -77,8 +77,8 @@ use etl::{
     },
     data::TableRow,
     destination::{
-        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult,
-        WriteTableRowsResult,
+        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -120,6 +120,7 @@ impl Destination for LoggingDestination {
     async fn write_events(
         &self,
         events: Vec<Event>,
+        _durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         println!("received {} streaming events", events.len());
@@ -220,7 +221,7 @@ DROP DATABASE etl_tutorial;
 - **Publications** define which tables to replicate via Postgres logical replication
 - **Pipeline configuration** controls batching behavior and error retry policies
 - **Custom destinations** are normal Rust types that implement the `Destination` trait
-- The pipeline performs an initial table copy, then streams changes in real-time
+- The pipeline performs an initial sync, then batches and writes ongoing changes
 
 ## Next Steps
 

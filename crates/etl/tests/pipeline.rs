@@ -4,7 +4,7 @@ use etl::{
     data::TableRow,
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
-        WriteEventsResult, WriteTableRowsResult,
+        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     event::{Event, EventType, InsertEvent},
@@ -12,7 +12,9 @@ use etl::{
     schema::{ColumnSchema, ReplicatedTableSchema, TableId},
     store::{SchemaStore, StateStore, TableState, TableStateType},
     test_utils::{
-        database::{spawn_source_database, test_table_name},
+        database::{
+            replication_slot_state, spawn_source_database, test_table_name, wait_for_new_walsender,
+        },
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::FaultyOp,
         memory_destination::MemoryDestination,
@@ -45,7 +47,7 @@ use tokio::{
     sync::{Mutex, Notify},
     time::sleep,
 };
-use tokio_postgres::types::{PgLsn, Type};
+use tokio_postgres::types::Type;
 
 /// Creates a test column schema with sensible defaults.
 fn test_column(
@@ -188,9 +190,10 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
+        durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        self.inner.write_events(events, async_result).await
+        self.inner.write_events(events, durability, async_result).await
     }
 }
 
@@ -317,9 +320,10 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
+        durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        self.inner.write_events(events, async_result).await
+        self.inner.write_events(events, durability, async_result).await
     }
 }
 
@@ -1287,16 +1291,8 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
     let client = database.client.as_ref().unwrap();
     let terminated_pid = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let row = client
-                .query_one(
-                    "select confirmed_flush_lsn, active_pid from pg_replication_slots where \
-                     slot_name = $1",
-                    &[&apply_slot_name],
-                )
-                .await
-                .unwrap();
-            let confirmed_flush_lsn: PgLsn = row.get(0);
-            let active_pid: Option<i32> = row.get(1);
+            let (confirmed_flush_lsn, active_pid) =
+                replication_slot_state(client, &apply_slot_name).await;
 
             if confirmed_flush_lsn >= first_insert.commit_lsn
                 && let Some(active_pid) = active_pid
@@ -1312,28 +1308,7 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
 
     client.query_one("select pg_terminate_backend($1)", &[&terminated_pid]).await.unwrap();
 
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let row = client
-                .query_one(
-                    "select active_pid from pg_replication_slots where slot_name = $1",
-                    &[&apply_slot_name],
-                )
-                .await
-                .unwrap();
-            let active_pid: Option<i32> = row.get(0);
-
-            if let Some(active_pid) = active_pid
-                && active_pid != terminated_pid
-            {
-                break;
-            }
-
-            sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("timed out waiting for apply worker to reconnect after source connection loss");
+    wait_for_new_walsender(client, &apply_slot_name, terminated_pid).await;
 
     let second_insert_notify =
         destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;

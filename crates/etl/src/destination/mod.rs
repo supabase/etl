@@ -18,7 +18,8 @@ pub(crate) use async_result::{
     PendingWriteEventsResult,
 };
 pub use async_result::{
-    DestinationWriteStatus, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
+    DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability, WriteEventsResult,
+    WriteTableRowsResult,
 };
 pub use base::Destination;
 pub use capabilities::PipelineDestination;

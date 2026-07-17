@@ -384,8 +384,7 @@ async fn table_insert_update_delete() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // We query BigQuery to check for deletion.
-    let users_rows = bigquery_database.query_table(database_schema.users_schema().name).await;
-    assert!(users_rows.is_none());
+    assert!(bigquery_database.wait_for_no_rows(database_schema.users_schema().name).await);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -682,8 +681,7 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
         ])))
     );
 
-    let table_rows = bigquery_database.query_table(table_name).await;
-    assert!(table_rows.is_none());
+    assert!(bigquery_database.wait_for_no_rows(table_name).await);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -978,8 +976,7 @@ async fn table_nullable_scalar_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database.query_table(table_name.clone()).await;
-    assert!(table_rows.is_none());
+    assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
@@ -1195,8 +1192,7 @@ async fn table_nullable_array_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database.query_table(table_name.clone()).await;
-    assert!(table_rows.is_none());
+    assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
@@ -1433,8 +1429,7 @@ async fn table_non_nullable_scalar_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database.query_table(table_name.clone()).await;
-    assert!(table_rows.is_none());
+    assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
@@ -1705,8 +1700,7 @@ async fn table_non_nullable_array_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database.query_table(table_name.clone()).await;
-    assert!(table_rows.is_none());
+    assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }

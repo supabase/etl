@@ -14,7 +14,7 @@ use crate::{
     data::TableRow,
     destination::{
         ApplyLoopAsyncResultMetadata, Destination, DispatchMetrics, DropTableForCopyResult,
-        PipelineDestination, WriteEventsResult, WriteTableRowsResult,
+        PipelineDestination, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::{Event, EventType},
@@ -368,6 +368,7 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
+        durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
@@ -382,12 +383,13 @@ where
         let (wrapped_flush_result, pending_flush_result) =
             WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
                 commit_end_lsn: None,
+                durability,
                 metrics: DispatchMetrics {
                     items_count: events.len(),
                     dispatched_at: Instant::now(),
                 },
             });
-        destination.write_events(events.clone(), wrapped_flush_result).await?;
+        destination.write_events(events.clone(), durability, wrapped_flush_result).await?;
 
         // We spawn a task to handle the result, this way the wrapper behaves like a
         // transparent layer that doesn't block on the result of the inner

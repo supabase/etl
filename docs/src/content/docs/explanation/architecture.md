@@ -85,7 +85,7 @@ pub trait Destination {
     fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
     fn drop_table_for_copy(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: DropTableForCopyResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, rows: Vec<TableRow>, async_result: WriteTableRowsResult) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_events(&self, events: Vec<Event>, durability: WriteEventsDurability, async_result: WriteEventsResult) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
@@ -100,7 +100,7 @@ pub trait Destination {
 
 Each write-like method receives an async result handle. The intent is different per method:
 
-- `write_events()`: after dispatch succeeds, ETL may keep processing other work while the destination finishes the batch. ETL still waits for that batch's async result before handing the destination the next streaming batch.
+- `write_events()`: after dispatch succeeds, ETL may keep processing other work while the destination finishes the batch. ETL still waits for that batch's async result before handing the destination the next streaming batch. `MayDefer` permits `Accepted` or `Durable`; `RequireDurable` requires cumulative durable completion.
 - `drop_table_for_copy()`: ETL waits for the result immediately. After a successful drop, ETL clears its own copy-scoped schema, destination metadata, and table-sync progress before storing the fresh `0/0` copy schema.
 - `write_table_rows()`: ETL waits for each result before requesting the next batch for that copy partition. `Durable` confirms that batch and any earlier accepted writes covered by the result. `Accepted` transfers ownership to the destination and lets copying continue without marking the table copy finished. If any batch is accepted this way, ETL sends a final empty batch after all copy workers finish; that table-wide barrier must cover every accepted write and return `Durable` before ETL stores `FinishedCopy`.
 
@@ -122,7 +122,7 @@ ETL provides **at-least-once delivery**. If restarts occur, some events may be d
 
 Exactly-once delivery requires distributed transactions between Postgres and the destination, adding complexity and latency. Instead, ETL optimizes for throughput and simplicity while minimizing duplicates through:
 
-- **Controlled shutdown**: The pipeline gracefully drains in-flight events before stopping
+- **Controlled shutdown**: The pipeline attempts to finish in-flight work before its shutdown deadline; interrupted work can be replayed after restart
 - **Frequent status updates**: Progress is reported to Postgres regularly, reducing the replay window after restarts
 
 ### Handling Duplicates

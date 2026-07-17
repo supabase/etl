@@ -10,8 +10,8 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
-        DestinationWriteStatus, DropTableForCopyResult, TaskSet, WriteEventsResult,
-        WriteTableRowsResult,
+        DestinationWriteStatus, DropTableForCopyResult, TaskSet, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -265,8 +265,9 @@ where
     /// path.
     ///
     /// Initializes the BigQuery client with the provided credentials and
-    /// project settings. The `max_staleness_mins` parameter controls table
-    /// metadata cache freshness. The `connection_pool_size` parameter
+    /// project settings. The `max_staleness_mins` parameter controls the
+    /// maximum acceptable staleness of BigQuery query results for tables
+    /// created by this destination. The `connection_pool_size` parameter
     /// controls the connection pool size.
     pub async fn new_with_key_path(
         project_id: String,
@@ -327,8 +328,9 @@ where
     /// Credentials (ADC).
     ///
     /// Initializes the BigQuery client with the default credentials and project
-    /// settings. The `max_staleness_mins` parameter controls table metadata
-    /// cache freshness. The `connection_pool_size` parameter controls the
+    /// settings. The `max_staleness_mins` parameter controls the maximum
+    /// acceptable staleness of BigQuery query results for tables created by
+    /// this destination. The `connection_pool_size` parameter controls the
     /// connection pool size.
     pub async fn new_with_adc(
         project_id: String,
@@ -358,7 +360,8 @@ where
     ///
     /// Initializes the BigQuery client with a flow authenticator using the
     /// provided secret and persistent file path. The `max_staleness_mins`
-    /// parameter controls table metadata cache freshness.
+    /// parameter controls the maximum acceptable staleness of BigQuery query
+    /// results for tables created by this destination.
     /// The `connection_pool_size` parameter controls the connection pool size.
     #[allow(clippy::too_many_arguments)]
     pub async fn new_with_flow_authenticator<Secret, Path>(
@@ -1391,6 +1394,7 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
+        _durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
