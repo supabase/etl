@@ -459,6 +459,15 @@ ClickHouse destination tests require a reachable ClickHouse HTTP endpoint:
 
 **Note:** ClickHouse tests are only run when the `clickhouse` and `test-utils` features are enabled. Each test creates a unique database in ClickHouse and drops it automatically when the test finishes. The Docker Compose setup started by `cargo x init` is sufficient for these tests.
 
+#### Value Roundtrip Property Test Variables
+
+The value roundtrip property tests in `crates/etl/tests/value_roundtrip.rs` run randomly generated cases against a real Postgres until a wall-clock budget elapses:
+
+| Variable | Description |
+|----------|-------------|
+| `ROUNDTRIP_PROPERTY_BUDGET_SECS` | Wall-clock budget per property in seconds (default `2`); raise it for deeper local or CI runs |
+| `ROUNDTRIP_PROPERTY_SEED` | Pin the chunk RNG seed to replay a failing chunk; the failure panic prints the seed to use |
+
 #### Test Output and Logging
 
 | Variable | Description |
