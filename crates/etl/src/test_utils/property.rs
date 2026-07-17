@@ -53,14 +53,11 @@ fn chunk_rng(seed: u64) -> TestRng {
 /// through a panic that also names the chunk seed, so the minimal failing
 /// input shows up in the test output and the chunk can be replayed with
 /// `PROPERTY_TEST_SEED`.
-pub fn run_property<S>(
+pub fn run_property<S: Strategy>(
     name: &str,
     strategy: &S,
     check: impl Fn(&S::Value) -> Result<(), TestCaseError>,
-) where
-    S: Strategy,
-    S::Value: std::fmt::Debug,
-{
+) {
     let deadline = Instant::now() + property_budget();
     let replay_seed = replay_seed();
     let mut total_cases = 0u64;
