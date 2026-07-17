@@ -25,7 +25,7 @@ use std::sync::{
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
-    data::{Cell, PgNumeric, TableRow},
+    data::{ArrayCell, Cell, PgNumeric, TableRow},
     error::EtlResult,
     schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
     store::{MemoryStore, SchemaStore},
@@ -576,6 +576,77 @@ async fn uuid_values_roundtrip_through_destination() {
 
         prop_assert_eq!(&row.vu, &vu.map(|u| u.to_string()));
         prop_assert_eq!(&row.wu, &wu.to_string());
+        Ok(())
+    });
+}
+
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct ArraysRow {
+    ai: Vec<Option<i64>>,
+    at: Vec<Option<String>>,
+    af: Vec<Option<f64>>,
+    ab: Vec<Option<String>>,
+    ad: Vec<Option<i32>>,
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn array_values_roundtrip_through_destination() {
+    let table = PropertyTable::create(
+        "proparrays",
+        &[
+            ("ai", Type::INT8_ARRAY, true),
+            ("at", Type::TEXT_ARRAY, true),
+            ("af", Type::FLOAT8_ARRAY, true),
+            ("ab", Type::BYTEA_ARRAY, true),
+            ("ad", Type::DATE_ARRAY, true),
+        ],
+    )
+    .await;
+
+    // The int8[] lengths cross the LEB128 single-byte boundary at 128 so
+    // multi-byte varint array lengths are exercised; the other arrays stay
+    // short to keep per-case cost down. Every element is Nullable on the
+    // ClickHouse side, so None elements exercise the per-element null byte.
+    let bytes = proptest::collection::vec(any::<u8>(), 0..=16);
+    let strategy = (
+        proptest::collection::vec(option::of(any::<i64>()), 0..=160),
+        proptest::collection::vec(option::of(pg_text()), 0..=8),
+        proptest::collection::vec(option::of(any::<u64>().prop_map(f64::from_bits)), 0..=8),
+        proptest::collection::vec(option::of(bytes), 0..=8),
+        proptest::collection::vec(option::of(ch_date()), 0..=8),
+    );
+    run_property("clickhouse array roundtrip", &strategy, |(ai, at, af, ab, ad)| {
+        let row: ArraysRow = block_on(async {
+            let id = table
+                .write(vec![
+                    Cell::Array(ArrayCell::I64(ai.clone())),
+                    Cell::Array(ArrayCell::String(at.clone())),
+                    Cell::Array(ArrayCell::F64(af.clone())),
+                    Cell::Array(ArrayCell::Bytes(ab.clone())),
+                    Cell::Array(ArrayCell::Date(ad.clone())),
+                ])
+                .await?;
+            Ok(table.read("ai, at, af, ab, ad", id).await)
+        })
+        .map_err(write_failed)?;
+
+        prop_assert_eq!(&row.ai, ai);
+        prop_assert_eq!(&row.at, at);
+        prop_assert_eq!(row.af.len(), af.len());
+        for (expected, stored) in af.iter().zip(&row.af) {
+            prop_assert!(
+                opt_f64_matches(expected, stored),
+                "float8[] {:?} stored as {:?}",
+                expected,
+                stored
+            );
+        }
+        let expected_ab: Vec<Option<String>> =
+            ab.iter().map(|element| element.as_deref().map(expected_hex)).collect();
+        prop_assert_eq!(&row.ab, &expected_ab);
+        let stored_ad: Vec<Option<NaiveDate>> =
+            row.ad.iter().map(|element| element.map(date_from_days)).collect();
+        prop_assert_eq!(&stored_ad, ad);
         Ok(())
     });
 }
