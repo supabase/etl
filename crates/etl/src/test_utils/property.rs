@@ -2,12 +2,12 @@
 //!
 //! [`run_property`] runs freshly generated cases until a wall-clock budget
 //! elapses instead of a fixed case count. The budget comes from the
-//! `ROUNDTRIP_PROPERTY_BUDGET_SECS` environment variable (default 2), so a
+//! `PROPERTY_TEST_BUDGET_SECS` environment variable (default 2), so a
 //! regular suite pays a few seconds per property while CI or local deep runs
 //! can raise it to minutes.
 //!
 //! On failure the panic names the failing chunk's RNG seed; set
-//! `ROUNDTRIP_PROPERTY_SEED` to that value to replay the chunk
+//! `PROPERTY_TEST_SEED` to that value to replay the chunk
 //! deterministically.
 
 use std::time::{Duration, Instant};
@@ -22,7 +22,7 @@ const CASES_PER_CHUNK: u32 = 64;
 
 /// Returns the wall-clock budget for one property.
 fn property_budget() -> Duration {
-    let secs = std::env::var("ROUNDTRIP_PROPERTY_BUDGET_SECS")
+    let secs = std::env::var("PROPERTY_TEST_BUDGET_SECS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(2);
@@ -30,10 +30,10 @@ fn property_budget() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Returns the pinned chunk seed from `ROUNDTRIP_PROPERTY_SEED`, if set.
+/// Returns the pinned chunk seed from `PROPERTY_TEST_SEED`, if set.
 fn replay_seed() -> Option<u64> {
-    let value = std::env::var("ROUNDTRIP_PROPERTY_SEED").ok()?;
-    Some(value.parse().expect("ROUNDTRIP_PROPERTY_SEED must be a u64 seed"))
+    let value = std::env::var("PROPERTY_TEST_SEED").ok()?;
+    Some(value.parse().expect("PROPERTY_TEST_SEED must be a u64 seed"))
 }
 
 /// Builds the deterministic RNG for one chunk of cases from a `u64` seed.
@@ -49,7 +49,7 @@ fn chunk_rng(seed: u64) -> TestRng {
 /// random seed. On failure the value is shrunk by proptest and reported
 /// through a panic that also names the chunk seed, so the minimal failing
 /// input shows up in the test output and the chunk can be replayed with
-/// `ROUNDTRIP_PROPERTY_SEED`.
+/// `PROPERTY_TEST_SEED`.
 pub fn run_property<S>(
     name: &str,
     strategy: &S,
@@ -72,7 +72,7 @@ pub fn run_property<S>(
             Ok(()) => total_cases += u64::from(CASES_PER_CHUNK),
             Err(err) => panic!(
                 "property '{name}' failed after ~{total_cases} passing cases; rerun with \
-                 ROUNDTRIP_PROPERTY_SEED={seed} to replay the failing chunk:\n{err}"
+                 PROPERTY_TEST_SEED={seed} to replay the failing chunk:\n{err}"
             ),
         }
 

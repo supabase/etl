@@ -8,8 +8,8 @@
 //!
 //! Every property runs new random cases until a wall-clock budget elapses,
 //! using the shared runner in `etl::test_utils::property`. See that module
-//! for the `ROUNDTRIP_PROPERTY_BUDGET_SECS` budget knob and the
-//! `ROUNDTRIP_PROPERTY_SEED` failure replay knob.
+//! for the `PROPERTY_TEST_BUDGET_SECS` budget knob and the
+//! `PROPERTY_TEST_SEED` failure replay knob.
 //!
 //! Known codec gaps stay outside the generated envelope and are documented on
 //! the strategies that would otherwise reach them: temporal `infinity`
