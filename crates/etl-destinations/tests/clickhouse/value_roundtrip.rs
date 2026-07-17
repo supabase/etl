@@ -650,3 +650,86 @@ async fn array_values_roundtrip_through_destination() {
         Ok(())
     });
 }
+
+/// Dates legal in Postgres but outside ClickHouse `Date32`'s
+/// `1900-01-01..=2299-12-31` range.
+fn out_of_range_date() -> impl Strategy<Value = NaiveDate> {
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    let days = |date: NaiveDate| date.signed_duration_since(epoch).num_days();
+
+    let low_min = days(NaiveDate::from_ymd_opt(1, 1, 1).unwrap());
+    let low_max = days(NaiveDate::from_ymd_opt(1899, 12, 31).unwrap());
+    let high_min = days(NaiveDate::from_ymd_opt(2300, 1, 1).unwrap());
+    let high_max = days(NaiveDate::from_ymd_opt(9999, 12, 31).unwrap());
+
+    prop_oneof![low_min..=low_max, high_min..=high_max]
+        .prop_map(move |days| epoch + chrono::Duration::days(days))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn out_of_range_dates_are_rejected_loudly() {
+    let table = PropertyTable::create("propdatereject", &[("vd", Type::DATE, true)]).await;
+
+    run_property("clickhouse date rejection", &out_of_range_date(), |date| {
+        let result = block_on(table.write(vec![Cell::Date(*date)]));
+        prop_assert!(result.is_err(), "date {} is outside Date32 but the write succeeded", date);
+        Ok(())
+    });
+}
+
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct TimestampRejectRow {
+    vts: Option<i64>,
+    vtstz: Option<i64>,
+}
+
+/// Out-of-range writes must never silently change values: either the write
+/// fails loudly or the stored value reads back equal to what was written.
+///
+/// Unlike dates, timestamps outside `DateTime64(6)`'s documented
+/// `1900..=2299` range have no local range check. Empirically ClickHouse
+/// accepts the raw microsecond ticks and reads them back bit-exact, so the
+/// values survive storage unchanged; this property pins that behavior and
+/// fails if either side ever starts mutating such values silently.
+#[tokio::test(flavor = "multi_thread")]
+async fn out_of_range_timestamps_are_rejected_or_roundtrip() {
+    let table = PropertyTable::create(
+        "proptsreject",
+        &[("vts", Type::TIMESTAMP, true), ("vtstz", Type::TIMESTAMPTZ, true)],
+    )
+    .await;
+
+    let out_of_range_timestamp =
+        || (out_of_range_date(), pg_time()).prop_map(|(date, time)| NaiveDateTime::new(date, time));
+    let strategy = (
+        out_of_range_timestamp(),
+        out_of_range_timestamp().prop_map(|naive| DateTime::from_naive_utc_and_offset(naive, Utc)),
+    );
+    run_property("clickhouse timestamp rejection", &strategy, |(ts, tstz)| {
+        // Loud rejection is a valid outcome.
+        let Ok(id) = block_on(table.write(vec![Cell::Timestamp(*ts), Cell::TimestampTz(*tstz)]))
+        else {
+            return Ok(());
+        };
+
+        let row: TimestampRejectRow = block_on(table.read("vts, vtstz", id));
+        let stored_ts = row.vts.map(|micros| {
+            DateTime::from_timestamp_micros(micros).expect("valid micros").naive_utc()
+        });
+        prop_assert_eq!(
+            stored_ts,
+            Some(*ts),
+            "timestamp {} was accepted but stored differently",
+            ts
+        );
+        let stored_tstz =
+            row.vtstz.map(|micros| DateTime::from_timestamp_micros(micros).expect("valid micros"));
+        prop_assert_eq!(
+            stored_tstz,
+            Some(*tstz),
+            "timestamptz {} was accepted but stored differently",
+            tstz
+        );
+        Ok(())
+    });
+}
