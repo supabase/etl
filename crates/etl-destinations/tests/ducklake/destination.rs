@@ -2932,10 +2932,12 @@ async fn copy_writes_table_parquet_and_inlines_applied_batch() {
         )
         .await
         .unwrap();
+    destination.write_table_rows(&replicated_table_schema, Vec::new()).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy_complete"), 1);
     assert_eq!(count_table_files(&data, &table_name), 1);
     assert_eq!(count_internal_table_files(&data, "__etl_applied_table_batches"), 0);
 }

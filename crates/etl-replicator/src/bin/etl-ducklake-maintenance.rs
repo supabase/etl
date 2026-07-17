@@ -151,6 +151,8 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     info!(
         applied = outcome.applied(),
         replay_helper_rows_deleted = outcome.replay_helper_rows_deleted,
+        replay_helper_files_created = outcome.replay_helper_files_created,
+        replay_helper_tables_rewritten = outcome.replay_helper_tables_rewritten,
         inline_flush_tables = outcome.inline_flush_tables,
         inline_flush_rows = outcome.inline_flush_rows,
         merge_adjacent_files_tables = outcome.merge_adjacent_files_tables,
@@ -162,11 +164,13 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         "ducklake external maintenance job finished"
     );
     println!(
-        "{{\"applied\":{},\"replayHelperRowsDeleted\":{},\"inlineFlushRows\":{},\"\
-         mergeAdjacentFilesCreated\":{},\"rewriteDataFilesCreated\":{},\"expiredSnapshots\":{},\"\
-         cleanedUpFiles\":{}}}",
+        "{{\"applied\":{},\"replayHelperRowsDeleted\":{},\"replayHelperFilesCreated\":{},\"\
+         replayHelperTablesRewritten\":{},\"inlineFlushRows\":{},\"mergeAdjacentFilesCreated\":{},\
+         \"rewriteDataFilesCreated\":{},\"expiredSnapshots\":{},\"cleanedUpFiles\":{}}}",
         outcome.applied(),
         outcome.replay_helper_rows_deleted,
+        outcome.replay_helper_files_created,
+        outcome.replay_helper_tables_rewritten,
         outcome.inline_flush_rows,
         outcome.merge_adjacent_files_created,
         outcome.rewrite_data_files_created,

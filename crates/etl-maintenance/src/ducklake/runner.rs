@@ -39,7 +39,12 @@ const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
 const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
 const REPLAY_EPOCHS_TABLE: &str = "__etl_replay_epochs";
 const REPLAY_EPOCH_COLUMN: &str = "replay_epoch";
+/// Pending replay epoch column used while a table reset is incomplete.
 const PENDING_REPLAY_EPOCH_COLUMN: &str = "pending_replay_epoch";
+/// Batch-kind column used to distinguish copy completion markers.
+const BATCH_KIND_COLUMN: &str = "batch_kind";
+/// Batch kind written by the terminal table-copy barrier.
+const COPY_COMPLETE_BATCH_KIND: &str = "copy_complete";
 const LEGACY_REPLAY_EPOCH: &str = "__legacy__";
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
@@ -62,9 +67,9 @@ const PARQUET_VERSION_OPTION_NAME: &str = "parquet_version";
 const PARQUET_VERSION_OPTION_VALUE: u8 = 2;
 const PRESERVE_INSERTION_ORDER_OPTION_NAME: &str = "preserve_insertion_order";
 const MAINTENANCE_QUERY_TIMEOUT: Duration = Duration::from_secs(6 * 60);
-/// Timeout for repairing helper tables whose existing file history is
-/// pathological.
-const REPLAY_HELPER_MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(40 * 60);
+/// Helper-table repair timeout, leaving five minutes inside the default
+/// thirty-minute maintenance job deadline.
+const REPLAY_HELPER_MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(25 * 60);
 const MAINTENANCE_DUCKDB_POOL_SIZE: u32 = 1;
 const BLOCKING_ABORT_GRACE: Duration = Duration::from_secs(30);
 const DUCKDB_MAINTENANCE_OPERATION_KIND: &str = "maintenance";
@@ -117,11 +122,13 @@ struct DuckLakeReplayEpochState {
     pending_table_names: BTreeSet<String>,
 }
 
-/// Rows removed from ETL replay helper tables.
+/// Work performed while maintaining ETL replay helper tables.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ReplayHelperCleanupOutcome {
     applied_batch_rows: u64,
     streaming_progress_rows: u64,
+    replay_helper_files_created: u64,
+    replay_helper_tables_rewritten: u32,
 }
 
 /// Latest retained streaming watermark for one table and replay epoch.
@@ -1597,6 +1604,10 @@ pub struct CleanupOldFilesMaintenanceConfig {
 pub struct DuckLakeMaintenanceOutcome {
     /// Obsolete rows deleted from ETL replay helper tables.
     pub replay_helper_rows_deleted: u64,
+    /// Files created while compacting ETL replay helper tables.
+    pub replay_helper_files_created: u64,
+    /// ETL replay helper tables passed to rewrite-data-files.
+    pub replay_helper_tables_rewritten: u32,
     /// Tables whose inline data was flushed.
     pub inline_flush_tables: u32,
     /// Rows flushed from inlined storage.
@@ -1619,6 +1630,8 @@ impl DuckLakeMaintenanceOutcome {
     /// Returns whether any operation did work.
     pub fn applied(&self) -> bool {
         self.replay_helper_rows_deleted > 0
+            || self.replay_helper_files_created > 0
+            || self.replay_helper_tables_rewritten > 0
             || self.inline_flush_rows > 0
             || self.merge_adjacent_files_created > 0
             || self.rewrite_data_files_tables > 0
@@ -1693,6 +1706,8 @@ pub async fn run_maintenance_once(
     )
     .await?;
     outcome.replay_helper_rows_deleted = replay_helper_cleanup.total_rows();
+    outcome.replay_helper_files_created = replay_helper_cleanup.replay_helper_files_created;
+    outcome.replay_helper_tables_rewritten = replay_helper_cleanup.replay_helper_tables_rewritten;
 
     if config.inline_flush.enabled {
         run_inline_flush(
@@ -2240,32 +2255,41 @@ async fn run_replay_helper_cleanup(
     let helper_table_count = helper_tables.len();
     let cleanup = duckdb
         .run_with_timeout(REPLAY_HELPER_MAINTENANCE_TIMEOUT, move |conn| {
+            let mut cleanup = ReplayHelperCleanupOutcome::default();
+
             // Compact before inspecting helper rows. A catalog that has
             // accumulated thousands of tiny progress files can otherwise time
             // out while finding the latest watermark, preventing the very
             // maintenance needed to repair it.
             for table_name in &helper_tables {
-                info!(table = %table_name, "ducklake ETL helper table pre-cleanup compaction executing");
-                merge_adjacent_files(conn, table_name, max_compacted_files)?;
+                info!(table = %table_name, "ducklake etl helper table pre-cleanup compaction executing");
+                let files_created =
+                    merge_adjacent_files(conn, table_name, max_compacted_files)?;
+                cleanup.replay_helper_files_created =
+                    cleanup.replay_helper_files_created.saturating_add(files_created);
                 rewrite_data_files(conn, table_name)?;
-                info!(table = %table_name, "ducklake ETL helper table pre-cleanup compaction completed");
+                cleanup.replay_helper_tables_rewritten =
+                    cleanup.replay_helper_tables_rewritten.saturating_add(1);
+                info!(table = %table_name, "ducklake etl helper table pre-cleanup compaction completed");
             }
 
-            let cleanup = cleanup_replay_helper_rows(
+            let row_cleanup = cleanup_replay_helper_rows(
                 conn,
                 &current_epochs,
                 &active_table_ids,
                 &pending_table_names,
             )?;
+            cleanup.applied_batch_rows = row_cleanup.applied_batch_rows;
+            cleanup.streaming_progress_rows = row_cleanup.streaming_progress_rows;
 
             // Materialize the cleanup deletes immediately so the next
             // maintenance or restart does not have to scan rows that are only
             // logically removed by delete files.
-            if cleanup.total_rows() > 0 {
+            if row_cleanup.total_rows() > 0 {
                 for table_name in &helper_tables {
-                    info!(table = %table_name, "ducklake ETL helper table post-cleanup rewrite executing");
+                    info!(table = %table_name, "ducklake etl helper table post-cleanup rewrite executing");
                     rewrite_data_files(conn, table_name)?;
-                    info!(table = %table_name, "ducklake ETL helper table post-cleanup rewrite completed");
+                    info!(table = %table_name, "ducklake etl helper table post-cleanup rewrite completed");
                 }
             }
             Ok(cleanup)
@@ -2278,8 +2302,10 @@ async fn run_replay_helper_cleanup(
         applied_batch_rows = cleanup.applied_batch_rows,
         streaming_progress_rows = cleanup.streaming_progress_rows,
         total_rows = cleanup.total_rows(),
+        replay_helper_files_created = cleanup.replay_helper_files_created,
+        replay_helper_tables_rewritten = cleanup.replay_helper_tables_rewritten,
         helper_table_count,
-        "ducklake ETL helper table maintenance completed"
+        "ducklake etl helper table maintenance completed"
     );
 
     Ok(cleanup)
@@ -2531,13 +2557,19 @@ fn cleanup_replay_helper_rows(
     if applied_batches_has_epoch.is_none() && streaming_progress_has_epoch.is_none() {
         return Ok(ReplayHelperCleanupOutcome::default());
     }
+    let applied_batches_has_batch_kind = match applied_batches_has_epoch {
+        Some(_) => {
+            ducklake_helper_table_has_column(conn, APPLIED_BATCHES_TABLE, BATCH_KIND_COLUMN)?
+        }
+        None => false,
+    };
     let current_epochs =
         load_replay_helper_current_epochs(current_epochs, active_table_ids, pending_table_names);
     if current_epochs.is_empty() {
         return Ok(ReplayHelperCleanupOutcome::default());
     }
 
-    conn.execute_batch("BEGIN TRANSACTION").map_err(|source| {
+    conn.execute_batch("begin transaction").map_err(|source| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake replay helper cleanup transaction failed to begin",
@@ -2560,12 +2592,18 @@ fn cleanup_replay_helper_rows(
                 cleanup.streaming_progress_rows.saturating_add(streaming_progress.deleted_rows);
 
             if let Some(has_replay_epoch_column) = applied_batches_has_epoch {
+                let copy_complete = if applied_batches_has_batch_kind {
+                    copy_complete_marker_exists(conn, has_replay_epoch_column, current_epoch)?
+                } else {
+                    false
+                };
                 cleanup.applied_batch_rows = cleanup.applied_batch_rows.saturating_add(
                     cleanup_applied_batch_rows_for_table(
                         conn,
                         has_replay_epoch_column,
                         current_epoch,
                         streaming_progress.current_exists,
+                        copy_complete,
                     )?,
                 );
             }
@@ -2575,7 +2613,7 @@ fn cleanup_replay_helper_rows(
 
     match result {
         Ok(cleanup) => {
-            conn.execute_batch("COMMIT").map_err(|source| {
+            conn.execute_batch("commit").map_err(|source| {
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake replay helper cleanup transaction failed to commit",
@@ -2585,7 +2623,7 @@ fn cleanup_replay_helper_rows(
             Ok(cleanup)
         }
         Err(error) => {
-            if let Err(rollback_error) = conn.execute_batch("ROLLBACK") {
+            if let Err(rollback_error) = conn.execute_batch("rollback") {
                 warn!(
                     error = %rollback_error,
                     "ducklake replay helper cleanup transaction failed to roll back"
@@ -2675,20 +2713,20 @@ fn read_streaming_progress_rows(
     let helper_table = ducklake_helper_table_name(STREAMING_PROGRESS_TABLE);
     let epoch_expression = if has_replay_epoch_column {
         format!(
-            "COALESCE({}, {}) = {}",
+            "coalesce({}, {}) = {}",
             quote_identifier(REPLAY_EPOCH_COLUMN),
             quote_literal(LEGACY_REPLAY_EPOCH),
             quote_literal(&current_epoch.replay_epoch),
         )
     } else if current_epoch.replay_epoch == LEGACY_REPLAY_EPOCH {
-        "TRUE".to_owned()
+        "true".to_owned()
     } else {
-        "FALSE".to_owned()
+        "false".to_owned()
     };
     let sql = format!(
-        "SELECT last_commit_lsn, last_tx_ordinal, {epoch_expression} AS is_current, COUNT(*) OVER \
-         () AS total_rows FROM {helper_table} WHERE table_name = {} ORDER BY is_current DESC, \
-         last_commit_lsn DESC, last_tx_ordinal DESC LIMIT 1;",
+        "select last_commit_lsn, last_tx_ordinal, {epoch_expression} as is_current, count(*) over \
+         () as total_rows from {helper_table} where table_name = {} order by is_current desc, \
+         last_commit_lsn desc, last_tx_ordinal desc limit 1;",
         quote_literal(&current_epoch.table_name),
     );
     let mut statement = conn.prepare(&sql).map_err(|source| {
@@ -2771,8 +2809,8 @@ fn insert_streaming_progress_watermark(
     let helper_table = ducklake_helper_table_name(STREAMING_PROGRESS_TABLE);
     let sql = if has_replay_epoch_column {
         format!(
-            "INSERT INTO {helper_table} (table_name, replay_epoch, last_commit_lsn, \
-             last_tx_ordinal, updated_at) VALUES ({}, {}, {}, {}, current_timestamp);",
+            "insert into {helper_table} (table_name, replay_epoch, last_commit_lsn, \
+             last_tx_ordinal, updated_at) values ({}, {}, {}, {}, current_timestamp);",
             quote_literal(&current_epoch.table_name),
             quote_literal(&current_epoch.replay_epoch),
             progress.last_commit_lsn,
@@ -2780,8 +2818,8 @@ fn insert_streaming_progress_watermark(
         )
     } else {
         format!(
-            "INSERT INTO {helper_table} (table_name, last_commit_lsn, last_tx_ordinal, \
-             updated_at) VALUES ({}, {}, {}, current_timestamp);",
+            "insert into {helper_table} (table_name, last_commit_lsn, last_tx_ordinal, \
+             updated_at) values ({}, {}, {}, current_timestamp);",
             quote_literal(&current_epoch.table_name),
             progress.last_commit_lsn,
             progress.last_tx_ordinal,
@@ -2803,10 +2841,19 @@ fn cleanup_applied_batch_rows_for_table(
     has_replay_epoch_column: bool,
     current_epoch: &DuckLakeReplayEpoch,
     has_current_streaming_progress: bool,
+    copy_complete: bool,
 ) -> EtlResult<u64> {
-    if has_current_streaming_progress
-        || (!has_replay_epoch_column && current_epoch.replay_epoch != LEGACY_REPLAY_EPOCH)
-    {
+    if has_current_streaming_progress {
+        return delete_all_replay_helper_rows_for_table(
+            conn,
+            APPLIED_BATCHES_TABLE,
+            &current_epoch.table_name,
+        );
+    }
+    if copy_complete {
+        return delete_completed_copy_batch_rows(conn, has_replay_epoch_column, current_epoch);
+    }
+    if !has_replay_epoch_column && current_epoch.replay_epoch != LEGACY_REPLAY_EPOCH {
         return delete_all_replay_helper_rows_for_table(
             conn,
             APPLIED_BATCHES_TABLE,
@@ -2819,11 +2866,66 @@ fn cleanup_applied_batch_rows_for_table(
 
     let helper_table = ducklake_helper_table_name(APPLIED_BATCHES_TABLE);
     let sql = format!(
-        "DELETE FROM {helper_table} WHERE table_name = {} AND COALESCE({}, {}) <> {};",
+        "delete from {helper_table} where table_name = {} and coalesce({}, {}) <> {};",
         quote_literal(&current_epoch.table_name),
         quote_identifier(REPLAY_EPOCH_COLUMN),
         quote_literal(LEGACY_REPLAY_EPOCH),
         quote_literal(&current_epoch.replay_epoch),
+    );
+    execute_replay_helper_delete(conn, &sql)
+}
+
+/// Returns whether the current replay epoch has completed its table copy.
+fn copy_complete_marker_exists(
+    conn: &duckdb::Connection,
+    has_replay_epoch_column: bool,
+    current_epoch: &DuckLakeReplayEpoch,
+) -> EtlResult<bool> {
+    let helper_table = ducklake_helper_table_name(APPLIED_BATCHES_TABLE);
+    let epoch_predicate = if has_replay_epoch_column {
+        format!(
+            "coalesce({}, {}) = {}",
+            quote_identifier(REPLAY_EPOCH_COLUMN),
+            quote_literal(LEGACY_REPLAY_EPOCH),
+            quote_literal(&current_epoch.replay_epoch),
+        )
+    } else if current_epoch.replay_epoch == LEGACY_REPLAY_EPOCH {
+        "true".to_owned()
+    } else {
+        "false".to_owned()
+    };
+    let sql = format!(
+        "select 1 from {helper_table} where table_name = {} and {} = {} and {epoch_predicate} \
+         limit 1;",
+        quote_literal(&current_epoch.table_name),
+        quote_identifier(BATCH_KIND_COLUMN),
+        quote_literal(COPY_COMPLETE_BATCH_KIND),
+    );
+    duckdb_exists(conn, &sql, "DuckLake copy completion marker query failed")
+}
+
+/// Removes per-batch COPY markers while retaining one completion marker.
+fn delete_completed_copy_batch_rows(
+    conn: &duckdb::Connection,
+    has_replay_epoch_column: bool,
+    current_epoch: &DuckLakeReplayEpoch,
+) -> EtlResult<u64> {
+    let helper_table = ducklake_helper_table_name(APPLIED_BATCHES_TABLE);
+    let stale_epoch_predicate = if has_replay_epoch_column {
+        format!(
+            "coalesce({}, {}) <> {} or ",
+            quote_identifier(REPLAY_EPOCH_COLUMN),
+            quote_literal(LEGACY_REPLAY_EPOCH),
+            quote_literal(&current_epoch.replay_epoch),
+        )
+    } else {
+        String::new()
+    };
+    let sql = format!(
+        "delete from {helper_table} where table_name = {} and ({stale_epoch_predicate}{} <> {});",
+        quote_literal(&current_epoch.table_name),
+        quote_identifier(BATCH_KIND_COLUMN),
+        quote_literal(COPY_COMPLETE_BATCH_KIND),
     );
     execute_replay_helper_delete(conn, &sql)
 }
@@ -2836,7 +2938,7 @@ fn delete_all_replay_helper_rows_for_table(
 ) -> EtlResult<u64> {
     let helper_table = ducklake_helper_table_name(helper_table_name);
     let sql =
-        format!("DELETE FROM {helper_table} WHERE table_name = {};", quote_literal(table_name),);
+        format!("delete from {helper_table} where table_name = {};", quote_literal(table_name),);
     execute_replay_helper_delete(conn, &sql)
 }
 
@@ -3290,15 +3392,18 @@ mod tests {
         }
     }
 
+    /// Attaches one in-memory catalog for helper-table cleanup tests.
     fn attach_lake_catalog(conn: &duckdb::Connection) {
         conn.execute_batch("attach ':memory:' as lake;").unwrap();
     }
 
+    /// Counts every row in one helper table.
     fn count_rows(conn: &duckdb::Connection, table_name: &str) -> i64 {
         let sql = format!("select count(*) from {}", ducklake_helper_table_name(table_name));
         conn.query_row(&sql, [], |row| row.get(0)).unwrap()
     }
 
+    /// Counts helper rows belonging to one destination table.
     fn count_rows_for_table(
         conn: &duckdb::Connection,
         helper_table_name: &str,
@@ -3312,6 +3417,18 @@ mod tests {
         conn.query_row(&sql, [], |row| row.get(0)).unwrap()
     }
 
+    /// Returns the retained applied-marker kind for one destination table.
+    fn retained_batch_kind(conn: &duckdb::Connection, table_name: &str) -> String {
+        let sql = format!(
+            "select batch_kind from {} where table_name = {}",
+            ducklake_helper_table_name(APPLIED_BATCHES_TABLE),
+            quote_literal(table_name),
+        );
+        conn.query_row(&sql, [], |row| row.get(0)).unwrap()
+    }
+
+    /// Completed copies retain one completion marker, while incomplete copies
+    /// retain their current per-batch markers.
     #[test]
     fn replay_helper_cleanup_keeps_only_useful_current_epoch_rows() {
         let conn = duckdb::Connection::open_in_memory().unwrap();
@@ -3320,7 +3437,8 @@ mod tests {
             r#"create table lake."__etl_applied_table_batches" (
                  table_name varchar not null,
                  replay_epoch varchar,
-                 batch_id varchar not null
+                 batch_id varchar not null,
+                 batch_kind varchar not null
                );
                create table lake."__etl_streaming_progress" (
                  table_name varchar not null,
@@ -3330,12 +3448,14 @@ mod tests {
                  updated_at timestamptz not null
                );
                insert into lake."__etl_applied_table_batches" values
-                 ('public.users', 'current', 'drop-after-streaming'),
-                 ('public.users', 'old', 'drop-old'),
-                 ('public.users', null, 'drop-legacy'),
-                 ('public.products', 'current', 'keep-copy-current'),
-                 ('public.products', 'old', 'drop-copy-old'),
-                 ('public.orders', 'old', 'keep-unknown-table');
+                 ('public.users', 'current', 'drop-after-streaming', 'copy'),
+                 ('public.users', 'old', 'drop-old', 'copy'),
+                 ('public.users', null, 'drop-legacy', 'copy'),
+                 ('public.products', 'current', 'drop-copy-current', 'copy'),
+                 ('public.products', 'current', 'keep-copy-complete', 'copy_complete'),
+                 ('public.products', 'old', 'drop-copy-old', 'copy'),
+                 ('public.incomplete', 'current', 'keep-incomplete-copy', 'copy'),
+                 ('public.orders', 'old', 'drop-unknown-table', 'copy');
                insert into lake."__etl_streaming_progress" values
                  ('public.users', 'current', 20, 1, current_timestamp),
                  ('public.users', 'current', 30, 0, current_timestamp),
@@ -3357,20 +3477,36 @@ mod tests {
                     table_name: "public.products".to_owned(),
                     replay_epoch: "current".to_owned(),
                 },
+                DuckLakeReplayEpoch {
+                    table_name: "public.incomplete".to_owned(),
+                    replay_epoch: "current".to_owned(),
+                },
             ],
-            &["public.users".to_owned(), "public.products".to_owned(), "public.orders".to_owned()],
+            &[
+                "public.users".to_owned(),
+                "public.products".to_owned(),
+                "public.incomplete".to_owned(),
+                "public.orders".to_owned(),
+            ],
             &[],
         )
         .unwrap();
 
         assert_eq!(
             cleanup,
-            ReplayHelperCleanupOutcome { applied_batch_rows: 5, streaming_progress_rows: 5 }
+            ReplayHelperCleanupOutcome {
+                applied_batch_rows: 6,
+                streaming_progress_rows: 5,
+                ..ReplayHelperCleanupOutcome::default()
+            }
         );
-        assert_eq!(count_rows(&conn, APPLIED_BATCHES_TABLE), 1);
+        assert_eq!(count_rows(&conn, APPLIED_BATCHES_TABLE), 2);
         assert_eq!(count_rows(&conn, STREAMING_PROGRESS_TABLE), 1);
         assert_eq!(count_rows_for_table(&conn, APPLIED_BATCHES_TABLE, "public.users"), 0);
         assert_eq!(count_rows_for_table(&conn, APPLIED_BATCHES_TABLE, "public.products"), 1);
+        assert_eq!(count_rows_for_table(&conn, APPLIED_BATCHES_TABLE, "public.incomplete"), 1);
+        assert_eq!(retained_batch_kind(&conn, "public.products"), "copy_complete");
+        assert_eq!(retained_batch_kind(&conn, "public.incomplete"), "copy");
         let retained_progress: (u64, u64) = conn
             .query_row(
                 r#"select last_commit_lsn, last_tx_ordinal
@@ -3383,6 +3519,7 @@ mod tests {
         assert_eq!(retained_progress, (30, 2));
     }
 
+    /// Legacy helper tables without epoch columns remain cleanable.
     #[test]
     fn replay_helper_cleanup_deletes_legacy_rows_when_helper_table_has_no_epoch_column() {
         let conn = duckdb::Connection::open_in_memory().unwrap();
@@ -3412,11 +3549,16 @@ mod tests {
 
         assert_eq!(
             cleanup,
-            ReplayHelperCleanupOutcome { applied_batch_rows: 2, streaming_progress_rows: 0 }
+            ReplayHelperCleanupOutcome {
+                applied_batch_rows: 2,
+                streaming_progress_rows: 0,
+                ..ReplayHelperCleanupOutcome::default()
+            }
         );
         assert_eq!(count_rows(&conn, APPLIED_BATCHES_TABLE), 1);
     }
 
+    /// One current streaming watermark is already minimal.
     #[test]
     fn replay_helper_cleanup_does_not_rewrite_one_current_progress_row() {
         let conn = duckdb::Connection::open_in_memory().unwrap();
@@ -3449,6 +3591,7 @@ mod tests {
         assert_eq!(count_rows(&conn, STREAMING_PROGRESS_TABLE), 1);
     }
 
+    /// Legacy streaming progress is reduced to its greatest sequence key.
     #[test]
     fn replay_helper_cleanup_deduplicates_implicit_legacy_progress() {
         let conn = duckdb::Connection::open_in_memory().unwrap();
@@ -3479,7 +3622,11 @@ mod tests {
 
         assert_eq!(
             cleanup,
-            ReplayHelperCleanupOutcome { applied_batch_rows: 2, streaming_progress_rows: 2 }
+            ReplayHelperCleanupOutcome {
+                applied_batch_rows: 2,
+                streaming_progress_rows: 2,
+                ..ReplayHelperCleanupOutcome::default()
+            }
         );
         assert_eq!(count_rows(&conn, APPLIED_BATCHES_TABLE), 0);
         let retained_progress: (u64, u64) = conn
@@ -3493,6 +3640,7 @@ mod tests {
         assert_eq!(retained_progress, (30, 2));
     }
 
+    /// Pending replay transitions protect both committed and pending markers.
     #[test]
     fn replay_helper_cleanup_skips_tables_with_pending_epoch_transitions() {
         let conn = duckdb::Connection::open_in_memory().unwrap();
@@ -3596,6 +3744,20 @@ mod tests {
         assert!(
             DuckLakeMaintenanceOutcome {
                 replay_helper_rows_deleted: 1,
+                ..DuckLakeMaintenanceOutcome::default()
+            }
+            .applied()
+        );
+        assert!(
+            DuckLakeMaintenanceOutcome {
+                replay_helper_files_created: 1,
+                ..DuckLakeMaintenanceOutcome::default()
+            }
+            .applied()
+        );
+        assert!(
+            DuckLakeMaintenanceOutcome {
+                replay_helper_tables_rewritten: 1,
                 ..DuckLakeMaintenanceOutcome::default()
             }
             .applied()

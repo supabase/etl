@@ -292,6 +292,7 @@ impl Hasher for BatchIdHasher {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DuckLakeTableBatchKind {
     Copy,
+    CopyComplete,
     Mutation,
     Truncate,
 }
@@ -300,6 +301,7 @@ impl DuckLakeTableBatchKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Copy => "copy",
+            Self::CopyComplete => "copy_complete",
             Self::Mutation => "mutation",
             Self::Truncate => "truncate",
         }
@@ -777,6 +779,26 @@ pub(super) fn prepare_copy_table_batch(
             prepare_copy_rows(replicated_table_schema, table_rows)?,
         )]),
     })
+}
+
+/// Prepares the durable marker written after every copy worker finishes.
+pub(super) fn prepare_copy_complete_table_batch(
+    table_name: DuckLakeTableName,
+    replay_epoch: String,
+) -> PreparedDuckLakeTableBatch {
+    let identity = build_copy_complete_batch_identity(&table_name);
+    PreparedDuckLakeTableBatch {
+        table_name,
+        replay_epoch,
+        batch_id: identity.batch_id,
+        batch_kind: DuckLakeTableBatchKind::CopyComplete,
+        first_start_lsn: None,
+        last_commit_lsn: None,
+        first_sequence_key: None,
+        last_sequence_key: None,
+        insert_column_names: Vec::new(),
+        action: PreparedDuckLakeTableBatchAction::Mutation(Vec::new()),
+    }
 }
 
 /// Prepares the ordered atomic batch for one table's truncate events.
@@ -1439,6 +1461,15 @@ fn build_copy_batch_identity(
     }
 
     Ok(build_batch_identity(DuckLakeTableBatchKind::Copy, None, None, hasher.finish()))
+}
+
+/// Builds the deterministic identity shared by retries of a copy barrier.
+fn build_copy_complete_batch_identity(table_name: &DuckLakeTableName) -> DuckLakeBatchIdentity {
+    let mut hasher = BatchIdHasher::new();
+    "copy_complete".hash(&mut hasher);
+    table_name.id().hash(&mut hasher);
+
+    build_batch_identity(DuckLakeTableBatchKind::CopyComplete, None, None, hasher.finish())
 }
 
 /// Builds a delete predicate for a full copied row using the source primary
@@ -2237,7 +2268,9 @@ fn maybe_fail_after_committed_batch_for_tests(
     table_name: &DuckLakeTableName,
 ) -> EtlResult<()> {
     match batch_kind {
-        DuckLakeTableBatchKind::Copy => maybe_fail_after_copy_batch_commit_for_tests(table_name),
+        DuckLakeTableBatchKind::Copy | DuckLakeTableBatchKind::CopyComplete => {
+            maybe_fail_after_copy_batch_commit_for_tests(table_name)
+        }
         DuckLakeTableBatchKind::Mutation | DuckLakeTableBatchKind::Truncate => {
             maybe_fail_after_atomic_batch_commit_for_tests(table_name)
         }

@@ -47,8 +47,8 @@ use crate::ducklake::{
     batches::{
         TableMutation, TrackedTableMutation, TrackedTruncateEvent, apply_table_batch_with_retry,
         apply_table_batches_with_retry, ensure_applied_batches_table_exists,
-        ensure_streaming_progress_table_exists, prepare_copy_table_batch,
-        prepare_mutation_table_batches, prepare_truncate_table_batch,
+        ensure_streaming_progress_table_exists, prepare_copy_complete_table_batch,
+        prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
         read_table_streaming_progress_sequence_key, retain_mutations_after_sequence_key,
         retain_truncates_after_sequence_key,
     },
@@ -325,8 +325,15 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
+        let copy_complete = table_rows.is_empty();
         let result = self.write_table_rows(replicated_table_schema, table_rows).await;
-        async_result.send(result.map(|_| DestinationWriteStatus::Durable));
+        async_result.send(result.map(|_| {
+            if copy_complete {
+                DestinationWriteStatus::Durable
+            } else {
+                DestinationWriteStatus::Accepted
+            }
+        }));
 
         Ok(())
     }
@@ -1458,22 +1465,17 @@ where
     ) -> EtlResult<()> {
         let table_name = self.ensure_table_exists(replicated_table_schema).await?;
 
-        if table_rows.is_empty() {
-            return Ok(());
-        }
-
         // Copy batches for the same table must still serialize so concurrent
         // callers do not race each other inside DuckDB.
         self.ensure_applied_batches_table_exists().await?;
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
-        let prepared_batch = prepare_copy_table_batch(
-            replicated_table_schema,
-            table_name,
-            replay_epoch,
-            table_rows,
-        )?;
+        let prepared_batch = if table_rows.is_empty() {
+            prepare_copy_complete_table_batch(table_name, replay_epoch)
+        } else {
+            prepare_copy_table_batch(replicated_table_schema, table_name, replay_epoch, table_rows)?
+        };
         apply_table_batch_with_retry(
             Arc::clone(&self.copy_pool),
             Arc::clone(&self.blocking_slots),
@@ -3506,6 +3508,7 @@ mod tests {
     mod postgres_backed {
         use super::*;
 
+        /// A pending replay epoch is stable until its table reset commits.
         #[tokio::test(flavor = "multi_thread")]
         async fn replay_epoch_transition_reuses_pending_epoch_until_reset_completes() {
             let dir = TempDir::new().expect("failed to create temp dir");

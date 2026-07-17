@@ -123,6 +123,22 @@ fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
     )
 }
 
+/// Counts one applied-marker kind for a destination table.
+fn count_applied_batches(
+    conn: &Connection,
+    table_name: &DuckLakeTableName,
+    batch_kind: &str,
+) -> i64 {
+    let sql = format!(
+        "select count(*) from {}.{} where table_name = {} and batch_kind = {}",
+        quote_identifier("lake"),
+        quote_identifier("__etl_applied_table_batches"),
+        quote_literal(&table_name.id()),
+        quote_literal(batch_kind),
+    );
+    conn.query_row(&sql, [], |row| row.get(0)).expect("failed to count applied table batches")
+}
+
 /// Queries replicated user rows using blocking DuckDB APIs.
 ///
 /// Production async code must wrap equivalent DuckDB work in
@@ -416,6 +432,8 @@ async fn table_copy_and_streaming_with_restart() {
         query_order_rows(&conn, &orders_table_name),
         vec![(1, "description_1".to_owned()), (2, "description_2".to_owned()),]
     );
+    assert_eq!(count_applied_batches(&conn, &users_table_name, "copy_complete"), 1);
+    assert_eq!(count_applied_batches(&conn, &orders_table_name, "copy_complete"), 1);
     drop(conn);
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
