@@ -1,11 +1,15 @@
 //! Helpers for asserting replication stream conversions in integration tests.
 
 use postgres_replication::protocol::TupleData;
+use tokio_postgres::types::Type;
 
 use crate::{
-    data::TableRow,
+    data::{Cell, TableRow},
     error::EtlResult,
-    postgres::codec::{convert_tuple_to_row, parse_table_row_from_postgres_copy_bytes},
+    postgres::codec::{
+        convert_tuple_to_row, parse_cell_from_postgres_text,
+        parse_table_row_from_postgres_copy_bytes,
+    },
     schema::ColumnSchema,
 };
 
@@ -20,4 +24,10 @@ pub fn parse_tuple(
     column_schemas: &[ColumnSchema],
 ) -> EtlResult<TableRow> {
     convert_tuple_to_row(column_schemas.iter(), tuple_data)
+}
+
+/// Parses a single Postgres text-format value with the production conversion
+/// path.
+pub fn parse_text_cell(typ: &Type, value: &str) -> EtlResult<Cell> {
+    parse_cell_from_postgres_text(typ, value)
 }

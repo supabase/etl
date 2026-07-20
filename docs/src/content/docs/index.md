@@ -1,13 +1,27 @@
 ---
 title: ETL
-description: Stream Postgres changes anywhere, in real-time.
+description: Replicate Postgres changes anywhere in near real time.
 ---
 
-**Stream Postgres changes anywhere, in real-time**
+**Replicate Postgres changes anywhere in near real time**
 
-**ETL** is a Rust framework for building **change data capture (CDC)** pipelines on **Postgres**. Stream inserts, updates, deletes, truncates, and schema events to feature-gated destination modules or your own custom destination. **BigQuery** is the recommended stable first production destination; DuckLake, ClickHouse, and Snowflake modules are available in `etl-destinations`, and the Iceberg module is deprecated for new deployments.
+**ETL** is the open-source Rust framework for building **change data capture
+(CDC)** pipelines on **Postgres**. These developer docs cover the framework,
+destination modules, standalone replicator, and custom implementations. Replicate
+inserts, updates, deletes, truncates, and schema events to a built-in module or
+your own destination. **BigQuery** is the most mature destination module in this
+library; DuckLake, ClickHouse, and Snowflake modules are also available in
+`etl-destinations`, and the Iceberg module is deprecated for new deployments.
 
-*Using ETL with Supabase?* The Supabase product documentation for [database replication](https://supabase.com/docs/guides/database/replication) explains how replication works inside Supabase itself, including dashboard-level concepts that complement this library-focused guide.
+Looking for the managed product in the Supabase Dashboard? Use the canonical
+[Supabase Pipelines documentation](https://supabase.com/docs/guides/database/replication/pipelines)
+for product setup, availability, pricing, and operational guidance. Product
+guidance lives there so these library docs can remain focused on developers who
+run or embed ETL themselves.
+
+The managed product calls the first replication phase **initial sync**. Lower-level
+engine documentation and APIs may call the same phase **initial copy** or **table
+copy** to match source-code names.
 
 ## Start Here
 
@@ -37,25 +51,25 @@ description: Stream Postgres changes anywhere, in real-time.
     <strong>Schema Changes</strong>
     <span>See how relation events, DDL messages, and destination diffs work.</span>
   </a>
-  <a class="doc-path-card" href="https://supabase.com/docs/guides/database/replication">
+  <a class="doc-path-card" href="https://supabase.com/docs/guides/database/replication/pipelines">
     <span class="doc-path-kicker">Supabase</span>
-    <strong>Database Replication</strong>
-    <span>Use this with the product docs for Supabase-hosted projects.</span>
+    <strong>Supabase Pipelines</strong>
+    <span>Configure and operate the managed product in the Supabase Dashboard.</span>
   </a>
 </div>
 
 ## Why ETL?
 
-- **Real-time**: Changes stream as they happen, not in batches
+- **Near-real-time**: Continuously replicate changes with configurable batching
 - **Reliable**: At-least-once delivery with automatic retries
 - **Extensible**: Implement one trait to add any destination
-- **Fast**: Parallel initial copy, configurable batching
+- **Fast**: Parallel initial sync and configurable batching
 - **Type-safe**: Rust API with compile-time guarantees
 
 ## How It Works
 
-1. **Initial copy**: ETL copies existing table data to your destination
-2. **Streaming**: ETL streams [events](/etl/explanation/events/) (Insert, Update, Delete, Relation, and more) in real-time
+1. **Initial sync**: ETL copies existing table data to your destination
+2. **Ongoing replication**: ETL batches and writes [events](/etl/explanation/events/) (Insert, Update, Delete, Relation, and more) as they arrive
 3. **Recovery**: The [store](/etl/explanation/traits/) persists state so pipelines resume after restarts
 
 See [Architecture](/etl/explanation/architecture/) for details, and

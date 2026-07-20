@@ -13,3 +13,4 @@ mod postgres_store;
 mod replication;
 mod replication_stream;
 mod support;
+mod value_roundtrip;

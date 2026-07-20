@@ -28,7 +28,7 @@
       <img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg">
     </a>
     <br />
-    Build real-time Postgres replication applications in Rust
+    Build near-real-time Postgres replication applications in Rust
     <br />
     <a href="https://supabase.github.io/etl"><strong>Documentation</strong></a>
     ·
@@ -39,7 +39,13 @@
 </p>
 
 ETL is a Rust framework by [Supabase](https://supabase.com) for building
-high-performance, real-time data replication apps on Postgres.
+high-performance, near-real-time data replication apps on Postgres.
+
+This repository contains the open-source Rust framework, destination modules,
+replicator binary, and developer documentation. If you want the managed product
+in the Supabase Dashboard, see the canonical
+[Supabase Pipelines documentation](https://supabase.com/docs/guides/database/replication/pipelines)
+for product setup, availability, pricing, and operational guidance.
 
 It sits on top of Postgres
 [logical replication](https://www.postgresql.org/docs/current/protocol-logical-replication.html)
@@ -59,19 +65,19 @@ flowchart LR
     ETL --> Destination["Destination"]
 ```
 
-ETL runs as one process that coordinates an initial copy, a continuous
+ETL runs as one process that coordinates an initial sync, continuous
 replication stream, and a state/schema store for recovery:
 
-1. **Initial copy** backfills the existing rows covered by a Postgres publication.
-2. **Streaming replication** forwards ongoing inserts, updates, deletes, truncates, and schema events.
+1. **Initial sync** copies the existing rows covered by a Postgres publication.
+2. **Ongoing replication** batches and forwards subsequent inserts, updates, deletes, truncates, and schema events.
 3. **State recovery** lets a durable store resume table state, schema versions, and destination metadata after restarts.
 
 ## Why ETL?
 
 | Capability | What it gives you |
 | --- | --- |
-| Real-time replication | Stream Postgres changes as they happen. |
-| Initial copy | Backfill existing table data before CDC begins. |
+| Near-real-time replication | Continuously replicate Postgres changes with configurable batching. |
+| Initial sync | Copy existing table data before ongoing replication begins. |
 | Schema changes | Track simple DDL changes today; destination-specific DDL behavior is documented in [Schema Changes](https://supabase.github.io/etl/explanation/schema-changes/). |
 | Cheap operations | Run one lightweight Rust process without Kafka, Flink, Debezium, or extra control-plane infrastructure. |
 | Library or binary | Use ETL as a standalone replicator or embed it in your own Rust application. |

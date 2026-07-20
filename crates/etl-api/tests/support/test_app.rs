@@ -23,7 +23,7 @@ use etl_api::{
         images::{CreateImageRequest, UpdateImageRequest},
         pipelines::{
             CreatePipelineRequest, RollbackTablesRequest, UpdatePipelineRequest,
-            UpdatePipelineVersionRequest,
+            UpdatePipelineVersionRequest, ValidatePipelineRequest,
         },
         sources::{CreateSourceRequest, UpdateSourceRequest, ValidateSourceRequest},
         tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest},
@@ -192,6 +192,30 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
+    pub(crate) async fn read_source_tables(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!("{}/v1/sources/{source_id}/tables", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
+    }
+
+    pub(crate) async fn read_source_publications(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!("{}/v1/sources/{source_id}/publications", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
+    }
+
     pub(crate) async fn validate_source(
         &self,
         tenant_id: &str,
@@ -272,6 +296,19 @@ impl TestApp {
         self.post_authenticated(format!("{}/v1/pipelines", &self.address))
             .header("tenant_id", tenant_id)
             .json(pipeline)
+            .send()
+            .await
+            .expect("Failed to execute request.")
+    }
+
+    pub(crate) async fn validate_pipeline(
+        &self,
+        tenant_id: &str,
+        request: &ValidatePipelineRequest,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!("{}/v1/pipelines/validate", &self.address))
+            .header("tenant_id", tenant_id)
+            .json(request)
             .send()
             .await
             .expect("Failed to execute request.")
