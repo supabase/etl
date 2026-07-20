@@ -31,14 +31,14 @@ pub trait Destination {
 | `startup()` | Called after store caches are loaded, removed-publication tables are purged, and before workers start. Default is a no-op. Override to reconcile destination state after restarts |
 | `drop_table_for_copy()` | Drops the existing destination object and destination-private replay state before restarting a table copy. Receives the previously stored replicated schema for locating the old object |
 | `write_table_rows()` | Writes rows during initial table copy. Receives the current replicated schema and may get an empty vector for an empty table or a deferred durability barrier |
-| `write_events()` | Processes streaming replication events (inserts, updates, deletes, truncates, relations, and transaction markers). Batches may span multiple tables |
+| `write_events()` | Processes streaming replication events (inserts, updates, deletes, truncates, relations, and transaction markers). Batches may span multiple tables, or be empty for a required durability barrier |
 
 ### Implementation Notes
 
 - `drop_table_for_copy()` should be **idempotent**. ETL calls it before clearing copy-scoped store state, so implementations can still use the supplied schema and existing destination metadata to locate the old object. Before returning success, it must also drain or invalidate writes accepted by an earlier copy attempt so stale work cannot mutate the recreated table.
 - `write_table_rows()` is called even for empty source tables so destinations can create or prepare initial destination state before streaming begins.
 - An immediate `write_table_rows()` implementation returns `DestinationWriteStatus::Durable` after the batch is durable. A deferred implementation may return `Accepted` after taking ownership of a nonempty batch. It must bound its accepted-but-not-durable backlog and delay `Accepted` when no capacity is available. If any batch returns `Accepted`, ETL sends an empty batch after all copy workers finish; the destination must return `Durable` from that call only after all rows accepted during the current copy attempt are durable.
-- `WriteEventsDurability::MayDefer` permits `write_events()` to return `Accepted` or `Durable`. `WriteEventsDurability::RequireDurable` cannot return `Accepted`: it must return `Durable` only after the current write and all earlier accepted writes in the same ordered apply-loop stream are durable.
+- `WriteEventsDurability::MayDefer` permits `write_events()` to return `Accepted` or `Durable`. ETL may issue `write_events(Vec::new(), WriteEventsDurability::RequireDurable, ...)` as a durability-only barrier, but never an empty `MayDefer` write. The empty vector carries no new replication events, but the call may flush or wait for earlier accepted work and must return `Durable` only after all writes covered by the destination's ordering state are durable. A destination may use a stronger barrier scope than the originating apply-loop stream.
 - `write_table_rows()` and `write_events()` must tolerate **duplicate delivery** because ETL may retry or replay after failure.
 - Handle **concurrent calls** safely, especially from parallel table sync workers.
 - Preserve **per-table event order**. During initial copy and catch-up, transaction markers are not a reliable all-tables transaction boundary.

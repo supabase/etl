@@ -30,8 +30,10 @@ pub enum DestinationWriteStatus {
     /// the batch's commit end LSN. It carries that LSN into the next streaming
     /// write and advances durable progress only when a later cumulative
     /// [`DestinationWriteStatus::Durable`] result covers it. If no later write
-    /// is dispatched before shutdown, ETL leaves progress at the last durable
-    /// checkpoint so restart can replay the accepted write.
+    /// is dispatched before shutdown, ETL normally leaves progress at the last
+    /// durable checkpoint so restart can replay the accepted write. A terminal
+    /// table-sync catchup may instead issue an empty
+    /// [`WriteEventsDurability::RequireDurable`] write to settle this debt.
     ///
     /// For table-copy writes through
     /// [`crate::destination::Destination::write_table_rows`], ETL may request
@@ -47,7 +49,8 @@ pub enum DestinationWriteStatus {
     /// [`crate::destination::Destination::write_events`], this write and all
     /// earlier `Accepted` writes in the same ordered apply-loop stream are
     /// durable. ETL may advance through the greatest commit end LSN carried by
-    /// this write or reattached from those earlier writes.
+    /// this write or reattached from those earlier writes. The current write
+    /// may be an empty durability-only barrier.
     ///
     /// For a nonempty table-copy write through
     /// [`crate::destination::Destination::write_table_rows`], this status
@@ -87,7 +90,9 @@ pub enum WriteEventsDurability {
     MayDefer,
     /// The destination must report [`DestinationWriteStatus::Durable`] for the
     /// write and all earlier accepted writes in the same ordered apply-loop
-    /// stream.
+    /// stream. ETL may use this with an empty event vector as a durability-only
+    /// barrier. The destination may return `Durable` immediately only when no
+    /// covered durability debt remains, returning `Accepted` is invalid.
     RequireDurable,
 }
 
