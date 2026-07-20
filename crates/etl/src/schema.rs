@@ -5,6 +5,7 @@
 //! while replication masks and projected schemas live here with the ETL domain.
 
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     sync::Arc,
@@ -20,6 +21,9 @@ pub use etl_postgres::{
 };
 pub use tokio_postgres::types::{PgLsn, Type};
 use tracing::warn;
+
+/// Prefix reserved for generated cycle-breaking column names.
+const SCHEMA_TEMPORARY_COLUMN_PREFIX: &str = "supabase_etl_schema_tmp_";
 
 /// Validates that all named columns exist in the supplied [`TableSchema`].
 ///
@@ -597,20 +601,45 @@ impl ReplicatedTableSchema {
     /// only the endpoint transition: transient names and operations compressed
     /// out of the two snapshots must not create destination work.
     pub fn diff(&self, new_schema: &ReplicatedTableSchema) -> SchemaDiff {
-        // Build maps: ordinal_position -> ColumnSchema for replicated columns only.
-        let old_columns: HashMap<i32, &ColumnSchema> =
-            self.column_schemas().map(|col| (col.ordinal_position, col)).collect();
+        // Replicated schemas preserve PostgreSQL `attnum` order, so one linear
+        // merge classifies every endpoint difference. Operation emission is a
+        // separate step because rename dependencies and cycles can refer to
+        // names belonging to columns later in this traversal.
+        let mut old_columns: Vec<_> = self.column_schemas().collect();
+        let mut new_columns: Vec<_> = new_schema.column_schemas().collect();
 
-        let new_columns: HashMap<i32, &ColumnSchema> =
-            new_schema.column_schemas().map(|col| (col.ordinal_position, col)).collect();
+        // PostgreSQL snapshots arrive in `attnum` order. Preserve correctness
+        // for schemas assembled through the public constructors as well,
+        // without paying for sorting on the production path.
+        if !old_columns.is_sorted_by_key(|column| column.ordinal_position) {
+            old_columns.sort_unstable_by_key(|column| column.ordinal_position);
+        }
+        if !new_columns.is_sorted_by_key(|column| column.ordinal_position) {
+            new_columns.sort_unstable_by_key(|column| column.ordinal_position);
+        }
 
-        // Same ordinal position means the same logical column, even if the
-        // name or other column metadata changed.
+        let mut old_index = 0;
+        let mut new_index = 0;
+        let mut columns_to_add = Vec::new();
         let mut columns_to_change = Vec::new();
         let mut columns_to_remove = Vec::new();
-        for (&ordinal_position, &old_column) in &old_columns {
-            match new_columns.get(&ordinal_position) {
-                Some(&new_column) => {
+
+        while let (Some(&old_column), Some(&new_column)) =
+            (old_columns.get(old_index), new_columns.get(new_index))
+        {
+            match old_column.ordinal_position.cmp(&new_column.ordinal_position) {
+                Ordering::Less => {
+                    columns_to_remove.push(old_column.clone());
+                    old_index += 1;
+                }
+                Ordering::Greater => {
+                    columns_to_add.push(new_column.clone());
+                    new_index += 1;
+                }
+                Ordering::Equal => {
+                    // Equal `attnum` means the same logical column. A rename
+                    // and its metadata changes therefore stay grouped even
+                    // when the endpoint name changed.
                     let mut modifications = Vec::new();
 
                     if old_column.name != new_column.name {
@@ -636,32 +665,27 @@ impl ReplicatedTableSchema {
 
                     if !modifications.is_empty() {
                         columns_to_change.push(ColumnChange {
-                            ordinal_position,
+                            ordinal_position: old_column.ordinal_position,
                             old_column: old_column.clone(),
                             new_column: new_column.clone(),
                             modifications,
                         });
                     }
+
+                    old_index += 1;
+                    new_index += 1;
                 }
-                None => columns_to_remove.push(old_column.clone()),
             }
         }
-        columns_to_change.sort_by_key(|c| c.ordinal_position);
-        columns_to_remove.sort_by_key(|c| c.ordinal_position);
 
-        // Columns to add: positions present only in the new schema.
-        let mut columns_to_add: Vec<ColumnSchema> = new_columns
-            .iter()
-            .filter(|(ordinal_position, _)| !old_columns.contains_key(ordinal_position))
-            .map(|(_, &column)| column.clone())
-            .collect();
-        columns_to_add.sort_by_key(|c| c.ordinal_position);
+        columns_to_remove.extend(old_columns[old_index..].iter().map(|column| (**column).clone()));
+        columns_to_add.extend(new_columns[new_index..].iter().map(|column| (**column).clone()));
 
         SchemaDiff::new(
             columns_to_add,
             columns_to_remove,
             columns_to_change,
-            old_columns.values().map(|column| column.name.as_str()),
+            old_columns.iter().map(|column| column.name.as_str()),
         )
     }
 
@@ -790,6 +814,11 @@ pub enum SchemaOperation {
         /// The name to occupy after the operation.
         new_name: String,
     },
+    /// Add a new logical column.
+    AddColumn {
+        /// The source column being added.
+        column: ColumnSchema,
+    },
     /// Apply a non-rename change after the column reaches its final name.
     ModifyColumn {
         /// The complete logical column change.
@@ -797,19 +826,19 @@ pub enum SchemaOperation {
         /// The individual non-rename modification to apply.
         modification: ColumnModification,
     },
-    /// Add a new logical column.
-    AddColumn {
-        /// The source column being added.
-        column: ColumnSchema,
-    },
 }
 
 /// Represents differences between two schema versions.
 ///
-/// Used to determine what schema changes need to be applied to a destination
-/// when the source schema has evolved. The ordered plan is valid from the old
-/// endpoint schema; destinations that replay a partially applied plan must
-/// separately reconcile it with their current physical schema.
+/// The classified columns describe facts visible in the two endpoint
+/// snapshots. [`SchemaDiff::ordered_operations`] is the destination execution
+/// contract and may additionally contain generated cycle-breaking renames.
+/// Keeping these views distinct prevents validation and replay code from
+/// mistaking a planner-generated temporary rename for source DDL.
+///
+/// The ordered plan is valid from the old endpoint schema. Destinations that
+/// replay a partially applied plan must separately reconcile it with their
+/// current physical schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaDiff {
     /// Columns that need to be added to the destination.
@@ -819,7 +848,7 @@ pub struct SchemaDiff {
     /// Existing columns that need to be changed in the destination.
     pub columns_to_change: Vec<ColumnChange>,
     /// Operations in a column-name-safe execution order: blocking drops,
-    /// renames, non-rename modifications, additions, then remaining drops.
+    /// renames, additions, non-rename modifications, then remaining drops.
     ordered_operations: Vec<SchemaOperation>,
 }
 
@@ -878,15 +907,12 @@ impl SchemaDiff {
 
     /// Returns destination operations in the order they must be applied.
     ///
-    /// Blocking drops precede renames, followed by non-rename modifications,
-    /// additions, and finally drops whose names are not reused.
+    /// Blocking drops precede renames, followed by additions, non-rename
+    /// modifications, and finally drops whose names are not reused.
     pub fn ordered_operations(&self) -> &[SchemaOperation] {
         &self.ordered_operations
     }
 }
-
-/// Prefix reserved for generated cycle-breaking column names.
-const SCHEMA_TEMPORARY_COLUMN_PREFIX: &str = "supabase_etl_schema_tmp_";
 
 /// A pending logical rename tracked by ordinal identity.
 #[derive(Debug)]
@@ -1013,6 +1039,7 @@ fn plan_schema_operations(
                 old_name: rename.current_name,
                 new_name: rename.target_name,
             });
+            
             continue;
         }
 
@@ -1061,8 +1088,16 @@ fn plan_schema_operations(
         });
     }
 
-    // Phase 3: names have converged, so metadata changes can address every
-    // logical column by its final endpoint name.
+    // Phase 3: additions are now safe because blocking drops and renames have
+    // released every reused name.
+    for column in columns_to_add {
+        operations.push(SchemaOperation::AddColumn { column: column.clone() });
+    }
+
+    // Phase 4: the final column-name set now exists, so metadata changes can
+    // address every existing logical column by its endpoint name. An added
+    // column carries its own endpoint metadata in `AddColumn` and does not
+    // produce a separate modification operation.
     for change in columns_to_change {
         for modification in &change.modifications {
             if matches!(modification, ColumnModification::Rename { .. }) {
@@ -1073,12 +1108,6 @@ fn plan_schema_operations(
                 modification: modification.clone(),
             });
         }
-    }
-
-    // Phase 4: additions are now safe because blocking drops and renames have
-    // released every reused name.
-    for column in columns_to_add {
-        operations.push(SchemaOperation::AddColumn { column: column.clone() });
     }
 
     // Phase 5: finish with removals that were not dependencies of earlier
@@ -1862,5 +1891,57 @@ mod tests {
                 SchemaOperation::ModifyColumn { change, .. },
             ] if new_name == "b" && change.new_column.name == "b"
         ));
+    }
+
+    #[test]
+    fn schema_diff_adds_before_modifying_a_renamed_column() {
+        let old_schema = create_replicated_schema(vec![
+            ColumnSchema::new("a".to_owned(), Type::TEXT, -1, 1, false)
+                .with_default_expression("'old'::text".to_owned()),
+            text_column("b", 2),
+            text_column("unused", 3),
+        ]);
+        let new_schema = create_replicated_schema(vec![
+            text_column("b", 1).with_default_expression("'new'::text".to_owned()),
+            text_column("a", 4),
+        ]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert!(matches!(
+            diff.ordered_operations(),
+            [
+                SchemaOperation::DropColumn { column: blocking_drop },
+                SchemaOperation::RenameColumn { old_name, new_name, .. },
+                SchemaOperation::AddColumn { column: addition },
+                SchemaOperation::ModifyColumn {
+                    change: nullability_change,
+                    modification: ColumnModification::Nullability { .. },
+                },
+                SchemaOperation::ModifyColumn {
+                    change: default_change,
+                    modification: ColumnModification::Default { .. },
+                },
+                SchemaOperation::DropColumn { column: deferred_drop },
+            ] if blocking_drop.name == "b"
+                && old_name == "a"
+                && new_name == "b"
+                && addition.name == "a"
+                && nullability_change.new_column.name == "b"
+                && default_change.new_column.name == "b"
+                && deferred_drop.name == "unused"
+        ));
+        assert_operations_converge(&old_schema, &new_schema);
+    }
+
+    #[test]
+    fn schema_diff_handles_columns_constructed_out_of_ordinal_order() {
+        let old_schema = create_replicated_schema(vec![text_column("b", 2), text_column("a", 1)]);
+        let new_schema = create_replicated_schema(vec![text_column("c", 3), text_column("b", 2)]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert_eq!(operation_names(&diff), ["add:c", "drop:a"]);
+        assert_operations_converge(&old_schema, &new_schema);
     }
 }

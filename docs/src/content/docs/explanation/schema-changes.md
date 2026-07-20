@@ -86,7 +86,7 @@ trying to reconstruct source DDL history. Columns are matched by PostgreSQL
 2. Applies rename chains from their free end toward their source.
 3. Uses one collision-checked `supabase_etl_` temporary name per rename cycle,
    and only when that cycle has no free target.
-4. Applies final-name column modifications and additions.
+4. Applies additions, then existing-column modifications using final names.
 5. Defers unrelated drops until the end.
 
 Consequently, transient add, drop, or rename operations absent from the final
