@@ -8,7 +8,7 @@ use etl::{
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
-        event::{group_events_by_type, group_events_by_type_and_table_id},
+        event::{EventCondition, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
         pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline},
@@ -87,20 +87,9 @@ fn find_snapshot_index_after(
 
 async fn wait_for_at_least_events(
     destination: &TestDestinationWrapper<MemoryDestination<NotifyingStore>>,
-    conditions: Vec<(EventType, u64)>,
+    conditions: Vec<EventCondition>,
 ) {
-    destination
-        .notify_on_events(move |events| {
-            let grouped = group_events_by_type(events);
-            conditions.iter().all(|(event_type, expected_count)| {
-                grouped
-                    .get(event_type)
-                    .is_some_and(|matched_events| matched_events.len() >= *expected_count as usize)
-            })
-        })
-        .await
-        .notified()
-        .await;
+    destination.wait_for_events(conditions).await.notified().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -115,7 +104,10 @@ async fn relation_message_updates_when_column_added() {
         .await;
 
     let events_received = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -187,7 +179,10 @@ async fn relation_message_updates_when_column_removed() {
         .await;
 
     let events_received = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -249,7 +244,10 @@ async fn relation_message_updates_when_column_renamed() {
         .await;
 
     let events_received = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -317,7 +315,10 @@ async fn relation_message_updates_when_column_type_changes() {
         .await;
 
     let events_received = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -430,7 +431,10 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
     pipeline.start().await.unwrap();
 
     let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -500,7 +504,10 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
         .await;
 
     let events_received = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -742,8 +749,14 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
+    wait_for_at_least_events(
+        &destination,
+        vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ],
+    )
+    .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     destination.clear_events().await;
@@ -784,8 +797,14 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
+    wait_for_at_least_events(
+        &destination,
+        vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ],
+    )
+    .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     destination.clear_events().await;
@@ -815,8 +834,14 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
+    wait_for_at_least_events(
+        &destination,
+        vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ],
+    )
+    .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     destination.clear_events().await;
@@ -860,8 +885,14 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
+    wait_for_at_least_events(
+        &destination,
+        vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ],
+    )
+    .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
@@ -1070,7 +1101,10 @@ async fn partitioned_table_schema_change_updates_relation_message() {
 
     // Wait for the Relation event (schema change) and Insert event.
     let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, parent_table_id, 1),
+            EventCondition::TableCount(EventType::Insert, parent_table_id, 1),
+        ])
         .await;
 
     // Add a new column to the partitioned table.

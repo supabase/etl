@@ -291,7 +291,7 @@ async fn pipeline_replicates_table_copy_and_cdc_from_read_replica() {
     assert_replication_slot_absent(&primary, &apply_slot_name).await;
 
     let users_inserted = destination
-        .wait_for_all_events(vec![EventCondition::Table(
+        .wait_for_all_events(vec![EventCondition::TableCount(
             EventType::Insert,
             database_schema.users_schema().id,
             3,

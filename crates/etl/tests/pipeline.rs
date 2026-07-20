@@ -1079,8 +1079,12 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 
     // We wait for two inserts to be processed, one for `users` and one for
     // `orders`.
-    let insert_events_notify =
-        destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+    let insert_events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 1),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 1),
+        ])
+        .await;
 
     // Insert a single row for each table.
     insert_mock_data(
@@ -1156,7 +1160,12 @@ async fn publication_changes_are_correctly_handled() {
     table_2_ready_notify.notified().await;
 
     // Insert one row in each table and wait for two insert events.
-    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+    let inserts_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, table_1_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_2_id, 1),
+        ])
+        .await;
 
     database.insert_values(table_1.clone(), &["value"], &[&1]).await.unwrap();
     database.insert_values(table_2.clone(), &["value"], &[&1]).await.unwrap();
@@ -1211,7 +1220,12 @@ async fn publication_changes_are_correctly_handled() {
     table_3_ready_notify.notified().await;
 
     // Insert one row in table_1 and table_3 and wait for the new events.
-    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+    let inserts_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, table_1_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_3_id, 1),
+        ])
+        .await;
 
     database.insert_values(table_1.clone(), &["value"], &[&2]).await.unwrap();
     database.insert_values(table_3.clone(), &["value"], &[&1]).await.unwrap();
@@ -1270,7 +1284,13 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
     pipeline.start().await.unwrap();
     users_ready.notified().await;
 
-    let first_insert_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let first_insert_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Insert,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
     insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
     first_insert_notify.notified().await;
 
@@ -1310,10 +1330,20 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
 
     wait_for_new_walsender(client, &apply_slot_name, terminated_pid).await;
 
-    let second_insert_notify =
-        destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
-    let duplicate_insert_notify =
-        destination.wait_for_events_count(vec![(EventType::Insert, 3)]).await;
+    let second_insert_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Insert,
+            database_schema.users_schema().id,
+            2,
+        )])
+        .await;
+    let duplicate_insert_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Insert,
+            database_schema.users_schema().id,
+            3,
+        )])
+        .await;
 
     insert_users_data(&mut database, &database_schema.users_schema().name, 2..=2).await;
     second_insert_notify.notified().await;
@@ -1375,8 +1405,9 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     table_ready_notify.notified().await;
 
     // Wait for an insert event in table 1.
-    let insert_events_notify =
-        destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let insert_events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_1_id, 1)])
+        .await;
 
     database.insert_values(table_1.clone(), &["name"], &[&"test_name_2".to_owned()]).await.unwrap();
 
@@ -1429,8 +1460,9 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     destination.clear_events().await;
 
     // Wait for an insert event in table 2.
-    let insert_events_notify =
-        destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let insert_events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_2_id, 1)])
+        .await;
 
     database.insert_values(table_2.clone(), &["value"], &[&2_i32]).await.unwrap();
 
@@ -1501,7 +1533,12 @@ async fn run_table_sync_copy_case<F>(
     orders_table_ready_notify.notified().await;
 
     // We wait for the two inserts.
-    let events_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, users_table_id, 1),
+            EventCondition::TableCount(EventType::Insert, orders_table_id, 1),
+        ])
+        .await;
 
     // We insert additional data.
     insert_users_data(&mut database, &users_table_name, 1..=1).await;
@@ -1687,7 +1724,12 @@ async fn table_copy_and_sync_streams_new_data() {
     .await;
 
     // We wait for all the inserts to be received.
-    let events_notify = destination.wait_for_events_count(vec![(EventType::Insert, 8)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 4),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 4),
+        ])
+        .await;
 
     // Insert more data to test apply worker processing.
     insert_mock_data(
@@ -1797,7 +1839,13 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     insert_users_data(&mut database, &database_schema.users_schema().name, 1..=rows_inserted).await;
 
     // We wait for all the inserts to be received.
-    let events_notify = destination.wait_for_events_count(vec![(EventType::Insert, 5)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Insert,
+            database_schema.users_schema().id,
+            5,
+        )])
+        .await;
 
     events_notify.notified().await;
 
@@ -1930,7 +1978,10 @@ async fn pipeline_respects_column_level_publication() {
 
     // Wait for an insert event to be processed.
     let insert_events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     // Insert test data with all columns (including email and phone).
@@ -2006,7 +2057,10 @@ async fn pipeline_respects_column_level_publication() {
 
     // Wait for 1 insert event with 4 columns.
     let insert_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -2072,7 +2126,10 @@ async fn pipeline_respects_column_level_publication() {
 
     // Wait for 1 insert event with 3 columns (different set than before).
     let insert_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -2256,8 +2313,20 @@ async fn table_sync_drops_destination_table_after_state_reset() {
     orders_ready_notify.notified().await;
 
     // Insert CDC data (ids 6-7) for both tables.
-    let cdc_events_notify =
-        destination.wait_for_events_count(vec![(EventType::Insert, (cdc_rows * 2) as u64)]).await;
+    let cdc_events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(
+                EventType::Insert,
+                database_schema.users_schema().id,
+                cdc_rows as u64,
+            ),
+            EventCondition::TableCount(
+                EventType::Insert,
+                database_schema.orders_schema().id,
+                cdc_rows as u64,
+            ),
+        ])
+        .await;
 
     insert_mock_data(
         &mut database,
@@ -2323,7 +2392,7 @@ async fn table_sync_drops_destination_table_after_state_reset() {
     // depending on timing.
     let total_expected_users = initial_rows + cdc_rows + new_rows_after_reset;
     let all_users_events_notify = destination
-        .wait_for_all_events(vec![EventCondition::Table(
+        .wait_for_all_events(vec![EventCondition::TableCount(
             EventType::Insert,
             database_schema.users_schema().id,
             total_expected_users as u64,
@@ -2412,13 +2481,20 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
         .await;
 
     // Wait for all rows to be processed (either as table copy or streaming
-    // inserts). This waits for 20 total inserts across both tables (10 users +
-    // 10 orders).
+    // inserts), requiring the expected count for each table.
     let all_events_notify = destination
-        .wait_for_all_events(vec![EventCondition::Any(
-            EventType::Insert,
-            (rows_to_insert * 2) as u64,
-        )])
+        .wait_for_all_events(vec![
+            EventCondition::TableCount(
+                EventType::Insert,
+                database_schema.users_schema().id,
+                rows_to_insert as u64,
+            ),
+            EventCondition::TableCount(
+                EventType::Insert,
+                database_schema.orders_schema().id,
+                rows_to_insert as u64,
+            ),
+        ])
         .await;
 
     // Start the pipeline only after all notifications are registered so we
@@ -2495,9 +2571,27 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
 
     // Wait for all update and delete events to be processed.
     let updates_deletes_notify = destination
-        .wait_for_events_count(vec![
-            (EventType::Update, (rows_to_update * 2) as u64),
-            (EventType::Delete, (rows_to_delete * 2) as u64),
+        .wait_for_events(vec![
+            EventCondition::TableCount(
+                EventType::Update,
+                database_schema.users_schema().id,
+                rows_to_update as u64,
+            ),
+            EventCondition::TableCount(
+                EventType::Update,
+                database_schema.orders_schema().id,
+                rows_to_update as u64,
+            ),
+            EventCondition::TableCount(
+                EventType::Delete,
+                database_schema.users_schema().id,
+                rows_to_delete as u64,
+            ),
+            EventCondition::TableCount(
+                EventType::Delete,
+                database_schema.orders_schema().id,
+                rows_to_delete as u64,
+            ),
         ])
         .await;
 

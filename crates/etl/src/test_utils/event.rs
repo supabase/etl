@@ -9,10 +9,29 @@ use crate::{
 /// Condition for waiting on events in tests.
 #[derive(Clone, Debug)]
 pub enum EventCondition {
-    /// Wait for a count of events of the given type across all tables.
-    Any(EventType, u64),
-    /// Wait for a count of events of the given type for a specific table.
-    Table(EventType, TableId, u64),
+    /// Wait for at least a count of events of the given type across all tables.
+    AnyCount(EventType, u64),
+    /// Wait for at least a count of events of the given type for a table.
+    TableCount(EventType, TableId, u64),
+}
+
+/// Checks whether the recorded events satisfy every condition.
+pub fn check_event_conditions(events: &[Event], conditions: &[EventCondition]) -> bool {
+    let grouped_events_by_type = group_events_by_type(events);
+    let grouped_events_by_type_and_table = group_events_by_type_and_table_id(events);
+
+    conditions.iter().all(|condition| match condition {
+        EventCondition::AnyCount(event_type, expected_count) => {
+            grouped_events_by_type.get(event_type).map_or(0, |events| events.len() as u64)
+                >= *expected_count
+        }
+        EventCondition::TableCount(event_type, table_id, expected_count) => {
+            grouped_events_by_type_and_table
+                .get(&(event_type.clone(), *table_id))
+                .map_or(0, |events| events.len() as u64)
+                >= *expected_count
+        }
+    })
 }
 
 pub fn group_events_by_type(events: &[Event]) -> HashMap<EventType, Vec<Event>> {
@@ -57,21 +76,21 @@ pub fn group_events_by_type_and_table_id(
 /// counts.
 ///
 /// Supports two condition types:
-/// - [`EventCondition::Any`]: counts events across all tables
-/// - [`EventCondition::Table`]: counts events for a specific table only
+/// - [`EventCondition::AnyCount`]: counts events across all tables
+/// - [`EventCondition::TableCount`]: counts events for a specific table only
 ///
 /// For [`EventType::Insert`], both streaming insert events and table copy rows
 /// are counted. For other event types, only streaming events are counted.
-pub fn check_all_events_count(
+pub fn check_all_event_conditions(
     events: &[Event],
     table_rows: &HashMap<TableId, Vec<TableRow>>,
-    conditions: Vec<EventCondition>,
+    conditions: &[EventCondition],
 ) -> bool {
     let grouped_events_by_type = group_events_by_type(events);
     let grouped_events_by_type_and_table = group_events_by_type_and_table_id(events);
 
     conditions.iter().all(|condition| match condition {
-        EventCondition::Any(event_type, expected_count) => {
+        EventCondition::AnyCount(event_type, expected_count) => {
             let event_count =
                 grouped_events_by_type.get(event_type).map_or(0, |events| events.len() as u64);
 
@@ -83,7 +102,7 @@ pub fn check_all_events_count(
 
             event_count + table_row_count >= *expected_count
         }
-        EventCondition::Table(event_type, table_id, expected_count) => {
+        EventCondition::TableCount(event_type, table_id, expected_count) => {
             let event_count = grouped_events_by_type_and_table
                 .get(&(event_type.clone(), *table_id))
                 .map_or(0, |events| events.len() as u64);
@@ -97,4 +116,43 @@ pub fn check_all_events_count(
             event_count + table_row_count >= *expected_count
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_conditions_use_minimum_counts() {
+        let events = vec![Event::Unsupported, Event::Unsupported];
+
+        assert!(check_event_conditions(
+            &events,
+            &[EventCondition::AnyCount(EventType::Unsupported, 2)]
+        ));
+        assert!(!check_event_conditions(
+            &events,
+            &[EventCondition::AnyCount(EventType::Unsupported, 3)]
+        ));
+    }
+
+    #[test]
+    fn all_event_conditions_treat_copied_rows_as_inserts() {
+        let table_id = TableId::new(1);
+        let table_rows =
+            HashMap::from([(table_id, vec![TableRow::new(Vec::new()), TableRow::new(Vec::new())])]);
+
+        assert!(check_all_event_conditions(
+            &[],
+            &table_rows,
+            &[
+                EventCondition::AnyCount(EventType::Insert, 2),
+                EventCondition::TableCount(EventType::Insert, table_id, 2),
+            ],
+        ));
+        assert!(!check_event_conditions(
+            &[],
+            &[EventCondition::TableCount(EventType::Insert, table_id, 1)],
+        ));
+    }
 }

@@ -9,6 +9,7 @@ use etl::{
     store::{StateStore, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
+        event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
@@ -153,7 +154,10 @@ async fn replacing_merge_tree_same_lsn_tx_insert_then_update_keeps_update() {
 
     // --- WHEN: INSERT + UPDATE in the same transaction ---
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1), (EventType::Update, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Update, table_id, 1),
+        ])
         .await;
 
     let tx = database.begin_transaction().await;
@@ -253,7 +257,10 @@ async fn replacing_merge_tree_same_lsn_tx_delete_then_insert_keeps_insert() {
 
     // --- WHEN: DELETE + INSERT of the same id in one transaction ---
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Delete, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Delete, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     let tx = database.begin_transaction().await;
@@ -339,7 +346,9 @@ async fn replacing_merge_tree_current_view_exposes_user_columns_and_current_stat
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .await;
     database
         .run_sql(&format!(
             "UPDATE {} SET value = 'after' WHERE id = 1",
@@ -521,7 +530,9 @@ async fn replacing_merge_tree_streamed_update_wins_over_initial_copy_row() {
     table_ready.notified().await;
 
     // --- WHEN: stream an UPDATE for the copied row ---
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .await;
     database
         .run_sql(&format!(
             "UPDATE {} SET value = 'streamed_value' WHERE id = 1",
@@ -607,7 +618,9 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
+        .await;
     database
         .run_sql(&format!("DELETE FROM {} WHERE id = 1", table_name.as_quoted_identifier()))
         .await

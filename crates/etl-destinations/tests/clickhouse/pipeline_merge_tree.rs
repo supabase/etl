@@ -9,6 +9,7 @@ use etl::{
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
+        event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
@@ -94,7 +95,9 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 2)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 2)])
+        .await;
 
     // --- WHEN: two transactions commit sequentially on separate connections ---
     let tx_a = database_1.begin_transaction().await;

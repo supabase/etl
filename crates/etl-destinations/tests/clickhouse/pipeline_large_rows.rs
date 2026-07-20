@@ -15,6 +15,7 @@ use etl::{
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
+        event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
@@ -153,7 +154,9 @@ async fn large_row_inner(engine: ClickHouseEngine, field_chars: usize) {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
 
     // Row 2 exercises the streaming INSERT-event path.
     database

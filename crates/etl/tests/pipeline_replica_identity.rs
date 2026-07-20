@@ -5,6 +5,7 @@ use etl::{
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
+        event::EventCondition,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
@@ -250,7 +251,9 @@ async fn run_replica_identity_scenario(
     let updated_large_text = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     let final_large_text = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
 
-    let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let insert_event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
     database
         .insert_values(
             table_name.clone(),
@@ -270,8 +273,13 @@ async fn run_replica_identity_scenario(
         INITIAL_ID,
         quote_literal(INITIAL_SURNAME),
     );
-    let non_identity_update_notify =
-        destination.wait_for_events_count(vec![(EventType::Update, update_count + 1)]).await;
+    let non_identity_update_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Update,
+            table_id,
+            update_count + 1,
+        )])
+        .await;
     let non_identity_update = database.run_sql(&non_identity_update_sql).await;
     if non_identity_update.is_ok() {
         non_identity_update_notify.notified().await;
@@ -285,16 +293,26 @@ async fn run_replica_identity_scenario(
         INITIAL_ID,
         quote_literal(INITIAL_SURNAME),
     );
-    let toast_update_notify =
-        destination.wait_for_events_count(vec![(EventType::Update, update_count + 1)]).await;
+    let toast_update_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Update,
+            table_id,
+            update_count + 1,
+        )])
+        .await;
     let toast_update = database.run_sql(&toast_update_sql).await;
     if toast_update.is_ok() {
         toast_update_notify.notified().await;
         update_count += 1;
     }
 
-    let identity_update_notify =
-        destination.wait_for_events_count(vec![(EventType::Update, update_count + 1)]).await;
+    let identity_update_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Update,
+            table_id,
+            update_count + 1,
+        )])
+        .await;
     let identity_update = database
         .run_sql(
             &replica_identity
@@ -305,7 +323,9 @@ async fn run_replica_identity_scenario(
         identity_update_notify.notified().await;
     }
 
-    let delete_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let delete_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
+        .await;
     let delete =
         database.run_sql(&replica_identity.delete_sql(&table_name.as_quoted_identifier())).await;
     if delete.is_ok() {

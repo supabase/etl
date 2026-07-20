@@ -10,6 +10,7 @@ use etl::{
     store::{StateStore, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
+        event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
@@ -447,7 +448,12 @@ async fn table_copy_and_streaming_with_restart() {
 
     pipeline.start().await.unwrap();
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+        ])
+        .await;
 
     insert_mock_data(
         &mut database,
@@ -626,7 +632,12 @@ async fn table_copy_and_streaming_without_restart() {
     users_ready.notified().await;
     orders_ready.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+        ])
+        .await;
 
     insert_mock_data(
         &mut database,
@@ -695,7 +706,13 @@ async fn table_insert_update_delete() {
     pipeline.start().await.unwrap();
     users_ready.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Insert,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
 
     database
         .insert_values(
@@ -726,7 +743,13 @@ async fn table_insert_update_delete() {
 
     pipeline.start().await.unwrap();
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Update,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
 
     database
         .update_values(
@@ -757,7 +780,13 @@ async fn table_insert_update_delete() {
 
     pipeline.start().await.unwrap();
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Delete,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
 
     database
         .delete_values(database_schema.users_schema().name.clone(), &["id"], &["1"], "")
@@ -813,7 +842,12 @@ async fn cdc_streaming_with_truncate() {
     users_ready.notified().await;
     orders_ready.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+        ])
+        .await;
 
     insert_mock_data(
         &mut database,
@@ -827,7 +861,12 @@ async fn cdc_streaming_with_truncate() {
     event_notify.notified().await;
     destination.clear_events().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Truncate, 2)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Truncate, database_schema.users_schema().id, 1),
+            EventCondition::TableCount(EventType::Truncate, database_schema.orders_schema().id, 1),
+        ])
+        .await;
 
     database.truncate_table(database_schema.users_schema().name.clone()).await.unwrap();
     database.truncate_table(database_schema.orders_schema().name.clone()).await.unwrap();
@@ -835,7 +874,12 @@ async fn cdc_streaming_with_truncate() {
     event_notify.notified().await;
     destination.clear_events().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+        ])
+        .await;
 
     insert_mock_data(
         &mut database,
@@ -918,7 +962,10 @@ async fn schema_change_add_column() {
     let initial_snapshot_id = initial_metadata.snapshot_id;
 
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -1029,7 +1076,10 @@ async fn schema_change_is_visible_to_already_open_connection() {
     assert_eq!(query_table_columns(&conn, &ducklake_table_name), vec!["id", "name", "age"]);
 
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -1133,7 +1183,10 @@ async fn schema_change_add_drop_rename() {
     table_ready.notified().await;
 
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -1236,11 +1289,11 @@ async fn schema_change_then_update_and_delete() {
     table_ready.notified().await;
 
     let event_notify = destination
-        .wait_for_events_count(vec![
-            (EventType::Relation, 1),
-            (EventType::Insert, 1),
-            (EventType::Update, 1),
-            (EventType::Delete, 1),
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Update, table_id, 1),
+            EventCondition::TableCount(EventType::Delete, table_id, 1),
         ])
         .await;
 
@@ -1339,7 +1392,10 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
     table_ready.notified().await;
 
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(
@@ -1359,7 +1415,10 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
 
     destination.clear_events().await;
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(
@@ -1379,7 +1438,10 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
 
     destination.clear_events().await;
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "ddl_col_0_1" }])
@@ -1396,7 +1458,10 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
 
     destination.clear_events().await;
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(
@@ -1479,7 +1544,10 @@ async fn schema_change_matches_simulator_generated_column_types() {
     table_ready.notified().await;
 
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(
@@ -1499,7 +1567,10 @@ async fn schema_change_matches_simulator_generated_column_types() {
 
     destination.clear_events().await;
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(
@@ -1520,7 +1591,10 @@ async fn schema_change_matches_simulator_generated_column_types() {
 
     destination.clear_events().await;
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(
@@ -1541,7 +1615,10 @@ async fn schema_change_matches_simulator_generated_column_types() {
 
     destination.clear_events().await;
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(
@@ -1562,7 +1639,10 @@ async fn schema_change_matches_simulator_generated_column_types() {
 
     destination.clear_events().await;
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(

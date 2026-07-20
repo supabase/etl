@@ -321,7 +321,7 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
 
     // WHEN: the held response is released only after the reconnect
     let replay_recorded = destination
-        .wait_for_all_events(vec![EventCondition::Table(EventType::Insert, table_id, 2)])
+        .wait_for_all_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;
 
     hold.release_ok();
@@ -400,7 +400,7 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
     let old_pid = active_pid.expect("apply walsender should be active");
 
     let first_insert_recorded = destination
-        .wait_for_all_events(vec![EventCondition::Table(EventType::Insert, table_id, 1)])
+        .wait_for_all_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     client.query_one("select pg_terminate_backend($1)", &[&old_pid]).await.unwrap();

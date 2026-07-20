@@ -4,6 +4,7 @@ use etl::{
     store::{StateStore, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
+        event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
@@ -364,7 +365,9 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .await;
 
     database
         .run_sql(&format!(
@@ -780,7 +783,9 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
+        .await;
 
     database
         .run_sql(&format!("DELETE FROM {} WHERE id = 2", table_name.as_quoted_identifier(),))
@@ -902,7 +907,9 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
 
     pipeline.start().await.unwrap();
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
 
     database
         .run_sql(&format!(
@@ -1103,7 +1110,9 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
     assert_eq!(rows.len(), 2, "table copy should produce two rows");
 
     // --- WHEN: truncate and insert a new row ---
-    let truncate_notify = destination.wait_for_events_count(vec![(EventType::Truncate, 1)]).await;
+    let truncate_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Truncate, table_id, 1)])
+        .await;
 
     database
         .truncate_table(table_name.clone())
@@ -1115,7 +1124,9 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
     let rows: Vec<IdValueRow> = clickhouse_db.query(&truncate_query()).await;
     assert!(rows.is_empty(), "table should be empty after truncate");
 
-    let insert_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let insert_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
 
     database
         .run_sql(&format!(
@@ -1314,7 +1325,12 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
     pipeline.start().await.unwrap();
     tokio::join!(table_a_ready.notified(), table_b_ready.notified());
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+    let event_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, table_a_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_b_id, 1),
+        ])
+        .await;
 
     // --- WHEN: insert one row into each table ---
     database
@@ -1490,7 +1506,10 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
     table_ready.notified().await;
 
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Delete, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Delete, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     // --- WHEN: delete id=2, insert id=3 ---
@@ -1789,7 +1808,10 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
 
     // --- WHEN: add column and insert with new schema ---
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(
@@ -1938,7 +1960,10 @@ async fn schema_change_add_column_defaults_merge_tree() {
     table_ready.notified().await;
 
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -2111,7 +2136,10 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
 
     // --- WHEN: rename + drop + add and insert with new schema ---
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(
