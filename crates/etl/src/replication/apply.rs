@@ -1915,11 +1915,11 @@ where
 
         let (events_batch, events_batch_bytes) = self.state.take_events_batch();
 
-        self.dispatch_events_write(events_batch, events_batch_bytes, reason).await
+        self.dispatch_write_events(events_batch, events_batch_bytes, reason).await
     }
 
     /// Dispatches one streaming write through the shared async-result path.
-    async fn dispatch_events_write(
+    async fn dispatch_write_events(
         &mut self,
         events_batch: Vec<Event>,
         events_batch_bytes: usize,
@@ -2712,7 +2712,7 @@ where
             // Record completion before dispatch so intake stops and the empty write
             // requires durability.
             self.state.record_exit_intent(Some(ExitIntent::Complete));
-            self.dispatch_events_write(
+            self.dispatch_write_events(
                 Vec::new(),
                 0,
                 "table sync catchup reached without a terminal event batch",
