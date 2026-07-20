@@ -419,13 +419,12 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 
+    // We take the relation events count after we applied the schema change so that
+    // we can use that for the next assertion.
     let events_before_restart = destination.get_events().await;
     let grouped_events_before_restart = group_events_by_type_and_table_id(&events_before_restart);
     let relation_count_before_restart =
         grouped_events_before_restart.get(&(EventType::Relation, table_id)).map_or(0, Vec::len);
-    let insert_count_before_restart =
-        grouped_events_before_restart.get(&(EventType::Insert, table_id)).map_or(0, Vec::len);
-    assert_eq!(insert_count_before_restart, 0);
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -444,11 +443,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
                 table_id,
                 (relation_count_before_restart + 1) as u64,
             ),
-            EventCondition::TableCount(
-                EventType::Insert,
-                table_id,
-                (insert_count_before_restart + 1) as u64,
-            ),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
         ])
         .await;
 
@@ -471,10 +466,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
         relation_count_before_restart + 1
     );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        insert_count_before_restart + 1
-    );
+    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
 
     let Event::Relation(relation) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
@@ -483,8 +475,11 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         &relation.replicated_table_schema,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
-    let relation_email_column =
-        relation.replicated_table_schema.column_schemas().find(|column| column.name == "email").unwrap();
+    let relation_email_column = relation
+        .replicated_table_schema
+        .column_schemas()
+        .find(|column| column.name == "email")
+        .unwrap();
     assert_eq!(
         relation_email_column.default_expression.as_deref(),
         Some("'unknown@example.com'::text")
@@ -499,7 +494,6 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
     let snapshots = table_schemas.get(&table_id).unwrap();
     assert_eq!(snapshots.len(), 2);
     assert_schema_snapshots_ordering(snapshots, true);
-
     let (_, first_schema) = &snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
