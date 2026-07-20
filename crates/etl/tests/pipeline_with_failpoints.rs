@@ -796,13 +796,11 @@ async fn stored_durable_progress_prevents_replay_when_status_updates_are_skipped
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We check that the durable flush is stricly greater than the last confirmed flush lsn on the
-    // Postgres side, which should be the case, since we artificially stopped status updates.
-    let durable_flush_lsn = store
-        .get_replication_progress(WorkerType::Apply)
-        .await
-        .unwrap()
-        .unwrap();
+    // We check that the durable flush is stricly greater than the last confirmed
+    // flush lsn on the Postgres side, which should be the case, since we
+    // artificially stopped status updates.
+    let durable_flush_lsn =
+        store.get_replication_progress(WorkerType::Apply).await.unwrap().unwrap();
     let (confirmed_flush_lsn, _) =
         replication_slot_state(database.client.as_ref().unwrap(), &apply_slot_name).await;
     assert!(confirmed_flush_lsn < durable_flush_lsn);
@@ -810,8 +808,7 @@ async fn stored_durable_progress_prevents_replay_when_status_updates_are_skipped
     // We check the expected events after the first two inserts.
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
-    let inserts =
-        grouped_events.get(&(EventType::Insert, table_id)).unwrap();
+    let inserts = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
     let expected_inserts = build_expected_users_inserts(
         1,
         &database_schema.users_schema(),
@@ -828,7 +825,8 @@ async fn stored_durable_progress_prevents_replay_when_status_updates_are_skipped
         destination.clone(),
     );
 
-    // We wait until 4 inserts have been reached, the previous ones + the current ones.
+    // We wait until 4 inserts have been reached, the previous ones + the current
+    // ones.
     let new_inserts = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
 
     pipeline.start().await.unwrap();
@@ -842,8 +840,7 @@ async fn stored_durable_progress_prevents_replay_when_status_updates_are_skipped
     // We check the expected events after all the inserts.
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
-    let inserts =
-        grouped_events.get(&(EventType::Insert, table_id)).unwrap();
+    let inserts = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
     let expected_inserts = build_expected_users_inserts(
         1,
         &database_schema.users_schema(),
