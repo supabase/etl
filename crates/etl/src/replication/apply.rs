@@ -2172,7 +2172,11 @@ where
         let snapshot_id: SnapshotId = start_lsn.into();
         let table_schema = schema_change_message.into_table_schema(snapshot_id);
 
-        // Store the new schema version in the store.
+        // Store the complete post-statement schema version. If more DDL
+        // messages for this table arrive before any DML, each snapshot remains
+        // available for historical replay but the waiting cache advances to
+        // the newest one. The later Relation event therefore exposes only the
+        // final endpoint that had observable row traffic.
         if let Err(err) = self.schema_store.store_table_schema(table_schema).await {
             counter!(
                 ETL_DDL_SCHEMA_CHANGES_TOTAL,

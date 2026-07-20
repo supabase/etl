@@ -28,7 +28,7 @@ changes:
 | Drop a replicated column default | Column default removal |
 | Drop `NOT NULL` from a replicated column | BigQuery relaxes an existing `REQUIRED` column to `NULLABLE`; other built-in destinations currently leave nullability unchanged |
 | Set `NOT NULL` on a replicated column | Detected in the schema snapshot, but not applied to built-in destinations |
-| Several of the above in one statement | One schema snapshot, diffed into column additions, removals, and grouped column modifications |
+| Several of the above in one statement | One final schema snapshot, diffed into a minimal ordered transition |
 
 When several attributes of the same logical column change at once, ETL groups
 them into one column change with multiple modifications. For example, renaming a
@@ -66,6 +66,33 @@ Destinations should treat `Event::Relation` as the point where the **active sche
 `write_events()` based on size and time, so a single destination batch may
 contain zero, one, or many schema changes, including multiple relation events
 for the same table.
+
+### Snapshot Compression and Ordered Operations
+
+The DDL message contains the complete table schema after an `ALTER TABLE`
+statement finishes. ETL does not replicate the statement's individual
+subcommands. If several DDL statements occur without intervening DML, ETL may
+store each source snapshot, but pgoutput does not need to emit a `Relation`
+between them. The destination then compares its previously applied schema
+directly with the final schema preceding the next row event. If DML occurs
+between two DDL statements, pgoutput emits the intervening `Relation`, so that
+schema remains an observable destination boundary.
+
+Schema diffing therefore works from the two endpoint snapshots rather than
+trying to reconstruct source DDL history. Columns are matched by PostgreSQL
+`attnum`, and the diff includes an ordered operation plan that:
+
+1. Drops only columns whose names must be freed before an add or rename.
+2. Applies rename chains from their free end toward their source.
+3. Uses one collision-checked `supabase_etl_` temporary name per rename cycle,
+   and only when that cycle has no free target.
+4. Applies final-name column modifications and additions.
+5. Defers unrelated drops until the end.
+
+Consequently, transient add, drop, or rename operations absent from the final
+snapshot do not create destination DDL. Each endpoint difference normally
+produces one destination operation; a rename cycle requires exactly one extra
+temporary rename.
 
 ## Destination-Specific DDL Behavior
 
@@ -222,7 +249,7 @@ A practical flow is:
    `ReplicatedTableSchema`.
 4. Mark destination metadata as `Applying` if the destination needs recovery
    bookkeeping for the DDL transition.
-5. Apply supported destination DDL for adds, drops, renames, and default changes.
+5. Apply supported destination DDL in the order supplied by the schema diff.
 6. Mark destination metadata as `Applied` only after the destination schema is
    actually ready for following row events.
 7. Process following row events with the new schema.

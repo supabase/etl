@@ -589,6 +589,13 @@ impl ReplicatedTableSchema {
     /// - Columns in the same position with different names are renamed.
     /// - Positions in old but not in new are columns to remove.
     /// - Positions in new but not in old are columns to add.
+    ///
+    /// DDL capture stores a complete post-statement table snapshot, and
+    /// `pgoutput` emits relation metadata lazily before DML. Consequently, a
+    /// destination may compare non-adjacent stored snapshots when several DDL
+    /// statements occur without intervening DML. This diff intentionally plans
+    /// only the endpoint transition: transient names and operations compressed
+    /// out of the two snapshots must not create destination work.
     pub fn diff(&self, new_schema: &ReplicatedTableSchema) -> SchemaDiff {
         // Build maps: ordinal_position -> ColumnSchema for replicated columns only.
         let old_columns: HashMap<i32, &ColumnSchema> =
@@ -851,7 +858,11 @@ struct PendingRename {
     target_name: String,
 }
 
-/// Plans operations that converge from the old namespace to the new one.
+/// Plans the minimum namespace-valid operations for the endpoint diff.
+///
+/// Every add, removal, modification, and acyclic rename produces exactly one
+/// operation. A rename cycle produces one additional temporary rename, which
+/// is the minimum needed when no target name is initially free.
 fn plan_schema_operations(
     columns_to_add: &[ColumnSchema],
     columns_to_remove: &[ColumnSchema],
@@ -868,14 +879,10 @@ fn plan_schema_operations(
             ColumnModification::Default { .. } | ColumnModification::Nullability { .. } => None,
         })
         .collect();
-    let mut occupied_names: HashMap<String, i32> = columns_to_remove
+    let mut occupied_names: HashSet<String> = columns_to_remove
         .iter()
-        .map(|column| (column.name.clone(), column.ordinal_position))
-        .chain(
-            columns_to_change
-                .iter()
-                .map(|change| (change.old_column.name.clone(), change.ordinal_position)),
-        )
+        .map(|column| column.name.clone())
+        .chain(columns_to_change.iter().map(|change| change.old_column.name.clone()))
         .collect();
     let mut operations = Vec::new();
     let mut deferred_removals = Vec::new();
@@ -911,13 +918,12 @@ fn plan_schema_operations(
     let mut temporary_name_sequence = 0_u64;
 
     while !pending_renames.is_empty() {
-        if let Some(index) = pending_renames
-            .iter()
-            .position(|rename| !occupied_names.contains_key(&rename.target_name))
+        if let Some(index) =
+            pending_renames.iter().position(|rename| !occupied_names.contains(&rename.target_name))
         {
             let rename = pending_renames.remove(index);
             occupied_names.remove(&rename.current_name);
-            occupied_names.insert(rename.target_name.clone(), rename.ordinal_position);
+            occupied_names.insert(rename.target_name.clone());
             operations.push(SchemaOperation::RenameColumn {
                 ordinal_position: rename.ordinal_position,
                 old_name: rename.current_name,
@@ -945,7 +951,7 @@ fn plan_schema_operations(
         };
 
         occupied_names.remove(&rename.current_name);
-        occupied_names.insert(temporary_name.clone(), rename.ordinal_position);
+        occupied_names.insert(temporary_name.clone());
         operations.push(SchemaOperation::RenameColumn {
             ordinal_position: rename.ordinal_position,
             old_name: std::mem::replace(&mut rename.current_name, temporary_name.clone()),
@@ -1616,6 +1622,22 @@ mod tests {
         let diff = old_schema.diff(&new_schema);
 
         assert_eq!(operation_names(&diff), ["rename:a->b:false", "drop:unused"]);
+    }
+
+    #[test]
+    fn schema_diff_plans_only_final_state_after_ddl_compression() {
+        // The source may have renamed `a` through one or more transient names,
+        // and may have dropped and recreated `value` repeatedly. With no DML
+        // between those states, DDL snapshotting exposes only these endpoints.
+        let old_schema =
+            create_replicated_schema(vec![text_column("a", 1), text_column("value", 2)]);
+        let new_schema =
+            create_replicated_schema(vec![text_column("final_a", 1), text_column("value", 3)]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert_eq!(operation_names(&diff), ["drop:value", "rename:a->final_a:false", "add:value"]);
+        assert_operations_converge(&old_schema, &new_schema);
     }
 
     #[test]
