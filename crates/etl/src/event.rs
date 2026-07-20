@@ -320,7 +320,8 @@ impl SizeHint for Event {
 pub struct EventSequenceKey {
     /// Commit LSN identifying transaction order across transactions.
     pub commit_lsn: PgLsn,
-    /// Zero-based ordinal identifying event order within the same transaction.
+    /// Zero-based ordinal identifying sequence-key-bearing event order within
+    /// the same transaction.
     pub tx_ordinal: u64,
 }
 

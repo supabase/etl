@@ -348,7 +348,7 @@ An LSN is a pointer to a position in Postgres's **Write-Ahead Log (WAL)**. It's 
 |-------|---------|----------|
 | `start_lsn` | Position where this event was recorded in the WAL | Debugging and WAL-position context |
 | `commit_lsn` | Position where the transaction will commit | Transaction grouping, recovery checkpoints |
-| `tx_ordinal` | Zero-based order of the event within its transaction | Ordering and idempotency within a transaction |
+| `tx_ordinal` | Zero-based order among sequence-key-bearing events in its transaction | Ordering and idempotency within a transaction |
 
 **Key insight:** Multiple events share the same `commit_lsn` when they belong
 to the same transaction. ETL uses `commit_lsn` plus `tx_ordinal` as the stable
@@ -366,7 +366,9 @@ COMMIT;                   -- Transaction commits at 0/16B3800
 ```
 
 Both inserts have the same `commit_lsn` because they commit together. Their
-`tx_ordinal` values distinguish their order within the transaction.
+`tx_ordinal` values distinguish their order among the transaction events that
+carry sequence keys. Session-generated relation messages do not consume an
+ordinal.
 
 ### Using LSNs
 

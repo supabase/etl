@@ -151,8 +151,8 @@ ETL has one shared schema-change signal, but **DDL behavior is implemented per d
 
 | Destination | Current DDL behavior |
 |-------------|----------------------|
-| BigQuery | Supports add, drop, rename, `REQUIRED` to `NULLABLE` relaxation, and supported literal default metadata. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. PostgreSQL remains responsible for enforcing later `SET NOT NULL` changes because BigQuery cannot tighten an existing column in place. |
-| ClickHouse | Supports add, drop, rename, and supported literal defaults. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. |
+| BigQuery | Supports non-primary-key add, drop, and rename operations, `REQUIRED` to `NULLABLE` relaxation, and supported literal default metadata on non-primary-key columns. The source primary-key definition must remain unchanged because BigQuery CDC uses the destination primary-key constraint and BigQuery cannot rename primary-key columns. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. PostgreSQL remains responsible for enforcing later `SET NOT NULL` changes because BigQuery cannot tighten an existing column in place. |
+| ClickHouse | Supports add, drop, rename, and supported literal defaults. `ReplacingMergeTree` rejects primary-key drops, renames, or order changes because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. |
 | DuckLake | Supports add, drop, rename, and supported literal defaults. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
 | Snowflake | Supports add, drop, rename, create-table literal defaults, and literal add-column defaults. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. |
 | Iceberg | Deprecated for now. Schema-change DDL is not a supported path for new deployments. |
@@ -172,7 +172,7 @@ Instead, destinations apply the schema change in the cheapest safe form they
 support:
 
 - BigQuery adds the column as nullable, then sets supported literal default
-  metadata for future writes.
+  metadata for future writes when the column is not part of the primary key.
 - ClickHouse may expose default values for pre-existing rows through default
   metadata, but ETL does not issue `MATERIALIZE COLUMN`.
 - DuckLake uses add-time initial default metadata for supported defaults; its
@@ -257,7 +257,7 @@ Destination support may be narrower than parser support:
 
 | Destination | Supported default behavior |
 |-------------|----------------------------|
-| BigQuery | Supports compatible string, numeric, boolean, date, time, timestamp, JSON, and UUID literals. Added columns are created nullable and supported defaults are set afterward for future writes. |
+| BigQuery | Supports compatible string, numeric, boolean, date, time, timestamp, JSON, and UUID literals on non-primary-key columns. Added columns are created nullable and supported defaults are set afterward for future writes. |
 | ClickHouse | Supports compatible string, numeric, boolean, date, time, timestamp, JSON, and UUID literals. Defaults are metadata only unless separately materialized. |
 | DuckLake | Supports compatible string, numeric, date, time, timestamp, JSON, and UUID literals. Boolean defaults are currently skipped by the DuckLake destination. |
 | Snowflake | `CREATE TABLE` supports compatible string, numeric, boolean, date, time, timestamp, JSON, and UUID literals. `ADD COLUMN` only receives the literal subset Snowflake allows for add-column defaults: string, numeric, and boolean literals. Later default changes on existing columns are skipped. |
@@ -356,9 +356,8 @@ These behaviors are **not full destination DDL semantics** yet:
   other pipeline logic.
 - A drop and re-add is not treated as a rename. It becomes a drop plus an add
   because PostgreSQL assigns a new ordinal position to the new column.
-- DuckLake reserves only the exact generated tombstone shapes
-  `supabase_etl_ducklake_dropped_<attnum>_<16-hex-hash>` and the legacy
-  `__etl_ducklake_dropped_<attnum>_<16-hex-hash>` form. Similar business names
+- DuckLake reserves only the exact generated tombstone shape
+  `supabase_etl_ducklake_dropped_<attnum>_<16-hex-hash>`. Similar business names
   that do not match that full shape remain valid.
 - Destination defaults are best-effort metadata translations. Unsupported
   defaults are skipped with a warning instead of failing replication. This does
@@ -391,6 +390,13 @@ These behaviors are **not full destination DDL semantics** yet:
   destination column remains nullable. Other built-in destinations currently
   leave streaming nullability changes unchanged. Newly added columns remain
   nullable where the destination requires that for historical rows.
+- BigQuery rejects source primary-key drops, additions, renames, and order
+  changes during streaming replication. BigQuery CDC matches rows through the
+  primary-key constraint created during the initial table copy, and BigQuery
+  does not allow renaming primary-key columns. Resync the table when its primary
+  key definition must change. BigQuery also does not support defaults on
+  primary-key columns, so ETL skips that destination metadata while continuing
+  to write the values PostgreSQL sends.
 - The trigger payload includes `current_query` for debugging only. It can
   contain literals and multiple statements, so it must not be treated as
   replayable DDL.
