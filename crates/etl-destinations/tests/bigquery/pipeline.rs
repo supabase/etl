@@ -1849,10 +1849,6 @@ async fn table_array_with_null_values() {
     // the CDC will contain the inserts and deletes, failing again.
     store.reset_table_state(table_id).await.unwrap();
 
-    // We also clear the events so that it's more idiomatic to wait for them, since
-    // we don't have the prior insert.
-    destination.clear_events().await;
-
     // We recreate the pipeline and try again.
     let mut pipeline = create_pipeline(
         &database.config,
@@ -2459,7 +2455,6 @@ async fn table_schema_change() {
         .unwrap();
 
     event_notify.notified().await;
-    destination.clear_events().await;
 
     // Apply multiple schema changes:
     // 1. Rename name -> full_name
@@ -2474,7 +2469,7 @@ async fn table_schema_change() {
     let event_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
         ])
         .await;
 

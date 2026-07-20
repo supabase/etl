@@ -284,7 +284,6 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
     // Wait for all CDC insert events to be written to Iceberg.
     event_notify.notified().await;
-    destination.clear_events().await;
 
     // === CDC UPDATE EVENTS ===
     // We'll expect 2 updates per table.
@@ -317,7 +316,6 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
     // Wait for all CDC update events to be written to Iceberg.
     event_notify.notified().await;
-    destination.clear_events().await;
 
     // === CDC DELETE EVENTS ===
     // We'll expect 1 delete per table.
@@ -570,7 +568,6 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     // Wait for all expected insert events to be processed.
     event_notify.notified().await;
-    destination.clear_events().await;
 
     let event_notify = destination
         .wait_for_events(vec![
@@ -586,7 +583,6 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     // Wait for all expected truncate events to be processed.
     event_notify.notified().await;
-    destination.clear_events().await;
 
     // base table names
     let users_table = table_name_to_iceberg_table_name(
@@ -609,8 +605,8 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     // We'll expect 2 inserts per table.
     let event_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
-            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 4),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 4),
         ])
         .await;
 
@@ -626,7 +622,6 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     // Wait for all expected insert and truncate events to be processed.
     event_notify.notified().await;
-    destination.clear_events().await;
 
     // After truncate, pre-truncate CDC rows should be gone (tables were dropped).
     // Only post-truncate rows remain.

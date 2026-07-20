@@ -1195,8 +1195,6 @@ async fn publication_changes_are_correctly_handled() {
     let table_2_inserts = grouped.get(&(EventType::Insert, table_2_id)).cloned().unwrap();
     assert_eq!(table_2_inserts.len(), 1);
 
-    destination.clear_events().await;
-
     // Create table_3 which is going to be added to the publication.
     let table_3 = test_table_name("table_3");
     let table_3_id =
@@ -1222,7 +1220,7 @@ async fn publication_changes_are_correctly_handled() {
     // Insert one row in table_1 and table_3 and wait for the new events.
     let inserts_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Insert, table_1_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_1_id, 2),
             EventCondition::TableCount(EventType::Insert, table_3_id, 1),
         ])
         .await;
@@ -1250,7 +1248,7 @@ async fn publication_changes_are_correctly_handled() {
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
     let table_1_inserts = grouped.get(&(EventType::Insert, table_1_id)).cloned().unwrap();
-    assert_eq!(table_1_inserts.len(), 1);
+    assert_eq!(table_1_inserts.len(), 2);
     let table_3_inserts = grouped.get(&(EventType::Insert, table_3_id)).cloned().unwrap();
     assert_eq!(table_3_inserts.len(), 1);
 }
@@ -1455,9 +1453,6 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     pipeline.start().await.unwrap();
 
     table_ready_notify.notified().await;
-
-    // We clear the events to make waiting more idiomatic down the line.
-    destination.clear_events().await;
 
     // Wait for an insert event in table 2.
     let insert_events_notify = destination
@@ -2043,9 +2038,6 @@ async fn pipeline_respects_column_level_publication() {
         }
     }
 
-    // Clear events and restart pipeline.
-    destination.clear_events().await;
-
     // Add email column to publication -> (id, name, age, email).
     database
         .run_sql(&format!(
@@ -2058,8 +2050,8 @@ async fn pipeline_respects_column_level_publication() {
     // Wait for 1 insert event with 4 columns.
     let insert_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
         ])
         .await;
 
@@ -2078,7 +2070,7 @@ async fn pipeline_respects_column_level_publication() {
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
     let inserts = grouped.get(&(EventType::Insert, table_id)).unwrap();
-    assert_eq!(inserts.len(), 1);
+    assert_eq!(inserts.len(), 2);
 
     let relation_after_adding_email = events
         .iter()
@@ -2091,7 +2083,9 @@ async fn pipeline_respects_column_level_publication() {
         })
         .expect("Expected relation event after adding email to publication");
 
-    if let Event::Insert(InsertEvent { replicated_table_schema, table_row, .. }) = &inserts[0] {
+    if let Event::Insert(InsertEvent { replicated_table_schema, table_row, .. }) =
+        inserts.last().unwrap()
+    {
         assert_eq!(table_row.values().len(), 4);
         let col_names: Vec<&str> =
             replicated_table_schema.column_schemas().map(|c| c.name.as_str()).collect();
@@ -2121,14 +2115,11 @@ async fn pipeline_respects_column_level_publication() {
         .await
         .unwrap();
 
-    // Clear events and restart pipeline.
-    destination.clear_events().await;
-
     // Wait for 1 insert event with 3 columns (different set than before).
     let insert_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
         ])
         .await;
 
@@ -2160,9 +2151,11 @@ async fn pipeline_respects_column_level_publication() {
         .expect("Expected relation event after removing age from publication");
     let grouped = group_events_by_type_and_table_id(&events);
     let inserts = grouped.get(&(EventType::Insert, table_id)).unwrap();
-    assert_eq!(inserts.len(), 1);
+    assert_eq!(inserts.len(), 3);
 
-    if let Event::Insert(InsertEvent { replicated_table_schema, table_row, .. }) = &inserts[0] {
+    if let Event::Insert(InsertEvent { replicated_table_schema, table_row, .. }) =
+        inserts.last().unwrap()
+    {
         assert_eq!(table_row.values().len(), 3);
         let col_names: Vec<&str> =
             replicated_table_schema.column_schemas().map(|c| c.name.as_str()).collect();
@@ -2341,40 +2334,27 @@ async fn table_sync_drops_destination_table_after_state_reset() {
 
     // Verify state before reset: table_rows has initial data, events has CDC data.
     let table_rows_before = destination.get_table_rows().await;
-    assert_eq!(
-        table_rows_before.get(&database_schema.users_schema().id).unwrap().len(),
-        initial_rows
-    );
-    assert_eq!(
-        table_rows_before.get(&database_schema.orders_schema().id).unwrap().len(),
-        initial_rows
-    );
+    let users_rows_before =
+        table_rows_before.get(&database_schema.users_schema().id).unwrap().len();
+    let orders_rows_before =
+        table_rows_before.get(&database_schema.orders_schema().id).unwrap().len();
+    assert_eq!(users_rows_before, initial_rows);
+    assert_eq!(orders_rows_before, initial_rows);
 
     let events_before = destination.get_events().await;
     let grouped_events_before = group_events_by_type_and_table_id(&events_before);
-    assert_eq!(
-        grouped_events_before
-            .get(&(EventType::Insert, database_schema.users_schema().id))
-            .unwrap()
-            .len(),
-        cdc_rows
-    );
-    assert_eq!(
-        grouped_events_before
-            .get(&(EventType::Insert, database_schema.orders_schema().id))
-            .unwrap()
-            .len(),
-        cdc_rows
-    );
+    let users_events_before = grouped_events_before
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .unwrap()
+        .len();
+    let orders_events_before = grouped_events_before
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .unwrap()
+        .len();
+    assert_eq!(users_events_before, cdc_rows);
+    assert_eq!(orders_events_before, cdc_rows);
 
-    // We clear the events and rows to check that only users data is written.
-    //
-    // This deletion becomes a bit confusing when used in the context of a
-    // destination drop that should take care of deleting data by itself. In
-    // this test we just want to make sure that the drop is called and that the
-    // data is rewritten from scratch.
-    destination.clear_events().await;
-    destination.clear_table_rows().await;
+    let orders_total_before = orders_rows_before + orders_events_before;
 
     // Register waits before resetting state so they observe the resync work from
     // this point on.
@@ -2390,12 +2370,12 @@ async fn table_sync_drops_destination_table_after_state_reset() {
     // Wait for all user events (table_rows + CDC) to be processed.
     // After the state reset, data can end up in either table_rows or events
     // depending on timing.
-    let total_expected_users = initial_rows + cdc_rows + new_rows_after_reset;
+    let expected_users_resync_writes = initial_rows + cdc_rows + new_rows_after_reset;
     let all_users_events_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(
             EventType::Insert,
             database_schema.users_schema().id,
-            total_expected_users as u64,
+            expected_users_resync_writes as u64,
         )])
         .await;
 
@@ -2420,21 +2400,21 @@ async fn table_sync_drops_destination_table_after_state_reset() {
     let events_after = destination.get_events().await;
     let grouped_events_after = group_events_by_type_and_table_id(&events_after);
 
-    // Users: table_rows + events should equal the total expected (data can be in
-    // either).
+    // Dropping users for a fresh copy removes that table's prior history from
+    // the wrapper. The replacement writes may be split between copy and
+    // streaming events.
     let users_rows = table_rows_after.get(&database_schema.users_schema().id).unwrap().len();
     let users_events = grouped_events_after
         .get(&(EventType::Insert, database_schema.users_schema().id))
         .map_or(0, Vec::len);
-    assert_eq!(users_rows + users_events, total_expected_users);
+    assert_eq!(users_rows + users_events, expected_users_resync_writes);
 
-    // Orders: no data, since we cleared it before restart and nothing should happen
-    // on orders.
-    assert!(!table_rows_after.contains_key(&database_schema.orders_schema().id));
-    assert!(
-        !grouped_events_after
-            .contains_key(&(EventType::Insert, database_schema.orders_schema().id))
-    );
+    // Orders are not resynced, so their cumulative history remains unchanged.
+    let orders_rows = table_rows_after.get(&database_schema.orders_schema().id).map_or(0, Vec::len);
+    let orders_events = grouped_events_after
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .map_or(0, Vec::len);
+    assert_eq!(orders_rows + orders_events, orders_total_before);
 
     // Verify the destination table was dropped for users but not for orders.
     assert!(destination.was_table_dropped_for_copy(database_schema.users_schema().id).await);
@@ -2558,10 +2538,6 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     let states = store.get_table_states().await;
     assert_eq!(states.get(&database_schema.users_schema().id), Some(&TableState::Ready));
     assert_eq!(states.get(&database_schema.orders_schema().id), Some(&TableState::Ready));
-
-    // Clear events and table rows to prepare for updates and deletes.
-    destination.clear_events().await;
-    destination.clear_table_rows().await;
 
     // Spawn a task to perform updates and deletes.
     let rows_to_update = 5;

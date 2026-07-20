@@ -399,6 +399,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         .unwrap();
 
     schema_stored.notified().await;
+
     pipeline.shutdown_and_wait().await.unwrap();
 
     let table_schemas = store.get_table_schemas().await;
@@ -418,7 +419,13 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 
-    destination.clear_events().await;
+    let events_before_restart = destination.get_events().await;
+    let grouped_events_before_restart = group_events_by_type_and_table_id(&events_before_restart);
+    let relation_count_before_restart =
+        grouped_events_before_restart.get(&(EventType::Relation, table_id)).map_or(0, Vec::len);
+    let insert_count_before_restart =
+        grouped_events_before_restart.get(&(EventType::Insert, table_id)).map_or(0, Vec::len);
+    assert_eq!(insert_count_before_restart, 0);
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -432,8 +439,16 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
 
     let notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(
+                EventType::Relation,
+                table_id,
+                (relation_count_before_restart + 1) as u64,
+            ),
+            EventCondition::TableCount(
+                EventType::Insert,
+                table_id,
+                (insert_count_before_restart + 1) as u64,
+            ),
         ])
         .await;
 
@@ -447,32 +462,38 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         .unwrap();
 
     notify.notified().await;
+
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
+    assert_eq!(
+        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
+        relation_count_before_restart + 1
+    );
+    assert_eq!(
+        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
+        insert_count_before_restart + 1
+    );
 
-    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
-    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
-
-    let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
+    let Event::Relation(relation) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
     assert_replicated_schema_column_names_types(
-        &r.replicated_table_schema,
+        &relation.replicated_table_schema,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
     let relation_email_column =
-        r.replicated_table_schema.column_schemas().find(|column| column.name == "email").unwrap();
+        relation.replicated_table_schema.column_schemas().find(|column| column.name == "email").unwrap();
     assert_eq!(
         relation_email_column.default_expression.as_deref(),
         Some("'unknown@example.com'::text")
     );
 
-    let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
+    let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
-    assert_eq!(i.table_row.values().len(), 4);
+    assert_eq!(insert.table_row.values().len(), 4);
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
@@ -484,7 +505,6 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         first_schema,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
     );
-
     let (_, second_schema) = &snapshots[1];
     assert_table_schema_column_names_types(
         second_schema,
@@ -759,8 +779,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    destination.clear_events().await;
-
     // Rename column + change type + insert, then restart.
     let mut pipeline = create_pipeline(
         &database.config,
@@ -800,14 +818,12 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     wait_for_at_least_events(
         &destination,
         vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
         ],
     )
     .await;
     pipeline.shutdown_and_wait().await.unwrap();
-
-    destination.clear_events().await;
 
     // Drop column + insert, then restart.
     let mut pipeline = create_pipeline(
@@ -837,14 +853,12 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     wait_for_at_least_events(
         &destination,
         vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
         ],
     )
     .await;
     pipeline.shutdown_and_wait().await.unwrap();
-
-    destination.clear_events().await;
 
     // Add another column + rename existing + insert, then verify.
     let mut pipeline = create_pipeline(
@@ -888,8 +902,8 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     wait_for_at_least_events(
         &destination,
         vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 4),
+            EventCondition::TableCount(EventType::Insert, table_id, 4),
         ],
     )
     .await;

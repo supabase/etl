@@ -859,7 +859,6 @@ async fn cdc_streaming_with_truncate() {
     .await;
 
     event_notify.notified().await;
-    destination.clear_events().await;
 
     let event_notify = destination
         .wait_for_events(vec![
@@ -872,12 +871,11 @@ async fn cdc_streaming_with_truncate() {
     database.truncate_table(database_schema.orders_schema().name.clone()).await.unwrap();
 
     event_notify.notified().await;
-    destination.clear_events().await;
 
     let event_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
-            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 4),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 4),
         ])
         .await;
 
@@ -1412,12 +1410,10 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         .await
         .expect("failed to insert row after generated column add");
     event_notify.notified().await;
-
-    destination.clear_events().await;
     let event_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
         ])
         .await;
     database
@@ -1435,12 +1431,10 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         .await
         .expect("failed to insert row after generated column rename");
     event_notify.notified().await;
-
-    destination.clear_events().await;
     let event_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
         ])
         .await;
     database
@@ -1455,12 +1449,10 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         .await
         .expect("failed to insert row after generated column drop");
     event_notify.notified().await;
-
-    destination.clear_events().await;
     let event_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 4),
+            EventCondition::TableCount(EventType::Insert, table_id, 4),
         ])
         .await;
     database
@@ -1564,12 +1556,10 @@ async fn schema_change_matches_simulator_generated_column_types() {
         .await
         .expect("failed to insert row after text generated column add");
     event_notify.notified().await;
-
-    destination.clear_events().await;
     let event_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
         ])
         .await;
     database
@@ -1588,12 +1578,10 @@ async fn schema_change_matches_simulator_generated_column_types() {
         .await
         .expect("failed to insert row after integer generated column add");
     event_notify.notified().await;
-
-    destination.clear_events().await;
     let event_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
         ])
         .await;
     database
@@ -1612,12 +1600,10 @@ async fn schema_change_matches_simulator_generated_column_types() {
         .await
         .expect("failed to insert row after boolean generated column add");
     event_notify.notified().await;
-
-    destination.clear_events().await;
     let event_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 4),
+            EventCondition::TableCount(EventType::Insert, table_id, 4),
         ])
         .await;
     database
@@ -1636,12 +1622,10 @@ async fn schema_change_matches_simulator_generated_column_types() {
         .await
         .expect("failed to insert row after timestamptz generated column add");
     event_notify.notified().await;
-
-    destination.clear_events().await;
     let event_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Relation, table_id, 5),
+            EventCondition::TableCount(EventType::Insert, table_id, 5),
         ])
         .await;
     database
