@@ -17,9 +17,9 @@ use etl::{
     },
     pipeline::PipelineId,
     schema::{ReplicatedTableSchema, SnapshotId, TableId, TableSchema},
-    store::{StateStore, TableRetryPolicy, TableState, TableStateType},
+    store::{StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
-        database::{spawn_source_database, test_table_name},
+        database::{replication_slot_state, spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
@@ -30,8 +30,8 @@ use etl::{
         },
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{
-            TableSelection, assert_events_equal, insert_orders_data, insert_users_data,
-            setup_test_database_schema,
+            TableSelection, assert_events_equal, build_expected_users_inserts, insert_orders_data,
+            insert_users_data, setup_test_database_schema,
         },
     },
 };
@@ -755,6 +755,98 @@ async fn table_sync_catchup_error_does_not_block_apply_worker() {
     assert_eq!(copied_users_table_rows.len(), copied_rows);
     let copied_orders_table_rows = table_rows.get(&orders_table_id).unwrap();
     assert_eq!(copied_orders_table_rows.len(), copied_rows);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stored_durable_progress_prevents_replay_when_status_updates_are_skipped() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let apply_slot_name: String =
+        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    ready.notified().await;
+
+    let initial_inserts = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=2).await;
+
+    initial_inserts.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // We check that the durable flush is stricly greater than the last confirmed
+    // flush lsn on the Postgres side, which should be the case, since we
+    // artificially stopped status updates.
+    let durable_flush_lsn =
+        store.get_replication_progress(WorkerType::Apply).await.unwrap().unwrap();
+    let (confirmed_flush_lsn, _) =
+        replication_slot_state(database.client.as_ref().unwrap(), &apply_slot_name).await;
+    assert!(confirmed_flush_lsn < durable_flush_lsn);
+
+    // We check the expected events after the first two inserts.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let inserts = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
+    let expected_inserts = build_expected_users_inserts(
+        1,
+        &database_schema.users_schema(),
+        vec![("user_1", 1), ("user_2", 2)],
+    );
+
+    assert_events_equal(inserts, &expected_inserts);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // We wait until 4 inserts have been reached, the previous ones + the current
+    // ones.
+    let new_inserts = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+
+    pipeline.start().await.unwrap();
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 3..=4).await;
+
+    new_inserts.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // We check the expected events after all the inserts.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let inserts = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
+    let expected_inserts = build_expected_users_inserts(
+        1,
+        &database_schema.users_schema(),
+        vec![("user_1", 1), ("user_2", 2), ("user_3", 3), ("user_4", 4)],
+    );
+    assert_events_equal(inserts, &expected_inserts);
 }
 
 #[tokio::test(flavor = "multi_thread")]
