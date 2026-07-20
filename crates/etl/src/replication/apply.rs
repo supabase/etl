@@ -647,7 +647,11 @@ struct ApplyLoopState {
     /// Number of events observed in the current transaction (excluding
     /// BEGIN/COMMIT).
     current_tx_events: u64,
-    /// Next zero-based ordinal to assign to transaction-scoped events.
+    /// Next zero-based ordinal to assign within the transaction.
+    ///
+    /// Runtime-generated relation metadata reserves ordinal slots to preserve
+    /// the sequence-key format written by earlier ETL versions, even though
+    /// relation events do not expose those ordinals.
     next_tx_ordinal: u64,
     /// Whether the loop is draining buffered destination work for shutdown.
     draining_for_shutdown: bool,
@@ -2015,7 +2019,7 @@ where
                 self.handle_commit_message(start_lsn, commit_body).await
             }
             LogicalReplicationMessage::Relation(relation_body) => {
-                self.handle_relation_message(start_lsn, relation_body).await
+                self.handle_relation_message(relation_body).await
             }
             LogicalReplicationMessage::Insert(insert_body) => {
                 self.state.current_tx_events += 1;
@@ -2298,7 +2302,6 @@ where
     /// use by DML handlers.
     async fn handle_relation_message(
         &mut self,
-        start_lsn: PgLsn,
         message: &protocol::RelationBody,
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
@@ -2310,7 +2313,14 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
-        let tx_ordinal = self.state.next_tx_ordinal();
+
+        // RELATION is session-generated protocol metadata and does not expose a
+        // sequence key. It still reserves an ordinal because deployed ETL
+        // versions included RELATION in later row keys. Changing that persisted
+        // ordering in place could make an unapplied row compare below an older
+        // destination watermark during an upgrade. A DML-only ordinal requires
+        // an explicitly versioned sequence-key migration.
+        let _reserved_tx_ordinal = self.state.next_tx_ordinal();
 
         // Exactly one worker owns protocol interpretation for a table at a time.
         // Non-owning workers skip `RELATION` handling and rely on the owner to
@@ -2365,12 +2375,7 @@ where
 
         self.shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
 
-        let relation_event = RelationEvent {
-            start_lsn,
-            commit_lsn: remote_final_lsn,
-            tx_ordinal,
-            replicated_table_schema,
-        };
+        let relation_event = RelationEvent { replicated_table_schema };
 
         Ok(HandleMessageResult::return_event(Event::Relation(relation_event)))
     }

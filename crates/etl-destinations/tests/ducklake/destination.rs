@@ -1244,9 +1244,6 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: new_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
@@ -1360,9 +1357,6 @@ async fn write_events_applies_defaulted_schema_change() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: new_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
@@ -1476,9 +1470,6 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: new_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
@@ -1582,9 +1573,6 @@ async fn write_events_supports_drop_and_add_same_column_name() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: new_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
@@ -1604,7 +1592,7 @@ async fn write_events_supports_drop_and_add_same_column_name() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let columns = table_column_names(&conn, &table_name);
-    assert!(!columns.iter().any(|column| column.starts_with("__etl_ducklake_dropped_")));
+    assert!(!columns.iter().any(|column| { column.starts_with("supabase_etl_ducklake_dropped_") }));
     assert!(columns.contains(&"status".to_owned()));
 
     let mut statement = conn
@@ -1684,9 +1672,6 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: int_lsn,
-                commit_lsn: int_lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: int_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
@@ -1704,9 +1689,6 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: text_lsn,
-                commit_lsn: text_lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: final_text_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
@@ -1722,7 +1704,7 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let columns = table_column_names(&conn, &table_name);
-    assert!(!columns.iter().any(|column| column.starts_with("__etl_ducklake_dropped_")));
+    assert!(!columns.iter().any(|column| { column.starts_with("supabase_etl_ducklake_dropped_") }));
     assert_eq!(columns, vec!["id", "status"]);
 
     let mut statement = conn
@@ -1749,7 +1731,7 @@ async fn write_events_drops_stale_tombstone_before_reusing_tombstone_name() {
     let lake = create_test_lake("write_events_drops_stale_tombstone_before_reuse").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let stale_tombstone_column = "__etl_ducklake_dropped_2_reused";
+    let stale_tombstone_column = "supabase_etl_ducklake_dropped_2_reused";
 
     let old_schema = make_schema(52, "public", "reuse_stale_tombstone");
     let new_schema = TableSchema::with_snapshot_id(
@@ -1796,9 +1778,6 @@ async fn write_events_drops_stale_tombstone_before_reusing_tombstone_name() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: new_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
@@ -1855,7 +1834,7 @@ async fn write_table_rows_preserves_active_column_with_tombstone_prefix() {
         vec![
             ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new(
-                "__etl_ducklake_dropped_business".to_owned(),
+                "supabase_etl_ducklake_dropped_business".to_owned(),
                 PgType::TEXT,
                 -1,
                 2,
@@ -1880,7 +1859,7 @@ async fn write_table_rows_preserves_active_column_with_tombstone_prefix() {
         .query_row(
             &format!(
                 "select {} from {} where id = 1",
-                quote_identifier("__etl_ducklake_dropped_business"),
+                quote_identifier("supabase_etl_ducklake_dropped_business"),
                 qualified_lake_table_name(&table_name)
             ),
             [],

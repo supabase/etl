@@ -257,12 +257,24 @@ again after supported schema changes.
 
 ```rust
 pub struct RelationEvent {
-    pub start_lsn: PgLsn,
-    pub commit_lsn: PgLsn,
-    pub tx_ordinal: u64,
     pub replicated_table_schema: ReplicatedTableSchema,
 }
 ```
+
+Relation messages are generated at runtime from `pgoutput`'s session-local
+schema cache; they are not WAL-backed changes. Which relation messages appear
+is therefore session-dependent: a fresh session resets the cache and can
+re-emit schema metadata during replay. `RelationEvent` intentionally has no
+start LSN, commit LSN, transaction ordinal, or sequence key. Those values would
+look like a durable replay identity even though they are not stable across
+sessions. Destinations should treat each relation event as an ordered schema
+barrier for the row events that follow it, not as a checkpoint or deduplication
+key.
+
+ETL currently reserves an internal transaction-ordinal position when it
+receives a relation message so row sequence keys remain compatible with values
+written by earlier releases. That compatibility detail is not part of
+`RelationEvent` and must not be used as a relation-event identity.
 
 PostgreSQL pgoutput builds relation messages by walking the table descriptor in
 `pg_attribute.attnum` order and skipping columns that are not published. It

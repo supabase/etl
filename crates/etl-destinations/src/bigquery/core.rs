@@ -18,7 +18,8 @@ use etl::{
     event::{Event, EventSequenceKey},
     pipeline::PipelineId,
     schema::{
-        ColumnModification, IdentityType, ReplicatedTableSchema, SchemaDiff, TableId, TableName,
+        ColumnModification, IdentityType, ReplicatedTableSchema, SchemaDiff, SchemaOperation,
+        TableId, TableName,
     },
     store::DestinationStore,
 };
@@ -759,7 +760,6 @@ where
         );
 
         let sequenced_bigquery_table_id = metadata.destination_table_id.parse()?;
-
         // Mark as applying before making changes (with the NEW snapshot_id and mask).
         //
         // NOTE: BigQuery does not support transactional DDL, so if the system crashes
@@ -780,7 +780,6 @@ where
             .store_destination_table_metadata(table_id, updated_metadata.clone())
             .await?;
 
-        // Compute and apply the diff.
         let diff = current_schema.diff(new_replicated_table_schema);
         if let Err(err) =
             self.apply_schema_diff(&table_id, &sequenced_bigquery_table_id, &diff).await
@@ -839,90 +838,104 @@ where
             diff.columns_to_change.len()
         );
 
-        // Apply column additions first (safest operation).
-        for column in &diff.columns_to_add {
-            self.client
-                .add_column(&self.dataset_id, &sequenced_bigquery_table_id.to_string(), column)
-                .await?;
-            if let Some(default_expression) = column.default_expression.as_deref() {
-                self.client
-                    .set_column_default(
-                        &self.dataset_id,
-                        &sequenced_bigquery_table_id.to_string(),
-                        &column.name,
-                        &column.typ,
-                        default_expression,
-                    )
-                    .await?;
-            }
-        }
-
-        // Apply column renames before other changes so subsequent DDL targets
-        // the new column name.
-        for change in &diff.columns_to_change {
-            for modification in &change.modifications {
-                let ColumnModification::Rename { old_name, new_name } = modification else {
-                    continue;
-                };
-
-                self.client
-                    .rename_column(
-                        &self.dataset_id,
-                        &sequenced_bigquery_table_id.to_string(),
-                        old_name,
-                        new_name,
-                    )
-                    .await?;
-            }
-        }
-
-        for change in &diff.columns_to_change {
-            for modification in &change.modifications {
-                // Schema changes normally keep BigQuery aligned with PostgreSQL, and failures
-                // are propagated. Nullability and default changes intentionally
-                // allow known unsupported source states, so later changes must
-                // tolerate that divergence.
-                match modification {
-                    ColumnModification::Rename { .. } => {}
-                    ColumnModification::Nullability { old_nullable, new_nullable } => {
-                        if !*old_nullable && *new_nullable {
-                            self.client
-                                .drop_column_not_null(
-                                    &self.dataset_id,
-                                    &sequenced_bigquery_table_id.to_string(),
-                                    &change.new_column.name,
-                                )
-                                .await?;
-                        } else {
-                            warn!(
-                                table_id = %table_id,
-                                column_name = %change.new_column.name,
-                                "bigquery does not support setting not null on an existing \
-                                 column; keeping the destination column nullable"
-                            );
-                        }
+        for operation in diff.operations() {
+            match operation {
+                SchemaOperation::DropColumn { column } => {
+                    self.client
+                        .drop_column(
+                            &self.dataset_id,
+                            &sequenced_bigquery_table_id.to_string(),
+                            &column.name,
+                        )
+                        .await?;
+                }
+                SchemaOperation::RenameColumn { old_name, new_name, .. } => {
+                    self.client
+                        .rename_column(
+                            &self.dataset_id,
+                            &sequenced_bigquery_table_id.to_string(),
+                            old_name,
+                            new_name,
+                        )
+                        .await?;
+                }
+                SchemaOperation::AddColumn { column } => {
+                    self.client
+                        .add_column(
+                            &self.dataset_id,
+                            &sequenced_bigquery_table_id.to_string(),
+                            column,
+                        )
+                        .await?;
+                    if let Some(default_expression) = column.default_expression.as_deref() {
+                        self.client
+                            .set_column_default(
+                                &self.dataset_id,
+                                &sequenced_bigquery_table_id.to_string(),
+                                &column.name,
+                                &column.typ,
+                                default_expression,
+                            )
+                            .await?;
                     }
-                    ColumnModification::Default { new_expression, .. } => {
-                        if let Some(new_default_expression) = new_expression.as_deref() {
-                            if supports_column_default(
-                                new_default_expression,
-                                &change.new_column.typ,
-                            ) {
+                }
+                SchemaOperation::ModifyColumn { change, modification } => {
+                    // Schema changes normally keep BigQuery aligned with PostgreSQL, and failures
+                    // are propagated. Nullability and default changes intentionally
+                    // allow known unsupported source states, so later changes must
+                    // tolerate that divergence.
+                    match modification {
+                        ColumnModification::Rename { .. } => {
+                            unreachable!("ordered modify operations exclude renames")
+                        }
+                        ColumnModification::Nullability { old_nullable, new_nullable } => {
+                            if !*old_nullable && *new_nullable {
                                 self.client
-                                    .set_column_default(
+                                    .drop_column_not_null(
                                         &self.dataset_id,
                                         &sequenced_bigquery_table_id.to_string(),
                                         &change.new_column.name,
-                                        &change.new_column.typ,
-                                        new_default_expression,
                                     )
                                     .await?;
                             } else {
                                 warn!(
                                     table_id = %table_id,
                                     column_name = %change.new_column.name,
-                                    "skipping unsupported source column default for bigquery"
+                                    "bigquery does not support setting not null on an existing \
+                                     column; keeping the destination column nullable"
                                 );
+                            }
+                        }
+                        ColumnModification::Default { new_expression, .. } => {
+                            if let Some(new_default_expression) = new_expression.as_deref() {
+                                if supports_column_default(
+                                    new_default_expression,
+                                    &change.new_column.typ,
+                                ) {
+                                    self.client
+                                        .set_column_default(
+                                            &self.dataset_id,
+                                            &sequenced_bigquery_table_id.to_string(),
+                                            &change.new_column.name,
+                                            &change.new_column.typ,
+                                            new_default_expression,
+                                        )
+                                        .await?;
+                                } else {
+                                    warn!(
+                                        table_id = %table_id,
+                                        column_name = %change.new_column.name,
+                                        "skipping unsupported source column default for bigquery"
+                                    );
+                                    self.client
+                                        .clear_column_default(
+                                            &self.dataset_id,
+                                            &sequenced_bigquery_table_id.to_string(),
+                                            &change.new_column.name,
+                                        )
+                                        .await?;
+                                }
+                            } else {
                                 self.client
                                     .clear_column_default(
                                         &self.dataset_id,
@@ -931,29 +944,10 @@ where
                                     )
                                     .await?;
                             }
-                        } else {
-                            self.client
-                                .clear_column_default(
-                                    &self.dataset_id,
-                                    &sequenced_bigquery_table_id.to_string(),
-                                    &change.new_column.name,
-                                )
-                                .await?;
                         }
                     }
                 }
             }
-        }
-
-        // Apply column removals last.
-        for column in &diff.columns_to_remove {
-            self.client
-                .drop_column(
-                    &self.dataset_id,
-                    &sequenced_bigquery_table_id.to_string(),
-                    &column.name,
-                )
-                .await?;
         }
 
         info!("schema changes applied successfully to table {}", sequenced_bigquery_table_id);

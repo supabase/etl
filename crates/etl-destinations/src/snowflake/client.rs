@@ -2,7 +2,9 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use etl::{
     pipeline::PipelineId,
-    schema::{ColumnChange, ColumnModification, ColumnSchema, SchemaDiff, TableId},
+    schema::{
+        ColumnChange, ColumnModification, ColumnSchema, SchemaDiff, SchemaOperation, TableId,
+    },
 };
 use metrics::{counter, gauge, histogram};
 use tokio::{
@@ -354,32 +356,29 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             return Ok(());
         }
 
-        for col in &diff.columns_to_add {
-            let add_column_default_clause = schema::add_column_default_clause(col);
-            self.sql_client
-                .add_column(
-                    table_name,
-                    &col.name,
-                    schema::type_name(&col.typ),
-                    add_column_default_clause.as_deref(),
-                )
-                .await?;
-        }
-
-        for change in &diff.columns_to_change {
-            for modification in &change.modifications {
-                let ColumnModification::Rename { old_name, new_name } = modification else {
-                    continue;
-                };
-
-                self.sql_client.rename_column(table_name, old_name, new_name).await?;
-            }
-        }
-
-        for change in &diff.columns_to_change {
-            for modification in &change.modifications {
-                match modification {
-                    ColumnModification::Rename { .. } => {}
+        for operation in diff.operations() {
+            match operation {
+                SchemaOperation::DropColumn { column } => {
+                    self.sql_client.drop_column(table_name, &column.name).await?;
+                }
+                SchemaOperation::RenameColumn { old_name, new_name, .. } => {
+                    self.sql_client.rename_column(table_name, old_name, new_name).await?;
+                }
+                SchemaOperation::AddColumn { column } => {
+                    let add_column_default_clause = schema::add_column_default_clause(column);
+                    self.sql_client
+                        .add_column(
+                            table_name,
+                            &column.name,
+                            schema::type_name(&column.typ),
+                            add_column_default_clause.as_deref(),
+                        )
+                        .await?;
+                }
+                SchemaOperation::ModifyColumn { change, modification } => match modification {
+                    ColumnModification::Rename { .. } => {
+                        unreachable!("ordered modify operations exclude renames")
+                    }
                     ColumnModification::Nullability { old_nullable, new_nullable } => {
                         warn!(
                             table_name,
@@ -400,12 +399,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                             );
                         }
                     }
-                }
+                },
             }
-        }
-
-        for col in &diff.columns_to_remove {
-            self.sql_client.drop_column(table_name, &col.name).await?;
         }
 
         Ok(())

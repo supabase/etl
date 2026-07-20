@@ -132,16 +132,10 @@ fn status_default_schema(
 async fn apply_relation_event(
     destination: &SnowflakeTestDestination,
     replicated_table_schema: ReplicatedTableSchema,
-    lsn: u64,
     context: &str,
 ) {
     destination
-        .process_events(vec![Event::Relation(RelationEvent {
-            start_lsn: PgLsn::from(lsn),
-            commit_lsn: PgLsn::from(lsn),
-            tx_ordinal: 0,
-            replicated_table_schema,
-        })])
+        .process_events(vec![Event::Relation(RelationEvent { replicated_table_schema })])
         .await
         .unwrap_or_else(|error| panic!("process_events ({context}) failed: {error}"));
 }
@@ -494,9 +488,6 @@ async fn schema_evolution_add_column() {
         harness
             .destination
             .process_events(vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })])
             .await
@@ -621,9 +612,6 @@ async fn schema_evolution_add_column_defaults() {
         harness
             .destination
             .process_events(vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })])
             .await
@@ -745,15 +733,13 @@ async fn schema_evolution_existing_column_default_changes() {
             harness.config.schema()
         );
 
-        apply_relation_event(&harness.destination, set_default_replicated, 100, "set default")
-            .await;
+        apply_relation_event(&harness.destination, set_default_replicated, "set default").await;
         insert_row_omitting_status(&harness.sql, &fqn, 1, "manual-1", "after skipped set default")
             .await;
 
         apply_relation_event(
             &harness.destination,
             unsupported_default_replicated,
-            200,
             "unsupported default",
         )
         .await;
@@ -766,8 +752,7 @@ async fn schema_evolution_existing_column_default_changes() {
         )
         .await;
 
-        apply_relation_event(&harness.destination, reset_default_replicated, 300, "reset default")
-            .await;
+        apply_relation_event(&harness.destination, reset_default_replicated, "reset default").await;
         insert_row_omitting_status(
             &harness.sql,
             &fqn,
@@ -777,8 +762,7 @@ async fn schema_evolution_existing_column_default_changes() {
         )
         .await;
 
-        apply_relation_event(&harness.destination, drop_default_replicated, 400, "drop default")
-            .await;
+        apply_relation_event(&harness.destination, drop_default_replicated, "drop default").await;
         insert_row_omitting_status(&harness.sql, &fqn, 4, "manual-4", "after skipped drop default")
             .await;
 
@@ -868,9 +852,6 @@ async fn schema_evolution_rename_column() {
         harness
             .destination
             .process_events(vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })])
             .await
@@ -1000,9 +981,6 @@ async fn schema_evolution_drop_column() {
         harness
             .destination
             .process_events(vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })])
             .await
@@ -1178,9 +1156,6 @@ async fn schema_evolution_interleaved_ddl_dml() {
         harness
             .destination
             .process_events(vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: replicated_v2.clone(),
             })])
             .await
@@ -1207,9 +1182,6 @@ async fn schema_evolution_interleaved_ddl_dml() {
         harness
             .destination
             .process_events(vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(200u64),
-                commit_lsn: PgLsn::from(200u64),
-                tx_ordinal: 0,
                 replicated_table_schema: replicated_v3.clone(),
             })])
             .await
@@ -1236,9 +1208,6 @@ async fn schema_evolution_interleaved_ddl_dml() {
         harness
             .destination
             .process_events(vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(300u64),
-                commit_lsn: PgLsn::from(300u64),
-                tx_ordinal: 0,
                 replicated_table_schema: replicated_v4.clone(),
             })])
             .await

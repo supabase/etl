@@ -11,8 +11,8 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnModification, IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId, Type,
-        is_array_type,
+        ColumnModification, IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff,
+        SchemaOperation, TableId, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
 };
@@ -781,7 +781,6 @@ where
         );
 
         let clickhouse_table_name = &metadata.destination_table_id;
-
         // Mark as Applying before DDL changes.
         let updated_metadata = DestinationTableMetadata::new_applied(
             clickhouse_table_name.clone(),
@@ -795,7 +794,6 @@ where
         );
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
-        // Compute and apply the diff.
         let diff = current_schema.diff(new_schema);
         if let Err(err) =
             self.apply_schema_diff(clickhouse_table_name, &diff, &current_schema, new_schema).await
@@ -876,35 +874,39 @@ where
             )?;
         }
 
-        // Track the last user column name for AFTER placement. New columns
-        // are inserted after this column, and each added column becomes the
-        // new anchor for the next. `None` (no user columns in the current
-        // schema) falls through to `FIRST` placement inside `add_column`,
-        // which still keeps the new column before the trailing CDC columns.
-        let mut last_user_column: Option<String> =
-            current_schema.column_schemas().last().map(|c| c.name.clone());
+        // Keep the current physical order so additions can remain before the
+        // trailing CDC columns even when earlier operations renamed or dropped
+        // the previous placement anchor.
+        let mut user_column_names: Vec<String> =
+            current_schema.column_schemas().map(|column| column.name.clone()).collect();
 
-        for column in &diff.columns_to_add {
-            self.client
-                .add_column(clickhouse_table_name, column, last_user_column.as_deref())
-                .await?;
-            last_user_column = Some(column.name.clone());
-        }
-
-        for change in &diff.columns_to_change {
-            for modification in &change.modifications {
-                let ColumnModification::Rename { old_name, new_name } = modification else {
-                    continue;
-                };
-
-                self.client.rename_column(clickhouse_table_name, old_name, new_name).await?;
-            }
-        }
-
-        for change in &diff.columns_to_change {
-            for modification in &change.modifications {
-                match modification {
-                    ColumnModification::Rename { .. } => {}
+        for operation in diff.operations() {
+            match operation {
+                SchemaOperation::DropColumn { column } => {
+                    self.client.drop_column(clickhouse_table_name, &column.name).await?;
+                    user_column_names.retain(|name| name != &column.name);
+                }
+                SchemaOperation::RenameColumn { old_name, new_name, .. } => {
+                    self.client.rename_column(clickhouse_table_name, old_name, new_name).await?;
+                    if let Some(name) = user_column_names.iter_mut().find(|name| *name == old_name)
+                    {
+                        new_name.clone_into(name);
+                    }
+                }
+                SchemaOperation::AddColumn { column } => {
+                    self.client
+                        .add_column(
+                            clickhouse_table_name,
+                            column,
+                            user_column_names.last().map(String::as_str),
+                        )
+                        .await?;
+                    user_column_names.push(column.name.clone());
+                }
+                SchemaOperation::ModifyColumn { change, modification } => match modification {
+                    ColumnModification::Rename { .. } => {
+                        unreachable!("ordered modify operations exclude renames")
+                    }
                     ColumnModification::Nullability { old_nullable, new_nullable } => {
                         warn!(
                             table_name = %clickhouse_table_name,
@@ -961,12 +963,8 @@ where
                             );
                         }
                     }
-                }
+                },
             }
-        }
-
-        for column in &diff.columns_to_remove {
-            self.client.drop_column(clickhouse_table_name, &column.name).await?;
         }
 
         if is_replacing_merge_tree {
@@ -1759,11 +1757,12 @@ mod tests {
     fn reject_pk_alters_under_replacing_merge_tree_allows_non_pk_drop() {
         // --- GIVEN: a diff that drops the non-PK `value` column ---
         let schema = replicated_schema_for_pk_alters();
-        let diff = SchemaDiff {
-            columns_to_add: Vec::new(),
-            columns_to_remove: vec![ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 3, true)],
-            columns_to_change: Vec::new(),
-        };
+        let diff = SchemaDiff::new(
+            Vec::new(),
+            vec![ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 3, true)],
+            Vec::new(),
+            schema.column_schemas().map(|column| column.name.as_str()),
+        );
         // --- WHEN/THEN: guard passes ---
         reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
@@ -1777,14 +1776,15 @@ mod tests {
     fn reject_pk_alters_under_replacing_merge_tree_rejects_pk_drop() {
         // --- GIVEN: a diff that drops the PK column `tenant_id` ---
         let schema = replicated_schema_for_pk_alters();
-        let diff = SchemaDiff {
-            columns_to_add: Vec::new(),
-            columns_to_remove: vec![
+        let diff = SchemaDiff::new(
+            Vec::new(),
+            vec![
                 ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, false)
                     .with_primary_key(1),
             ],
-            columns_to_change: Vec::new(),
-        };
+            Vec::new(),
+            schema.column_schemas().map(|column| column.name.as_str()),
+        );
         // --- WHEN: validating ---
         let err = reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
@@ -1801,11 +1801,12 @@ mod tests {
     fn reject_pk_alters_under_replacing_merge_tree_allows_non_pk_rename() {
         // --- GIVEN: a rename of the non-PK `value` column ---
         let schema = replicated_schema_for_pk_alters();
-        let diff = SchemaDiff {
-            columns_to_add: Vec::new(),
-            columns_to_remove: Vec::new(),
-            columns_to_change: vec![rename_change("value", "payload", 3)],
-        };
+        let diff = SchemaDiff::new(
+            Vec::new(),
+            Vec::new(),
+            vec![rename_change("value", "payload", 3)],
+            schema.column_schemas().map(|column| column.name.as_str()),
+        );
         // --- WHEN/THEN: guard passes ---
         reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
@@ -1819,11 +1820,12 @@ mod tests {
     fn reject_pk_alters_under_replacing_merge_tree_rejects_pk_rename() {
         // --- GIVEN: a rename of the PK column `id` ---
         let schema = replicated_schema_for_pk_alters();
-        let diff = SchemaDiff {
-            columns_to_add: Vec::new(),
-            columns_to_remove: Vec::new(),
-            columns_to_change: vec![rename_change("id", "row_id", 2)],
-        };
+        let diff = SchemaDiff::new(
+            Vec::new(),
+            Vec::new(),
+            vec![rename_change("id", "row_id", 2)],
+            schema.column_schemas().map(|column| column.name.as_str()),
+        );
         // --- WHEN: validating ---
         let err = reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
