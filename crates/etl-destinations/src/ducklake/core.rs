@@ -1,7 +1,7 @@
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
@@ -17,7 +17,7 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnModification, ColumnSchema, ReplicatedTableSchema, ReplicationMask, SchemaDiff,
+        ColumnModificationType, ColumnSchema, ReplicatedTableSchema, ReplicationMask, SchemaDiff,
         SchemaOperation, SnapshotId, TableId, TableName, TableSchema,
     },
     store::{DestinationStore, TableStateType},
@@ -534,25 +534,114 @@ fn tombstone_columns_to_cleanup_ducklake(
         .collect()
 }
 
+/// Returns rename-cycle ordinals whose final names already occupy logical
+/// column order in DuckLake.
+///
+/// DuckLake applies a schema plan in one transaction, but destination metadata
+/// is stored separately. A crash after the DuckLake commit and before metadata
+/// becomes `Applied` therefore replays against either the complete old or the
+/// complete new physical schema. Ordinary renames expose that state by name;
+/// a cycle reuses the same name set at both endpoints. Because renaming does
+/// not reorder physical columns, their final-name order identifies a completed
+/// cycle without persisting planner-generated temporary names.
+fn completed_rename_cycle_ordinals_ducklake(
+    column_names: &[String],
+    diff: &SchemaDiff,
+) -> HashSet<i32> {
+    let renames: BTreeMap<i32, (&str, &str)> = diff
+        .columns_to_modify
+        .iter()
+        .filter_map(|modification| {
+            modification.modification_types.contains(&ColumnModificationType::Rename).then_some((
+                modification.old_column_schema.ordinal_position,
+                (
+                    modification.old_column_schema.name.as_str(),
+                    modification.new_column_schema.name.as_str(),
+                ),
+            ))
+        })
+        .collect();
+    let owner_ordinal_by_old_name: HashMap<&str, i32> = renames
+        .iter()
+        .map(|(&ordinal_position, &(old_name, _))| (old_name, ordinal_position))
+        .collect();
+    let mut visited = HashSet::new();
+    let mut completed = HashSet::new();
+
+    for &start_ordinal in renames.keys() {
+        if visited.contains(&start_ordinal) {
+            continue;
+        }
+
+        let mut path = Vec::new();
+        let mut path_index_by_ordinal = HashMap::new();
+        let mut current_ordinal = start_ordinal;
+
+        loop {
+            if visited.contains(&current_ordinal) {
+                break;
+            }
+            if let Some(&cycle_start_index) = path_index_by_ordinal.get(&current_ordinal) {
+                let mut cycle_ordinals = path[cycle_start_index..].to_vec();
+                cycle_ordinals.sort_unstable();
+
+                let final_name_positions: Vec<_> = cycle_ordinals
+                    .iter()
+                    .filter_map(|ordinal_position| {
+                        let (_, final_name) = renames.get(ordinal_position)?;
+                        find_ducklake_column(column_names, final_name)
+                    })
+                    .collect();
+                let final_names_are_in_logical_order = final_name_positions.len()
+                    == cycle_ordinals.len()
+                    && final_name_positions.windows(2).all(|positions| positions[0] < positions[1]);
+
+                if final_names_are_in_logical_order {
+                    completed.extend(cycle_ordinals);
+                }
+                break;
+            }
+
+            path_index_by_ordinal.insert(current_ordinal, path.len());
+            path.push(current_ordinal);
+
+            let Some((_, target_name)) = renames.get(&current_ordinal) else {
+                break;
+            };
+            let Some(&next_ordinal) = owner_ordinal_by_old_name.get(target_name) else {
+                break;
+            };
+            current_ordinal = next_ordinal;
+        }
+
+        visited.extend(path);
+    }
+
+    completed
+}
+
 /// Plans idempotent DuckLake schema DDL for the current destination columns.
 fn plan_schema_diff_sql_ducklake(
     table_name: &DuckLakeTableName,
     mut column_names: Vec<String>,
     diff: &SchemaDiff,
 ) -> EtlResult<DuckLakeSchemaDiffPlan> {
+    let completed_rename_cycle_ordinals =
+        completed_rename_cycle_ordinals_ducklake(&column_names, diff);
     let added_column_names: HashSet<_> =
         diff.columns_to_add.iter().map(|column| column.name.as_str()).collect();
     let rename_target_names: HashSet<_> = diff
-        .columns_to_change
+        .columns_to_modify
         .iter()
-        .flat_map(|change| &change.modifications)
-        .filter_map(|modification| match modification {
-            ColumnModification::Rename { new_name, .. } => Some(new_name.as_str()),
-            _ => None,
+        .filter_map(|modification| {
+            modification
+                .modification_types
+                .contains(&ColumnModificationType::Rename)
+                .then_some(modification.new_column_schema.name.as_str())
         })
         .collect();
-    let reused_removed_column_names: HashSet<_> = diff
-        .columns_to_remove
+    let reused_dropped_column_names: HashSet<_> = diff
+        .columns_to_drop
         .iter()
         .filter(|column| {
             added_column_names.contains(column.name.as_str())
@@ -562,20 +651,18 @@ fn plan_schema_diff_sql_ducklake(
         .collect();
     let mut statements = Vec::new();
 
-    // Consume the shared plan exactly once. DuckLake only customizes how an
-    // operation is rendered or reconciled against the current physical schema;
-    // the shared planner remains the sole owner of execution order.
+    // Preserve shared operation order while rendering replay-safe DuckLake DDL.
     for operation in diff.ordered_operations() {
         match operation {
-            SchemaOperation::DropColumn { column }
-                if reused_removed_column_names.contains(column.name.as_str()) =>
+            SchemaOperation::DropColumn { column_schema }
+                if reused_dropped_column_names.contains(column_schema.name.as_str()) =>
             {
                 // Keep a dropped column under a deterministic tombstone name
                 // until the replacement has been applied and metadata is
                 // durable. This makes same-name replacement replayable without
                 // changing the shared operation order.
-                let tombstone_name = dropped_column_tombstone_name_ducklake(column);
-                let old_index = find_ducklake_column(&column_names, &column.name);
+                let tombstone_name = dropped_column_tombstone_name_ducklake(column_schema);
+                let old_index = find_ducklake_column(&column_names, &column_schema.name);
                 let tombstone_index = find_ducklake_column(&column_names, &tombstone_name);
 
                 match (old_index, tombstone_index) {
@@ -583,7 +670,7 @@ fn plan_schema_diff_sql_ducklake(
                         statements.push(DuckLakeSchemaDdlStatement {
                             sql: build_rename_column_sql_ducklake(
                                 table_name,
-                                &column.name,
+                                &column_schema.name,
                                 &tombstone_name,
                             ),
                             error_description: "DuckLake alter table rename dropped column failed",
@@ -593,7 +680,7 @@ fn plan_schema_diff_sql_ducklake(
                     (Some(_), Some(_)) => {
                         debug!(
                             table = %table_name,
-                            column = %column.name,
+                            column = %column_schema.name,
                             tombstone_column = %tombstone_name,
                             "ducklake drop column skipped because reused column name was already \
                              tombstoned"
@@ -602,7 +689,7 @@ fn plan_schema_diff_sql_ducklake(
                     (None, Some(_)) => {
                         debug!(
                             table = %table_name,
-                            column = %column.name,
+                            column = %column_schema.name,
                             tombstone_column = %tombstone_name,
                             "ducklake drop column skipped because destination column is already \
                              tombstoned"
@@ -611,30 +698,48 @@ fn plan_schema_diff_sql_ducklake(
                     (None, None) => {
                         debug!(
                             table = %table_name,
-                            column = %column.name,
+                            column = %column_schema.name,
                             "ducklake drop column skipped because destination column is already \
                              absent"
                         );
                     }
                 }
             }
-            SchemaOperation::DropColumn { column } => {
-                let Some(index) = find_ducklake_column(&column_names, &column.name) else {
+            SchemaOperation::DropColumn { column_schema } => {
+                let Some(index) = find_ducklake_column(&column_names, &column_schema.name) else {
                     debug!(
                         table = %table_name,
-                        column = %column.name,
+                        column = %column_schema.name,
                         "ducklake drop column skipped because destination column is already absent"
                     );
                     continue;
                 };
 
                 statements.push(DuckLakeSchemaDdlStatement {
-                    sql: build_drop_column_sql_ducklake(table_name, &column.name),
+                    sql: build_drop_column_sql_ducklake(table_name, &column_schema.name),
                     error_description: "DuckLake alter table drop column failed",
                 });
                 column_names.remove(index);
             }
-            SchemaOperation::RenameColumn { old_name, new_name, .. } => {
+            SchemaOperation::ModifyColumn {
+                old_column_schema,
+                new_column_schema,
+                modification_type: ColumnModificationType::Rename,
+            } if completed_rename_cycle_ordinals.contains(&old_column_schema.ordinal_position) => {
+                debug!(
+                    table = %table_name,
+                    old_column = %old_column_schema.name,
+                    new_column = %new_column_schema.name,
+                    "ducklake rename skipped because its cycle already has final column order"
+                );
+            }
+            SchemaOperation::ModifyColumn {
+                old_column_schema,
+                new_column_schema,
+                modification_type: ColumnModificationType::Rename,
+            } => {
+                let old_name = &old_column_schema.name;
+                let new_name = &new_column_schema.name;
                 let old_index = find_ducklake_column(&column_names, old_name);
                 let new_index = find_ducklake_column(&column_names, new_name);
 
@@ -694,103 +799,110 @@ fn plan_schema_diff_sql_ducklake(
                     }
                 }
             }
-            SchemaOperation::ModifyColumn { change, modification } => {
-                if find_ducklake_column(&column_names, &change.new_column.name).is_none() {
+            SchemaOperation::ModifyColumn {
+                old_column_schema,
+                new_column_schema,
+                modification_type: ColumnModificationType::Nullability,
+            } => {
+                if find_ducklake_column(&column_names, &new_column_schema.name).is_none() {
                     debug!(
                         table = %table_name,
-                        column = %change.new_column.name,
+                        column = %new_column_schema.name,
                         "ducklake column update skipped because destination column is absent"
                     );
                     continue;
                 }
 
-                match modification {
-                    ColumnModification::Rename { .. } => {
-                        unreachable!("ordered modify operations exclude renames")
-                    }
-                    ColumnModification::Nullability { old_nullable, new_nullable } => {
+                warn!(
+                    table_name = %table_name,
+                    column_name = %new_column_schema.name,
+                    old_nullable = old_column_schema.nullable,
+                    new_nullable = new_column_schema.nullable,
+                    "skipping source column nullability change for DuckLake"
+                );
+            }
+            SchemaOperation::ModifyColumn {
+                old_column_schema,
+                new_column_schema,
+                modification_type: ColumnModificationType::Default,
+            } => {
+                if find_ducklake_column(&column_names, &new_column_schema.name).is_none() {
+                    debug!(
+                        table = %table_name,
+                        column = %new_column_schema.name,
+                        "ducklake column update skipped because destination column is absent"
+                    );
+                    continue;
+                }
+
+                let old_default_was_supported = old_column_schema
+                    .default_expression
+                    .as_deref()
+                    .is_some_and(|default_expression| {
+                        supports_column_default_ducklake(default_expression, &old_column_schema.typ)
+                    });
+
+                if let Some(new_default_expression) =
+                    new_column_schema.default_expression.as_deref()
+                {
+                    let Some(sql) = build_set_default_sql_ducklake(
+                        table_name,
+                        &new_column_schema.name,
+                        &new_column_schema.typ,
+                        new_default_expression,
+                    ) else {
                         warn!(
                             table_name = %table_name,
-                            column_name = %change.new_column.name,
-                            old_nullable,
-                            new_nullable,
-                            "skipping source column nullability change for DuckLake"
+                            column_name = %new_column_schema.name,
+                            "skipping unsupported source column default for DuckLake"
                         );
-                    }
-                    ColumnModification::Default { old_expression, new_expression } => {
-                        let old_default_was_supported =
-                            old_expression.as_deref().is_some_and(|default_expression| {
-                                supports_column_default_ducklake(
-                                    default_expression,
-                                    &change.old_column.typ,
-                                )
-                            });
-
-                        if let Some(new_default_expression) = new_expression.as_deref() {
-                            let Some(sql) = build_set_default_sql_ducklake(
-                                table_name,
-                                &change.new_column.name,
-                                &change.new_column.typ,
-                                new_default_expression,
-                            ) else {
-                                warn!(
-                                    table_name = %table_name,
-                                    column_name = %change.new_column.name,
-                                    "skipping unsupported source column default for DuckLake"
-                                );
-                                if old_default_was_supported {
-                                    statements.push(DuckLakeSchemaDdlStatement {
-                                        sql: build_drop_default_sql_ducklake(
-                                            table_name,
-                                            &change.new_column.name,
-                                        ),
-                                        error_description: "DuckLake alter table drop default \
-                                                            failed",
-                                    });
-                                }
-                                continue;
-                            };
-                            statements.push(DuckLakeSchemaDdlStatement {
-                                sql,
-                                error_description: "DuckLake alter table set default failed",
-                            });
-                        } else if old_default_was_supported {
+                        if old_default_was_supported {
                             statements.push(DuckLakeSchemaDdlStatement {
                                 sql: build_drop_default_sql_ducklake(
                                     table_name,
-                                    &change.new_column.name,
+                                    &new_column_schema.name,
                                 ),
                                 error_description: "DuckLake alter table drop default failed",
                             });
-                        } else if old_expression.is_some() {
-                            warn!(
-                                table_name = %table_name,
-                                column_name = %change.new_column.name,
-                                "skipping source column default removal for DuckLake because no \
-                                 supported destination default was set"
-                            );
                         }
-                    }
+                        continue;
+                    };
+                    statements.push(DuckLakeSchemaDdlStatement {
+                        sql,
+                        error_description: "DuckLake alter table set default failed",
+                    });
+                } else if old_default_was_supported {
+                    statements.push(DuckLakeSchemaDdlStatement {
+                        sql: build_drop_default_sql_ducklake(table_name, &new_column_schema.name),
+                        error_description: "DuckLake alter table drop default failed",
+                    });
+                } else if old_column_schema.default_expression.is_some() {
+                    warn!(
+                        table_name = %table_name,
+                        column_name = %new_column_schema.name,
+                        "skipping source column default drop for DuckLake because no supported \
+                         destination default was set"
+                    );
                 }
             }
-            SchemaOperation::AddColumn { column } => {
-                if find_ducklake_column(&column_names, &column.name).is_some() {
+            SchemaOperation::AddColumn { column_schema } => {
+                if find_ducklake_column(&column_names, &column_schema.name).is_some() {
                     debug!(
                         table = %table_name,
-                        column = %column.name,
+                        column = %column_schema.name,
                         "ducklake add column skipped because destination column already exists"
                     );
 
-                    if let Some(default_expression) = column.default_expression.as_deref() {
+                    if let Some(default_expression) = column_schema.default_expression.as_deref() {
                         let Some(sql) = build_set_default_sql_ducklake(
                             table_name,
-                            &column.name,
-                            &column.typ,
+                            &column_schema.name,
+                            &column_schema.typ,
                             default_expression,
                         ) else {
                             warn!(
                                 table_name = %table_name,
-                                column_name = %column.name,
+                                column_name = %column_schema.name,
                                 "skipping unsupported source column default for DuckLake"
                             );
                             continue;
@@ -805,10 +917,10 @@ fn plan_schema_diff_sql_ducklake(
                 }
 
                 statements.push(DuckLakeSchemaDdlStatement {
-                    sql: build_add_column_sql_ducklake(table_name, column),
+                    sql: build_add_column_sql_ducklake(table_name, column_schema),
                     error_description: "DuckLake alter table add column failed",
                 });
-                column_names.push(column.name.clone());
+                column_names.push(column_schema.name.clone());
             }
         }
     }
@@ -1594,8 +1706,8 @@ where
         info!(
             table = %table_name,
             additions = diff.columns_to_add.len(),
-            removals = diff.columns_to_remove.len(),
-            changes = diff.columns_to_change.len(),
+            drops = diff.columns_to_drop.len(),
+            modifications = diff.columns_to_modify.len(),
             "ducklake applying schema diff"
         );
 
@@ -2747,8 +2859,8 @@ mod tests {
         config::{PgConnectionConfig, TcpKeepaliveConfig},
         data::{Cell, PartialTableRow, TableRow},
         schema::{
-            ColumnChange, ColumnModification, ColumnSchema, IdentityMask, ReplicationMask,
-            SchemaDiff, SnapshotId, TableSchema, Type as PgType,
+            ColumnModification, ColumnModificationType, ColumnSchema, IdentityMask,
+            ReplicationMask, SchemaDiff, SnapshotId, TableSchema, Type as PgType,
         },
         store::{MemoryStore, SchemaStore},
     };
@@ -2828,36 +2940,36 @@ mod tests {
         )
     }
 
-    fn rename_change(old_name: &str, new_name: &str, ordinal_position: i32) -> ColumnChange {
-        ColumnChange {
-            ordinal_position,
-            old_column: ColumnSchema::new(
+    fn rename_modification(
+        old_name: &str,
+        new_name: &str,
+        ordinal_position: i32,
+    ) -> ColumnModification {
+        ColumnModification {
+            old_column_schema: ColumnSchema::new(
                 old_name.to_owned(),
                 PgType::TEXT,
                 -1,
                 ordinal_position,
                 true,
             ),
-            new_column: ColumnSchema::new(
+            new_column_schema: ColumnSchema::new(
                 new_name.to_owned(),
                 PgType::TEXT,
                 -1,
                 ordinal_position,
                 true,
             ),
-            modifications: vec![ColumnModification::Rename {
-                old_name: old_name.to_owned(),
-                new_name: new_name.to_owned(),
-            }],
+            modification_types: vec![ColumnModificationType::Rename],
         }
     }
 
-    fn default_change(
+    fn default_modification(
         name: &str,
         ordinal_position: i32,
         old_expression: Option<&str>,
         new_expression: Option<&str>,
-    ) -> ColumnChange {
+    ) -> ColumnModification {
         let old_column =
             ColumnSchema::new(name.to_owned(), PgType::TEXT, -1, ordinal_position, true)
                 .with_default_expression_option(old_expression.map(ToOwned::to_owned));
@@ -2865,14 +2977,10 @@ mod tests {
             ColumnSchema::new(name.to_owned(), PgType::TEXT, -1, ordinal_position, true)
                 .with_default_expression_option(new_expression.map(ToOwned::to_owned));
 
-        ColumnChange {
-            ordinal_position,
-            old_column,
-            new_column,
-            modifications: vec![ColumnModification::Default {
-                old_expression: old_expression.map(ToOwned::to_owned),
-                new_expression: new_expression.map(ToOwned::to_owned),
-            }],
+        ColumnModification {
+            old_column_schema: old_column,
+            new_column_schema: new_column,
+            modification_types: vec![ColumnModificationType::Default],
         }
     }
 
@@ -2918,7 +3026,7 @@ mod tests {
         let diff = SchemaDiff::new(
             vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
             Vec::new(),
-            vec![rename_change("name", "full_name", 2)],
+            vec![rename_modification("name", "full_name", 2)],
             ["id", "name"],
         );
 
@@ -2946,7 +3054,7 @@ mod tests {
         let diff = SchemaDiff::new(
             Vec::new(),
             Vec::new(),
-            vec![rename_change("a", "b", 1), rename_change("b", "a", 2)],
+            vec![rename_modification("a", "b", 1), rename_modification("b", "a", 2)],
             ["a", "b"],
         );
 
@@ -2967,6 +3075,26 @@ mod tests {
                 r#"alter table "lake"."public"."users" rename column "supabase_etl_schema_tmp_1_0" to "b""#,
             ]
         );
+        assert_eq!(plan.column_names, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_skips_replayed_completed_rename_cycle() {
+        let diff = SchemaDiff::new(
+            Vec::new(),
+            Vec::new(),
+            vec![rename_modification("a", "b", 1), rename_modification("b", "a", 2)],
+            ["a", "b"],
+        );
+
+        let plan = plan_schema_diff_sql_ducklake(
+            &ducklake_table_name(),
+            vec!["b".to_owned(), "a".to_owned()],
+            &diff,
+        )
+        .expect("completed rename cycle should be replayable");
+
+        assert!(plan.statements.is_empty());
         assert_eq!(plan.column_names, vec!["b", "a"]);
     }
 
@@ -3005,7 +3133,7 @@ mod tests {
         let diff = SchemaDiff::new(
             Vec::new(),
             Vec::new(),
-            vec![default_change("status", 3, Some("array['unsupported']::text[]"), None)],
+            vec![default_modification("status", 3, Some("array['unsupported']::text[]"), None)],
             ["id", "name", "status"],
         );
 
@@ -3025,7 +3153,7 @@ mod tests {
         let diff = SchemaDiff::new(
             vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
             Vec::new(),
-            vec![rename_change("name", "full_name", 2)],
+            vec![rename_modification("name", "full_name", 2)],
             ["id", "name"],
         );
 
@@ -3045,7 +3173,10 @@ mod tests {
         let diff = SchemaDiff::new(
             Vec::new(),
             Vec::new(),
-            vec![rename_change("name", "full_name", 2), rename_change("email", "name", 3)],
+            vec![
+                rename_modification("name", "full_name", 2),
+                rename_modification("email", "name", 3),
+            ],
             ["id", "name", "email"],
         );
 
@@ -3065,7 +3196,7 @@ mod tests {
         let diff = SchemaDiff::new(
             Vec::new(),
             Vec::new(),
-            vec![rename_change("ddl_col_4_1", "ddl_col_4_0", 4)],
+            vec![rename_modification("ddl_col_4_1", "ddl_col_4_0", 4)],
             ["id", "ddl_col_4_1"],
         );
 
@@ -3086,13 +3217,13 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_tombstones_removed_column_when_name_is_reused_by_rename() {
-        let removed_column = ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true);
-        let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
+    fn plan_schema_diff_tombstones_dropped_column_when_name_is_reused_by_rename() {
+        let dropped_column = ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true);
+        let tombstone_name = dropped_column_tombstone_name_ducklake(&dropped_column);
         let diff = SchemaDiff::new(
             Vec::new(),
-            vec![removed_column],
-            vec![rename_change("name", "status", 2)],
+            vec![dropped_column],
+            vec![rename_modification("name", "status", 2)],
             ["id", "name", "status"],
         );
 
@@ -3101,7 +3232,7 @@ mod tests {
             vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
             &diff,
         )
-        .expect("schema diff should tombstone reused removed name");
+        .expect("schema diff should tombstone reused dropped name");
         let statement_sql: Vec<_> =
             plan.statements.iter().map(|statement| statement.sql.clone()).collect();
 
@@ -3119,12 +3250,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_tombstones_removed_column_when_name_is_reused_by_add() {
-        let removed_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true);
-        let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
+    fn plan_schema_diff_tombstones_dropped_column_when_name_is_reused_by_add() {
+        let dropped_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true);
+        let tombstone_name = dropped_column_tombstone_name_ducklake(&dropped_column);
         let diff = SchemaDiff::new(
             vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
-            vec![removed_column],
+            vec![dropped_column],
             Vec::new(),
             ["id", "name"],
         );
@@ -3134,7 +3265,7 @@ mod tests {
             vec!["id".to_owned(), "name".to_owned()],
             &diff,
         )
-        .expect("schema diff should tombstone reused removed name");
+        .expect("schema diff should tombstone reused dropped name");
         let statement_sql: Vec<_> =
             plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
 
@@ -3151,12 +3282,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_skips_replayed_reused_removed_column_name() {
-        let removed_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true);
-        let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
+    fn plan_schema_diff_skips_replayed_reused_dropped_column_name() {
+        let dropped_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true);
+        let tombstone_name = dropped_column_tombstone_name_ducklake(&dropped_column);
         let diff = SchemaDiff::new(
             vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
-            vec![removed_column],
+            vec![dropped_column],
             Vec::new(),
             ["id", "name"],
         );

@@ -217,6 +217,8 @@ impl TruncateEvent {
 /// intentionally has no LSN, transaction ordinal, or sequence key because such
 /// metadata would not be a durable replay identity. Consumers should instead
 /// treat it as an ordered schema barrier for the row events that follow it.
+/// [`crate::schema::SnapshotId`] is the only stable identifier of the table
+/// schema snapshot carried by this event.
 ///
 /// PostgreSQL emits relation-message columns in `pg_attribute.attnum` order,
 /// skipping unpublished columns, and sends tuple data in that same order. The
@@ -228,8 +230,8 @@ impl TruncateEvent {
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct RelationEvent {
-    /// The replicated table schema containing the table schema, replication
-    /// mask, and identity mask.
+    /// The replicated table schema containing the stable snapshot ID, table
+    /// schema, replication mask, and identity mask.
     pub replicated_table_schema: ReplicatedTableSchema,
 }
 
@@ -318,9 +320,7 @@ impl SizeHint for Event {
 pub struct EventSequenceKey {
     /// Commit LSN identifying transaction order across transactions.
     pub commit_lsn: PgLsn,
-    /// Zero-based ordinal identifying protocol order within the same
-    /// transaction. Runtime-generated relation events may reserve ordinal
-    /// slots for compatibility, but do not expose sequence keys themselves.
+    /// Zero-based ordinal identifying event order within the same transaction.
     pub tx_ordinal: u64,
 }
 

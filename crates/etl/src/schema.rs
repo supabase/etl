@@ -591,7 +591,7 @@ impl ReplicatedTableSchema {
     /// Only consider replicated columns. Uses ordinal positions to track
     /// columns:
     /// - Columns in the same position with different names are renamed.
-    /// - Positions in old but not in new are columns to remove.
+    /// - Positions in old but not in new are columns to drop.
     /// - Positions in new but not in old are columns to add.
     ///
     /// DDL capture stores a complete post-statement table snapshot, and
@@ -621,15 +621,15 @@ impl ReplicatedTableSchema {
         let mut old_index = 0;
         let mut new_index = 0;
         let mut columns_to_add = Vec::new();
-        let mut columns_to_change = Vec::new();
-        let mut columns_to_remove = Vec::new();
+        let mut columns_to_modify = Vec::new();
+        let mut columns_to_drop = Vec::new();
 
         while let (Some(&old_column), Some(&new_column)) =
             (old_columns.get(old_index), new_columns.get(new_index))
         {
             match old_column.ordinal_position.cmp(&new_column.ordinal_position) {
                 Ordering::Less => {
-                    columns_to_remove.push(old_column.clone());
+                    columns_to_drop.push(old_column.clone());
                     old_index += 1;
                 }
                 Ordering::Greater => {
@@ -640,35 +640,25 @@ impl ReplicatedTableSchema {
                     // Equal `attnum` means the same logical column. A rename
                     // and its metadata changes therefore stay grouped even
                     // when the endpoint name changed.
-                    let mut modifications = Vec::new();
+                    let mut modification_types = Vec::new();
 
                     if old_column.name != new_column.name {
-                        modifications.push(ColumnModification::Rename {
-                            old_name: old_column.name.clone(),
-                            new_name: new_column.name.clone(),
-                        });
+                        modification_types.push(ColumnModificationType::Rename);
                     }
 
                     if old_column.nullable != new_column.nullable {
-                        modifications.push(ColumnModification::Nullability {
-                            old_nullable: old_column.nullable,
-                            new_nullable: new_column.nullable,
-                        });
+                        modification_types.push(ColumnModificationType::Nullability);
                     }
 
                     if old_column.default_expression != new_column.default_expression {
-                        modifications.push(ColumnModification::Default {
-                            old_expression: old_column.default_expression.clone(),
-                            new_expression: new_column.default_expression.clone(),
-                        });
+                        modification_types.push(ColumnModificationType::Default);
                     }
 
-                    if !modifications.is_empty() {
-                        columns_to_change.push(ColumnChange {
-                            ordinal_position: old_column.ordinal_position,
-                            old_column: old_column.clone(),
-                            new_column: new_column.clone(),
-                            modifications,
+                    if !modification_types.is_empty() {
+                        columns_to_modify.push(ColumnModification {
+                            old_column_schema: old_column.clone(),
+                            new_column_schema: new_column.clone(),
+                            modification_types,
                         });
                     }
 
@@ -678,13 +668,13 @@ impl ReplicatedTableSchema {
             }
         }
 
-        columns_to_remove.extend(old_columns[old_index..].iter().map(|column| (**column).clone()));
+        columns_to_drop.extend(old_columns[old_index..].iter().map(|column| (**column).clone()));
         columns_to_add.extend(new_columns[new_index..].iter().map(|column| (**column).clone()));
 
         SchemaDiff::new(
             columns_to_add,
-            columns_to_remove,
-            columns_to_change,
+            columns_to_drop,
+            columns_to_modify,
             old_columns.iter().map(|column| column.name.as_str()),
         )
     }
@@ -757,74 +747,59 @@ impl ReplicatedTableSchema {
     }
 }
 
-/// Represents a single column modification within a [`ColumnChange`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ColumnModification {
+/// Identifies the column field changed by a [`ColumnModification`].
+///
+/// Variant order is the canonical per-column order: establish the final name,
+/// then apply nullability and default metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ColumnModificationType {
     /// The column was renamed.
-    Rename {
-        /// The old name of the column.
-        old_name: String,
-        /// The new name of the column.
-        new_name: String,
-    },
+    Rename,
     /// The column nullability changed.
-    Nullability {
-        /// The previous nullability.
-        old_nullable: bool,
-        /// The new nullability.
-        new_nullable: bool,
-    },
+    Nullability,
     /// The column default expression changed.
-    Default {
-        /// The previous default expression, if one existed.
-        old_expression: Option<String>,
-        /// The new default expression, if one exists.
-        new_expression: Option<String>,
-    },
+    Default,
 }
 
-/// Represents a change to an existing logical column.
+/// Represents all endpoint differences for one existing logical column.
+///
+/// The old and new schemas have the same PostgreSQL ordinal position, which is
+/// the logical-column identity used by endpoint diffing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ColumnChange {
-    /// The column ordinal position used to identify the logical column.
-    pub ordinal_position: i32,
-    /// The previous column schema.
-    pub old_column: ColumnSchema,
-    /// The new column schema.
-    pub new_column: ColumnSchema,
-    /// The concrete modifications detected for this logical column.
-    pub modifications: Vec<ColumnModification>,
+pub struct ColumnModification {
+    /// The old endpoint column schema.
+    pub old_column_schema: ColumnSchema,
+    /// The new endpoint column schema.
+    pub new_column_schema: ColumnSchema,
+    /// The fields that differ between the endpoint schemas.
+    pub modification_types: Vec<ColumnModificationType>,
 }
 
-/// One ordered operation in a destination schema transition.
+/// One directly executable operation in a destination schema transition.
+///
+/// Modification operations carry the immediate old and new column states.
+/// Destinations use `modification_type` to select the field to apply and may
+/// inspect the remaining schema metadata for destination-specific validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaOperation {
-    /// Drop a column before its name is reused, or after other operations when
-    /// its name does not block the transition.
+    /// Drop a column that is absent from the new endpoint schema.
     DropColumn {
-        /// The source column being removed.
-        column: ColumnSchema,
-    },
-    /// Rename an existing logical column.
-    RenameColumn {
-        /// The ordinal position identifying the logical column.
-        ordinal_position: i32,
-        /// The currently occupied column name.
-        old_name: String,
-        /// The name to occupy after the operation.
-        new_name: String,
+        /// The old endpoint column schema.
+        column_schema: ColumnSchema,
     },
     /// Add a new logical column.
     AddColumn {
-        /// The source column being added.
-        column: ColumnSchema,
+        /// The new endpoint column schema.
+        column_schema: ColumnSchema,
     },
-    /// Apply a non-rename change after the column reaches its final name.
+    /// Modify one field of an existing logical column.
     ModifyColumn {
-        /// The complete logical column change.
-        change: ColumnChange,
-        /// The individual non-rename modification to apply.
-        modification: ColumnModification,
+        /// The column state immediately before this operation.
+        old_column_schema: ColumnSchema,
+        /// The column state immediately after this operation.
+        new_column_schema: ColumnSchema,
+        /// The field this operation changes.
+        modification_type: ColumnModificationType,
     },
 }
 
@@ -843,17 +818,17 @@ pub enum SchemaOperation {
 pub struct SchemaDiff {
     /// Columns that need to be added to the destination.
     pub columns_to_add: Vec<ColumnSchema>,
-    /// Columns that need to be removed from the destination.
-    pub columns_to_remove: Vec<ColumnSchema>,
-    /// Existing columns that need to be changed in the destination.
-    pub columns_to_change: Vec<ColumnChange>,
-    /// Operations in a column-name-safe execution order: blocking drops,
-    /// renames, additions, non-rename modifications, then remaining drops.
+    /// Columns that need to be dropped from the destination.
+    pub columns_to_drop: Vec<ColumnSchema>,
+    /// Existing columns that need to be modified in the destination.
+    pub columns_to_modify: Vec<ColumnModification>,
+    /// Operations in a column-name-safe execution order: drops, renames,
+    /// additions, then nullability/default modifications.
     ordered_operations: Vec<SchemaOperation>,
 }
 
 impl SchemaDiff {
-    /// Builds a diff from already classified column changes.
+    /// Builds a diff from already classified column operations.
     ///
     /// Prefer [`ReplicatedTableSchema::diff`] when both endpoint schemas are
     /// available. `existing_column_names` must include every currently
@@ -863,15 +838,38 @@ impl SchemaDiff {
     /// endpoints and every generated name. A name can therefore become free
     /// for a requested rename without becoming eligible for temporary use.
     pub fn new<I, S>(
-        columns_to_add: Vec<ColumnSchema>,
-        columns_to_remove: Vec<ColumnSchema>,
-        columns_to_change: Vec<ColumnChange>,
+        mut columns_to_add: Vec<ColumnSchema>,
+        mut columns_to_drop: Vec<ColumnSchema>,
+        mut columns_to_modify: Vec<ColumnModification>,
         existing_column_names: I,
     ) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
+        // Canonicalize manually assembled diffs without sorting the normal
+        // snapshot-diff path, which already emits PostgreSQL `attnum` order.
+        if !columns_to_add.is_sorted_by_key(|column| column.ordinal_position) {
+            columns_to_add.sort_unstable_by_key(|column| column.ordinal_position);
+        }
+        if !columns_to_drop.is_sorted_by_key(|column| column.ordinal_position) {
+            columns_to_drop.sort_unstable_by_key(|column| column.ordinal_position);
+        }
+        if !columns_to_modify
+            .is_sorted_by_key(|modification| modification.old_column_schema.ordinal_position)
+        {
+            columns_to_modify.sort_unstable_by_key(|modification| {
+                modification.old_column_schema.ordinal_position
+            });
+        }
+        for modification in &mut columns_to_modify {
+            if !modification.modification_types.is_sorted() {
+                modification.modification_types.sort_unstable();
+            }
+            modification.modification_types.dedup();
+        }
+        columns_to_modify.retain(|modification| !modification.modification_types.is_empty());
+
         let occupied_column_names: HashSet<String> =
             existing_column_names.into_iter().map(Into::into).collect();
         // Generated names must also avoid case-only endpoint variants because
@@ -880,35 +878,39 @@ impl SchemaDiff {
             .iter()
             .cloned()
             .chain(columns_to_add.iter().map(|column| column.name.clone()))
-            .chain(columns_to_remove.iter().map(|column| column.name.clone()))
-            .chain(columns_to_change.iter().flat_map(|change| {
-                [change.old_column.name.clone(), change.new_column.name.clone()]
+            .chain(columns_to_drop.iter().map(|column| column.name.clone()))
+            .chain(columns_to_modify.iter().flat_map(|modification| {
+                [
+                    modification.old_column_schema.name.clone(),
+                    modification.new_column_schema.name.clone(),
+                ]
             }))
             .map(|name| name.to_ascii_lowercase())
             .collect();
 
         let ordered_operations = plan_schema_operations(
             &columns_to_add,
-            &columns_to_remove,
-            &columns_to_change,
+            &columns_to_drop,
+            &columns_to_modify,
             occupied_column_names,
             reserved_column_name_keys,
         );
 
-        Self { columns_to_add, columns_to_remove, columns_to_change, ordered_operations }
+        Self { columns_to_add, columns_to_drop, columns_to_modify, ordered_operations }
     }
 
     /// Returns `true` if there are no schema changes.
     pub fn is_empty(&self) -> bool {
         self.columns_to_add.is_empty()
-            && self.columns_to_remove.is_empty()
-            && self.columns_to_change.is_empty()
+            && self.columns_to_drop.is_empty()
+            && self.columns_to_modify.is_empty()
     }
 
-    /// Returns destination operations in the order they must be applied.
+    /// Returns the only destination-executable schema operations.
     ///
-    /// Blocking drops precede renames, followed by additions, non-rename
-    /// modifications, and finally drops whose names are not reused.
+    /// Drops precede renames, followed by additions and nullability/default
+    /// modifications. Destinations must preserve this exact order and must not
+    /// independently apply the classified `columns_to_*` fields.
     pub fn ordered_operations(&self) -> &[SchemaOperation] {
         &self.ordered_operations
     }
@@ -917,15 +919,15 @@ impl SchemaDiff {
 /// A pending logical rename tracked by ordinal identity.
 #[derive(Debug)]
 struct PendingRename {
-    /// The name currently occupied by the logical column.
-    current_name: String,
-    /// The final target name from the new schema.
+    /// The current state of the logical column.
+    current_column_schema: ColumnSchema,
+    /// The final target name from the new endpoint.
     target_name: String,
 }
 
 /// Plans the minimum column-name-safe operations for the endpoint diff.
 ///
-/// Every add, removal, modification, and acyclic rename produces exactly one
+/// Every add, drop, modification, and acyclic rename produces exactly one
 /// operation. A rename cycle produces one additional temporary rename, which
 /// is the minimum needed when no target name is initially free. Ready renames
 /// and cycle roots are selected by ordinal position, making the output stable
@@ -943,37 +945,19 @@ struct PendingRename {
 /// name without dropping or recreating the logical column.
 fn plan_schema_operations(
     columns_to_add: &[ColumnSchema],
-    columns_to_remove: &[ColumnSchema],
-    columns_to_change: &[ColumnChange],
+    columns_to_drop: &[ColumnSchema],
+    columns_to_modify: &[ColumnModification],
     mut occupied_names: HashSet<String>,
     mut reserved_column_name_keys: HashSet<String>,
 ) -> Vec<SchemaOperation> {
-    let add_names: HashSet<&str> =
-        columns_to_add.iter().map(|column| column.name.as_str()).collect();
-    let rename_target_names: HashSet<&str> = columns_to_change
-        .iter()
-        .flat_map(|change| &change.modifications)
-        .filter_map(|modification| match modification {
-            ColumnModification::Rename { new_name, .. } => Some(new_name.as_str()),
-            ColumnModification::Default { .. } | ColumnModification::Nullability { .. } => None,
-        })
-        .collect();
     let mut operations = Vec::new();
-    let mut deferred_removals = Vec::new();
 
-    // Phase 1: free names that the endpoint needs for an addition or rename.
-    // A real drop is both necessary and cheaper than moving the removed column
-    // through a generated name. Drops unrelated to name reuse are deferred so
-    // destructive work happens only after the replacement schema is ready.
-    for column in columns_to_remove {
-        if add_names.contains(column.name.as_str())
-            || rename_target_names.contains(column.name.as_str())
-        {
-            occupied_names.remove(&column.name);
-            operations.push(SchemaOperation::DropColumn { column: column.clone() });
-        } else {
-            deferred_removals.push(column);
-        }
+    // Phase 1: drop every column absent from the new endpoint. This frees all
+    // names that renames or additions may reuse and gives every destination the
+    // same simple structural ordering.
+    for column in columns_to_drop {
+        occupied_names.remove(&column.name);
+        operations.push(SchemaOperation::DropColumn { column_schema: column.clone() });
     }
 
     // Phase 2: schedule renames from their free targets toward their sources.
@@ -981,28 +965,24 @@ fn plan_schema_operations(
     // cycle-root selection deterministic.
     let mut pending_renames = BTreeMap::new();
 
-    // `owner` answers which pending logical column currently occupies a name.
     // `waiting` answers which pending rename wants a name as its final target.
     // Endpoint column names are unique, so each lookup has at most one answer.
-    let mut owner_ordinal_by_current_name = HashMap::new();
     let mut waiting_ordinal_by_target_name = HashMap::new();
-    for change in columns_to_change {
-        let Some((old_name, new_name)) =
-            change.modifications.iter().find_map(|modification| match modification {
-                ColumnModification::Rename { old_name, new_name } => {
-                    Some((old_name.clone(), new_name.clone()))
-                }
-                ColumnModification::Default { .. } | ColumnModification::Nullability { .. } => None,
-            })
-        else {
+    for modification in columns_to_modify {
+        if !modification.modification_types.contains(&ColumnModificationType::Rename) {
             continue;
-        };
+        }
 
-        let _ = owner_ordinal_by_current_name.insert(old_name.clone(), change.ordinal_position);
-        let _ = waiting_ordinal_by_target_name.insert(new_name.clone(), change.ordinal_position);
+        let ordinal_position = modification.old_column_schema.ordinal_position;
+        let new_name = &modification.new_column_schema.name;
+
+        let _ = waiting_ordinal_by_target_name.insert(new_name.clone(), ordinal_position);
         let _ = pending_renames.insert(
-            change.ordinal_position,
-            PendingRename { current_name: old_name, target_name: new_name },
+            ordinal_position,
+            PendingRename {
+                current_column_schema: modification.old_column_schema.clone(),
+                target_name: new_name.clone(),
+            },
         );
     }
 
@@ -1019,27 +999,30 @@ fn plan_schema_operations(
 
     while !pending_renames.is_empty() {
         if let Some(ordinal_position) = ready_renames.pop_first() {
-            let rename = pending_renames
-                .remove(&ordinal_position)
-                .expect("ready rename should remain pending");
+            debug_assert!(pending_renames.contains_key(&ordinal_position));
+            let Some(rename) = pending_renames.remove(&ordinal_position) else {
+                continue;
+            };
 
             // Moving this column consumes its target and frees its current
             // name. If another rename targets the freed name, that rename is
             // now ready; no scan of all pending renames is required.
-            owner_ordinal_by_current_name.remove(&rename.current_name);
-            occupied_names.remove(&rename.current_name);
+            occupied_names.remove(&rename.current_column_schema.name);
             occupied_names.insert(rename.target_name.clone());
-            if let Some(waiting_ordinal) = waiting_ordinal_by_target_name.get(&rename.current_name)
+            if let Some(waiting_ordinal) =
+                waiting_ordinal_by_target_name.get(&rename.current_column_schema.name)
                 && pending_renames.contains_key(waiting_ordinal)
             {
                 ready_renames.insert(*waiting_ordinal);
             }
-            operations.push(SchemaOperation::RenameColumn {
-                ordinal_position,
-                old_name: rename.current_name,
-                new_name: rename.target_name,
+            let mut new_column_schema = rename.current_column_schema.clone();
+            new_column_schema.name = rename.target_name;
+            operations.push(SchemaOperation::ModifyColumn {
+                old_column_schema: rename.current_column_schema,
+                new_column_schema,
+                modification_type: ColumnModificationType::Rename,
             });
-            
+
             continue;
         }
 
@@ -1048,11 +1031,13 @@ fn plan_schema_operations(
         // necessarily used an intermediate name, but endpoint diffing neither
         // observes nor needs to recover it. Choose the smallest ordinal as the
         // stable cycle root and generate exactly one free name for this cycle.
-        let (&ordinal_position, rename) = pending_renames
-            .first_key_value()
-            .expect("non-empty pending renames should have a first entry");
+        let Some((&ordinal_position, rename)) = pending_renames.first_key_value() else {
+            break;
+        };
         debug_assert!(
-            owner_ordinal_by_current_name.contains_key(&rename.target_name),
+            pending_renames.values().any(|pending_rename| {
+                pending_rename.current_column_schema.name == rename.target_name
+            }),
             "a blocked pending rename target should be owned by another pending rename"
         );
         let temporary_name = loop {
@@ -1065,55 +1050,64 @@ fn plan_schema_operations(
             }
         };
 
-        let rename = pending_renames
-            .get_mut(&ordinal_position)
-            .expect("cycle-breaking rename should remain pending");
+        debug_assert!(pending_renames.contains_key(&ordinal_position));
+        let Some(rename) = pending_renames.get_mut(&ordinal_position) else {
+            break;
+        };
 
         // Only the current physical name changes here. The logical rename
         // remains pending with the same final target, now represented as
         // `temporary -> target`. Freeing its old name wakes the preceding
         // cycle member, after which the ordinary ready path unwinds the cycle.
-        let old_name = std::mem::replace(&mut rename.current_name, temporary_name.clone());
-        owner_ordinal_by_current_name.remove(&old_name);
-        owner_ordinal_by_current_name.insert(temporary_name.clone(), ordinal_position);
-        occupied_names.remove(&old_name);
+        let old_column_schema = rename.current_column_schema.clone();
+        rename.current_column_schema.name = temporary_name.clone();
+        occupied_names.remove(&old_column_schema.name);
         occupied_names.insert(temporary_name.clone());
-        if let Some(waiting_ordinal) = waiting_ordinal_by_target_name.get(&old_name) {
+        if let Some(waiting_ordinal) = waiting_ordinal_by_target_name.get(&old_column_schema.name) {
             ready_renames.insert(*waiting_ordinal);
         }
-        operations.push(SchemaOperation::RenameColumn {
-            ordinal_position,
-            old_name,
-            new_name: temporary_name,
+        operations.push(SchemaOperation::ModifyColumn {
+            old_column_schema,
+            new_column_schema: rename.current_column_schema.clone(),
+            modification_type: ColumnModificationType::Rename,
         });
     }
 
-    // Phase 3: additions are now safe because blocking drops and renames have
-    // released every reused name.
+    // Phase 3: additions are now safe because drops and renames have released
+    // every reused name.
     for column in columns_to_add {
-        operations.push(SchemaOperation::AddColumn { column: column.clone() });
+        operations.push(SchemaOperation::AddColumn { column_schema: column.clone() });
     }
 
-    // Phase 4: the final column-name set now exists, so metadata changes can
+    // Phase 4: every structural operation is complete, so metadata changes can
     // address every existing logical column by its endpoint name. An added
     // column carries its own endpoint metadata in `AddColumn` and does not
     // produce a separate modification operation.
-    for change in columns_to_change {
-        for modification in &change.modifications {
-            if matches!(modification, ColumnModification::Rename { .. }) {
-                continue;
+    for modification in columns_to_modify {
+        let mut current_column_schema = modification.old_column_schema.clone();
+        if modification.modification_types.contains(&ColumnModificationType::Rename) {
+            current_column_schema.name.clone_from(&modification.new_column_schema.name);
+        }
+
+        for modification_type in &modification.modification_types {
+            let old_column_schema = current_column_schema.clone();
+            match modification_type {
+                ColumnModificationType::Rename => continue,
+                ColumnModificationType::Nullability => {
+                    current_column_schema.nullable = modification.new_column_schema.nullable;
+                }
+                ColumnModificationType::Default => {
+                    current_column_schema
+                        .default_expression
+                        .clone_from(&modification.new_column_schema.default_expression);
+                }
             }
             operations.push(SchemaOperation::ModifyColumn {
-                change: change.clone(),
-                modification: modification.clone(),
+                old_column_schema,
+                new_column_schema: current_column_schema.clone(),
+                modification_type: *modification_type,
             });
         }
-    }
-
-    // Phase 5: finish with removals that were not dependencies of earlier
-    // operations.
-    for column in deferred_removals {
-        operations.push(SchemaOperation::DropColumn { column: column.clone() });
     }
 
     operations
@@ -1253,13 +1247,32 @@ mod tests {
         diff.ordered_operations()
             .iter()
             .map(|operation| match operation {
-                SchemaOperation::DropColumn { column } => format!("drop:{}", column.name),
-                SchemaOperation::RenameColumn { old_name, new_name, .. } => {
-                    format!("rename:{old_name}->{new_name}")
+                SchemaOperation::DropColumn { column_schema } => {
+                    format!("drop:{}", column_schema.name)
                 }
-                SchemaOperation::AddColumn { column } => format!("add:{}", column.name),
-                SchemaOperation::ModifyColumn { change, modification } => {
-                    format!("modify:{}:{modification:?}", change.new_column.name)
+                SchemaOperation::AddColumn { column_schema } => {
+                    format!("add:{}", column_schema.name)
+                }
+                SchemaOperation::ModifyColumn {
+                    old_column_schema,
+                    new_column_schema,
+                    modification_type: ColumnModificationType::Rename,
+                } => {
+                    format!("rename:{}->{}", old_column_schema.name, new_column_schema.name)
+                }
+                SchemaOperation::ModifyColumn {
+                    new_column_schema,
+                    modification_type: ColumnModificationType::Nullability,
+                    ..
+                } => {
+                    format!("modify-nullability:{}", new_column_schema.name)
+                }
+                SchemaOperation::ModifyColumn {
+                    new_column_schema,
+                    modification_type: ColumnModificationType::Default,
+                    ..
+                } => {
+                    format!("modify-default:{}", new_column_schema.name)
                 }
             })
             .collect()
@@ -1277,15 +1290,35 @@ mod tests {
 
         for operation in diff.ordered_operations() {
             match operation {
-                SchemaOperation::DropColumn { column } => {
-                    assert_eq!(occupied.remove(&column.name), Some(column.ordinal_position));
+                SchemaOperation::DropColumn { column_schema } => {
+                    assert_eq!(
+                        occupied.remove(&column_schema.name),
+                        Some(column_schema.ordinal_position)
+                    );
                 }
-                SchemaOperation::RenameColumn { ordinal_position, old_name, new_name, .. } => {
-                    assert_eq!(occupied.remove(old_name), Some(*ordinal_position));
-                    assert_eq!(occupied.insert(new_name.clone(), *ordinal_position), None);
+                SchemaOperation::AddColumn { column_schema } => {
+                    assert_eq!(
+                        occupied
+                            .insert(column_schema.name.clone(), column_schema.ordinal_position,),
+                        None
+                    );
                 }
-                SchemaOperation::AddColumn { column } => {
-                    assert_eq!(occupied.insert(column.name.clone(), column.ordinal_position), None);
+                SchemaOperation::ModifyColumn {
+                    old_column_schema,
+                    new_column_schema,
+                    modification_type: ColumnModificationType::Rename,
+                } => {
+                    assert_eq!(
+                        occupied.remove(&old_column_schema.name),
+                        Some(old_column_schema.ordinal_position)
+                    );
+                    assert_eq!(
+                        occupied.insert(
+                            new_column_schema.name.clone(),
+                            new_column_schema.ordinal_position,
+                        ),
+                        None
+                    );
                 }
                 SchemaOperation::ModifyColumn { .. } => {}
             }
@@ -1404,8 +1437,8 @@ mod tests {
 
         assert!(diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
-        assert!(diff.columns_to_remove.is_empty());
-        assert!(diff.columns_to_change.is_empty());
+        assert!(diff.columns_to_drop.is_empty());
+        assert!(diff.columns_to_modify.is_empty());
     }
 
     #[test]
@@ -1426,12 +1459,12 @@ mod tests {
         assert_eq!(diff.columns_to_add.len(), 1);
         assert_eq!(diff.columns_to_add[0].name, "email");
         assert_eq!(diff.columns_to_add[0].ordinal_position, 3);
-        assert!(diff.columns_to_remove.is_empty());
-        assert!(diff.columns_to_change.is_empty());
+        assert!(diff.columns_to_drop.is_empty());
+        assert!(diff.columns_to_modify.is_empty());
     }
 
     #[test]
-    fn schema_diff_column_removed() {
+    fn schema_diff_column_dropped() {
         let old_schema = create_replicated_schema(vec![
             ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
@@ -1446,10 +1479,10 @@ mod tests {
 
         assert!(!diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
-        assert_eq!(diff.columns_to_remove.len(), 1);
-        assert_eq!(diff.columns_to_remove[0].name, "age");
-        assert_eq!(diff.columns_to_remove[0].ordinal_position, 3);
-        assert!(diff.columns_to_change.is_empty());
+        assert_eq!(diff.columns_to_drop.len(), 1);
+        assert_eq!(diff.columns_to_drop[0].name, "age");
+        assert_eq!(diff.columns_to_drop[0].ordinal_position, 3);
+        assert!(diff.columns_to_modify.is_empty());
     }
 
     #[test]
@@ -1467,15 +1500,14 @@ mod tests {
 
         assert!(!diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
-        assert!(diff.columns_to_remove.is_empty());
-        assert_eq!(diff.columns_to_change.len(), 1);
-        assert_eq!(diff.columns_to_change[0].ordinal_position, 2);
+        assert!(diff.columns_to_drop.is_empty());
+        assert_eq!(diff.columns_to_modify.len(), 1);
+        assert_eq!(diff.columns_to_modify[0].old_column_schema.ordinal_position, 2);
+        assert_eq!(diff.columns_to_modify[0].old_column_schema.name, "name");
+        assert_eq!(diff.columns_to_modify[0].new_column_schema.name, "full_name");
         assert_eq!(
-            diff.columns_to_change[0].modifications,
-            vec![ColumnModification::Rename {
-                old_name: "name".to_owned(),
-                new_name: "full_name".to_owned(),
-            }]
+            diff.columns_to_modify[0].modification_types,
+            vec![ColumnModificationType::Rename]
         );
     }
 
@@ -1495,15 +1527,17 @@ mod tests {
 
         assert!(!diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
-        assert!(diff.columns_to_remove.is_empty());
-        assert_eq!(diff.columns_to_change.len(), 1);
-        assert_eq!(diff.columns_to_change[0].new_column.name, "status");
+        assert!(diff.columns_to_drop.is_empty());
+        assert_eq!(diff.columns_to_modify.len(), 1);
+        assert_eq!(diff.columns_to_modify[0].new_column_schema.name, "status");
         assert_eq!(
-            diff.columns_to_change[0].modifications,
-            vec![ColumnModification::Default {
-                old_expression: None,
-                new_expression: Some("'pending'::text".to_owned()),
-            }]
+            diff.columns_to_modify[0].modification_types,
+            vec![ColumnModificationType::Default]
+        );
+        assert_eq!(diff.columns_to_modify[0].old_column_schema.default_expression, None);
+        assert_eq!(
+            diff.columns_to_modify[0].new_column_schema.default_expression.as_deref(),
+            Some("'pending'::text")
         );
     }
 
@@ -1540,13 +1574,15 @@ mod tests {
 
         assert!(!diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
-        assert!(diff.columns_to_remove.is_empty());
-        assert_eq!(diff.columns_to_change.len(), 1);
-        assert_eq!(diff.columns_to_change[0].new_column.name, "email");
+        assert!(diff.columns_to_drop.is_empty());
+        assert_eq!(diff.columns_to_modify.len(), 1);
+        assert_eq!(diff.columns_to_modify[0].new_column_schema.name, "email");
         assert_eq!(
-            diff.columns_to_change[0].modifications,
-            vec![ColumnModification::Nullability { old_nullable: false, new_nullable: true }]
+            diff.columns_to_modify[0].modification_types,
+            vec![ColumnModificationType::Nullability]
         );
+        assert!(!diff.columns_to_modify[0].old_column_schema.nullable);
+        assert!(diff.columns_to_modify[0].new_column_schema.nullable);
     }
 
     #[test]
@@ -1566,32 +1602,22 @@ mod tests {
 
         assert!(!diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
-        assert!(diff.columns_to_remove.is_empty());
-        assert_eq!(diff.columns_to_change.len(), 1);
-        assert_eq!(diff.columns_to_change[0].old_column.name, "status");
-        assert_eq!(diff.columns_to_change[0].new_column.name, "state");
+        assert!(diff.columns_to_drop.is_empty());
+        assert_eq!(diff.columns_to_modify.len(), 1);
+        assert_eq!(diff.columns_to_modify[0].old_column_schema.name, "status");
+        assert_eq!(diff.columns_to_modify[0].new_column_schema.name, "state");
         assert_eq!(
-            diff.columns_to_change[0].modifications,
+            diff.columns_to_modify[0].modification_types,
             vec![
-                ColumnModification::Rename {
-                    old_name: "status".to_owned(),
-                    new_name: "state".to_owned(),
-                },
-                ColumnModification::Nullability { old_nullable: false, new_nullable: true },
-                ColumnModification::Default {
-                    old_expression: Some("'pending'::text".to_owned()),
-                    new_expression: Some("'queued'::text".to_owned()),
-                },
+                ColumnModificationType::Rename,
+                ColumnModificationType::Nullability,
+                ColumnModificationType::Default,
             ]
         );
     }
 
     #[test]
     fn schema_diff_mixed_operations() {
-        // Old schema: id (pos 1), name (pos 2), age (pos 3)
-        // New schema: id (pos 1), full_name (pos 2), email (pos 4)
-        // Expected: age removed (pos 3), name -> full_name renamed (pos 2), email added
-        // (pos 4)
         let old_schema = create_replicated_schema(vec![
             ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
@@ -1607,22 +1633,18 @@ mod tests {
 
         assert!(!diff.is_empty());
 
-        // Column added: email at position 4.
         assert_eq!(diff.columns_to_add.len(), 1);
         assert_eq!(diff.columns_to_add[0].name, "email");
 
-        // Column removed: age at position 3.
-        assert_eq!(diff.columns_to_remove.len(), 1);
-        assert_eq!(diff.columns_to_remove[0].name, "age");
+        assert_eq!(diff.columns_to_drop.len(), 1);
+        assert_eq!(diff.columns_to_drop[0].name, "age");
 
-        // Column changed: name -> full_name at position 2.
-        assert_eq!(diff.columns_to_change.len(), 1);
+        assert_eq!(diff.columns_to_modify.len(), 1);
+        assert_eq!(diff.columns_to_modify[0].old_column_schema.name, "name");
+        assert_eq!(diff.columns_to_modify[0].new_column_schema.name, "full_name");
         assert_eq!(
-            diff.columns_to_change[0].modifications,
-            vec![ColumnModification::Rename {
-                old_name: "name".to_owned(),
-                new_name: "full_name".to_owned(),
-            }]
+            diff.columns_to_modify[0].modification_types,
+            vec![ColumnModificationType::Rename]
         );
     }
 
@@ -1644,12 +1666,12 @@ mod tests {
             diff.columns_to_add.iter().map(|c| c.name.as_str()).collect();
         assert!(added_names.contains("name"));
         assert!(added_names.contains("email"));
-        assert!(diff.columns_to_remove.is_empty());
-        assert!(diff.columns_to_change.is_empty());
+        assert!(diff.columns_to_drop.is_empty());
+        assert!(diff.columns_to_modify.is_empty());
     }
 
     #[test]
-    fn schema_diff_multiple_removals() {
+    fn schema_diff_multiple_drops() {
         let old_schema = create_replicated_schema(vec![
             ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
@@ -1662,12 +1684,12 @@ mod tests {
         let diff = old_schema.diff(&new_schema);
 
         assert!(diff.columns_to_add.is_empty());
-        assert_eq!(diff.columns_to_remove.len(), 2);
-        let removed_names: HashSet<&str> =
-            diff.columns_to_remove.iter().map(|c| c.name.as_str()).collect();
-        assert!(removed_names.contains("name"));
-        assert!(removed_names.contains("email"));
-        assert!(diff.columns_to_change.is_empty());
+        assert_eq!(diff.columns_to_drop.len(), 2);
+        let dropped_names: HashSet<&str> =
+            diff.columns_to_drop.iter().map(|c| c.name.as_str()).collect();
+        assert!(dropped_names.contains("name"));
+        assert!(dropped_names.contains("email"));
+        assert!(diff.columns_to_modify.is_empty());
     }
 
     #[test]
@@ -1678,6 +1700,35 @@ mod tests {
         let diff = old_schema.diff(&new_schema);
 
         assert_eq!(operation_names(&diff), ["drop:value", "add:value"]);
+    }
+
+    #[test]
+    fn schema_diff_new_canonicalizes_manually_ordered_inputs() {
+        let modification = ColumnModification {
+            old_column_schema: text_column("b", 2),
+            new_column_schema: text_column("c", 2)
+                .with_default_expression("'new'::text".to_owned()),
+            modification_types: vec![
+                ColumnModificationType::Default,
+                ColumnModificationType::Rename,
+                ColumnModificationType::Default,
+            ],
+        };
+        let diff = SchemaDiff::new(
+            vec![text_column("f", 5), text_column("e", 4)],
+            vec![text_column("unused", 3), text_column("old_a", 1)],
+            vec![modification],
+            ["old_a", "b", "unused"],
+        );
+
+        assert_eq!(
+            operation_names(&diff),
+            ["drop:old_a", "drop:unused", "rename:b->c", "add:e", "add:f", "modify-default:c",]
+        );
+        assert_eq!(
+            diff.columns_to_modify[0].modification_types,
+            [ColumnModificationType::Rename, ColumnModificationType::Default]
+        );
     }
 
     #[test]
@@ -1701,7 +1752,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_orders_blocking_drop_before_rename() {
+    fn schema_diff_orders_drop_before_rename_target_reuse() {
         let old_schema = create_replicated_schema(vec![text_column("a", 1), text_column("b", 2)]);
         let new_schema = create_replicated_schema(vec![text_column("b", 1)]);
 
@@ -1711,14 +1762,14 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_defers_non_blocking_drop() {
+    fn schema_diff_orders_unrelated_drop_before_rename() {
         let old_schema =
             create_replicated_schema(vec![text_column("a", 1), text_column("unused", 2)]);
         let new_schema = create_replicated_schema(vec![text_column("b", 1)]);
 
         let diff = old_schema.diff(&new_schema);
 
-        assert_eq!(operation_names(&diff), ["rename:a->b", "drop:unused"]);
+        assert_eq!(operation_names(&diff), ["drop:unused", "rename:a->b"]);
     }
 
     #[test]
@@ -1887,14 +1938,22 @@ mod tests {
         assert!(matches!(
             diff.ordered_operations(),
             [
-                SchemaOperation::RenameColumn { new_name, .. },
-                SchemaOperation::ModifyColumn { change, .. },
-            ] if new_name == "b" && change.new_column.name == "b"
+                SchemaOperation::ModifyColumn {
+                    new_column_schema: renamed_column_schema,
+                    modification_type: ColumnModificationType::Rename,
+                    ..
+                },
+                SchemaOperation::ModifyColumn {
+                    new_column_schema: default_column_schema,
+                    modification_type: ColumnModificationType::Default,
+                    ..
+                },
+            ] if renamed_column_schema.name == "b" && default_column_schema.name == "b"
         ));
     }
 
     #[test]
-    fn schema_diff_adds_before_modifying_a_renamed_column() {
+    fn schema_diff_applies_structural_operations_before_modifying_a_renamed_column() {
         let old_schema = create_replicated_schema(vec![
             ColumnSchema::new("a".to_owned(), Type::TEXT, -1, 1, false)
                 .with_default_expression("'old'::text".to_owned()),
@@ -1911,25 +1970,85 @@ mod tests {
         assert!(matches!(
             diff.ordered_operations(),
             [
-                SchemaOperation::DropColumn { column: blocking_drop },
-                SchemaOperation::RenameColumn { old_name, new_name, .. },
-                SchemaOperation::AddColumn { column: addition },
+                SchemaOperation::DropColumn { column_schema: blocking_drop },
+                SchemaOperation::DropColumn { column_schema: unrelated_drop },
                 SchemaOperation::ModifyColumn {
-                    change: nullability_change,
-                    modification: ColumnModification::Nullability { .. },
+                    old_column_schema: rename_old_column_schema,
+                    new_column_schema: rename_new_column_schema,
+                    modification_type: ColumnModificationType::Rename,
+                },
+                SchemaOperation::AddColumn { column_schema: addition },
+                SchemaOperation::ModifyColumn {
+                    new_column_schema: nullability_column_schema,
+                    modification_type: ColumnModificationType::Nullability,
+                    ..
                 },
                 SchemaOperation::ModifyColumn {
-                    change: default_change,
-                    modification: ColumnModification::Default { .. },
+                    new_column_schema: default_column_schema,
+                    modification_type: ColumnModificationType::Default,
+                    ..
                 },
-                SchemaOperation::DropColumn { column: deferred_drop },
             ] if blocking_drop.name == "b"
-                && old_name == "a"
-                && new_name == "b"
+                && unrelated_drop.name == "unused"
+                && rename_old_column_schema.name == "a"
+                && rename_new_column_schema.name == "b"
                 && addition.name == "a"
-                && nullability_change.new_column.name == "b"
-                && default_change.new_column.name == "b"
-                && deferred_drop.name == "unused"
+                && nullability_column_schema.name == "b"
+                && default_column_schema.name == "b"
+        ));
+        assert_operations_converge(&old_schema, &new_schema);
+    }
+
+    #[test]
+    fn schema_diff_modifies_cycle_member_after_its_final_rename() {
+        let old_schema = create_replicated_schema(vec![
+            ColumnSchema::new("a".to_owned(), Type::TEXT, -1, 1, false)
+                .with_default_expression("'old'::text".to_owned()),
+            text_column("b", 2),
+        ]);
+        let new_schema = create_replicated_schema(vec![
+            text_column("b", 1).with_default_expression("'new'::text".to_owned()),
+            text_column("a", 2),
+        ]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert!(matches!(
+            diff.ordered_operations(),
+            [
+                SchemaOperation::ModifyColumn {
+                    old_column_schema: first_old_column_schema,
+                    new_column_schema: temporary_column_schema,
+                    modification_type: ColumnModificationType::Rename,
+                },
+                SchemaOperation::ModifyColumn {
+                    old_column_schema: second_old_column_schema,
+                    new_column_schema: second_new_column_schema,
+                    modification_type: ColumnModificationType::Rename,
+                },
+                SchemaOperation::ModifyColumn {
+                    old_column_schema: final_old_column_schema,
+                    new_column_schema: final_new_column_schema,
+                    modification_type: ColumnModificationType::Rename,
+                },
+                SchemaOperation::ModifyColumn {
+                    new_column_schema: nullability_column_schema,
+                    modification_type: ColumnModificationType::Nullability,
+                    ..
+                },
+                SchemaOperation::ModifyColumn {
+                    new_column_schema: default_column_schema,
+                    modification_type: ColumnModificationType::Default,
+                    ..
+                },
+            ] if first_old_column_schema.name == "a"
+                && temporary_column_schema.name.starts_with(SCHEMA_TEMPORARY_COLUMN_PREFIX)
+                && second_old_column_schema.name == "b"
+                && second_new_column_schema.name == "a"
+                && final_old_column_schema.name == temporary_column_schema.name
+                && final_new_column_schema.name == "b"
+                && nullability_column_schema.name == "b"
+                && default_column_schema.name == "b"
         ));
         assert_operations_converge(&old_schema, &new_schema);
     }
@@ -1941,7 +2060,7 @@ mod tests {
 
         let diff = old_schema.diff(&new_schema);
 
-        assert_eq!(operation_names(&diff), ["add:c", "drop:a"]);
+        assert_eq!(operation_names(&diff), ["drop:a", "add:c"]);
         assert_operations_converge(&old_schema, &new_schema);
     }
 }

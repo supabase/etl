@@ -25,7 +25,7 @@ changes:
 | Drop a replicated column | Drop column |
 | Rename a replicated column | Rename column |
 | Change a replicated column default | Column default modification |
-| Drop a replicated column default | Column default removal |
+| Drop a replicated column default | Column default modification |
 | Drop `NOT NULL` from a replicated column | BigQuery relaxes an existing `REQUIRED` column to `NULLABLE`; other built-in destinations currently leave nullability unchanged |
 | Set `NOT NULL` on a replicated column | Detected in the schema snapshot, but not applied to built-in destinations |
 | Several of the above in one statement | One final schema snapshot, diffed into a minimal ordered transition |
@@ -82,12 +82,13 @@ Schema diffing therefore works from the two endpoint snapshots rather than
 trying to reconstruct source DDL history. Columns are matched by PostgreSQL
 `attnum`, and the diff includes an ordered operation plan that:
 
-1. Drops only columns whose names must be freed before an add or rename.
+1. Drops columns absent from the final endpoint schema.
 2. Applies rename chains from their free end toward their source.
 3. Uses one collision-checked `supabase_etl_` temporary name per rename cycle,
    and only when that cycle has no free target.
-4. Applies additions, then existing-column modifications using final names.
-5. Defers unrelated drops until the end.
+4. Adds columns present only in the final endpoint schema.
+5. Applies existing-column nullability and default modifications using final
+   names.
 
 Consequently, transient add, drop, or rename operations absent from the final
 snapshot do not create destination DDL. Each endpoint difference normally

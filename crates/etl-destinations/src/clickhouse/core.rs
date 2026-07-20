@@ -11,7 +11,7 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnModification, IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff,
+        ColumnModificationType, IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff,
         SchemaOperation, TableId, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
@@ -861,6 +861,8 @@ where
             return Ok(());
         }
 
+        // Inspect endpoint facts before applying anything. This validation does
+        // not emit DDL; all DDL below still comes from `ordered_operations`.
         // The ReplacingMergeTree table's `ORDER BY` clause is the source primary key,
         // and ClickHouse uses that ORDER BY as the dedup key during merges.
         // Dropping or renaming a PK column would invalidate that key in a
@@ -880,92 +882,106 @@ where
         let mut user_column_names: Vec<String> =
             current_schema.column_schemas().map(|column| column.name.clone()).collect();
 
-        // Preserve the shared planner's dependency order. Regrouping by
-        // operation kind could reintroduce name collisions.
+        // Apply the shared plan without regrouping operations.
         for operation in diff.ordered_operations() {
             match operation {
-                SchemaOperation::DropColumn { column } => {
-                    self.client.drop_column(clickhouse_table_name, &column.name).await?;
-                    user_column_names.retain(|name| name != &column.name);
+                SchemaOperation::DropColumn { column_schema } => {
+                    self.client.drop_column(clickhouse_table_name, &column_schema.name).await?;
+                    user_column_names.retain(|name| name != &column_schema.name);
                 }
-                SchemaOperation::RenameColumn { old_name, new_name, .. } => {
-                    self.client.rename_column(clickhouse_table_name, old_name, new_name).await?;
-                    if let Some(name) = user_column_names.iter_mut().find(|name| *name == old_name)
+                SchemaOperation::ModifyColumn {
+                    old_column_schema,
+                    new_column_schema,
+                    modification_type: ColumnModificationType::Rename,
+                } => {
+                    self.client
+                        .rename_column(
+                            clickhouse_table_name,
+                            &old_column_schema.name,
+                            &new_column_schema.name,
+                        )
+                        .await?;
+                    if let Some(name) =
+                        user_column_names.iter_mut().find(|name| *name == &old_column_schema.name)
                     {
-                        new_name.clone_into(name);
+                        new_column_schema.name.clone_into(name);
                     }
                 }
-                SchemaOperation::AddColumn { column } => {
+                SchemaOperation::AddColumn { column_schema } => {
                     self.client
                         .add_column(
                             clickhouse_table_name,
-                            column,
+                            column_schema,
                             user_column_names.last().map(String::as_str),
                         )
                         .await?;
-                    user_column_names.push(column.name.clone());
+                    user_column_names.push(column_schema.name.clone());
                 }
-                SchemaOperation::ModifyColumn { change, modification } => match modification {
-                    ColumnModification::Rename { .. } => {
-                        unreachable!("ordered modify operations exclude renames")
-                    }
-                    ColumnModification::Nullability { old_nullable, new_nullable } => {
-                        warn!(
-                            table_name = %clickhouse_table_name,
-                            column_name = %change.new_column.name,
-                            old_nullable,
-                            new_nullable,
-                            "skipping source column nullability change for ClickHouse"
-                        );
-                    }
-                    ColumnModification::Default { old_expression, new_expression } => {
-                        let old_default_was_supported =
-                            old_expression.as_deref().is_some_and(|default_expression| {
-                                supports_column_default(default_expression, &change.old_column.typ)
-                            });
+                SchemaOperation::ModifyColumn {
+                    old_column_schema,
+                    new_column_schema,
+                    modification_type: ColumnModificationType::Nullability,
+                } => {
+                    warn!(
+                        table_name = %clickhouse_table_name,
+                        column_name = %new_column_schema.name,
+                        old_nullable = old_column_schema.nullable,
+                        new_nullable = new_column_schema.nullable,
+                        "skipping source column nullability change for ClickHouse"
+                    );
+                }
+                SchemaOperation::ModifyColumn {
+                    old_column_schema,
+                    new_column_schema,
+                    modification_type: ColumnModificationType::Default,
+                } => {
+                    let old_default_was_supported = old_column_schema
+                        .default_expression
+                        .as_deref()
+                        .is_some_and(|default_expression| {
+                            supports_column_default(default_expression, &old_column_schema.typ)
+                        });
 
-                        if let Some(new_default_expression) = new_expression.as_deref() {
-                            if supports_column_default(
-                                new_default_expression,
-                                &change.new_column.typ,
-                            ) {
-                                self.client
-                                    .set_column_default(
-                                        clickhouse_table_name,
-                                        &change.new_column.name,
-                                        &change.new_column.typ,
-                                        new_default_expression,
-                                    )
-                                    .await?;
-                            } else {
-                                warn!(
-                                    table_name = %clickhouse_table_name,
-                                    column_name = %change.new_column.name,
-                                    "skipping unsupported source column default for ClickHouse"
-                                );
-                                if old_default_was_supported {
-                                    self.client
-                                        .drop_column_default(
-                                            clickhouse_table_name,
-                                            &change.new_column.name,
-                                        )
-                                        .await?;
-                                }
-                            }
-                        } else if old_default_was_supported {
+                    if let Some(new_default_expression) =
+                        new_column_schema.default_expression.as_deref()
+                    {
+                        if supports_column_default(new_default_expression, &new_column_schema.typ) {
                             self.client
-                                .drop_column_default(clickhouse_table_name, &change.new_column.name)
+                                .set_column_default(
+                                    clickhouse_table_name,
+                                    &new_column_schema.name,
+                                    &new_column_schema.typ,
+                                    new_default_expression,
+                                )
                                 .await?;
-                        } else if old_expression.is_some() {
+                        } else {
                             warn!(
                                 table_name = %clickhouse_table_name,
-                                column_name = %change.new_column.name,
-                                "skipping source column default removal for ClickHouse because no \
-                                 supported destination default was set"
+                                column_name = %new_column_schema.name,
+                                "skipping unsupported source column default for ClickHouse"
                             );
+                            if old_default_was_supported {
+                                self.client
+                                    .drop_column_default(
+                                        clickhouse_table_name,
+                                        &new_column_schema.name,
+                                    )
+                                    .await?;
+                            }
                         }
+                    } else if old_default_was_supported {
+                        self.client
+                            .drop_column_default(clickhouse_table_name, &new_column_schema.name)
+                            .await?;
+                    } else if old_column_schema.default_expression.is_some() {
+                        warn!(
+                            table_name = %clickhouse_table_name,
+                            column_name = %new_column_schema.name,
+                            "skipping source column default drop for ClickHouse because no \
+                             supported destination default was set"
+                        );
                     }
-                },
+                }
             }
         }
 
@@ -1163,7 +1179,7 @@ fn reject_pk_alters_under_replacing_merge_tree(
     diff: &SchemaDiff,
     current_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
-    for column in &diff.columns_to_remove {
+    for column in &diff.columns_to_drop {
         if column.primary_key_ordinal_position.is_some() {
             return Err(etl_error!(
                 ErrorKind::SourceSchemaError,
@@ -1178,12 +1194,10 @@ fn reject_pk_alters_under_replacing_merge_tree(
         }
     }
 
-    for change in &diff.columns_to_change {
-        for modification in &change.modifications {
-            let ColumnModification::Rename { old_name, new_name } = modification else {
-                continue;
-            };
-
+    for modification in &diff.columns_to_modify {
+        if modification.modification_types.contains(&ColumnModificationType::Rename) {
+            let old_name = &modification.old_column_schema.name;
+            let new_name = &modification.new_column_schema.name;
             let was_pk = current_schema
                 .column_schemas()
                 .find(|c| c.name == *old_name)
@@ -1727,31 +1741,27 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
-    fn rename_change(
+    fn rename_modification(
         old_name: &str,
         new_name: &str,
         ordinal_position: i32,
-    ) -> etl::schema::ColumnChange {
-        etl::schema::ColumnChange {
-            ordinal_position,
-            old_column: ColumnSchema::new(
+    ) -> etl::schema::ColumnModification {
+        etl::schema::ColumnModification {
+            old_column_schema: ColumnSchema::new(
                 old_name.to_owned(),
                 Type::TEXT,
                 -1,
                 ordinal_position,
                 true,
             ),
-            new_column: ColumnSchema::new(
+            new_column_schema: ColumnSchema::new(
                 new_name.to_owned(),
                 Type::TEXT,
                 -1,
                 ordinal_position,
                 true,
             ),
-            modifications: vec![etl::schema::ColumnModification::Rename {
-                old_name: old_name.to_owned(),
-                new_name: new_name.to_owned(),
-            }],
+            modification_types: vec![etl::schema::ColumnModificationType::Rename],
         }
     }
 
@@ -1806,7 +1816,7 @@ mod tests {
         let diff = SchemaDiff::new(
             Vec::new(),
             Vec::new(),
-            vec![rename_change("value", "payload", 3)],
+            vec![rename_modification("value", "payload", 3)],
             schema.column_schemas().map(|column| column.name.as_str()),
         );
         // --- WHEN/THEN: guard passes ---
@@ -1825,7 +1835,7 @@ mod tests {
         let diff = SchemaDiff::new(
             Vec::new(),
             Vec::new(),
-            vec![rename_change("id", "row_id", 2)],
+            vec![rename_modification("id", "row_id", 2)],
             schema.column_schemas().map(|column| column.name.as_str()),
         );
         // --- WHEN: validating ---

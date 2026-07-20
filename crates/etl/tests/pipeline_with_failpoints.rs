@@ -648,20 +648,6 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         ],
     );
     let initial_events = collect_table_events(&events, table_id);
-    let initial_insert_sequence_keys = initial_events
-        .iter()
-        .filter_map(|event| match event {
-            Event::Insert(insert) => Some(insert.event_sequence_key()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    // Relation messages do not expose sequence keys, but they reserve ordinal
-    // slots for compatibility with persisted destination watermarks.
-    assert_eq!(
-        initial_insert_sequence_keys.iter().map(|key| key.tx_ordinal).collect::<Vec<_>>(),
-        vec![2, 4, 6]
-    );
     let initial_table_schema_snapshots = table_schemas_snapshots.clone();
 
     destination.clear_events().await;
@@ -685,16 +671,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     pipeline.shutdown_and_wait().await.unwrap();
 
     let restarted_events = destination.get_events().await;
-    let restarted_events = collect_table_events(&restarted_events, table_id);
-    let restarted_insert_sequence_keys = restarted_events
-        .iter()
-        .filter_map(|event| match event {
-            Event::Insert(insert) => Some(insert.event_sequence_key()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(restarted_insert_sequence_keys, initial_insert_sequence_keys);
-    assert_events_equal(&restarted_events, &initial_events);
+    assert_events_equal(&collect_table_events(&restarted_events, table_id), &initial_events);
 
     let restarted_table_schemas = store.get_table_schemas().await;
     assert_restarted_schema_snapshot_pairs(

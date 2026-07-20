@@ -647,11 +647,8 @@ struct ApplyLoopState {
     /// Number of events observed in the current transaction (excluding
     /// BEGIN/COMMIT).
     current_tx_events: u64,
-    /// Next zero-based ordinal to assign within the transaction.
-    ///
-    /// Runtime-generated relation metadata reserves ordinal slots to preserve
-    /// the sequence-key format written by earlier ETL versions, even though
-    /// relation events do not expose those ordinals.
+    /// Next zero-based ordinal to assign to transaction events with sequence
+    /// keys.
     next_tx_ordinal: u64,
     /// Whether the loop is draining buffered destination work for shutdown.
     draining_for_shutdown: bool,
@@ -2317,14 +2314,6 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
-
-        // RELATION is session-generated protocol metadata and does not expose a
-        // sequence key. It still reserves an ordinal because deployed ETL
-        // versions included RELATION in later row keys. Changing that persisted
-        // ordering in place could make an unapplied row compare below an older
-        // destination watermark during an upgrade. A DML-only ordinal requires
-        // an explicitly versioned sequence-key migration.
-        let _reserved_tx_ordinal = self.state.next_tx_ordinal();
 
         // Exactly one worker owns protocol interpretation for a table at a time.
         // Non-owning workers skip `RELATION` handling and rely on the owner to

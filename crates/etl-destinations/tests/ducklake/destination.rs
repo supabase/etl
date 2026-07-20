@@ -1592,7 +1592,7 @@ async fn write_events_supports_drop_and_add_same_column_name() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let columns = table_column_names(&conn, &table_name);
-    assert!(!columns.iter().any(|column| { column.starts_with("supabase_etl_ducklake_dropped_") }));
+    assert!(!columns.iter().any(|column| column.starts_with("supabase_etl_ducklake_dropped_")));
     assert!(columns.contains(&"status".to_owned()));
 
     let mut statement = conn
@@ -1704,7 +1704,7 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let columns = table_column_names(&conn, &table_name);
-    assert!(!columns.iter().any(|column| { column.starts_with("supabase_etl_ducklake_dropped_") }));
+    assert!(!columns.iter().any(|column| column.starts_with("supabase_etl_ducklake_dropped_")));
     assert_eq!(columns, vec!["id", "status"]);
 
     let mut statement = conn

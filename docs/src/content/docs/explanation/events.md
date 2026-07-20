@@ -271,10 +271,11 @@ sessions. Destinations should treat each relation event as an ordered schema
 barrier for the row events that follow it, not as a checkpoint or deduplication
 key.
 
-ETL currently reserves an internal transaction-ordinal position when it
-receives a relation message so row sequence keys remain compatible with values
-written by earlier releases. That compatibility detail is not part of
-`RelationEvent` and must not be used as a relation-event identity.
+The `SnapshotId` inside the carried table schema is the only stable identifier
+for that particular table-schema snapshot. Do not derive schema-snapshot
+identity from relation delivery order, transaction position, or the schema's
+contents: relation delivery is session-dependent, and identical contents can
+legitimately appear in different snapshots.
 
 PostgreSQL pgoutput builds relation messages by walking the table descriptor in
 `pg_attribute.attnum` order and skipping columns that are not published. It
@@ -331,9 +332,11 @@ async fn write_events(
 
 ## Understanding LSN Fields
 
-Every event includes **LSN (Log Sequence Number)** fields plus a transaction-local
-ordinal that are critical for understanding event ordering, checkpointing, and
-idempotent destination writes.
+WAL-backed data and transaction events include **LSN (Log Sequence Number)**
+fields plus a transaction-local ordinal. These values are critical for ordering,
+checkpointing, and idempotent destination writes. `RelationEvent` is the
+exception: it is session-generated schema metadata and must be processed in
+stream order rather than assigned a durable sequence key.
 
 ### What is an LSN?
 
@@ -367,12 +370,13 @@ Both inserts have the same `commit_lsn` because they commit together. Their
 
 ### Using LSNs
 
-**For ordering:** Use `commit_lsn` to order transactions and `tx_ordinal` to
-order events within the same transaction.
+**For ordering:** For events that expose a sequence key, use `commit_lsn` to
+order transactions and `tx_ordinal` to order events within the same
+transaction. Preserve `RelationEvent` ordering directly as a schema barrier.
 
-**For idempotency:** Use the event sequence key, equivalent to
-`(commit_lsn, tx_ordinal)`, together with the destination's table or row key
-when detecting replays.
+**For idempotency:** For events that expose one, use the event sequence key,
+equivalent to `(commit_lsn, tx_ordinal)`, together with the destination's table
+or row key when detecting replays. Do not use relation events as replay keys.
 
 **For checkpointing:** Store the highest `commit_lsn` you've processed. On restart, you can resume from that point.
 
