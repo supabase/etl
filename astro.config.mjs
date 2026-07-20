@@ -75,6 +75,10 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Destinations',
+          items: [{ slug: 'destinations/bigquery' }],
+        },
+        {
           label: 'Explanations',
           items: [
             { slug: 'explanation/concepts' },
@@ -95,12 +99,17 @@ export default defineConfig({
           description:
             'Supabase ETL is a Rust framework for building change data capture pipelines that stream Postgres logical replication events to BigQuery, DuckLake, or custom destinations.',
           details:
-            'The documentation is organized for builders. Start with the overview and guides for implementation tasks, then use explanations for Postgres replication concepts, architecture, event semantics, schema changes, and extension traits. Prefer the generated full context file when answering broad implementation questions and the smaller sets when a focused answer is enough.',
+            'The documentation is organized for builders. Start with the overview and guides for implementation tasks, use destination pages for destination-specific behavior and limitations, then use explanations for Postgres replication concepts, architecture, event semantics, schema changes, and extension traits. Prefer the generated full context file when answering broad implementation questions and the smaller sets when a focused answer is enough.',
           customSets: [
             {
               label: 'Guides',
               description: 'step-by-step implementation and setup guides for Supabase ETL',
               paths: ['guides/**'],
+            },
+            {
+              label: 'Destinations',
+              description: 'destination-specific behavior and limitations for Supabase ETL',
+              paths: ['destinations/**'],
             },
             {
               label: 'Explanations',
