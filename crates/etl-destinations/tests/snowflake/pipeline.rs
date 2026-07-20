@@ -18,7 +18,6 @@ use etl_destinations::snowflake::{
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use rand::random;
-use serde_json::Value;
 use tokio::time::{Duration, sleep};
 
 use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
@@ -39,13 +38,13 @@ async fn query_default_rows(
     database: &str,
     schema: &str,
     table: &str,
-) -> Vec<Vec<Value>> {
+) -> Vec<Vec<serde_json::Value>> {
     let fqn = format!("\"{database}\".\"{schema}\".\"{table}\"");
     query_rows(
         sql,
         &format!(
-            "select \"id\"::varchar, \"status\", \"score\"::varchar, \"active\"::varchar from \
-             {fqn} order by \"id\""
+            "select \"id\"::varchar, \"replaced\", \"status\", \"score\"::varchar, \
+             \"active\"::varchar from {fqn} order by \"id\""
         ),
     )
     .await
@@ -58,7 +57,7 @@ async fn query_initial_row(
     database: &str,
     schema: &str,
     table: &str,
-) -> Vec<Vec<Value>> {
+) -> Vec<Vec<serde_json::Value>> {
     let fqn = format!("\"{database}\".\"{schema}\".\"{table}\"");
     query_rows(sql, &format!("select \"id\"::varchar, \"name\" from {fqn} where \"id\" = '1'"))
         .await
@@ -71,7 +70,7 @@ async fn wait_for_initial_row(
     database: &str,
     schema: &str,
     table: &str,
-) -> Vec<Vec<Value>> {
+) -> Vec<Vec<serde_json::Value>> {
     let expected = vec![vec![serde_json::json!("1"), serde_json::json!("Alice")]];
     let mut last_rows = Vec::new();
 
@@ -94,8 +93,8 @@ async fn wait_for_default_rows(
     database: &str,
     schema: &str,
     table: &str,
-    expected: &[Vec<Value>],
-) -> Vec<Vec<Value>> {
+    expected: &[Vec<serde_json::Value>],
+) -> Vec<Vec<serde_json::Value>> {
     let mut last_rows = Vec::new();
 
     for attempt in 0..QUERY_MAX_ATTEMPTS {
@@ -114,12 +113,16 @@ async fn wait_for_default_rows(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Snowflake credentials"]
-async fn schema_change_add_column_defaults() {
+async fn schema_change_batched_operations() {
     let database = spawn_source_database().await;
     let table_name =
         test_table_name(&format!("snowflake_defaults_{}", uuid::Uuid::new_v4().simple()));
     let table_id = database
-        .create_table(table_name.clone(), true, &[("name", "text not null")])
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("replaced", "integer not null")],
+        )
         .await
         .expect("failed to create source table");
 
@@ -130,7 +133,7 @@ async fn schema_change_add_column_defaults() {
         .expect("failed to create publication");
     database
         .run_sql(&format!(
-            "insert into {} (name) values ('Alice')",
+            "insert into {} (name, replaced) values ('Alice', 25)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -187,6 +190,8 @@ async fn schema_change_add_column_defaults() {
             .alter_table(
                 table_name.clone(),
                 &[
+                    TableModification::DropColumn { name: "replaced" },
+                    TableModification::AddColumn { name: "replaced", data_type: "text" },
                     TableModification::AddColumn {
                         name: "status",
                         data_type: "text default 'new'::text",
@@ -202,7 +207,7 @@ async fn schema_change_add_column_defaults() {
             .expect("failed to alter source table");
         database
             .run_sql(&format!(
-                "insert into {} (name) values ('Bob')",
+                "insert into {} (name, replaced) values ('Bob', 'new-replaced')",
                 table_name.as_quoted_identifier()
             ))
             .await
@@ -214,12 +219,14 @@ async fn schema_change_add_column_defaults() {
         let expected = vec![
             vec![
                 serde_json::json!("1"),
+                serde_json::Value::Null,
                 serde_json::json!("new"),
                 serde_json::json!("15"),
                 serde_json::json!("true"),
             ],
             vec![
                 serde_json::json!("2"),
+                serde_json::json!("new-replaced"),
                 serde_json::json!("new"),
                 serde_json::json!("15"),
                 serde_json::json!("true"),

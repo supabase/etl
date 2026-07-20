@@ -5,14 +5,18 @@ description: How ETL handles DDL and evolving table schemas.
 
 **How ETL handles DDL and evolving table schemas**
 
-ETL supports schema changes, and this area is actively being improved. The
-current implementation is intentionally conservative: the source-side event
-trigger captures a rich PostgreSQL-shaped snapshot, while ETL currently models
-well-understood column changes: **adds, drops, renames, and column default
-changes**. Built-in destination support varies by destination DDL
+:::caution[Beta]
+Schema-change support is currently in beta. We are actively improving its
+coverage, destination behavior, and recovery guarantees.
+:::
+
+The current implementation is intentionally conservative: the source-side
+event trigger captures a rich PostgreSQL-shaped snapshot, while ETL currently
+models well-understood column changes: **adds, drops, renames, and column
+default changes**. Built-in destination support varies by destination DDL
 capabilities. **BigQuery, ClickHouse, DuckLake, and Snowflake** apply supported
-schema changes automatically; Iceberg is deprecated for new deployments and does
-not support schema-change DDL.
+schema changes automatically; Iceberg is deprecated for new deployments and
+does not support schema-change DDL.
 
 ## Short Version
 
@@ -94,6 +98,52 @@ Consequently, transient add, drop, or rename operations absent from the final
 snapshot do not create destination DDL. Each endpoint difference normally
 produces one destination operation; a rename cycle requires exactly one extra
 temporary rename.
+
+### Why ETL Captures Schema State Instead of Replaying DDL
+
+Source schema history and destination transition planning solve different
+problems:
+
+- Source schema history answers which immutable schema is needed to decode a
+  row at a particular WAL position.
+- Destination planning answers which legal operations move one destination
+  from its currently applied schema to that source schema.
+
+Capturing operations would not eliminate the first problem. ETL would still
+need to apply every operation to a previous schema and materialize the resulting
+immutable schema versions for row decoding. That would make ETL reproduce
+PostgreSQL behavior such as `attnum` allocation, dropped-column tombstones,
+internal `ALTER TABLE` pass ordering, type and default resolution, cascades,
+inheritance, and implicit catalog effects. The post-DDL PostgreSQL catalog
+already provides the authoritative result directly.
+
+Full snapshots also behave as schema checkpoints: each is self-contained,
+replaying one is naturally idempotent, and understanding a later snapshot does
+not require replaying the complete earlier DDL history. Their size is small
+relative to replicated row traffic, making this a favorable correctness and
+storage tradeoff.
+
+Raw SQL is not a suitable portable execution contract either. It describes a
+PostgreSQL-specific request rather than the canonical result after PostgreSQL
+resolves identifiers and dependencies. Other destinations have different DDL
+syntax and capabilities, and parsing submitted SQL would still miss or need to
+reproduce implicit PostgreSQL behavior.
+
+The endpoint snapshots instead provide authoritative before and after states,
+while `attnum` preserves logical-column identity across renames. The shared
+planner derives namespace dependencies from those states and lets each
+destination translate only the ordered operations it supports. Temporary
+destination states, such as cycle-breaking names, remain destination execution
+details and never become source schema versions.
+
+The deliberate tradeoff is that ETL preserves the schema required for
+observable row events, not the source operation history. Operations can have
+semantics outside the modeled schema shape—such as `ALTER TYPE ... USING`,
+constraint validation, indexes, grants, or data rewrites. Supporting those
+would require a broader cross-database DDL and data-migration contract; raw SQL
+capture alone would not make them portable. Source operation metadata may still
+be useful for diagnostics or as an optional hint, but the catalog snapshot must
+remain authoritative.
 
 ## Destination-Specific DDL Behavior
 

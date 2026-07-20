@@ -2086,7 +2086,10 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "name", new_name: "schema_swap" }],
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "supabase_etl_source_swap",
+            }],
         )
         .await
         .unwrap();
@@ -2102,20 +2105,21 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "schema_swap", new_name: "status" }],
+            &[TableModification::RenameColumn {
+                old_name: "supabase_etl_source_swap",
+                new_name: "status",
+            }],
         )
-        .await
-        .unwrap();
-
-    database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
         .await
         .unwrap();
 
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn { name: "age", data_type: "text" }],
+            &[
+                TableModification::DropColumn { name: "age" },
+                TableModification::AddColumn { name: "age", data_type: "text" },
+            ],
         )
         .await
         .unwrap();

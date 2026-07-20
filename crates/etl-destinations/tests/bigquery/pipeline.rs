@@ -2380,9 +2380,9 @@ async fn table_schema_change() {
     event_notify.notified().await;
     destination.clear_events().await;
 
-    // Stage a rename cycle and a same-name drop/add without intervening DML.
-    // The next Relation exposes only the final endpoint, so the destination
-    // must follow the shared ordered plan rather than regrouping operations.
+    // PostgreSQL requires each column rename to be a separate statement. With
+    // no intervening DML, pgoutput emits no intermediate Relation, so the
+    // destination observes the old and final names as one rename cycle.
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
@@ -2390,7 +2390,10 @@ async fn table_schema_change() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "name", new_name: "schema_swap" }],
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "supabase_etl_source_swap",
+            }],
         )
         .await
         .unwrap();
@@ -2406,20 +2409,23 @@ async fn table_schema_change() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "schema_swap", new_name: "status" }],
+            &[TableModification::RenameColumn {
+                old_name: "supabase_etl_source_swap",
+                new_name: "status",
+            }],
         )
         .await
         .unwrap();
 
-    database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
-        .await
-        .unwrap();
-
+    // Exercise same-name replacement in one multi-action ALTER TABLE. DDL
+    // capture records only its final snapshot, where `age` has a new attnum.
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn { name: "age", data_type: "text" }],
+            &[
+                TableModification::DropColumn { name: "age" },
+                TableModification::AddColumn { name: "age", data_type: "text" },
+            ],
         )
         .await
         .unwrap();

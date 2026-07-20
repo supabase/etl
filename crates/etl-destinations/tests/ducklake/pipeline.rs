@@ -1121,7 +1121,10 @@ async fn schema_change_ordered_name_reuse() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "name", new_name: "schema_swap" }],
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "supabase_etl_source_swap",
+            }],
         )
         .await
         .expect("failed to rename source column");
@@ -1135,21 +1138,23 @@ async fn schema_change_ordered_name_reuse() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "schema_swap", new_name: "status" }],
+            &[TableModification::RenameColumn {
+                old_name: "supabase_etl_source_swap",
+                new_name: "status",
+            }],
         )
         .await
         .expect("failed to complete source rename cycle");
     database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
-        .await
-        .expect("failed to drop source column");
-    database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn { name: "age", data_type: "text" }],
+            &[
+                TableModification::DropColumn { name: "age" },
+                TableModification::AddColumn { name: "age", data_type: "text" },
+            ],
         )
         .await
-        .expect("failed to re-add source column");
+        .expect("failed to replace source column");
     database
         .run_sql(&format!(
             "insert into {} (status, name, age) values ('Bob', 'pending', 'thirty')",

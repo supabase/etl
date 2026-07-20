@@ -594,17 +594,29 @@ impl ReplicatedTableSchema {
     /// - Positions in old but not in new are columns to drop.
     /// - Positions in new but not in old are columns to add.
     ///
-    /// DDL capture stores a complete post-statement table snapshot, and
-    /// `pgoutput` emits relation metadata lazily before DML. Consequently, a
-    /// destination may compare non-adjacent stored snapshots when several DDL
-    /// statements occur without intervening DML. This diff intentionally plans
-    /// only the endpoint transition: transient names and operations compressed
-    /// out of the two snapshots must not create destination work.
+    /// Each DDL message stores a complete post-statement table snapshot, but it
+    /// does not materialize a schema change at the destination. `pgoutput`
+    /// emits relation metadata lazily before the next DML event, and that
+    /// [`crate::event::RelationEvent`] advances the destination from its last
+    /// applied schema to the newest stored snapshot. Several DDL statements
+    /// without intervening DML can therefore appear here as one endpoint diff
+    /// containing any combination of additions, drops, renames, and metadata
+    /// changes, including rename chains or cycles that one `ALTER TABLE`
+    /// statement could not express.
+    ///
+    /// Diffing catalog snapshots is intentional. Row decoding still requires
+    /// immutable schemas at their WAL positions, so capturing operations would
+    /// not replace snapshots: ETL would first have to reproduce PostgreSQL's
+    /// `attnum` allocation, command ordering, dependencies, and implicit
+    /// catalog effects to rebuild them. The post-DDL catalog already provides
+    /// that canonical result.
+    ///
+    /// Source snapshots contain only PostgreSQL catalog states used to decode
+    /// WAL rows. Planner-generated temporary names exist only while destination
+    /// DDL is running and are never stored as source schema versions. The
+    /// planner emits only the operations needed to reach the schema used by the
+    /// next row event.
     pub fn diff(&self, new_schema: &ReplicatedTableSchema) -> SchemaDiff {
-        // Replicated schemas preserve PostgreSQL `attnum` order, so one linear
-        // merge classifies every endpoint difference. Operation emission is a
-        // separate step because rename dependencies and cycles can refer to
-        // names belonging to columns later in this traversal.
         let mut old_columns: Vec<_> = self.column_schemas().collect();
         let mut new_columns: Vec<_> = new_schema.column_schemas().collect();
 
@@ -618,6 +630,10 @@ impl ReplicatedTableSchema {
             new_columns.sort_unstable_by_key(|column| column.ordinal_position);
         }
 
+        // Once ordered by `attnum`, one linear merge classifies the endpoint
+        // difference. Planning happens afterward because a rename target may
+        // still be occupied by a higher-`attnum` column that is itself renamed
+        // or dropped by the same endpoint transition.
         let mut old_index = 0;
         let mut new_index = 0;
         let mut columns_to_add = Vec::new();
@@ -849,8 +865,9 @@ impl SchemaDiff {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        // The occupied column names are defined as the columns that we can't create or rename to.
-        // They will be used to determine the how to break or solve rename cycles.
+        // The occupied column names are defined as the columns that we can't create or
+        // rename to. They will be used to determine the how to break or solve
+        // rename cycles.
         let occupied_column_names: HashSet<String> =
             existing_column_names.into_iter().map(Into::into).collect();
 
@@ -937,6 +954,12 @@ struct PendingRename {
 }
 
 /// Plans the minimum column-name-safe operations for the endpoint diff.
+///
+/// The endpoints may summarize several DDL statements because stored DDL
+/// snapshots become destination-visible only when a later
+/// [`crate::event::RelationEvent`] is received. The planner must therefore
+/// order the complete endpoint difference without assuming it came from one
+/// PostgreSQL statement or attempting to reconstruct the source statements.
 ///
 /// Every add, drop, modification, and acyclic rename produces exactly one
 /// operation. A rename cycle produces one additional temporary rename, which
@@ -1096,6 +1119,9 @@ fn plan_schema_operations(
     // produce a separate modification operation.
     for modification in columns_to_modify {
         let mut current_column_schema = modification.old_column_schema.clone();
+
+        // Renames were applied in the structural phase, so subsequent metadata
+        // operations must address the column by its final endpoint name.
         if modification.modification_types.contains(&ColumnModificationType::Rename) {
             current_column_schema.name.clone_from(&modification.new_column_schema.name);
         }

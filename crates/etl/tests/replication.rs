@@ -2328,6 +2328,83 @@ async fn same_transaction_ddl_messages_precede_relation_and_insert_in_pgoutput()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn consecutive_renames_without_dml_emit_one_final_relation() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("ddl_rename_cycle");
+    database.create_table(table_name.clone(), true, &[("a", "text"), ("b", "text")]).await.unwrap();
+
+    let publication_name = "ddl_rename_cycle_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("ddl_rename_cycle_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "a",
+                new_name: "supabase_etl_source_swap",
+            }],
+        )
+        .await
+        .unwrap();
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn { old_name: "b", new_name: "a" }],
+        )
+        .await
+        .unwrap();
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "supabase_etl_source_swap",
+                new_name: "b",
+            }],
+        )
+        .await
+        .unwrap();
+    database.insert_values(table_name, &["a", "b"], &[&"old-b", &"old-a"]).await.unwrap();
+
+    let markers = collect_stream_markers(stream, 13).await;
+    assert_eq!(
+        markers,
+        vec![
+            StreamMarker::Begin,
+            StreamMarker::DdlMessage(vec![
+                "id".to_owned(),
+                "supabase_etl_source_swap".to_owned(),
+                "b".to_owned(),
+            ]),
+            StreamMarker::Commit,
+            StreamMarker::Begin,
+            StreamMarker::DdlMessage(vec![
+                "id".to_owned(),
+                "supabase_etl_source_swap".to_owned(),
+                "a".to_owned(),
+            ]),
+            StreamMarker::Commit,
+            StreamMarker::Begin,
+            StreamMarker::DdlMessage(vec!["id".to_owned(), "b".to_owned(), "a".to_owned(),]),
+            StreamMarker::Commit,
+            StreamMarker::Begin,
+            StreamMarker::Relation(vec!["id".to_owned(), "b".to_owned(), "a".to_owned()]),
+            StreamMarker::Insert,
+            StreamMarker::Commit,
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn get_slot_state_returns_valid_for_healthy_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
