@@ -838,7 +838,9 @@ where
             diff.columns_to_change.len()
         );
 
-        for operation in diff.operations() {
+        // Preserve the shared planner's dependency order. Regrouping by
+        // operation kind could reintroduce name collisions.
+        for operation in diff.ordered_operations() {
             match operation {
                 SchemaOperation::DropColumn { column } => {
                     self.client

@@ -356,7 +356,9 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             return Ok(());
         }
 
-        for operation in diff.operations() {
+        // Preserve the shared planner's dependency order. Regrouping by
+        // operation kind could reintroduce name collisions.
+        for operation in diff.ordered_operations() {
             match operation {
                 SchemaOperation::DropColumn { column } => {
                     self.sql_client.drop_column(table_name, &column.name).await?;

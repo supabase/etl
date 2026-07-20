@@ -562,168 +562,199 @@ fn plan_schema_diff_sql_ducklake(
         .collect();
     let mut statements = Vec::new();
 
-    for operation in diff.operations() {
-        let SchemaOperation::DropColumn { column } = operation else {
-            continue;
-        };
-        if !reused_removed_column_names.contains(column.name.as_str()) {
-            continue;
-        }
-
-        let tombstone_name = dropped_column_tombstone_name_ducklake(column);
-        let old_index = find_ducklake_column(&column_names, &column.name);
-        let tombstone_index = find_ducklake_column(&column_names, &tombstone_name);
-
-        match (old_index, tombstone_index) {
-            (Some(index), None) => {
-                statements.push(DuckLakeSchemaDdlStatement {
-                    sql: build_rename_column_sql_ducklake(
-                        table_name,
-                        &column.name,
-                        &tombstone_name,
-                    ),
-                    error_description: "DuckLake alter table rename dropped column failed",
-                });
-                column_names[index] = tombstone_name;
-            }
-            (Some(_), Some(_)) => {
-                debug!(
-                    table = %table_name,
-                    column = %column.name,
-                    tombstone_column = %tombstone_name,
-                    "ducklake drop column skipped because reused column name was already \
-                     tombstoned"
-                );
-            }
-            (None, Some(_)) => {
-                debug!(
-                    table = %table_name,
-                    column = %column.name,
-                    tombstone_column = %tombstone_name,
-                    "ducklake drop column skipped because destination column is already \
-                     tombstoned"
-                );
-            }
-            (None, None) => {
-                debug!(
-                    table = %table_name,
-                    column = %column.name,
-                    "ducklake drop column skipped because destination column is already absent"
-                );
-            }
-        }
-    }
-
-    for operation in diff.operations() {
-        let SchemaOperation::RenameColumn { old_name, new_name, .. } = operation else {
-            continue;
-        };
-
-        let old_index = find_ducklake_column(&column_names, old_name);
-        let new_index = find_ducklake_column(&column_names, new_name);
-
-        match (old_index, new_index) {
-            (Some(index), None) => {
-                statements.push(DuckLakeSchemaDdlStatement {
-                    sql: build_rename_column_sql_ducklake(table_name, old_name, new_name),
-                    error_description: "DuckLake alter table rename column failed",
-                });
-                column_names[index] = new_name.clone();
-            }
-            (None, Some(_)) => {
-                debug!(
-                    table = %table_name,
-                    old_column = %old_name,
-                    new_column = %new_name,
-                    "ducklake rename column skipped because destination column already has new \
-                     name"
-                );
-            }
-            (None, None) => {
-                return Err(etl_error!(
-                    ErrorKind::CorruptedTableSchema,
-                    "DuckLake destination column for rename is missing",
-                    format!(
-                        "Table '{table_name}' has neither old column '{old_name}' nor new column \
-                         '{new_name}'"
-                    )
-                ));
-            }
-            (Some(_), Some(_))
-                if added_column_names.contains(old_name.as_str())
-                    || rename_target_names.contains(old_name.as_str()) =>
+    // Consume the shared plan exactly once. DuckLake only customizes how an
+    // operation is rendered or reconciled against the current physical schema;
+    // the shared planner remains the sole owner of execution order.
+    for operation in diff.ordered_operations() {
+        match operation {
+            SchemaOperation::DropColumn { column }
+                if reused_removed_column_names.contains(column.name.as_str()) =>
             {
-                debug!(
-                    table = %table_name,
-                    old_column = %old_name,
-                    new_column = %new_name,
-                    "ducklake rename column skipped because destination has both names after \
-                     replay"
-                );
+                // Keep a dropped column under a deterministic tombstone name
+                // until the replacement has been applied and metadata is
+                // durable. This makes same-name replacement replayable without
+                // changing the shared operation order.
+                let tombstone_name = dropped_column_tombstone_name_ducklake(column);
+                let old_index = find_ducklake_column(&column_names, &column.name);
+                let tombstone_index = find_ducklake_column(&column_names, &tombstone_name);
+
+                match (old_index, tombstone_index) {
+                    (Some(index), None) => {
+                        statements.push(DuckLakeSchemaDdlStatement {
+                            sql: build_rename_column_sql_ducklake(
+                                table_name,
+                                &column.name,
+                                &tombstone_name,
+                            ),
+                            error_description: "DuckLake alter table rename dropped column failed",
+                        });
+                        column_names[index] = tombstone_name;
+                    }
+                    (Some(_), Some(_)) => {
+                        debug!(
+                            table = %table_name,
+                            column = %column.name,
+                            tombstone_column = %tombstone_name,
+                            "ducklake drop column skipped because reused column name was already \
+                             tombstoned"
+                        );
+                    }
+                    (None, Some(_)) => {
+                        debug!(
+                            table = %table_name,
+                            column = %column.name,
+                            tombstone_column = %tombstone_name,
+                            "ducklake drop column skipped because destination column is already \
+                             tombstoned"
+                        );
+                    }
+                    (None, None) => {
+                        debug!(
+                            table = %table_name,
+                            column = %column.name,
+                            "ducklake drop column skipped because destination column is already \
+                             absent"
+                        );
+                    }
+                }
             }
-            (Some(index), Some(_)) => {
-                debug!(
-                    table = %table_name,
-                    old_column = %old_name,
-                    new_column = %new_name,
-                    "ducklake dropping stale rename source column because destination already \
-                     has target name"
-                );
+            SchemaOperation::DropColumn { column } => {
+                let Some(index) = find_ducklake_column(&column_names, &column.name) else {
+                    debug!(
+                        table = %table_name,
+                        column = %column.name,
+                        "ducklake drop column skipped because destination column is already absent"
+                    );
+                    continue;
+                };
+
                 statements.push(DuckLakeSchemaDdlStatement {
-                    sql: build_drop_column_sql_ducklake(table_name, old_name),
-                    error_description: "DuckLake alter table drop stale rename source column \
-                                        failed",
+                    sql: build_drop_column_sql_ducklake(table_name, &column.name),
+                    error_description: "DuckLake alter table drop column failed",
                 });
                 column_names.remove(index);
             }
-        }
-    }
+            SchemaOperation::RenameColumn { old_name, new_name, .. } => {
+                let old_index = find_ducklake_column(&column_names, old_name);
+                let new_index = find_ducklake_column(&column_names, new_name);
 
-    for operation in diff.operations() {
-        let SchemaOperation::ModifyColumn { change, modification } = operation else {
-            continue;
-        };
-        if find_ducklake_column(&column_names, &change.new_column.name).is_none() {
-            debug!(
-                table = %table_name,
-                column = %change.new_column.name,
-                "ducklake column update skipped because destination column is absent"
-            );
-            continue;
-        }
-
-        match modification {
-            ColumnModification::Rename { .. } => {
-                unreachable!("ordered modify operations exclude renames")
+                match (old_index, new_index) {
+                    (Some(index), None) => {
+                        statements.push(DuckLakeSchemaDdlStatement {
+                            sql: build_rename_column_sql_ducklake(table_name, old_name, new_name),
+                            error_description: "DuckLake alter table rename column failed",
+                        });
+                        column_names[index] = new_name.clone();
+                    }
+                    (None, Some(_)) => {
+                        debug!(
+                            table = %table_name,
+                            old_column = %old_name,
+                            new_column = %new_name,
+                            "ducklake rename column skipped because destination column already \
+                             has new name"
+                        );
+                    }
+                    (None, None) => {
+                        return Err(etl_error!(
+                            ErrorKind::CorruptedTableSchema,
+                            "DuckLake destination column for rename is missing",
+                            format!(
+                                "Table '{table_name}' has neither old column '{old_name}' nor new \
+                                 column '{new_name}'"
+                            )
+                        ));
+                    }
+                    (Some(_), Some(_))
+                        if added_column_names.contains(old_name.as_str())
+                            || rename_target_names.contains(old_name.as_str()) =>
+                    {
+                        debug!(
+                            table = %table_name,
+                            old_column = %old_name,
+                            new_column = %new_name,
+                            "ducklake rename column skipped because destination has both names \
+                             after replay"
+                        );
+                    }
+                    (Some(index), Some(_)) => {
+                        debug!(
+                            table = %table_name,
+                            old_column = %old_name,
+                            new_column = %new_name,
+                            "ducklake dropping stale rename source column because destination \
+                             already has target name"
+                        );
+                        statements.push(DuckLakeSchemaDdlStatement {
+                            sql: build_drop_column_sql_ducklake(table_name, old_name),
+                            error_description: "DuckLake alter table drop stale rename source \
+                                                column failed",
+                        });
+                        column_names.remove(index);
+                    }
+                }
             }
-            ColumnModification::Nullability { old_nullable, new_nullable } => {
-                warn!(
-                    table_name = %table_name,
-                    column_name = %change.new_column.name,
-                    old_nullable,
-                    new_nullable,
-                    "skipping source column nullability change for DuckLake"
-                );
-            }
-            ColumnModification::Default { old_expression, new_expression } => {
-                let old_default_was_supported =
-                    old_expression.as_deref().is_some_and(|default_expression| {
-                        supports_column_default_ducklake(default_expression, &change.old_column.typ)
-                    });
+            SchemaOperation::ModifyColumn { change, modification } => {
+                if find_ducklake_column(&column_names, &change.new_column.name).is_none() {
+                    debug!(
+                        table = %table_name,
+                        column = %change.new_column.name,
+                        "ducklake column update skipped because destination column is absent"
+                    );
+                    continue;
+                }
 
-                if let Some(new_default_expression) = new_expression.as_deref() {
-                    let Some(sql) = build_set_default_sql_ducklake(
-                        table_name,
-                        &change.new_column.name,
-                        &change.new_column.typ,
-                        new_default_expression,
-                    ) else {
+                match modification {
+                    ColumnModification::Rename { .. } => {
+                        unreachable!("ordered modify operations exclude renames")
+                    }
+                    ColumnModification::Nullability { old_nullable, new_nullable } => {
                         warn!(
                             table_name = %table_name,
                             column_name = %change.new_column.name,
-                            "skipping unsupported source column default for DuckLake"
+                            old_nullable,
+                            new_nullable,
+                            "skipping source column nullability change for DuckLake"
                         );
-                        if old_default_was_supported {
+                    }
+                    ColumnModification::Default { old_expression, new_expression } => {
+                        let old_default_was_supported =
+                            old_expression.as_deref().is_some_and(|default_expression| {
+                                supports_column_default_ducklake(
+                                    default_expression,
+                                    &change.old_column.typ,
+                                )
+                            });
+
+                        if let Some(new_default_expression) = new_expression.as_deref() {
+                            let Some(sql) = build_set_default_sql_ducklake(
+                                table_name,
+                                &change.new_column.name,
+                                &change.new_column.typ,
+                                new_default_expression,
+                            ) else {
+                                warn!(
+                                    table_name = %table_name,
+                                    column_name = %change.new_column.name,
+                                    "skipping unsupported source column default for DuckLake"
+                                );
+                                if old_default_was_supported {
+                                    statements.push(DuckLakeSchemaDdlStatement {
+                                        sql: build_drop_default_sql_ducklake(
+                                            table_name,
+                                            &change.new_column.name,
+                                        ),
+                                        error_description: "DuckLake alter table drop default \
+                                                            failed",
+                                    });
+                                }
+                                continue;
+                            };
+                            statements.push(DuckLakeSchemaDdlStatement {
+                                sql,
+                                error_description: "DuckLake alter table set default failed",
+                            });
+                        } else if old_default_was_supported {
                             statements.push(DuckLakeSchemaDdlStatement {
                                 sql: build_drop_default_sql_ducklake(
                                     table_name,
@@ -731,93 +762,55 @@ fn plan_schema_diff_sql_ducklake(
                                 ),
                                 error_description: "DuckLake alter table drop default failed",
                             });
+                        } else if old_expression.is_some() {
+                            warn!(
+                                table_name = %table_name,
+                                column_name = %change.new_column.name,
+                                "skipping source column default removal for DuckLake because no \
+                                 supported destination default was set"
+                            );
                         }
-                        continue;
-                    };
-                    statements.push(DuckLakeSchemaDdlStatement {
-                        sql,
-                        error_description: "DuckLake alter table set default failed",
-                    });
-                } else if old_default_was_supported {
-                    statements.push(DuckLakeSchemaDdlStatement {
-                        sql: build_drop_default_sql_ducklake(table_name, &change.new_column.name),
-                        error_description: "DuckLake alter table drop default failed",
-                    });
-                } else if old_expression.is_some() {
-                    warn!(
-                        table_name = %table_name,
-                        column_name = %change.new_column.name,
-                        "skipping source column default removal for DuckLake because no \
-                         supported destination default was set"
-                    );
+                    }
                 }
             }
-        }
-    }
-
-    for operation in diff.operations() {
-        let SchemaOperation::AddColumn { column } = operation else {
-            continue;
-        };
-        if find_ducklake_column(&column_names, &column.name).is_some() {
-            debug!(
-                table = %table_name,
-                column = %column.name,
-                "ducklake add column skipped because destination column already exists"
-            );
-
-            if let Some(default_expression) = column.default_expression.as_deref() {
-                let Some(sql) = build_set_default_sql_ducklake(
-                    table_name,
-                    &column.name,
-                    &column.typ,
-                    default_expression,
-                ) else {
-                    warn!(
-                        table_name = %table_name,
-                        column_name = %column.name,
-                        "skipping unsupported source column default for DuckLake"
+            SchemaOperation::AddColumn { column } => {
+                if find_ducklake_column(&column_names, &column.name).is_some() {
+                    debug!(
+                        table = %table_name,
+                        column = %column.name,
+                        "ducklake add column skipped because destination column already exists"
                     );
+
+                    if let Some(default_expression) = column.default_expression.as_deref() {
+                        let Some(sql) = build_set_default_sql_ducklake(
+                            table_name,
+                            &column.name,
+                            &column.typ,
+                            default_expression,
+                        ) else {
+                            warn!(
+                                table_name = %table_name,
+                                column_name = %column.name,
+                                "skipping unsupported source column default for DuckLake"
+                            );
+                            continue;
+                        };
+                        statements.push(DuckLakeSchemaDdlStatement {
+                            sql,
+                            error_description: "DuckLake alter table set default failed",
+                        });
+                    }
+
                     continue;
-                };
+                }
+
                 statements.push(DuckLakeSchemaDdlStatement {
-                    sql,
-                    error_description: "DuckLake alter table set default failed",
+                    sql: build_add_column_sql_ducklake(table_name, column),
+                    error_description: "DuckLake alter table add column failed",
                 });
+                column_names.push(column.name.clone());
             }
-
-            continue;
         }
-
-        statements.push(DuckLakeSchemaDdlStatement {
-            sql: build_add_column_sql_ducklake(table_name, column),
-            error_description: "DuckLake alter table add column failed",
-        });
-        column_names.push(column.name.clone());
-    }
-
-    for operation in diff.operations() {
-        let SchemaOperation::DropColumn { column } = operation else {
-            continue;
-        };
-        if reused_removed_column_names.contains(column.name.as_str()) {
-            continue;
-        }
-
-        let Some(index) = find_ducklake_column(&column_names, &column.name) else {
-            debug!(
-                table = %table_name,
-                column = %column.name,
-                "ducklake drop column skipped because destination column is already absent"
-            );
-            continue;
-        };
-
-        statements.push(DuckLakeSchemaDdlStatement {
-            sql: build_drop_column_sql_ducklake(table_name, &column.name),
-            error_description: "DuckLake alter table drop column failed",
-        });
-        column_names.remove(index);
     }
 
     Ok(DuckLakeSchemaDiffPlan { statements, column_names })

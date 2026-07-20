@@ -880,7 +880,9 @@ where
         let mut user_column_names: Vec<String> =
             current_schema.column_schemas().map(|column| column.name.clone()).collect();
 
-        for operation in diff.operations() {
+        // Preserve the shared planner's dependency order. Regrouping by
+        // operation kind could reintroduce name collisions.
+        for operation in diff.ordered_operations() {
             match operation {
                 SchemaOperation::DropColumn { column } => {
                     self.client.drop_column(clickhouse_table_name, &column.name).await?;
