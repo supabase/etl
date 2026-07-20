@@ -386,6 +386,9 @@ where
             current_replication_mask.clone(),
         );
 
+        let new_columns: Vec<_> = new_schema.column_schemas().cloned().collect();
+        schema::validate_no_cdc_collisions(&new_columns).map_err(EtlError::from)?;
+
         let table_name = try_stringify_table_name(new_schema.name())?.to_uppercase();
         self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
 
@@ -417,8 +420,6 @@ where
             .store_destination_table_metadata(table_id, updated_metadata.to_applied())
             .await?;
 
-        let new_columns: Vec<_> = new_schema.column_schemas().cloned().collect();
-        schema::validate_no_cdc_collisions(&new_columns).map_err(EtlError::from)?;
         self.client.refresh_table(&table_id).await.map_err(EtlError::from)?;
 
         info!(table_id = ?table_id, "schema change applied");

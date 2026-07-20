@@ -257,9 +257,18 @@ A practical flow is:
 
 The built-in BigQuery, ClickHouse, DuckLake, and Snowflake destinations follow
 this shape: they mark destination schema metadata as `Applying`, apply the
-supported DDL operations, then mark the schema as `Applied`. Because destination
-DDL is not always transactional, a crash while metadata is `Applying` may require
-manual intervention.
+supported DDL operations, then mark the schema as `Applied`. Recovery follows
+each destination's actual DDL guarantees:
+
+- DuckLake applies one schema plan transactionally. It can retry ordinary
+  old-or-target states, but a rename cycle requires manual recovery because the
+  old and target schemas use the same name set and metadata is stored outside
+  the DuckLake transaction.
+- ClickHouse automatically resumes only when its nontransactional table schema
+  matches the complete previous or target endpoint. A partially applied DDL
+  prefix requires manual recovery.
+- BigQuery and Snowflake leave `Applying` metadata for operator recovery rather
+  than guessing which nontransactional operations completed.
 
 Other destination modules may support a narrower schema-change surface. Treat
 `Event::Relation` as the stable ETL contract, then check the destination's
@@ -297,6 +306,10 @@ These behaviors are **not full destination DDL semantics** yet:
   other pipeline logic.
 - A drop and re-add is not treated as a rename. It becomes a drop plus an add
   because PostgreSQL assigns a new ordinal position to the new column.
+- DuckLake reserves only the exact generated tombstone shapes
+  `supabase_etl_ducklake_dropped_<attnum>_<16-hex-hash>` and the legacy
+  `__etl_ducklake_dropped_<attnum>_<16-hex-hash>` form. Similar business names
+  that do not match that full shape remain valid.
 - Destination defaults are best-effort metadata translations. Unsupported
   defaults are skipped with a warning instead of failing replication. This does
   not remove values PostgreSQL emits in future row events; it only means the

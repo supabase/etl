@@ -2380,16 +2380,9 @@ async fn table_schema_change() {
     event_notify.notified().await;
     destination.clear_events().await;
 
-    // Apply multiple schema changes:
-    // 1. Rename name -> full_name
-    // 2. Drop the status column
-    // 3. Add email column
-    //
-    // Note: Each DDL change is captured via the DDL event trigger and stored in the
-    // schema store, but PostgreSQL sends only ONE Relation message with the
-    // final schema when the next DML operation (INSERT) occurs. The schema
-    // diffing in handle_relation_event then computes and applies all changes at
-    // once.
+    // Stage a rename cycle and a same-name drop/add without intervening DML.
+    // The next Relation exposes only the final endpoint, so the destination
+    // must follow the shared ordered plan rather than regrouping operations.
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
@@ -2397,20 +2390,36 @@ async fn table_schema_change() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
+            &[TableModification::RenameColumn { old_name: "name", new_name: "schema_swap" }],
         )
-        .await
-        .unwrap();
-
-    database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "status" }])
         .await
         .unwrap();
 
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn { name: "email", data_type: "text" }],
+            &[TableModification::RenameColumn { old_name: "status", new_name: "name" }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn { old_name: "schema_swap", new_name: "status" }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn { name: "age", data_type: "text" }],
         )
         .await
         .unwrap();
@@ -2419,8 +2428,8 @@ async fn table_schema_change() {
     database
         .insert_values(
             table_name.clone(),
-            &["full_name", "age", "email"],
-            &[&"Bob", &30, &"bob@example.com"],
+            &["status", "name", "age"],
+            &[&"Bob", &"pending", &"thirty"],
         )
         .await
         .unwrap();
@@ -2439,18 +2448,32 @@ async fn table_schema_change() {
         "snapshot_id should have increased after schema change"
     );
 
+    let table_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .expect("BigQuery table schema should exist after schema change");
+    assert!(
+        table_schema.column_names().iter().all(|name| !name.starts_with("supabase_etl_")),
+        "planner-generated columns must not remain after a successful schema change"
+    );
+
     let rows = bigquery_database.query_table(table_name).await.unwrap();
     let mut rows = parse_bigquery_table_rows::<BigQuerySchemaChangeRow>(rows);
     rows.sort();
     assert_eq!(
         rows,
         vec![
-            BigQuerySchemaChangeRow { id: 1, full_name: "Alice".to_owned(), age: 25, email: None },
+            BigQuerySchemaChangeRow {
+                id: 1,
+                status: "Alice".to_owned(),
+                name: Some("active".to_owned()),
+                age: None,
+            },
             BigQuerySchemaChangeRow {
                 id: 2,
-                full_name: "Bob".to_owned(),
-                age: 30,
-                email: Some("bob@example.com".to_owned()),
+                status: "Bob".to_owned(),
+                name: Some("pending".to_owned()),
+                age: Some("thirty".to_owned()),
             },
         ]
     );

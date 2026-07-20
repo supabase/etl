@@ -751,7 +751,7 @@ impl ReplicatedTableSchema {
 ///
 /// Variant order is the canonical per-column order: establish the final name,
 /// then apply nullability and default metadata.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnModificationType {
     /// The column was renamed.
     Rename,
@@ -831,47 +831,29 @@ impl SchemaDiff {
     /// Builds a diff from already classified column operations.
     ///
     /// Prefer [`ReplicatedTableSchema::diff`] when both endpoint schemas are
-    /// available. `existing_column_names` must include every currently
-    /// occupied destination name so any generated cycle-breaking name is
-    /// collision-free. The planner tracks those occupied names as mutable
-    /// execution state, while a separate reserved-name set covers both
-    /// endpoints and every generated name. A name can therefore become free
-    /// for a requested rename without becoming eligible for temporary use.
+    /// available. The column vectors and each modification-type vector must be
+    /// in PostgreSQL `attnum` and canonical modification order, respectively.
+    /// `existing_column_names` must include every currently occupied
+    /// destination name so any generated cycle-breaking name is collision-free.
+    /// The planner tracks those occupied names as mutable execution state,
+    /// while a separate reserved-name set covers both endpoints and every
+    /// generated name. A name can therefore become free for a requested
+    /// rename without becoming eligible for temporary use.
     pub fn new<I, S>(
-        mut columns_to_add: Vec<ColumnSchema>,
-        mut columns_to_drop: Vec<ColumnSchema>,
-        mut columns_to_modify: Vec<ColumnModification>,
+        columns_to_add: Vec<ColumnSchema>,
+        columns_to_drop: Vec<ColumnSchema>,
+        columns_to_modify: Vec<ColumnModification>,
         existing_column_names: I,
     ) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        // Canonicalize manually assembled diffs without sorting the normal
-        // snapshot-diff path, which already emits PostgreSQL `attnum` order.
-        if !columns_to_add.is_sorted_by_key(|column| column.ordinal_position) {
-            columns_to_add.sort_unstable_by_key(|column| column.ordinal_position);
-        }
-        if !columns_to_drop.is_sorted_by_key(|column| column.ordinal_position) {
-            columns_to_drop.sort_unstable_by_key(|column| column.ordinal_position);
-        }
-        if !columns_to_modify
-            .is_sorted_by_key(|modification| modification.old_column_schema.ordinal_position)
-        {
-            columns_to_modify.sort_unstable_by_key(|modification| {
-                modification.old_column_schema.ordinal_position
-            });
-        }
-        for modification in &mut columns_to_modify {
-            if !modification.modification_types.is_sorted() {
-                modification.modification_types.sort_unstable();
-            }
-            modification.modification_types.dedup();
-        }
-        columns_to_modify.retain(|modification| !modification.modification_types.is_empty());
-
+        // The occupied column names are defined as the columns that we can't create or rename to.
+        // They will be used to determine the how to break or solve rename cycles.
         let occupied_column_names: HashSet<String> =
             existing_column_names.into_iter().map(Into::into).collect();
+
         // Generated names must also avoid case-only endpoint variants because
         // some destinations compare identifiers case-insensitively.
         let reserved_column_name_keys = occupied_column_names
@@ -913,6 +895,35 @@ impl SchemaDiff {
     /// independently apply the classified `columns_to_*` fields.
     pub fn ordered_operations(&self) -> &[SchemaOperation] {
         &self.ordered_operations
+    }
+
+    /// Returns whether the plan contains a rename cycle.
+    ///
+    /// Each cycle requires one planner-generated rename in addition to its
+    /// endpoint renames.
+    pub fn has_rename_cycles(&self) -> bool {
+        let endpoint_rename_count = self
+            .columns_to_modify
+            .iter()
+            .filter(|modification| {
+                modification.modification_types.contains(&ColumnModificationType::Rename)
+            })
+            .count();
+        let planned_rename_count = self
+            .ordered_operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    SchemaOperation::ModifyColumn {
+                        modification_type: ColumnModificationType::Rename,
+                        ..
+                    }
+                )
+            })
+            .count();
+
+        planned_rename_count > endpoint_rename_count
     }
 }
 
@@ -1283,7 +1294,11 @@ mod tests {
         new_schema: &ReplicatedTableSchema,
     ) {
         let diff = old_schema.diff(new_schema);
-        let mut occupied: HashMap<String, i32> = old_schema
+        let mut columns_by_ordinal: BTreeMap<i32, ColumnSchema> = old_schema
+            .column_schemas()
+            .map(|column| (column.ordinal_position, column.clone()))
+            .collect();
+        let mut occupied_names: HashMap<String, i32> = old_schema
             .column_schemas()
             .map(|column| (column.name.clone(), column.ordinal_position))
             .collect();
@@ -1292,43 +1307,55 @@ mod tests {
             match operation {
                 SchemaOperation::DropColumn { column_schema } => {
                     assert_eq!(
-                        occupied.remove(&column_schema.name),
+                        columns_by_ordinal.remove(&column_schema.ordinal_position),
+                        Some(column_schema.clone())
+                    );
+                    assert_eq!(
+                        occupied_names.remove(&column_schema.name),
                         Some(column_schema.ordinal_position)
                     );
                 }
                 SchemaOperation::AddColumn { column_schema } => {
                     assert_eq!(
-                        occupied
-                            .insert(column_schema.name.clone(), column_schema.ordinal_position,),
+                        columns_by_ordinal
+                            .insert(column_schema.ordinal_position, column_schema.clone()),
+                        None
+                    );
+                    assert_eq!(
+                        occupied_names
+                            .insert(column_schema.name.clone(), column_schema.ordinal_position),
                         None
                     );
                 }
-                SchemaOperation::ModifyColumn {
-                    old_column_schema,
-                    new_column_schema,
-                    modification_type: ColumnModificationType::Rename,
-                } => {
+                SchemaOperation::ModifyColumn { old_column_schema, new_column_schema, .. } => {
                     assert_eq!(
-                        occupied.remove(&old_column_schema.name),
-                        Some(old_column_schema.ordinal_position)
+                        columns_by_ordinal.get(&old_column_schema.ordinal_position),
+                        Some(old_column_schema)
                     );
-                    assert_eq!(
-                        occupied.insert(
-                            new_column_schema.name.clone(),
-                            new_column_schema.ordinal_position,
-                        ),
-                        None
-                    );
+                    if old_column_schema.name != new_column_schema.name {
+                        assert_eq!(
+                            occupied_names.remove(&old_column_schema.name),
+                            Some(old_column_schema.ordinal_position)
+                        );
+                        assert_eq!(
+                            occupied_names.insert(
+                                new_column_schema.name.clone(),
+                                new_column_schema.ordinal_position,
+                            ),
+                            None
+                        );
+                    }
+                    columns_by_ordinal
+                        .insert(new_column_schema.ordinal_position, new_column_schema.clone());
                 }
-                SchemaOperation::ModifyColumn { .. } => {}
             }
         }
 
-        let expected: HashMap<String, i32> = new_schema
+        let expected: BTreeMap<i32, ColumnSchema> = new_schema
             .column_schemas()
-            .map(|column| (column.name.clone(), column.ordinal_position))
+            .map(|column| (column.ordinal_position, column.clone()))
             .collect();
-        assert_eq!(occupied, expected);
+        assert_eq!(columns_by_ordinal, expected);
     }
 
     fn permutations(values: &mut [String], start: usize, output: &mut Vec<Vec<String>>) {
@@ -1703,35 +1730,6 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_new_canonicalizes_manually_ordered_inputs() {
-        let modification = ColumnModification {
-            old_column_schema: text_column("b", 2),
-            new_column_schema: text_column("c", 2)
-                .with_default_expression("'new'::text".to_owned()),
-            modification_types: vec![
-                ColumnModificationType::Default,
-                ColumnModificationType::Rename,
-                ColumnModificationType::Default,
-            ],
-        };
-        let diff = SchemaDiff::new(
-            vec![text_column("f", 5), text_column("e", 4)],
-            vec![text_column("unused", 3), text_column("old_a", 1)],
-            vec![modification],
-            ["old_a", "b", "unused"],
-        );
-
-        assert_eq!(
-            operation_names(&diff),
-            ["drop:old_a", "drop:unused", "rename:b->c", "add:e", "add:f", "modify-default:c",]
-        );
-        assert_eq!(
-            diff.columns_to_modify[0].modification_types,
-            [ColumnModificationType::Rename, ColumnModificationType::Default]
-        );
-    }
-
-    #[test]
     fn schema_diff_orders_rename_chain_without_temporary_name() {
         let old_schema = create_replicated_schema(vec![text_column("a", 1), text_column("b", 2)]);
         let new_schema = create_replicated_schema(vec![text_column("b", 1), text_column("c", 2)]);
@@ -1799,6 +1797,7 @@ mod tests {
 
         let diff = old_schema.diff(&new_schema);
 
+        assert!(diff.has_rename_cycles());
         assert_eq!(
             operation_names(&diff),
             [
@@ -1836,6 +1835,7 @@ mod tests {
         for _ in 0..10 {
             let diff = old_schema.diff(&new_schema);
 
+            assert!(diff.has_rename_cycles());
             assert_eq!(operation_names(&diff), expected);
             assert_operations_converge(&old_schema, &new_schema);
         }

@@ -787,7 +787,7 @@ async fn schema_evolution_existing_column_default_changes() {
 
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
-async fn schema_evolution_rename_column() {
+async fn schema_evolution_applies_ordered_name_reuse_plan() {
     let harness = TestHarness::new();
     let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
     let sf_table = snowflake_table_name("public", &src_table);
@@ -800,7 +800,9 @@ async fn schema_evolution_rename_column() {
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
             ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+            ColumnSchema::new("first".to_owned(), Type::TEXT, -1, 2, true),
+            ColumnSchema::new("second".to_owned(), Type::TEXT, -1, 3, true),
+            ColumnSchema::new("replaced".to_owned(), Type::TEXT, -1, 4, true),
         ],
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
@@ -811,7 +813,9 @@ async fn schema_evolution_rename_column() {
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
             ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
-            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, true),
+            ColumnSchema::new("second".to_owned(), Type::TEXT, -1, 2, true),
+            ColumnSchema::new("first".to_owned(), Type::TEXT, -1, 3, true),
+            ColumnSchema::new("replaced".to_owned(), Type::TEXT, -1, 5, true),
         ],
         new_snapshot_id,
     );
@@ -825,7 +829,12 @@ async fn schema_evolution_rename_column() {
             .destination
             .write_table_rows(
                 &initial_replicated,
-                vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())])],
+                vec![TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("first-1".into()),
+                    Cell::String("second-1".into()),
+                    Cell::String("old-replaced".into()),
+                ])],
             )
             .await
             .expect("initial write_table_rows failed");
@@ -855,7 +864,7 @@ async fn schema_evolution_rename_column() {
                 replicated_table_schema: evolved_replicated.clone(),
             })])
             .await
-            .expect("process_events (RelationEvent rename) failed");
+            .expect("process_events (RelationEvent ordered plan) failed");
 
         harness
             .destination
@@ -864,10 +873,15 @@ async fn schema_evolution_rename_column() {
                 commit_lsn: PgLsn::from(101u64),
                 tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Bob".into())]),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("second-2".into()),
+                    Cell::String("first-2".into()),
+                    Cell::String("new-replaced".into()),
+                ]),
             })])
             .await
-            .expect("process_events (Insert with renamed column) failed");
+            .expect("process_events (Insert after ordered plan) failed");
 
         let expected_offset = OffsetToken::new(PgLsn::from(101u64), 0);
         let committed = poll_destination_offset(
@@ -886,25 +900,31 @@ async fn schema_evolution_rename_column() {
             harness.config.schema()
         );
 
-        // New row uses the renamed column.
         let rows = query_rows(
             &harness.sql,
-            &format!("SELECT \"full_name\" FROM {fqn} WHERE \"id\" = '2'"),
+            &format!(
+                "SELECT \"id\", \"second\", \"first\", \"replaced\" FROM {fqn} ORDER BY \"id\""
+            ),
         )
         .await
-        .expect("query for renamed column failed");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0][0], serde_json::json!("Bob"));
-
-        // Initial row data is preserved under the new column name.
-        let rows = query_rows(
-            &harness.sql,
-            &format!("SELECT \"full_name\" FROM {fqn} WHERE \"id\" = '1'"),
-        )
-        .await
-        .expect("query for initial row after rename failed");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0][0], serde_json::json!("Alice"));
+        .expect("query after ordered schema plan failed");
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    serde_json::json!("1"),
+                    serde_json::json!("first-1"),
+                    serde_json::json!("second-1"),
+                    serde_json::Value::Null,
+                ],
+                vec![
+                    serde_json::json!("2"),
+                    serde_json::json!("second-2"),
+                    serde_json::json!("first-2"),
+                    serde_json::json!("new-replaced"),
+                ],
+            ]
+        );
     })
     .await;
 }
