@@ -271,11 +271,18 @@ sessions. Destinations should treat each relation event as an ordered schema
 barrier for the row events that follow it, not as a checkpoint or deduplication
 key.
 
-The `SnapshotId` inside the carried table schema is the only stable identifier
-for that particular table-schema snapshot. Do not derive schema-snapshot
-identity from relation delivery order, transaction position, or the schema's
-contents: relation delivery is session-dependent, and identical contents can
-legitimately appear in different snapshots.
+During replay, logical decoding uses historical catalog state at each row
+change's WAL position. Committed publication column-list changes are therefore
+reflected in the corresponding relation masks: rows written before and after a
+publication change are decoded with their respective projections. Session
+dependence affects when relation metadata is emitted or re-emitted, not the
+historical projection used to decode a row.
+
+The carried `SnapshotId` identifies the underlying stored table schema, not the
+complete `ReplicatedTableSchema`. A relation event for the same snapshot can
+carry different replication or identity masks, so destinations must preserve
+those mask changes. Relation delivery order and transaction position are
+session-dependent and must not be used as snapshot identity.
 
 PostgreSQL pgoutput builds relation messages by walking the table descriptor in
 `pg_attribute.attnum` order and skipping columns that are not published. It

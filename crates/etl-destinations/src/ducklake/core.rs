@@ -17,8 +17,8 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnModificationType, ColumnSchema, ReplicatedTableSchema, ReplicationMask, SchemaDiff,
-        SchemaOperation, SnapshotId, TableId, TableName, TableSchema,
+        ColumnModificationType, ColumnNameComparison, ColumnSchema, ReplicatedTableSchema,
+        ReplicationMask, SchemaDiff, SchemaOperation, SnapshotId, TableId, TableName, TableSchema,
     },
     store::{DestinationStore, TableStateType},
 };
@@ -1625,7 +1625,8 @@ where
         );
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
-        let diff = current_schema.diff(new_replicated_table_schema);
+        let diff = current_schema
+            .diff(new_replicated_table_schema, ColumnNameComparison::AsciiCaseInsensitive);
         if let Err(error) = self.apply_schema_diff(&table_name, &diff).await {
             warn!(
                 error = %error,
@@ -1754,6 +1755,7 @@ where
             Vec::new(),
             Vec::new(),
             ducklake_columns.iter().map(String::as_str),
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         self.apply_schema_diff(table_name, &diff).await
@@ -2291,38 +2293,18 @@ where
         Ok(table_schema)
     }
 
-    /// Loads the best available previous schema for interrupted DDL recovery.
+    /// Loads the exact previous schema for interrupted DDL recovery.
     async fn load_previous_recovery_table_schema(
         &self,
         table_id: TableId,
         previous_snapshot_id: SnapshotId,
     ) -> EtlResult<Arc<TableSchema>> {
-        let table_schema =
-            self.store.get_table_schema(&table_id, previous_snapshot_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::InvalidState,
-                        "DuckLake schema recovery previous schema not found",
-                        format!(
-                            "Table {} needs stored schema snapshot {} to recover the destination \
-                             table, but it was not found.",
-                            table_id, previous_snapshot_id
-                        )
-                    )
-                },
-            )?;
-
-        if table_schema.snapshot_id != previous_snapshot_id {
-            warn!(
-                table_id = %table_id,
-                requested_snapshot_id = %previous_snapshot_id,
-                found_snapshot_id = %table_schema.snapshot_id,
-                "ducklake schema recovery exact previous schema not found, using nearest \
-                 available schema"
-            );
-        }
-
-        Ok(table_schema)
+        self.load_exact_table_schema(
+            table_id,
+            previous_snapshot_id,
+            "DuckLake schema recovery previous schema not found",
+        )
+        .await
     }
 
     /// Resolves the target replicated schema for interrupted DDL recovery.
@@ -2392,7 +2374,8 @@ where
                     previous_table_schema,
                     previous_replication_mask,
                 );
-                let diff = old_schema.diff(&target_schema);
+                let diff =
+                    old_schema.diff(&target_schema, ColumnNameComparison::AsciiCaseInsensitive);
                 ensure_schema_diff_recoverable_ducklake(table_name, &diff)?;
                 self.apply_schema_diff(table_name, &diff).await?;
             }
@@ -3006,6 +2989,7 @@ mod tests {
             Vec::new(),
             vec![rename_modification("name", "full_name", 2)],
             ["id", "name"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let plan = plan_schema_diff_sql_ducklake(
@@ -3034,6 +3018,7 @@ mod tests {
             Vec::new(),
             vec![rename_modification("a", "b", 1), rename_modification("b", "a", 2)],
             ["a", "b"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let plan = plan_schema_diff_sql_ducklake(
@@ -3063,6 +3048,7 @@ mod tests {
             Vec::new(),
             vec![rename_modification("a", "b", 1), rename_modification("b", "a", 2)],
             ["a", "b"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let plan = plan_schema_diff_sql_ducklake(
@@ -3092,6 +3078,7 @@ mod tests {
             Vec::new(),
             vec![rename_modification("a", "b", 1), rename_modification("b", "a", 2)],
             ["a", "b"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let error =
@@ -3110,6 +3097,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             ["id", "name"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let plan = plan_schema_diff_sql_ducklake(
@@ -3137,6 +3125,7 @@ mod tests {
             Vec::new(),
             vec![default_modification("status", 3, Some("array['unsupported']::text[]"), None)],
             ["id", "name", "status"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let plan = plan_schema_diff_sql_ducklake(
@@ -3157,6 +3146,7 @@ mod tests {
             Vec::new(),
             vec![rename_modification("name", "full_name", 2)],
             ["id", "name"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let plan = plan_schema_diff_sql_ducklake(
@@ -3180,6 +3170,7 @@ mod tests {
                 rename_modification("email", "name", 3),
             ],
             ["id", "name", "email"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let plan = plan_schema_diff_sql_ducklake(
@@ -3200,6 +3191,7 @@ mod tests {
             Vec::new(),
             vec![rename_modification("ddl_col_4_1", "ddl_col_4_0", 4)],
             ["id", "ddl_col_4_1"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let plan = plan_schema_diff_sql_ducklake(
@@ -3227,6 +3219,7 @@ mod tests {
             vec![dropped_column],
             vec![rename_modification("name", "status", 2)],
             ["id", "name", "status"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let plan = plan_schema_diff_sql_ducklake(
@@ -3260,6 +3253,7 @@ mod tests {
             vec![dropped_column],
             Vec::new(),
             ["id", "name"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let plan = plan_schema_diff_sql_ducklake(
@@ -3292,6 +3286,7 @@ mod tests {
             vec![dropped_column],
             Vec::new(),
             ["id", "name"],
+            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
         let plan = plan_schema_diff_sql_ducklake(

@@ -1297,7 +1297,7 @@ async fn schema_snapshots_are_pruned_after_confirmed_progress() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_replication_masks_are_consistent_after_restart() {
+async fn publication_column_masks_replay_in_historical_wal_order_after_restart() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
     fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
@@ -1311,22 +1311,22 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
         return;
     }
 
-    // Create a table with 3 columns (plus auto-generated id).
+    // Create a table with 3 columns, including the auto-generated id.
     let table_name = test_table_name("col_removal");
     let table_id = database
         .create_table(
             table_name.clone(),
             true,
-            &[("name", "text not null"), ("age", "integer not null"), ("email", "text not null")],
+            &[("name", "text not null"), ("age", "integer not null")],
         )
         .await
         .unwrap();
 
-    // Create publication with all 3 columns (plus id) initially.
+    // Create the publication with all 3 columns initially.
     let publication_name = format!("pub_{}", random::<u32>());
     database
         .run_sql(&format!(
-            "create publication {publication_name} for table {} (id, name, age, email)",
+            "create publication {publication_name} for table {} (id, name, age)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1351,38 +1351,22 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
 
     sync_done_notify.notified().await;
 
-    // We expect 3 relation events (one per publication change) and 3 insert events.
+    // Relation messages are generated lazily, but logical decoding must use
+    // the publication projection visible at each insert's WAL position.
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
         .await;
 
-    // State 1: Insert with all 4 columns (id, name, age, email).
+    // State 1: Insert with all 3 columns (id, name, age).
     database
         .run_sql(&format!(
-            "insert into {} (name, age, email) values ('Alice', 25, 'alice@example.com')",
+            "insert into {} (name, age) values ('Alice', 25)",
             table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
 
-    // State 2: Remove email column -> (id, name, age), then insert.
-    database
-        .run_sql(&format!(
-            "alter publication {publication_name} set table {} (id, name, age)",
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    database
-        .run_sql(&format!(
-            "insert into {} (name, age, email) values ('Bob', 30, 'bob@example.com')",
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    // State 3: Remove age column -> (id, name), then insert.
+    // State 2: Remove age -> (id, name), then insert.
     database
         .run_sql(&format!(
             "alter publication {publication_name} set table {} (id, name)",
@@ -1393,7 +1377,24 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
 
     database
         .run_sql(&format!(
-            "insert into {} (name, age, email) values ('Charlie', 35, 'charlie@example.com')",
+            "insert into {} (name, age) values ('Bob', 30)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // State 3: Remove name -> (id), then insert.
+    database
+        .run_sql(&format!(
+            "alter publication {publication_name} set table {} (id)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "insert into {} (name, age) values ('Charlie', 35)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1422,15 +1423,27 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
             relation_events.len()
         );
 
-        // Verify relation events have decreasing column counts: 4 -> 3 -> 2.
+        // Verify relation events have decreasing column counts: 3 -> 2 -> 1.
         let relation_column_counts: Vec<usize> = relation_events
             .iter()
             .map(|r| r.replicated_table_schema.column_schemas().count())
             .collect();
         assert_eq!(
             relation_column_counts,
-            vec![4, 3, 2],
-            "Expected relation column counts [4, 3, 2], got {relation_column_counts:?}"
+            vec![3, 2, 1],
+            "Expected relation column counts [3, 2, 1], got {relation_column_counts:?}"
+        );
+
+        // Publication column changes do not create TableSchema snapshots. All
+        // three relation states therefore share one snapshot ID and differ by
+        // replication mask.
+        let snapshot_id = relation_events[0].replicated_table_schema.inner().snapshot_id;
+        assert!(
+            relation_events.iter().all(|relation| relation
+                .replicated_table_schema
+                .inner()
+                .snapshot_id
+                == snapshot_id)
         );
 
         // Verify relation column names for each state.
@@ -1439,46 +1452,46 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
             .column_schemas()
             .map(|c| c.name.as_str())
             .collect();
-        assert_eq!(relation_1_cols, vec!["id", "name", "age", "email"]);
+        assert_eq!(relation_1_cols, vec!["id", "name", "age"]);
 
         let relation_2_cols: Vec<&str> = relation_events[1]
             .replicated_table_schema
             .column_schemas()
             .map(|c| c.name.as_str())
             .collect();
-        assert_eq!(relation_2_cols, vec!["id", "name", "age"]);
+        assert_eq!(relation_2_cols, vec!["id", "name"]);
 
         let relation_3_cols: Vec<&str> = relation_events[2]
             .replicated_table_schema
             .column_schemas()
             .map(|c| c.name.as_str())
             .collect();
-        assert_eq!(relation_3_cols, vec!["id", "name"]);
+        assert_eq!(relation_3_cols, vec!["id"]);
 
         // Verify replication masks.
         assert_eq!(
             relation_events[0].replicated_table_schema.replication_mask().as_slice(),
-            &[1, 1, 1, 1]
+            &[1, 1, 1]
         );
         assert_eq!(
             relation_events[1].replicated_table_schema.replication_mask().as_slice(),
-            &[1, 1, 1, 0]
+            &[1, 1, 0]
         );
         assert_eq!(
             relation_events[2].replicated_table_schema.replication_mask().as_slice(),
-            &[1, 1, 0, 0]
+            &[1, 0, 0]
         );
 
-        // Verify underlying schema always has 4 columns.
+        // Verify the underlying schema always has 3 columns.
         for relation in &relation_events {
-            assert_eq!(relation.replicated_table_schema.inner().column_schemas.len(), 4);
+            assert_eq!(relation.replicated_table_schema.inner().column_schemas.len(), 3);
         }
 
         // Verify we have 3 insert events.
         let insert_events = grouped.get(&(EventType::Insert, table_id)).unwrap();
         assert_eq!(insert_events.len(), 3, "Expected 3 insert events, got {}", insert_events.len());
 
-        // Verify insert events have decreasing value counts: 4 -> 3 -> 2.
+        // Verify insert events have decreasing value counts: 3 -> 2 -> 1.
         let insert_value_counts: Vec<usize> = insert_events
             .iter()
             .filter_map(|event| {
@@ -1491,8 +1504,8 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
             .collect();
         assert_eq!(
             insert_value_counts,
-            vec![4, 3, 2],
-            "Expected insert value counts [4, 3, 2], got {insert_value_counts:?}"
+            vec![3, 2, 1],
+            "Expected insert value counts [3, 2, 1], got {insert_value_counts:?}"
         );
     };
 
@@ -1509,11 +1522,11 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
     assert!(!table_schemas_snapshots.is_empty(), "Expected at least 1 schema snapshot");
     assert_schema_snapshots_ordering(table_schemas_snapshots, true);
 
-    // The underlying table schema should always have 4 columns.
+    // The underlying table schema should always have 3 columns.
     for (_, schema) in table_schemas_snapshots {
         assert_table_schema_column_names_types(
             schema,
-            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
         );
     }
 
@@ -1527,8 +1540,9 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
     // would break the exact-count match in wait_for_events_count below).
     fail::remove(SEND_STATUS_UPDATE_FP);
 
-    // Restart the pipeline -- Postgres will resend the data since we don't
-    // track progress exactly.
+    // Restart after the live publication reached its final `(id)`
+    // projection. PostgreSQL will resend the retained WAL because run 1 did
+    // not acknowledge progress.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1546,7 +1560,8 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
 
     events_notify_restart.notified().await;
 
-    // Verify the same events are received after restart.
+    // Historical catalog visibility must reproduce the original 3 -> 2 -> 1
+    // relation masks rather than applying the live 1-column mask to every row.
     let events_after_restart = destination.get_events().await;
     verify_events(&events_after_restart, table_id);
 

@@ -11,8 +11,8 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnModification, ColumnModificationType, IdentityType, PgLsn, ReplicatedTableSchema,
-        SchemaDiff, SchemaOperation, TableId, Type, is_array_type,
+        ColumnModification, ColumnModificationType, ColumnNameComparison, IdentityType, PgLsn,
+        ReplicatedTableSchema, SchemaDiff, SchemaOperation, TableId, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
 };
@@ -192,6 +192,7 @@ fn metadata_only_schema_diff(
         Vec::new(),
         columns_to_modify,
         target_schema.column_schemas().map(|column| column.name.as_str()),
+        ColumnNameComparison::CaseSensitive,
     )
 }
 
@@ -785,7 +786,7 @@ where
                     Arc::clone(&old_table_schema),
                     metadata.replication_mask.clone(),
                 );
-                let diff = old_schema.diff(schema);
+                let diff = old_schema.diff(schema, ColumnNameComparison::CaseSensitive);
                 let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
                 let actual_user_column_names =
                     clickhouse_user_column_names(&actual_columns, self.inserter_config.engine)?;
@@ -965,7 +966,7 @@ where
         );
 
         let clickhouse_table_name = &metadata.destination_table_id;
-        let diff = current_schema.diff(new_schema);
+        let diff = current_schema.diff(new_schema, ColumnNameComparison::CaseSensitive);
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
             reject_pk_alters_under_replacing_merge_tree(
                 clickhouse_table_name,
@@ -1991,6 +1992,7 @@ mod tests {
             vec![ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 3, true)],
             Vec::new(),
             schema.column_schemas().map(|column| column.name.as_str()),
+            ColumnNameComparison::CaseSensitive,
         );
         reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
@@ -2012,6 +2014,7 @@ mod tests {
             ],
             Vec::new(),
             schema.column_schemas().map(|column| column.name.as_str()),
+            ColumnNameComparison::CaseSensitive,
         );
         let err = reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
@@ -2032,6 +2035,7 @@ mod tests {
             Vec::new(),
             vec![rename_modification("value", "payload", 3)],
             schema.column_schemas().map(|column| column.name.as_str()),
+            ColumnNameComparison::CaseSensitive,
         );
         reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
@@ -2050,6 +2054,7 @@ mod tests {
             Vec::new(),
             vec![rename_modification("id", "row_id", 2)],
             schema.column_schemas().map(|column| column.name.as_str()),
+            ColumnNameComparison::CaseSensitive,
         );
         let err = reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
@@ -2083,7 +2088,7 @@ mod tests {
             ReplicationMask::all(&new_table_schema),
             IdentityMask::from_bytes(vec![1, 1, 0]),
         );
-        let diff = current_schema.diff(&new_schema);
+        let diff = current_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
 
         assert!(diff.is_empty());
         let error = reject_pk_alters_under_replacing_merge_tree(

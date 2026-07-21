@@ -18,8 +18,8 @@ use etl::{
     event::{Event, EventSequenceKey},
     pipeline::PipelineId,
     schema::{
-        ColumnModificationType, IdentityType, ReplicatedTableSchema, SchemaDiff, SchemaOperation,
-        TableId, TableName,
+        ColumnModificationType, ColumnNameComparison, IdentityType, ReplicatedTableSchema,
+        SchemaDiff, SchemaOperation, TableId, TableName,
     },
     store::DestinationStore,
 };
@@ -760,7 +760,8 @@ where
         );
         ensure_bigquery_primary_key_unchanged(&current_schema, new_replicated_table_schema)?;
 
-        let diff = current_schema.diff(new_replicated_table_schema);
+        let diff = current_schema
+            .diff(new_replicated_table_schema, ColumnNameComparison::UnicodeCaseInsensitive);
         let sequenced_bigquery_table_id = metadata.destination_table_id.parse()?;
 
         // Mark as applying before making changes (with the NEW snapshot_id and mask).

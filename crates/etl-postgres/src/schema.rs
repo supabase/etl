@@ -30,10 +30,8 @@ type Oid = u32;
 ///
 /// Wraps a [`PgLsn`] to represent the start_lsn of the DDL message that created
 /// a schema version. A value of 0/0 indicates the initial schema before any DDL
-/// changes. Stored as `pg_lsn` in the database. This is the only stable
-/// identifier for a particular table-schema snapshot; relation-message
-/// position and delivery order are session-dependent and must not be used as
-/// snapshot identity.
+/// changes. Stored as `pg_lsn` in the database. Replication and identity masks
+/// are runtime relation state and may change without a new snapshot ID.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct SnapshotId(PgLsn);
 
@@ -462,11 +460,10 @@ pub struct TableSchema {
     pub name: TableName,
     /// The schemas of all columns in the table.
     pub column_schemas: Vec<ColumnSchema>,
-    /// The stable identifier for this schema version.
+    /// The identifier for this stored source schema version.
     ///
-    /// This is the only stable identifier for a particular table-schema
-    /// snapshot. Value 0 indicates the initial schema; other values are
-    /// start-LSN positions of DDL changes.
+    /// Value 0 indicates the initial schema; other values are start-LSN
+    /// positions of DDL changes.
     pub snapshot_id: SnapshotId,
 }
 

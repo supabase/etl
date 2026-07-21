@@ -2015,12 +2015,11 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
     assert_eq!(rows, vec![(1, "existing".to_owned()), (2, "new".to_owned())]);
 }
 
-/// Startup recovery may need to use an older retained schema when the exact
-/// previous schema snapshot has already been pruned.
+/// Startup recovery fails closed when the exact previous schema was pruned.
 #[tokio::test(flavor = "multi_thread")]
-async fn startup_after_restart_recovers_applying_schema_change_with_pruned_previous_schema() {
+async fn startup_after_restart_rejects_applying_schema_change_with_pruned_previous_schema() {
     let lake = create_test_lake(
-        "startup_after_restart_recovers_applying_schema_change_with_pruned_previous_schema",
+        "startup_after_restart_rejects_applying_schema_change_with_pruned_previous_schema",
     )
     .await;
     let catalog_url = lake.catalog_url.clone();
@@ -2062,18 +2061,22 @@ async fn startup_after_restart_recovers_applying_schema_change_with_pruned_previ
     drop(destination);
 
     let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
-    restarted_destination.startup().await.unwrap();
+    let error = restarted_destination.startup().await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidState);
+    assert!(error.to_string().contains("DuckLake schema recovery previous schema not found"));
 
     let metadata = store
         .get_destination_table_metadata(old_schema.id)
         .await
         .unwrap()
         .expect("destination metadata should exist");
-    assert!(metadata.is_applied());
+    assert!(metadata.is_applying());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+    assert_eq!(metadata.previous_snapshot_id, Some(missing_previous_snapshot_id));
+    assert_eq!(metadata.replication_mask, new_replicated_table_schema.replication_mask().clone());
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name"]);
 }
 
 /// Startup should recover an interrupted initial table creation.

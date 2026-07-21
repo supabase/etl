@@ -11,7 +11,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{DeleteEvent, Event, InsertEvent, UpdateEvent},
-    schema::{ColumnSchema, ReplicatedTableSchema, TableId},
+    schema::{ColumnNameComparison, ColumnSchema, ReplicatedTableSchema, TableId},
     store::DestinationStore,
 };
 use tracing::{info, warn};
@@ -404,7 +404,7 @@ where
         );
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
-        let diff = current_schema.diff(new_schema);
+        let diff = current_schema.diff(new_schema, ColumnNameComparison::CaseSensitive);
         if let Err(err) =
             self.client.apply_schema_diff(&table_name, &diff).await.map_err(EtlError::from)
         {

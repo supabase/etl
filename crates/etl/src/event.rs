@@ -217,8 +217,15 @@ impl TruncateEvent {
 /// intentionally has no LSN, transaction ordinal, or sequence key because such
 /// metadata would not be a durable replay identity. Consumers should instead
 /// treat it as an ordered schema barrier for the row events that follow it.
-/// [`crate::schema::SnapshotId`] is the only stable identifier of the table
-/// schema snapshot carried by this event.
+/// During replay, logical decoding uses historical catalog state at each row
+/// change's WAL position, so committed publication column-list changes are
+/// reflected in the corresponding relation masks. Session dependence affects
+/// when that metadata is emitted or re-emitted, not the historical projection
+/// used to decode a row.
+/// The carried [`crate::schema::SnapshotId`] identifies the underlying stored
+/// table schema, not the complete [`ReplicatedTableSchema`]. Consumers must
+/// also preserve replication and identity mask changes, including when the
+/// snapshot ID is unchanged.
 ///
 /// PostgreSQL emits relation-message columns in `pg_attribute.attnum` order,
 /// skipping unpublished columns, and sends tuple data in that same order. The
