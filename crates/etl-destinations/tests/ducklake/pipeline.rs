@@ -10,6 +10,7 @@ use etl::{
     store::{StateStore, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
+        event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
@@ -407,17 +408,17 @@ async fn table_copy_and_streaming_with_restart() {
         destination.clone(),
     );
 
-    let users_ready = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
-    let orders_ready = store
+    let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
-    orders_ready.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
@@ -447,7 +448,12 @@ async fn table_copy_and_streaming_with_restart() {
 
     pipeline.start().await.unwrap();
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+        ])
+        .await;
 
     insert_mock_data(
         &mut database,
@@ -458,7 +464,7 @@ async fn table_copy_and_streaming_with_restart() {
     )
     .await;
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
@@ -520,12 +526,12 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         destination.clone(),
     );
 
-    let users_ready =
+    let users_ready_notify =
         store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
+    users_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -560,12 +566,12 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         destination.clone(),
     );
 
-    let users_ready =
+    let users_ready_notify =
         store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
+    users_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -614,19 +620,24 @@ async fn table_copy_and_streaming_without_restart() {
         destination.clone(),
     );
 
-    let users_ready = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
-    let orders_ready = store
+    let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
-    orders_ready.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+        ])
+        .await;
 
     insert_mock_data(
         &mut database,
@@ -637,7 +648,7 @@ async fn table_copy_and_streaming_without_restart() {
     )
     .await;
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
@@ -679,7 +690,7 @@ async fn table_insert_update_delete() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let users_ready = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
@@ -693,9 +704,15 @@ async fn table_insert_update_delete() {
     );
 
     pipeline.start().await.unwrap();
-    users_ready.notified().await;
+    users_ready_notify.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Insert,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
 
     database
         .insert_values(
@@ -706,7 +723,7 @@ async fn table_insert_update_delete() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
@@ -726,7 +743,13 @@ async fn table_insert_update_delete() {
 
     pipeline.start().await.unwrap();
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Update,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
 
     database
         .update_values(
@@ -737,7 +760,7 @@ async fn table_insert_update_delete() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
@@ -757,14 +780,20 @@ async fn table_insert_update_delete() {
 
     pipeline.start().await.unwrap();
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Delete,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
 
     database
         .delete_values(database_schema.users_schema().name.clone(), &["id"], &["1"], "")
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
@@ -801,19 +830,24 @@ async fn cdc_streaming_with_truncate() {
         destination.clone(),
     );
 
-    let users_ready = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
-    let orders_ready = store
+    let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
-    orders_ready.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+        ])
+        .await;
 
     insert_mock_data(
         &mut database,
@@ -824,18 +858,26 @@ async fn cdc_streaming_with_truncate() {
     )
     .await;
 
-    event_notify.notified().await;
-    destination.clear_events().await;
+    events_notify.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Truncate, 2)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Truncate, database_schema.users_schema().id, 1),
+            EventCondition::TableCount(EventType::Truncate, database_schema.orders_schema().id, 1),
+        ])
+        .await;
 
     database.truncate_table(database_schema.users_schema().name.clone()).await.unwrap();
     database.truncate_table(database_schema.orders_schema().name.clone()).await.unwrap();
 
-    event_notify.notified().await;
-    destination.clear_events().await;
+    events_notify.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 4),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 4),
+        ])
+        .await;
 
     insert_mock_data(
         &mut database,
@@ -846,7 +888,7 @@ async fn cdc_streaming_with_truncate() {
     )
     .await;
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
@@ -905,10 +947,11 @@ async fn schema_change_add_column() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     let initial_metadata = store
         .get_applied_destination_table_metadata(table_id)
@@ -917,8 +960,11 @@ async fn schema_change_add_column() {
         .expect("metadata should exist after table creation");
     let initial_snapshot_id = initial_metadata.snapshot_id;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -942,7 +988,7 @@ async fn schema_change_add_column() {
         .await
         .expect("failed to insert Bob");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
@@ -1012,10 +1058,11 @@ async fn schema_change_is_visible_to_already_open_connection() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     let initial_snapshot_id = store
         .get_applied_destination_table_metadata(table_id)
@@ -1028,8 +1075,11 @@ async fn schema_change_is_visible_to_already_open_connection() {
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(query_table_columns(&conn, &ducklake_table_name), vec!["id", "name", "age"]);
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -1053,7 +1103,7 @@ async fn schema_change_is_visible_to_already_open_connection() {
         .await
         .expect("failed to insert Bob");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
@@ -1127,13 +1177,17 @@ async fn schema_change_add_drop_rename() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -1163,7 +1217,7 @@ async fn schema_change_add_drop_rename() {
         .await
         .expect("failed to insert Bob");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
@@ -1230,17 +1284,18 @@ async fn schema_change_then_update_and_delete() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![
-            (EventType::Relation, 1),
-            (EventType::Insert, 1),
-            (EventType::Update, 1),
-            (EventType::Delete, 1),
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Update, table_id, 1),
+            EventCondition::TableCount(EventType::Delete, table_id, 1),
         ])
         .await;
 
@@ -1281,7 +1336,7 @@ async fn schema_change_then_update_and_delete() {
         .await
         .expect("failed to delete Bob");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
@@ -1333,13 +1388,17 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(
@@ -1355,11 +1414,12 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         ))
         .await
         .expect("failed to insert row after generated column add");
-    event_notify.notified().await;
-
-    destination.clear_events().await;
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    events_notify.notified().await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
     database
         .alter_table(
@@ -1375,11 +1435,12 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         ))
         .await
         .expect("failed to insert row after generated column rename");
-    event_notify.notified().await;
-
-    destination.clear_events().await;
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    events_notify.notified().await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
     database
         .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "ddl_col_0_1" }])
@@ -1392,11 +1453,12 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         ))
         .await
         .expect("failed to insert row after generated column drop");
-    event_notify.notified().await;
-
-    destination.clear_events().await;
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    events_notify.notified().await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 4),
+            EventCondition::TableCount(EventType::Insert, table_id, 4),
+        ])
         .await;
     database
         .alter_table(
@@ -1412,7 +1474,7 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         ))
         .await
         .expect("failed to insert row after generated column re-add");
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
@@ -1473,13 +1535,17 @@ async fn schema_change_matches_simulator_generated_column_types() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
     database
         .alter_table(
@@ -1495,11 +1561,12 @@ async fn schema_change_matches_simulator_generated_column_types() {
         ))
         .await
         .expect("failed to insert row after text generated column add");
-    event_notify.notified().await;
-
-    destination.clear_events().await;
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    events_notify.notified().await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
     database
         .alter_table(
@@ -1516,11 +1583,12 @@ async fn schema_change_matches_simulator_generated_column_types() {
         ))
         .await
         .expect("failed to insert row after integer generated column add");
-    event_notify.notified().await;
-
-    destination.clear_events().await;
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    events_notify.notified().await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
     database
         .alter_table(
@@ -1537,11 +1605,12 @@ async fn schema_change_matches_simulator_generated_column_types() {
         ))
         .await
         .expect("failed to insert row after boolean generated column add");
-    event_notify.notified().await;
-
-    destination.clear_events().await;
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    events_notify.notified().await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 4),
+            EventCondition::TableCount(EventType::Insert, table_id, 4),
+        ])
         .await;
     database
         .alter_table(
@@ -1558,11 +1627,12 @@ async fn schema_change_matches_simulator_generated_column_types() {
         ))
         .await
         .expect("failed to insert row after timestamptz generated column add");
-    event_notify.notified().await;
-
-    destination.clear_events().await;
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    events_notify.notified().await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 5),
+            EventCondition::TableCount(EventType::Insert, table_id, 5),
+        ])
         .await;
     database
         .alter_table(
@@ -1580,7 +1650,7 @@ async fn schema_change_matches_simulator_generated_column_types() {
         ))
         .await
         .expect("failed to insert row after numeric generated column add");
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);

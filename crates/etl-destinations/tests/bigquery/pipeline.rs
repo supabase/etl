@@ -10,6 +10,7 @@ use etl::{
     store::{StateStore, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
+        event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::{create_pipeline, create_pipeline_with_batch_config},
         test_destination_wrapper::TestDestinationWrapper,
@@ -108,17 +109,17 @@ async fn table_copy_and_streaming_with_restart() {
     );
 
     // Register notifications for table copy completion.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
-    let orders_state_notify = store
+    let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -155,8 +156,13 @@ async fn table_copy_and_streaming_with_restart() {
 
     pipeline.start().await.unwrap();
 
-    // We expect 2 insert events for each table (4 total).
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    // We expect 2 insert events for each table.
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+        ])
+        .await;
 
     // Insert additional data.
     insert_mock_data(
@@ -168,7 +174,7 @@ async fn table_copy_and_streaming_with_restart() {
     )
     .await;
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -235,12 +241,12 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         destination.clone(),
     );
 
-    let users_ready =
+    let users_ready_notify =
         store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
+    users_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -271,7 +277,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         destination.clone(),
     );
 
-    let users_ready =
+    let users_ready_notify =
         store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
@@ -279,7 +285,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     // BigQuery can keep the default Storage Write stream for a dropped and
     // re-created table unavailable for several minutes. The destination is
     // expected to keep retrying while preserving the physical `*_0` table id.
-    users_ready.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
+    users_ready_notify.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -320,16 +326,22 @@ async fn table_insert_update_delete() {
     );
 
     // Register notifications for table copy completion.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     // Wait for the first insert.
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Insert,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
 
     // Insert a row.
     database
@@ -341,7 +353,7 @@ async fn table_insert_update_delete() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     // We query BigQuery to check for the insert.
     let users_rows =
@@ -350,7 +362,13 @@ async fn table_insert_update_delete() {
     assert_eq!(parsed_users_rows, vec![BigQueryUser::new(1, "user_1", 1),]);
 
     // Wait for the update.
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Update,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
 
     // Update the row.
     database
@@ -362,7 +380,7 @@ async fn table_insert_update_delete() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     // We query BigQuery to check for the update.
     let users_rows =
@@ -371,7 +389,13 @@ async fn table_insert_update_delete() {
     assert_eq!(parsed_users_rows, vec![BigQueryUser::new(1, "user_10", 10),]);
 
     // Wait for the update.
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Delete,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
 
     // Update the row.
     database
@@ -379,7 +403,7 @@ async fn table_insert_update_delete() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -417,17 +441,20 @@ async fn table_subsequent_updates() {
     );
 
     // Register notifications for table copy completion.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     // Wait for the first insert.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1), (EventType::Update, 2)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 1),
+            EventCondition::TableCount(EventType::Update, database_schema.users_schema().id, 2),
+        ])
         .await;
 
     // Insert a row.
@@ -463,7 +490,7 @@ async fn table_subsequent_updates() {
         .unwrap();
     transaction_b.commit_transaction().await;
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -509,15 +536,21 @@ async fn table_primary_key_update_rewrites_row() {
         destination.clone(),
     );
 
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Update,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
 
     // With default primary-key replica identity, changing the source primary
     // key is a valid PostgreSQL shape: the update carries an old key row plus
@@ -537,7 +570,7 @@ async fn table_primary_key_update_rewrites_row() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -635,7 +668,9 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
     // That means unchanged external TOAST values can be reconstructed and the
     // destination should receive a full new row image.
     let updated_name = "alicia".to_owned();
-    let update_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let update_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .await;
 
     database
         .update_values_where(table_name.clone(), &["name"], &[&updated_name], &["id"], &["1"], "")
@@ -644,7 +679,9 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
 
     update_notify.notified().await;
 
-    let delete_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let delete_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
+        .await;
 
     database.delete_values(table_name.clone(), &["id"], &["1"], "").await.unwrap();
 
@@ -721,22 +758,26 @@ async fn table_truncate_with_batching() {
     );
 
     // Register notifications for table copy completion.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
-    let orders_state_notify = store
+    let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
-    // Wait for the 8 inserts (4 per table + 4 after truncate) and 2 truncates (1
-    // per table).
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 8), (EventType::Truncate, 2)])
+    // Wait for 4 inserts and 1 truncate per table.
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 4),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 4),
+            EventCondition::TableCount(EventType::Truncate, database_schema.users_schema().id, 1),
+            EventCondition::TableCount(EventType::Truncate, database_schema.orders_schema().id, 1),
+        ])
         .await;
 
     // Insert 2 rows per each table.
@@ -763,7 +804,7 @@ async fn table_truncate_with_batching() {
     )
     .await;
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -843,15 +884,17 @@ async fn table_nullable_scalar_columns() {
         destination.clone(),
     );
 
-    let table_sync_done_notification =
+    let table_ready_notify =
         store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    table_ready_notify.notified().await;
 
     // Insert
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
 
     database
         .insert_values(
@@ -883,14 +926,16 @@ async fn table_nullable_scalar_columns() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsScalar>(table_rows);
     assert_eq!(parsed_table_rows, vec![NullableColsScalar::all_nulls(1),]);
 
     // Update
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .await;
 
     // Define test values
     let updated_bool = true;
@@ -941,7 +986,7 @@ async fn table_nullable_scalar_columns() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsScalar>(table_rows);
@@ -970,11 +1015,13 @@ async fn table_nullable_scalar_columns() {
     assert_eq!(parsed_table_rows, vec![expected_row]);
 
     // delete
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
+        .await;
 
     database.delete_values(table_name.clone(), &["id"], &["'1'"], "").await.unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
 
@@ -1039,15 +1086,17 @@ async fn table_nullable_array_columns() {
         destination.clone(),
     );
 
-    let table_sync_done_notification =
+    let table_ready_notify =
         store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    table_ready_notify.notified().await;
 
     // insert with null arrays
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
 
     database
         .insert_values(
@@ -1080,7 +1129,7 @@ async fn table_nullable_array_columns() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
@@ -1089,7 +1138,9 @@ async fn table_nullable_array_columns() {
     assert_eq!(parsed_table_rows, vec![NullableColsArray::all_empty(1),]);
 
     // update with array values
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .await;
 
     // Define test array values
     let updated_bool_arr = vec![true, false, true];
@@ -1157,7 +1208,7 @@ async fn table_nullable_array_columns() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
@@ -1186,11 +1237,13 @@ async fn table_nullable_array_columns() {
     assert_eq!(parsed_table_rows, vec![expected_row]);
 
     // delete
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
+        .await;
 
     database.delete_values(table_name.clone(), &["id"], &["'1'"], "").await.unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
 
@@ -1255,15 +1308,17 @@ async fn table_non_nullable_scalar_columns() {
         destination.clone(),
     );
 
-    let table_sync_done_notification =
+    let table_ready_notify =
         store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    table_ready_notify.notified().await;
 
     // insert with non-null values
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
 
     // Define test values - all non-null
     let test_bool = true;
@@ -1314,7 +1369,7 @@ async fn table_non_nullable_scalar_columns() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NonNullableColsScalar>(table_rows);
@@ -1343,7 +1398,9 @@ async fn table_non_nullable_scalar_columns() {
     assert_eq!(parsed_table_rows, vec![expected_row]);
 
     // update with different non-null values
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .await;
 
     // Define updated test values
     let updated_bool = false;
@@ -1394,7 +1451,7 @@ async fn table_non_nullable_scalar_columns() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NonNullableColsScalar>(table_rows);
@@ -1423,11 +1480,13 @@ async fn table_non_nullable_scalar_columns() {
     assert_eq!(parsed_table_rows, vec![expected_updated_row]);
 
     // delete
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
+        .await;
 
     database.delete_values(table_name.clone(), &["id"], &["'1'"], "").await.unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
 
@@ -1492,15 +1551,17 @@ async fn table_non_nullable_array_columns() {
         destination.clone(),
     );
 
-    let table_sync_done_notification =
+    let table_ready_notify =
         store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    table_ready_notify.notified().await;
 
     // insert with non-null array values
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
 
     // Define test array values - all non-null
     let test_bool_arr = vec![true, false, true];
@@ -1568,7 +1629,7 @@ async fn table_non_nullable_array_columns() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
@@ -1597,7 +1658,9 @@ async fn table_non_nullable_array_columns() {
     assert_eq!(parsed_table_rows, vec![expected_row]);
 
     // update with different non-null array values
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .await;
 
     // Define updated test array values
     let updated_bool_arr = vec![false, true];
@@ -1665,7 +1728,7 @@ async fn table_non_nullable_array_columns() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
@@ -1694,11 +1757,13 @@ async fn table_non_nullable_array_columns() {
     assert_eq!(parsed_table_rows, vec![expected_updated_row]);
 
     // delete
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
+        .await;
 
     database.delete_values(table_name.clone(), &["id"], &["'1'"], "").await.unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
 
@@ -1739,12 +1804,12 @@ async fn table_array_with_null_values() {
         destination.clone(),
     );
 
-    let table_sync_done_notification =
+    let table_ready_notify =
         store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    table_ready_notify.notified().await;
 
     // Insert array with null value
     database
@@ -1784,10 +1849,6 @@ async fn table_array_with_null_values() {
     // the CDC will contain the inserts and deletes, failing again.
     store.reset_table_state(table_id).await.unwrap();
 
-    // We also clear the events so that it's more idiomatic to wait for them, since
-    // we don't have the prior insert.
-    destination.clear_events().await;
-
     // We recreate the pipeline and try again.
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1797,7 +1858,7 @@ async fn table_array_with_null_values() {
         destination.clone(),
     );
 
-    let table_sync_done_notification =
+    let table_ready_notify =
         store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
@@ -1805,9 +1866,11 @@ async fn table_array_with_null_values() {
     // BigQuery can keep the default Storage Write stream for a dropped and
     // re-created table unavailable for several minutes. The destination is
     // expected to keep retrying while preserving the physical `*_0` table id.
-    table_sync_done_notification.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
+    table_ready_notify.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
 
     // Insert array without null values
     database
@@ -1824,7 +1887,7 @@ async fn table_array_with_null_values() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -2092,14 +2155,18 @@ async fn schema_change_add_column_defaults() {
         destination.clone(),
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -2125,7 +2192,7 @@ async fn schema_change_add_column_defaults() {
         .await
         .expect("failed to insert defaulted source row");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -2196,14 +2263,18 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
         destination.clone(),
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     let set_not_null_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
         .await;
 
     database
@@ -2235,7 +2306,10 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
     set_not_null_notify.notified().await;
 
     let drop_not_null_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     database
@@ -2262,7 +2336,10 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
     drop_not_null_notify.notified().await;
 
     let drop_default_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     database
@@ -2355,12 +2432,12 @@ async fn table_schema_change() {
         destination.clone(),
     );
 
-    let table_sync_done =
-        store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_sync_done.notified().await;
+    table_ready_notify.notified().await;
 
     let initial_state = store
         .get_applied_destination_table_metadata(table_id)
@@ -2370,15 +2447,16 @@ async fn table_schema_change() {
     let initial_snapshot_id = initial_state.snapshot_id;
 
     // Insert the initial row.
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
 
     database
         .insert_values(table_name.clone(), &["name", "age", "status"], &[&"Alice", &25, &"active"])
         .await
         .unwrap();
 
-    event_notify.notified().await;
-    destination.clear_events().await;
+    events_notify.notified().await;
 
     // Apply multiple schema changes:
     // 1. Rename name -> full_name
@@ -2390,8 +2468,11 @@ async fn table_schema_change() {
     // final schema when the next DML operation (INSERT) occurs. The schema
     // diffing in handle_relation_event then computes and applies all changes at
     // once.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     database
@@ -2425,7 +2506,7 @@ async fn table_schema_change() {
         .await
         .unwrap();
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 

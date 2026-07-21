@@ -7,6 +7,7 @@ use etl::{
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
+        event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
@@ -159,10 +160,11 @@ async fn schema_change_add_column_defaults() {
             store.clone(),
             destination.clone(),
         );
-        let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+        let table_ready_notify =
+            store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
         pipeline.start().await.unwrap();
-        table_ready.notified().await;
+        table_ready_notify.notified().await;
 
         let copy_offset = OffsetToken::new(0_u64.into(), 1);
         let committed = poll_destination_offset(
@@ -179,8 +181,11 @@ async fn schema_change_add_column_defaults() {
             wait_for_initial_row(&sql, config.database(), config.schema(), &snowflake_table).await;
         assert_eq!(initial_rows, vec![vec![serde_json::json!("1"), serde_json::json!("Alice")]]);
 
-        let event_notify = destination
-            .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        let events_notify = destination
+            .wait_for_events(vec![
+                EventCondition::TableCount(EventType::Relation, table_id, 1),
+                EventCondition::TableCount(EventType::Insert, table_id, 1),
+            ])
             .await;
 
         database
@@ -208,7 +213,7 @@ async fn schema_change_add_column_defaults() {
             .await
             .expect("failed to insert defaulted source row");
 
-        event_notify.notified().await;
+        events_notify.notified().await;
         pipeline.shutdown_and_wait().await.unwrap();
 
         let expected = vec![
