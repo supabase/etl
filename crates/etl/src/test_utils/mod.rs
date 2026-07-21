@@ -6,6 +6,7 @@
 //! worker lifecycle coordination, and data consistency validation.
 
 pub mod database;
+pub mod destination;
 pub mod event;
 pub mod faults;
 pub mod materialize;

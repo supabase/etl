@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use etl::{
     bail,
@@ -13,6 +13,10 @@ use etl::{
     event::{DeleteEvent, Event, InsertEvent, UpdateEvent},
     schema::{ColumnSchema, ReplicatedTableSchema, TableId},
     store::DestinationStore,
+};
+use tokio::{
+    sync::{Mutex, Semaphore},
+    time::timeout,
 };
 use tracing::{info, warn};
 
@@ -30,20 +34,177 @@ use crate::{
 
 type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
 
+/// Maximum time allowed to drain Snowflake event tasks and retire local table
+/// state before a reset.
+const RESET_PREPARATION_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Coordinates the initial Snowflake setup of each table.
+///
+/// Copy partitions can concurrently observe missing destination metadata. A
+/// per-table gate gives one caller ownership of the complete `Applying` ->
+/// remote setup -> `Applied` transition so a stale caller cannot overwrite
+/// completed metadata with `Applying`. The registry mutex is released before a
+/// caller waits for its table gate.
+#[derive(Clone)]
+struct TableInitializer {
+    /// Stable initialization gates retained for this destination's lifetime.
+    gates: Arc<Mutex<HashMap<TableId, Arc<Semaphore>>>>,
+}
+
+impl TableInitializer {
+    /// Creates an empty table-initialization registry.
+    fn new() -> Self {
+        Self { gates: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+    /// Ensures the Snowflake table, channel, and durable metadata exist.
+    async fn ensure<S, T, C>(
+        &self,
+        client: &Client<T, C>,
+        store: &S,
+        table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()>
+    where
+        S: DestinationStore,
+        T: TokenProvider + 'static,
+        C: StreamClient,
+    {
+        let table_id = table_schema.id();
+        let table_name = try_stringify_table_name(table_schema.name())?.to_uppercase();
+        let columns: Vec<_> = table_schema.column_schemas().cloned().collect();
+
+        // Applied metadata needs no transition coordination, but this process
+        // may still need to reopen its local channel state.
+        if store
+            .get_destination_table_metadata(table_id)
+            .await?
+            .is_some_and(|metadata| metadata.is_applied())
+        {
+            client.ensure_table(table_id, &table_name, &columns).await.map_err(EtlError::from)?;
+            return Ok(());
+        }
+
+        // Hold the registry only long enough to obtain the stable gate for this
+        // table; unrelated tables must not wait on its remote setup.
+        let gate = {
+            let mut gates = self.gates.lock().await;
+            Arc::clone(gates.entry(table_id).or_insert_with(|| Arc::new(Semaphore::new(1))))
+        };
+
+        // The permit owns the complete Applying -> remote setup -> Applied
+        // transition for this table.
+        let _permit =
+            gate.acquire_owned().await.expect("table initialization gates are never closed");
+
+        // Re-read under the table gate because another copy partition may have
+        // completed setup after the fast-path read.
+        let snapshot_id = table_schema.inner().snapshot_id;
+        let replication_mask = table_schema.replication_mask().clone();
+        let applying_metadata = match store.get_destination_table_metadata(table_id).await? {
+            None => {
+                // Record ownership before creating remote state so a restart can
+                // find and remove a partial setup.
+                let metadata = DestinationTableMetadata::new_applying(
+                    table_name.clone(),
+                    snapshot_id,
+                    replication_mask.clone(),
+                );
+                store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+                Some(metadata)
+            }
+            Some(metadata) if metadata.is_applied() => {
+                // Another copy partition completed setup while this caller waited.
+                None
+            }
+            Some(metadata) if metadata.previous_snapshot_id.is_none() => {
+                // Resume a matching initial setup left by an earlier failure or
+                // cancellation.
+                if metadata.destination_table_id != table_name
+                    || metadata.snapshot_id != snapshot_id
+                    || metadata.replication_mask != replication_mask
+                {
+                    bail!(
+                        ErrorKind::CorruptedTableSchema,
+                        "Interrupted Snowflake table setup metadata does not match current schema",
+                        format!(
+                            "Table {table_id} has interrupted initial setup metadata for snapshot \
+                             {}, but the current setup uses snapshot {snapshot_id}.",
+                            metadata.snapshot_id
+                        )
+                    );
+                }
+
+                Some(metadata)
+            }
+            Some(_) => {
+                // Applying metadata with a previous snapshot belongs to schema
+                // evolution, which requires its separate recovery path.
+                bail!(
+                    ErrorKind::InvalidState,
+                    "Snowflake table schema is still being applied",
+                    format!(
+                        "Table {table_id} has an interrupted schema change and cannot be prepared \
+                         for streaming until that change is recovered."
+                    )
+                );
+            }
+        };
+
+        // Remote setup is retry-safe and remains inside the per-table permit.
+        client.ensure_table(table_id, &table_name, &columns).await.map_err(EtlError::from)?;
+
+        // Publish completion only after both the table and channel exist.
+        if let Some(metadata) = applying_metadata {
+            store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Execution context captured by Snowflake background event tasks.
+///
+/// Before resetting a table, [`Destination`] retains exclusive access to its
+/// [`TaskSet`] while waiting for every admitted event task to finish. A task
+/// that captured the complete destination could later access that same task
+/// registry, causing the reset to wait for the task while the task waits for
+/// the reset-held registry.
+///
+/// This type contains the state needed to execute writes but deliberately omits
+/// [`TaskSet`], making that recursive registry access unavailable through the
+/// task's execution context.
+struct DestinationWriter<S, T, C> {
+    /// Snowflake API client shared by foreground and event writes.
+    client: Client<T, C>,
+    /// Destination metadata store.
+    store: S,
+    /// Per-table initial-setup coordinator.
+    table_initializer: TableInitializer,
+}
+
+impl<S: Clone, T: TokenProvider, C: StreamClient> Clone for DestinationWriter<S, T, C> {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            store: self.store.clone(),
+            table_initializer: self.table_initializer.clone(),
+        }
+    }
+}
+
 /// Postgres replication to Snowflake via Snowpipe Streaming.
 ///
 /// Thin adapter between the ETL [`etl::destination::Destination`] trait and
 /// [`Client`]. Translates replication events into client operations and manages
 /// the state store bookkeeping.
 pub struct Destination<S, T = AuthManager<HttpExchanger>, C = RestStreamClient<T>> {
-    client: Client<T, C>,
-    store: S,
+    writer: DestinationWriter<S, T, C>,
     tasks: TaskSet,
 }
 
 impl<S: Clone, T: TokenProvider, C: StreamClient> Clone for Destination<S, T, C> {
     fn clone(&self) -> Self {
-        Self { client: self.client.clone(), store: self.store.clone(), tasks: self.tasks.clone() }
+        Self { writer: self.writer.clone(), tasks: self.tasks.clone() }
     }
 }
 
@@ -56,79 +217,44 @@ where
     /// Create a new destination.
     pub fn new(client: Client<T, C>, store: S) -> Self {
         register_metrics();
-        Self { client, store, tasks: TaskSet::new() }
+        Self {
+            writer: DestinationWriter { client, store, table_initializer: TableInitializer::new() },
+            tasks: TaskSet::new(),
+        }
     }
 
-    /// Ensure the Snowflake table and streaming channel exist for this table.
-    /// Operation is idempotent.
-    pub async fn prepare_table_for_streaming(
+    /// Fetches the latest committed offset for this table's channel.
+    pub async fn fetch_committed_offset(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<OffsetToken>> {
+        self.writer.client.fetch_committed_offset(table_id).await.map_err(EtlError::from)
+    }
+}
+
+impl<S, T, C> DestinationWriter<S, T, C>
+where
+    S: DestinationStore,
+    T: TokenProvider + 'static,
+    C: StreamClient,
+{
+    /// Ensures the Snowflake table and streaming channel exist for this table.
+    async fn prepare_table_for_streaming(
         &self,
         table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        let table_id = table_schema.id();
-        let table_name = try_stringify_table_name(table_schema.name())?.to_uppercase();
-        let columns: Vec<_> = table_schema.column_schemas().cloned().collect();
-
-        let table_is_new = self
-            .client
-            .ensure_table(table_id, &table_name, &columns)
-            .await
-            .map_err(EtlError::from)?;
-
-        if table_is_new {
-            let snapshot_id = table_schema.inner().snapshot_id;
-            let replication_mask = table_schema.replication_mask().clone();
-            let metadata = DestinationTableMetadata::new_applied(
-                table_name.clone(),
-                snapshot_id,
-                replication_mask,
-            );
-            self.store.store_destination_table_metadata(table_id, metadata).await?;
-        }
-
-        Ok(())
+        self.table_initializer.ensure(&self.client, &self.store, table_schema).await
     }
 
-    /// Write rows during the initial snapshot (table copy) phase.
+    /// Processes an event batch after its task was admitted into [`TaskSet`].
     ///
-    /// All rows are stamped as inserts with a zero offset since the table
-    /// starts empty.
-    pub async fn write_table_rows(
+    /// This execution context intentionally cannot access the task registry. A
+    /// table reset may retain that registry while waiting for this method to
+    /// finish.
+    async fn process_admitted_events(
         &self,
-        schema: &ReplicatedTableSchema,
-        rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
-        // Table must exist even for empty snapshots, CDC events may arrive later.
-        self.prepare_table_for_streaming(schema).await?;
-
-        if rows.is_empty() {
-            return Ok(());
-        }
-
-        let table_id = schema.id();
-        let columns: Vec<_> = schema.column_schemas().cloned().collect();
-
-        // Build row batches. Snowflake has limits on max size of input, so we slice
-        // into proper batches, when necessary.
-        let zero = OffsetToken::zero();
-        let mut builder = RowBatchBuilder::new();
-        for row in &rows {
-            builder
-                .push_row(&columns, row, CdcMeta::new(CdcOperation::Insert, zero.as_ref()), &zero)
-                .map_err(EtlError::from)?;
-        }
-
-        let batches = builder.finish().map_err(EtlError::from)?;
-        self.client.send_table_copy_batches(table_id, batches).await.map_err(EtlError::from)?;
-
-        Ok(())
-    }
-
-    /// Process  CDC events.
-    ///
-    /// All events (inserts, updates, deletes, truncates, and schema changes)
-    /// from the replication stream are processed here.
-    pub async fn process_events(&self, events: Vec<Event>) -> EtlResult<DestinationWriteStatus> {
+        events: Vec<Event>,
+    ) -> EtlResult<DestinationWriteStatus> {
         let mut iter = events.into_iter().peekable();
         // Schema and truncate side effects must close the pending streaming window.
         let mut requires_durability_wait = false;
@@ -148,14 +274,6 @@ where
         } else {
             Ok(DestinationWriteStatus::Accepted)
         }
-    }
-
-    /// Fetches the latest committed offset for this table's channel.
-    pub async fn fetch_committed_offset(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<OffsetToken>> {
-        self.client.fetch_committed_offset(table_id).await.map_err(EtlError::from)
     }
 
     async fn accumulate_data_events(
@@ -493,15 +611,37 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        self.tasks.try_reap().await?;
-
         let table_name = try_stringify_table_name(replicated_table_schema.name())?.to_uppercase();
-        let result = self
-            .client
-            .drop_table_for_copy(replicated_table_schema.id(), &table_name)
-            .await
-            .map_err(EtlError::from);
+        let (task_guard, detached) = timeout(RESET_PREPARATION_TIMEOUT, async {
+            // Acquire the task registry before any client lock. Event tasks have no
+            // registry access, so they can finish while reset waits for them.
+            let task_guard = self.tasks.drain().await?;
+            let detached = self
+                .writer
+                .client
+                .detach_table_for_copy(replicated_table_schema.id(), &table_name)
+                .await
+                .map_err(EtlError::from)?;
+            Ok::<_, EtlError>((task_guard, detached))
+        })
+        .await
+        .map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationTimeout,
+                "Snowflake table reset preparation timed out",
+                source: error
+            )
+        })??;
+
+        // Keep event registration closed through the remote drop. This operation
+        // stays outside the local drain timeout because cancelling remote SQL does
+        // not prove whether Snowflake completed it.
+        let result =
+            self.writer.client.drop_detached_table_for_copy(detached).await.map_err(EtlError::from);
+
+        // Publish the remote result before allowing another event task to run.
         async_result.send(result);
+        drop(task_guard);
 
         Ok(())
     }
@@ -512,8 +652,49 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows(replicated_table_schema, table_rows).await;
-        async_result.send(result.map(|_| DestinationWriteStatus::Durable));
+        let result: EtlResult<DestinationWriteStatus> = async {
+            // Table must exist even for empty snapshots, CDC events may arrive later.
+            self.writer.prepare_table_for_streaming(replicated_table_schema).await?;
+
+            if table_rows.is_empty() {
+                self.writer
+                    .client
+                    .wait_for_table_copy_durability(replicated_table_schema.id())
+                    .await
+                    .map_err(EtlError::from)?;
+                return Ok(DestinationWriteStatus::Durable);
+            }
+
+            let table_id = replicated_table_schema.id();
+            let columns: Vec<_> = replicated_table_schema.column_schemas().cloned().collect();
+
+            // Build row batches. Snowflake has limits on max size of input, so we slice
+            // into proper batches, when necessary.
+            let zero = OffsetToken::zero();
+            let mut builder = RowBatchBuilder::new();
+            for row in &table_rows {
+                builder
+                    .push_row(
+                        &columns,
+                        row,
+                        CdcMeta::new(CdcOperation::Insert, zero.as_ref()),
+                        &zero,
+                    )
+                    .map_err(EtlError::from)?;
+            }
+
+            let batches = builder.finish().map_err(EtlError::from)?;
+            self.writer
+                .client
+                .send_table_copy_batches(table_id, batches)
+                .await
+                .map_err(EtlError::from)?;
+
+            Ok(DestinationWriteStatus::Accepted)
+        }
+        .await;
+
+        async_result.send(result);
         Ok(())
     }
 
@@ -525,15 +706,15 @@ where
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
 
-        let destination = self.clone();
+        let writer = self.writer.clone();
         self.tasks
             .spawn(async move {
                 let result = async {
-                    let status = destination.process_events(events).await?;
+                    let status = writer.process_admitted_events(events).await?;
                     if durability == WriteEventsDurability::RequireDurable
                         && status == DestinationWriteStatus::Accepted
                     {
-                        destination
+                        writer
                             .client
                             .wait_for_pending_durability()
                             .await
@@ -559,10 +740,50 @@ mod tests {
 
     use etl::{
         data::{Cell, PartialTableRow},
+        pipeline::PipelineId,
         schema::{IdentityMask, ReplicationMask, TableName, TableSchema, Type},
+        store::StateStore,
+        test_utils::notifying_store::NotifyingStore,
     };
 
     use super::*;
+    use crate::snowflake::{Config, Error, SqlClient};
+
+    /// Token provider that fails if a no-network unit test reaches HTTP setup.
+    struct UnusedTokenProvider;
+
+    impl TokenProvider for UnusedTokenProvider {
+        async fn get_token(&self) -> crate::snowflake::Result<String> {
+            Err(Error::Auth("Unused test token provider.".to_owned()))
+        }
+
+        async fn invalidate_token(&self) {}
+    }
+
+    /// Builds a destination whose HTTP clients must remain unused.
+    fn test_destination() -> (
+        Destination<NotifyingStore, UnusedTokenProvider, RestStreamClient<UnusedTokenProvider>>,
+        NotifyingStore,
+    ) {
+        let config = Config::new("example-account", "test-user", "test-db", "test-schema").unwrap();
+        let auth = Arc::new(UnusedTokenProvider);
+        let http = reqwest::Client::new();
+        let sql_client =
+            SqlClient::new(config.clone_without_credentials(), Arc::clone(&auth), http.clone());
+        let stream_client =
+            Arc::new(RestStreamClient::new(config.account_url().to_owned(), auth, http));
+        let client = Client::with_clients(
+            sql_client,
+            stream_client,
+            config.database().to_owned(),
+            config.schema().to_owned(),
+            PipelineId::from(1_u64),
+        );
+        let store = NotifyingStore::new();
+        let destination = Destination::new(client, store.clone());
+
+        (destination, store)
+    }
 
     fn replicated_schema() -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
@@ -577,6 +798,34 @@ mod tests {
         let identity_mask = IdentityMask::from_bytes(vec![1, 0]);
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    #[tokio::test]
+    async fn initial_setup_failure_leaves_metadata_applying() {
+        let (destination, store) = test_destination();
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(2),
+            TableName::new("public".to_owned(), "reserved_column".to_owned()),
+            vec![ColumnSchema::new("_cdc_operation".to_owned(), Type::TEXT, -1, 1, true)],
+        ));
+        let schema = ReplicatedTableSchema::all(table_schema);
+
+        let error = destination.writer.prepare_table_for_streaming(&schema).await.unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
+        let metadata = store
+            .get_destination_table_metadata(schema.id())
+            .await
+            .unwrap()
+            .expect("initial setup metadata should remain available for recovery");
+        assert!(metadata.is_applying());
+        assert_eq!(metadata.previous_snapshot_id, None);
+        assert_eq!(metadata.snapshot_id, schema.inner().snapshot_id);
+        assert_eq!(metadata.replication_mask, *schema.replication_mask());
+        assert_eq!(
+            metadata.destination_table_id,
+            try_stringify_table_name(schema.name()).unwrap().to_uppercase()
+        );
     }
 
     #[test]

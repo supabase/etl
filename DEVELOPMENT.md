@@ -463,8 +463,9 @@ ClickHouse destination tests require a reachable ClickHouse HTTP endpoint:
 
 Property tests built on the shared runner in `etl::test_utils::property`
 (for example the value roundtrip tests in
-`crates/etl/tests/value_roundtrip.rs`) run randomly generated cases
-until a wall-clock budget elapses:
+`crates/etl/tests/value_roundtrip.rs` and
+`crates/etl-destinations/tests/clickhouse/value_roundtrip.rs`) run
+randomly generated cases until a wall-clock budget elapses:
 
 | Variable                    | Description                                                                                   |
 |-----------------------------|-----------------------------------------------------------------------------------------------|
