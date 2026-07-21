@@ -100,7 +100,7 @@ pub trait Destination {
 
 Each write-like method receives an async result handle. The intent is different per method:
 
-- `write_events()`: after dispatch succeeds, ETL may keep processing other work while the destination finishes the batch. ETL still waits for that batch's async result before handing the destination the next streaming batch. `MayDefer` permits `Accepted` or `Durable`; `RequireDurable` requires cumulative durable completion.
+- `write_events()`: after dispatch succeeds, ETL may keep processing other work while the destination finishes the batch. ETL still waits for that batch's async result before handing the destination the next streaming batch. `MayDefer` permits `Accepted` or `Durable`; `RequireDurable` requires cumulative durable completion. ETL may send an empty `RequireDurable` write as a durability-only barrier for earlier accepted work, but never sends an empty `MayDefer` write.
 - `drop_table_for_copy()`: ETL waits for the result immediately. After a successful drop, ETL clears its own copy-scoped schema, destination metadata, and table-sync progress before storing the fresh `0/0` copy schema.
 - `write_table_rows()`: ETL waits for each result before requesting the next batch for that copy partition. `Durable` confirms that batch and any earlier accepted writes covered by the result. `Accepted` transfers ownership to the destination and lets copying continue without marking the table copy finished. If any batch is accepted this way, ETL sends a final empty batch after all copy workers finish; that table-wide barrier must cover every accepted write and return `Durable` before ETL stores `FinishedCopy`.
 
