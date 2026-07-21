@@ -9,7 +9,7 @@ use std::future::Future;
 pub use batch::{RowBatch, RowBatchBuilder};
 pub(crate) use channel::{
     AcceptedRowBatch, ChannelHandle, DEFAULT_COMMIT_POLL_INTERVAL, DEFAULT_COMMIT_WAIT_TIMEOUT,
-    validate_committed_status,
+    PendingDurabilityTarget, validate_committed_status,
 };
 pub use offset_token::OffsetToken;
 pub use rest_client::RestStreamClient;

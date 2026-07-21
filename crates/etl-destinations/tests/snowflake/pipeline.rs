@@ -164,16 +164,16 @@ async fn schema_change_add_column_defaults() {
         pipeline.start().await.unwrap();
         table_ready.notified().await;
 
-        let zero_offset = OffsetToken::zero();
+        let copy_offset = OffsetToken::new(0_u64.into(), 1);
         let committed = poll_destination_offset(
             &destination_for_polling,
             table_id,
-            &zero_offset,
+            &copy_offset,
             DESTINATION_OFFSET_POLL_INTERVAL,
             DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
-        assert_eq!(committed, Some(zero_offset), "initial data should commit before source DDL");
+        assert_eq!(committed, Some(copy_offset), "initial data should commit before source DDL");
 
         let initial_rows =
             wait_for_initial_row(&sql, config.database(), config.schema(), &snowflake_table).await;
