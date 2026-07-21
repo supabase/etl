@@ -9,9 +9,9 @@ use crate::{
 /// Condition for waiting on events in tests.
 #[derive(Clone, Debug)]
 pub enum EventCondition {
-    /// Wait for at least a count of events of the given type across all tables.
+    /// Wait for an exact count of events of the given type across all tables.
     AnyCount(EventType, u64),
-    /// Wait for at least a count of events of the given type for a table.
+    /// Wait for an exact count of events of the given type for a table.
     TableCount(EventType, TableId, u64),
 }
 
@@ -23,13 +23,13 @@ pub fn check_event_conditions(events: &[Event], conditions: &[EventCondition]) -
     conditions.iter().all(|condition| match condition {
         EventCondition::AnyCount(event_type, expected_count) => {
             grouped_events_by_type.get(event_type).map_or(0, |events| events.len() as u64)
-                >= *expected_count
+                == *expected_count
         }
         EventCondition::TableCount(event_type, table_id, expected_count) => {
             grouped_events_by_type_and_table
                 .get(&(event_type.clone(), *table_id))
                 .map_or(0, |events| events.len() as u64)
-                >= *expected_count
+                == *expected_count
         }
     })
 }
@@ -72,7 +72,7 @@ pub fn group_events_by_type_and_table_id(
     grouped
 }
 
-/// Checks if the combined count of events and table rows meets the expected
+/// Checks if the combined count of events and table rows equals the expected
 /// counts.
 ///
 /// Supports two condition types:
@@ -100,7 +100,7 @@ pub fn check_all_event_conditions(
                 0
             };
 
-            event_count + table_row_count >= *expected_count
+            event_count + table_row_count == *expected_count
         }
         EventCondition::TableCount(event_type, table_id, expected_count) => {
             let event_count = grouped_events_by_type_and_table
@@ -113,7 +113,7 @@ pub fn check_all_event_conditions(
                 0
             };
 
-            event_count + table_row_count >= *expected_count
+            event_count + table_row_count == *expected_count
         }
     })
 }
@@ -123,12 +123,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn event_conditions_use_minimum_counts() {
+    fn event_conditions_use_exact_counts() {
         let events = vec![Event::Unsupported, Event::Unsupported];
 
         assert!(check_event_conditions(
             &events,
             &[EventCondition::AnyCount(EventType::Unsupported, 2)]
+        ));
+        assert!(!check_event_conditions(
+            &events,
+            &[EventCondition::AnyCount(EventType::Unsupported, 1)]
         ));
         assert!(!check_event_conditions(
             &events,
@@ -149,6 +153,11 @@ mod tests {
                 EventCondition::AnyCount(EventType::Insert, 2),
                 EventCondition::TableCount(EventType::Insert, table_id, 2),
             ],
+        ));
+        assert!(!check_all_event_conditions(
+            &[],
+            &table_rows,
+            &[EventCondition::TableCount(EventType::Insert, table_id, 1)],
         ));
         assert!(!check_event_conditions(
             &[],

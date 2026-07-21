@@ -85,13 +85,6 @@ fn find_snapshot_index_after(
         .expect("expected schema snapshot in order")
 }
 
-async fn wait_for_at_least_events(
-    destination: &TestDestinationWrapper<MemoryDestination<NotifyingStore>>,
-    conditions: Vec<EventCondition>,
-) {
-    destination.wait_for_events(conditions).await.notified().await;
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn relation_message_updates_when_column_added() {
     init_test_tracing();
@@ -763,14 +756,14 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    wait_for_at_least_events(
-        &destination,
-        vec![
+    destination
+        .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ],
-    )
-    .await;
+        ])
+        .await
+        .notified()
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Rename column + change type + insert, then restart.
@@ -809,14 +802,14 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    wait_for_at_least_events(
-        &destination,
-        vec![
+    destination
+        .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 2),
             EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ],
-    )
-    .await;
+        ])
+        .await
+        .notified()
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Drop column + insert, then restart.
@@ -844,14 +837,14 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    wait_for_at_least_events(
-        &destination,
-        vec![
+    destination
+        .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 3),
             EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ],
-    )
-    .await;
+        ])
+        .await
+        .notified()
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Add another column + rename existing + insert, then verify.
@@ -893,14 +886,14 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    wait_for_at_least_events(
-        &destination,
-        vec![
+    destination
+        .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 4),
             EventCondition::TableCount(EventType::Insert, table_id, 4),
-        ],
-    )
-    .await;
+        ])
+        .await
+        .notified()
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
