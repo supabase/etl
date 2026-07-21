@@ -22,7 +22,10 @@ use etl::{
     schema::ColumnSchema,
     test_utils::{
         database::spawn_source_database,
-        property::run_property,
+        property::{
+            any_f32, any_f64, block_on, f32_matches, f64_matches, opt_f64_matches, pg_text,
+            pg_time, run_property,
+        },
         replication_stream::{parse_copy_row, parse_text_cell},
     },
 };
@@ -35,15 +38,6 @@ use tokio_postgres::{
     types::{Kind, ToSql, Type},
 };
 use uuid::Uuid;
-
-/// Runs an async future to completion from inside a synchronous proptest
-/// closure.
-///
-/// Properties execute on a multi-threaded Tokio runtime worker, so blocking in
-/// place is safe and keeps the database connection driven.
-fn block_on<F: Future>(future: F) -> F::Output {
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
-}
 
 /// Fetches the single text column the statement returns.
 fn query_text(
@@ -72,11 +66,6 @@ fn assert_parses_to(typ: &Type, rendered: &str, expected: &Cell) -> Result<(), T
 
     prop_assert_eq!(&cell, expected);
     Ok(())
-}
-
-/// Strings that are valid Postgres `text` values (no NUL bytes).
-fn pg_text() -> impl Strategy<Value = String> {
-    any::<String>().prop_filter("postgres text cannot contain NUL", |s| !s.contains('\0'))
 }
 
 /// Nullable-element arrays of Postgres `text` values.
@@ -143,24 +132,6 @@ async fn scalar_values_roundtrip_through_text_codec() {
     });
 }
 
-/// Compares floats bit-for-bit, treating every NaN payload as equal.
-///
-/// Postgres renders every NaN as `NaN`, so payload bits cannot survive the
-/// text roundtrip; sign and value bits of all other floats must.
-fn f64_matches(expected: f64, parsed: f64) -> bool {
-    if expected.is_nan() { parsed.is_nan() } else { expected.to_bits() == parsed.to_bits() }
-}
-
-/// [`f64_matches`] for `f32`.
-fn f32_matches(expected: f32, parsed: f32) -> bool {
-    if expected.is_nan() { parsed.is_nan() } else { expected.to_bits() == parsed.to_bits() }
-}
-
-/// All `f64` bit patterns: normals, subnormals, zeros, infinities, NaNs.
-fn any_f64() -> impl Strategy<Value = f64> {
-    any::<u64>().prop_map(f64::from_bits)
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn float_values_roundtrip_through_text_codec() {
     init_test_tracing();
@@ -169,7 +140,7 @@ async fn float_values_roundtrip_through_text_codec() {
     let client = database.client.as_ref().unwrap();
     let render = client.prepare("select ($1::float8)::text, ($2::float4)::text").await.unwrap();
 
-    let strategy = (any_f64(), any::<u32>().prop_map(f32::from_bits));
+    let strategy = (any_f64(), any_f32());
     run_property("float text roundtrip", &strategy, |(f64v, f32v)| {
         let rendered = query_texts(client, &render, &[f64v, f32v])?;
 
@@ -213,12 +184,10 @@ async fn float8_array_values_roundtrip_through_text_codec() {
 
         prop_assert_eq!(parsed.len(), values.len());
         for (expected, parsed) in values.iter().zip(&parsed) {
-            let matches = match (expected, parsed) {
-                (None, None) => true,
-                (Some(expected), Some(parsed)) => f64_matches(*expected, *parsed),
-                _ => false,
-            };
-            prop_assert!(matches, "float8[] {expected:?} parsed as {parsed:?}");
+            prop_assert!(
+                opt_f64_matches(*expected, *parsed),
+                "float8[] {expected:?} parsed as {parsed:?}"
+            );
         }
         Ok(())
     });
@@ -314,19 +283,6 @@ fn pg_date() -> impl Strategy<Value = NaiveDate> {
     let max = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap().num_days_from_ce();
 
     (min..=max).prop_map(|days| NaiveDate::from_num_days_from_ce_opt(days).unwrap())
-}
-
-/// Microsecond-precision times of day, matching Postgres's time resolution.
-///
-/// Postgres also accepts and stores `24:00:00`, but `chrono::NaiveTime`
-/// cannot represent it and the codec rejects it (a pinned known gap; see
-/// `time_falls_back_for_non_iso_shapes` in the codec tests). It stays
-/// outside the envelope until the codec and destinations decide how to
-/// carry it.
-fn pg_time() -> impl Strategy<Value = NaiveTime> {
-    (0u32..86_400, 0u32..1_000_000).prop_map(|(seconds, micros)| {
-        NaiveTime::from_num_seconds_from_midnight_opt(seconds, micros * 1_000).unwrap()
-    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
