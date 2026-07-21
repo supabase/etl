@@ -99,6 +99,16 @@ impl RowBatch {
     pub fn end_offset(&self) -> &OffsetToken {
         &self.offset_range.end
     }
+
+    /// Assigns the single Snowpipe request offset for this encoded batch.
+    ///
+    /// Copy batches are encoded before the channel reserves their attempt-local
+    /// offset. Both request-range endpoints are set to `offset` while the
+    /// encoded `_cdc_sequence_number` remains unchanged.
+    pub(crate) fn with_request_offset(mut self, offset: OffsetToken) -> Self {
+        self.offset_range = OffsetRange { start: offset.clone(), end: offset };
+        self
+    }
 }
 
 /// Builds compressed row batches with streaming zstd compression.
