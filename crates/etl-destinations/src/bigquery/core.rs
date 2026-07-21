@@ -1295,6 +1295,11 @@ where
                 .await?;
         }
 
+        // Invalidate Storage Write API connections after dropping the physical
+        // tables. A subsequent copy can recreate a table with the same ID, and a
+        // cached connection may still refer to the previous table incarnation.
+        self.client.invalidate_all_connections().await;
+
         // Once destination cleanup is done, remove any stale local cache entries.
         let mut inner = self.inner.lock().await;
         inner.clear_table_cache(&base_bigquery_table_id);
