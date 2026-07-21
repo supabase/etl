@@ -684,10 +684,13 @@ where
         Ok(())
     }
 
-    /// Writes an initial-copy batch directly to the destination table.
+    /// Writes an initial-copy batch directly to the destination table,
+    /// awaiting the write inline instead of reporting through the trait's
+    /// async completion result.
     ///
-    /// This convenience wrapper preserves the pre-async-result direct-call API
-    /// by awaiting the write inline.
+    /// Test-only entrypoint for exercising the production write path without
+    /// pipeline plumbing.
+    #[cfg(feature = "test-utils")]
     pub async fn write_table_rows(
         &self,
         schema: &ReplicatedTableSchema,

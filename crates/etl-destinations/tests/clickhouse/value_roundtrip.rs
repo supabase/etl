@@ -4,8 +4,13 @@
 //! production destination path (schema DDL, `cell_to_clickhouse_value`,
 //! RowBinary encoding, HTTP insert), reads them back from ClickHouse, and
 //! asserts the stored value equals the written one. ClickHouse itself is the
-//! oracle, so these properties catch silent value corruption in the write
-//! path, not just encoder panics.
+//! storage oracle. Expected values are computed independently of the
+//! production encoder where practical (hex for `bytea`, clock components for
+//! `time`, `Date32` day offsets and raw microsecond ticks for temporals).
+//! For `numeric` and `jsonb` the format pin shares the production
+//! `to_string` path, so those properties additionally parse the stored text
+//! back and compare values, failing on any rendering that changes
+//! information.
 //!
 //! Every property runs new random cases until a wall-clock budget elapses,
 //! using the shared runner in `etl::test_utils::property`. See that module
@@ -23,13 +28,16 @@ use std::sync::{
     atomic::{AtomicI64, Ordering},
 };
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use etl::{
     data::{ArrayCell, Cell, PgNumeric, TableRow},
-    error::EtlResult,
+    error::{EtlError, EtlResult},
     schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
     store::{MemoryStore, SchemaStore},
-    test_utils::property::run_property,
+    test_utils::property::{
+        any_f32, any_f64, block_on, f32_matches, f64_matches, opt_f32_matches, opt_f64_matches,
+        pg_text, pg_time, run_property,
+    },
 };
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::{
@@ -124,51 +132,14 @@ impl PropertyTable {
     }
 }
 
-/// Runs an async future to completion from inside a synchronous proptest
-/// closure.
-///
-/// Properties execute on a multi-threaded Tokio runtime worker, so blocking in
-/// place is safe and keeps the HTTP client driven.
-fn block_on<F: Future>(future: F) -> F::Output {
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
-}
-
 /// Maps a generated optional value into a nullable cell.
 fn opt_cell<T>(value: Option<T>, into_cell: impl Fn(T) -> Cell) -> Cell {
     value.map_or(Cell::Null, into_cell)
 }
 
 /// Converts a write error into a property failure.
-fn write_failed(err: etl::error::EtlError) -> TestCaseError {
+fn write_failed(err: EtlError) -> TestCaseError {
     TestCaseError::fail(format!("destination write failed: {err}"))
-}
-
-/// Bit-level float equality that treats every NaN as equal to every NaN.
-///
-/// RowBinary carries raw IEEE-754 bytes in both directions, so non-NaN values
-/// (including signed zeros) must survive bit-exactly; NaN payloads are only
-/// required to stay NaN.
-fn f64_matches(expected: f64, parsed: f64) -> bool {
-    if expected.is_nan() { parsed.is_nan() } else { expected.to_bits() == parsed.to_bits() }
-}
-
-/// See [`f64_matches`].
-fn f32_matches(expected: f32, parsed: f32) -> bool {
-    if expected.is_nan() { parsed.is_nan() } else { expected.to_bits() == parsed.to_bits() }
-}
-
-/// Optional-aware [`f64_matches`].
-fn opt_f64_matches(expected: &Option<f64>, parsed: &Option<f64>) -> bool {
-    match (expected, parsed) {
-        (None, None) => true,
-        (Some(expected), Some(parsed)) => f64_matches(*expected, *parsed),
-        _ => false,
-    }
-}
-
-/// Strings that are valid Postgres `text` values (no NUL bytes).
-fn pg_text() -> impl Strategy<Value = String> {
-    any::<String>().prop_filter("postgres text cannot contain NUL", |s| !s.contains('\0'))
 }
 
 /// Dates inside ClickHouse `Date32`'s supported range.
@@ -180,15 +151,6 @@ fn ch_date() -> impl Strategy<Value = NaiveDate> {
     let max_days = max.signed_duration_since(epoch).num_days();
 
     (min_days..=max_days).prop_map(move |days| epoch + chrono::Duration::days(days))
-}
-
-/// Times with microsecond precision, matching what the Postgres codec emits.
-fn pg_time() -> impl Strategy<Value = NaiveTime> {
-    (0i64..86_400_000_000).prop_map(|micros| {
-        let seconds = u32::try_from(micros / 1_000_000).expect("seconds fit in u32");
-        let nanos = u32::try_from(micros % 1_000_000).expect("micros fit in u32") * 1_000;
-        NaiveTime::from_num_seconds_from_midnight_opt(seconds, nanos).expect("valid time")
-    })
 }
 
 /// Timestamps inside ClickHouse `DateTime64(6)`'s supported range.
@@ -211,6 +173,50 @@ fn date_from_days(days: i32) -> NaiveDate {
 /// production encoder.
 fn expected_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Renders the text expected for a `time` value, computed from clock
+/// components independently of the chrono `Display` path the production
+/// encoder uses.
+///
+/// Mirrors the stored format's fraction rules: no fractional digits for
+/// whole seconds, three digits for whole milliseconds, six otherwise.
+fn expected_time_string(time: &NaiveTime) -> String {
+    let micros = time.nanosecond() / 1_000;
+    let base = format!("{:02}:{:02}:{:02}", time.hour(), time.minute(), time.second());
+    if micros == 0 {
+        base
+    } else if micros.is_multiple_of(1_000) {
+        format!("{base}.{:03}", micros / 1_000)
+    } else {
+        format!("{base}.{micros:06}")
+    }
+}
+
+/// Asserts stored numeric text reparses to the exact value that was written.
+///
+/// The format pin shares the production `to_string` path, so it cannot see
+/// rendering bugs; reparsing closes the loop ([`PgNumeric`] equality is
+/// structural, and its `FromStr` is validated against Postgres by the codec
+/// properties in `etl`).
+fn assert_numeric_reparses(stored: &str, written: &PgNumeric) -> Result<(), TestCaseError> {
+    let reparsed: PgNumeric = stored.parse().map_err(|err| {
+        TestCaseError::fail(format!("stored numeric {stored:?} does not reparse: {err}"))
+    })?;
+    prop_assert_eq!(&reparsed, written, "stored numeric {} reparses to a different value", stored);
+    Ok(())
+}
+
+/// Asserts stored json text parses back to the document that was written.
+///
+/// `serde_json`'s parser is an independent inverse of the production
+/// rendering, so a `to_string` that changes a value fails here even though
+/// the format pin cannot see it.
+fn assert_json_parses_back(stored: &str, written: &serde_json::Value) -> Result<(), TestCaseError> {
+    let parsed: serde_json::Value = serde_json::from_str(stored)
+        .map_err(|err| TestCaseError::fail(format!("stored json does not parse: {err}")))?;
+    prop_assert_eq!(&parsed, written, "stored json {} parses to a different document", stored);
+    Ok(())
 }
 
 /// Valid Postgres numeric values built from generated digit strings.
@@ -354,9 +360,7 @@ async fn float_values_roundtrip_through_destination() {
     )
     .await;
 
-    let f32_bits = any::<u32>().prop_map(f32::from_bits);
-    let f64_bits = any::<u64>().prop_map(f64::from_bits);
-    let strategy = (option::of(f32_bits.clone()), f32_bits, option::of(f64_bits.clone()), f64_bits);
+    let strategy = (option::of(any_f32()), any_f32(), option::of(any_f64()), any_f64());
     run_property("clickhouse float roundtrip", &strategy, |(v4, w4, v8, w8)| {
         let row: FloatsRow = block_on(async {
             let id = table
@@ -371,14 +375,9 @@ async fn float_values_roundtrip_through_destination() {
         })
         .map_err(write_failed)?;
 
-        let v4_matches = match (v4, &row.v4) {
-            (None, None) => true,
-            (Some(expected), Some(parsed)) => f32_matches(*expected, *parsed),
-            _ => false,
-        };
-        prop_assert!(v4_matches, "float4 {v4:?} stored as {:?}", row.v4);
+        prop_assert!(opt_f32_matches(*v4, row.v4), "float4 {v4:?} stored as {:?}", row.v4);
         prop_assert!(f32_matches(*w4, row.w4), "float4 {w4:?} stored as {:?}", row.w4);
-        prop_assert!(opt_f64_matches(v8, &row.v8), "float8 {v8:?} stored as {:?}", row.v8);
+        prop_assert!(opt_f64_matches(*v8, row.v8), "float8 {v8:?} stored as {:?}", row.v8);
         prop_assert!(f64_matches(*w8, row.w8), "float8 {w8:?} stored as {:?}", row.w8);
         Ok(())
     });
@@ -473,10 +472,22 @@ async fn string_mapped_values_roundtrip_through_destination() {
             prop_assert_eq!(&row.wn, &wn.to_string());
             prop_assert_eq!(&row.vj, &vj.as_ref().map(ToString::to_string));
             prop_assert_eq!(&row.wj, &wj.to_string());
-            prop_assert_eq!(&row.vtime, &vtime.map(|t| t.to_string()));
-            prop_assert_eq!(&row.wtime, &wtime.to_string());
+            prop_assert_eq!(&row.vtime, &vtime.as_ref().map(expected_time_string));
+            prop_assert_eq!(&row.wtime, &expected_time_string(wtime));
             prop_assert_eq!(&row.vbytes, &vbytes.as_deref().map(expected_hex));
             prop_assert_eq!(&row.wbytes, &expected_hex(wbytes));
+
+            // Value oracles for the columns whose format pins share
+            // production code: the stored text must parse back to the value
+            // that was written.
+            if let (Some(stored), Some(written)) = (&row.vn, vn) {
+                assert_numeric_reparses(stored, written)?;
+            }
+            assert_numeric_reparses(&row.wn, wn)?;
+            if let (Some(stored), Some(written)) = (&row.vj, vj) {
+                assert_json_parses_back(stored, written)?;
+            }
+            assert_json_parses_back(&row.wj, wj)?;
             Ok(())
         },
     );
@@ -611,7 +622,7 @@ async fn array_values_roundtrip_through_destination() {
     let strategy = (
         proptest::collection::vec(option::of(any::<i64>()), 0..=160),
         proptest::collection::vec(option::of(pg_text()), 0..=8),
-        proptest::collection::vec(option::of(any::<u64>().prop_map(f64::from_bits)), 0..=8),
+        proptest::collection::vec(option::of(any_f64()), 0..=8),
         proptest::collection::vec(option::of(bytes), 0..=8),
         proptest::collection::vec(option::of(ch_date()), 0..=8),
     );
@@ -635,7 +646,7 @@ async fn array_values_roundtrip_through_destination() {
         prop_assert_eq!(row.af.len(), af.len());
         for (expected, stored) in af.iter().zip(&row.af) {
             prop_assert!(
-                opt_f64_matches(expected, stored),
+                opt_f64_matches(*expected, *stored),
                 "float8[] {:?} stored as {:?}",
                 expected,
                 stored
