@@ -2129,6 +2129,36 @@ async fn schema_change_add_column_defaults() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
+    let destination_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist after applying defaults");
+    let defaults = bigquery_database
+        .query_column_defaults_by_id(&destination_metadata.destination_table_id)
+        .await;
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "status")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("'new'")
+    );
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "score")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("15")
+    );
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "active")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("true")
+    );
+
     let rows = bigquery_database.query_table(table_name).await.unwrap();
     let mut rows = parse_bigquery_table_rows::<BigQueryDefaultsRow>(rows);
     rows.sort();
@@ -2287,6 +2317,22 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
     drop_default_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let destination_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist after clearing the default");
+    let defaults = bigquery_database
+        .query_column_defaults_by_id(&destination_metadata.destination_table_id)
+        .await;
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "divergent_default")
+            .and_then(|column| column.column_default.as_deref()),
+        None
+    );
 
     let rows = bigquery_database.query_table(table_name).await.unwrap();
     let mut rows = parse_bigquery_table_rows::<BigQuerySchemaDivergenceRow>(rows);

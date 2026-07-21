@@ -408,8 +408,8 @@ impl BigQueryDatabase {
     /// Queries BigQuery column defaults for an exact table ID.
     pub async fn query_column_defaults_by_id(&self, table_id: &str) -> Vec<BigQueryColumnDefault> {
         let query = format!(
-            "SELECT column_name, column_default FROM `{}.{}.INFORMATION_SCHEMA.COLUMNS` WHERE \
-             table_name = '{}' ORDER BY ordinal_position",
+            "select column_name, column_default from `{}.{}.INFORMATION_SCHEMA.COLUMNS` where \
+             table_name = '{}' order by ordinal_position",
             self.project_id, self.dataset_id, table_id
         );
 
@@ -527,10 +527,13 @@ pub struct BigQueryColumnDefault {
 impl From<TableRow> for BigQueryColumnDefault {
     fn from(value: TableRow) -> Self {
         let columns = value.columns.unwrap();
+        // BigQuery query rows encode a null STRING value as the string `NULL`.
+        let column_default = parse_table_cell(columns[1].clone())
+            .filter(|column_default: &String| column_default != "NULL");
 
         BigQueryColumnDefault {
             column_name: parse_table_cell(columns[0].clone()).unwrap(),
-            column_default: parse_table_cell(columns[1].clone()),
+            column_default,
         }
     }
 }

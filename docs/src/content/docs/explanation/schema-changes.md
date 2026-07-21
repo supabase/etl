@@ -360,11 +360,14 @@ These behaviors are **not full destination DDL semantics** yet:
   `supabase_etl_ducklake_dropped_<attnum>_<16-hex-hash>`. Similar business names
   that do not match that full shape remain valid.
 - Destination defaults are best-effort metadata translations. Unsupported
-  defaults are skipped with a warning instead of failing replication. This does
+  defaults are skipped instead of failing replication. This does
   not remove values PostgreSQL emits in future row events; it only means the
   destination schema default metadata is not set. If a previously supported
   default becomes unsupported, ETL removes the old destination default where the
   destination supports that operation so stale behavior is not left behind.
+  BigQuery applies default changes in the shared schema-operation order:
+  supported defaults replace the destination default, while unsupported or
+  absent defaults remove it if present.
   Snowflake default changes on existing columns are skipped with a warning
   because `ALTER COLUMN SET DEFAULT` is documented only for existing sequence
   defaults, and defaults introduced by `ALTER TABLE ADD COLUMN ... DEFAULT`

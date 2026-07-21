@@ -1010,8 +1010,8 @@ fn plan_schema_operations(
         let ordinal_position = modification.old_column_schema.ordinal_position;
         let new_name = &modification.new_column_schema.name;
 
-        let _ = waiting_ordinal_by_target_name.insert(new_name.clone(), ordinal_position);
-        let _ = pending_renames.insert(
+        waiting_ordinal_by_target_name.insert(new_name.clone(), ordinal_position);
+        pending_renames.insert(
             ordinal_position,
             PendingRename {
                 current_column_schema: modification.old_column_schema.clone(),

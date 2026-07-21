@@ -16,33 +16,18 @@ const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 /// Special column name for Change Data Capture sequence ordering in BigQuery.
 const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
 
-/// BigQuery support for the default on a complete source column schema.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ColumnDefaultSupport<'a> {
-    /// The source column has no default.
-    Absent,
-    /// BigQuery can install this source default on the column.
-    Supported(&'a str),
-    /// The source column has a default that BigQuery cannot install.
-    Unsupported,
-}
-
-/// Classifies the default on a complete source column for BigQuery.
+/// Returns the BigQuery default for a complete source column, if supported.
 ///
 /// This applies both expression-and-type compatibility and column-level
 /// restrictions, including BigQuery's prohibition on primary-key defaults.
-pub(super) fn column_default_support(column_schema: &ColumnSchema) -> ColumnDefaultSupport<'_> {
-    let Some(default_expression) = column_schema.default_expression.as_deref() else {
-        return ColumnDefaultSupport::Absent;
-    };
-
-    if column_schema.primary_key()
-        || default_expression_sql(default_expression, &column_schema.typ).is_none()
-    {
-        ColumnDefaultSupport::Unsupported
-    } else {
-        ColumnDefaultSupport::Supported(default_expression)
+pub(super) fn column_default_sql(column_schema: &ColumnSchema) -> Option<String> {
+    if column_schema.primary_key() {
+        return None;
     }
+
+    column_schema.default_expression.as_deref().and_then(|default_expression| {
+        default_expression_sql(default_expression, &column_schema.typ)
+    })
 }
 
 /// Generates SQL column specification for CREATE TABLE statements.
@@ -52,20 +37,13 @@ pub(super) fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
     let mut column_spec =
         format!("{} {}", column_name, postgres_to_bigquery_type(&column_schema.typ));
 
-    match column_default_support(column_schema) {
-        ColumnDefaultSupport::Supported(default_expression) => {
-            let rendered_default_expression =
-                default_expression_sql(default_expression, &column_schema.typ)
-                    .expect("supported BigQuery column default should be renderable");
-            column_spec.push_str(&format!(" default {rendered_default_expression}"));
-        }
-        ColumnDefaultSupport::Unsupported => {
-            warn!(
-                column_name = %column_schema.name,
-                "skipping unsupported source column default for bigquery table creation"
-            );
-        }
-        ColumnDefaultSupport::Absent => {}
+    if let Some(default_expression) = column_default_sql(column_schema) {
+        column_spec.push_str(&format!(" default {default_expression}"));
+    } else if column_schema.default_expression.is_some() {
+        warn!(
+            column_name = %column_schema.name,
+            "skipping unsupported source column default for bigquery table creation"
+        );
     }
 
     if !column_schema.nullable && !is_array_type(&column_schema.typ) {
@@ -76,7 +54,7 @@ pub(super) fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
 }
 
 /// Returns a rendered default expression for BigQuery, if supported.
-pub(super) fn default_expression_sql(default_expression: &str, typ: &Type) -> Option<String> {
+fn default_expression_sql(default_expression: &str, typ: &Type) -> Option<String> {
     parse_default_expression(default_expression, typ)
         .and_then(|expression| render_default_expression(&expression, typ))
 }
@@ -469,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn column_default_support_uses_complete_column_schema() {
+    fn column_default_sql_uses_complete_column_schema() {
         let without_default = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 1, true);
         let supported_default =
             without_default.clone().with_default_expression("'pending'::text".to_owned());
@@ -479,13 +457,10 @@ mod tests {
             .with_primary_key(1)
             .with_default_expression("1".to_owned());
 
-        assert_eq!(column_default_support(&without_default), ColumnDefaultSupport::Absent);
-        assert_eq!(
-            column_default_support(&supported_default),
-            ColumnDefaultSupport::Supported("'pending'::text")
-        );
-        assert_eq!(column_default_support(&unsupported_default), ColumnDefaultSupport::Unsupported);
-        assert_eq!(column_default_support(&primary_key_default), ColumnDefaultSupport::Unsupported);
+        assert_eq!(column_default_sql(&without_default), None);
+        assert_eq!(column_default_sql(&supported_default).as_deref(), Some("'pending'"));
+        assert_eq!(column_default_sql(&unsupported_default), None);
+        assert_eq!(column_default_sql(&primary_key_default), None);
     }
 
     #[test]

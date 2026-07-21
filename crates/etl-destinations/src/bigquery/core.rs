@@ -18,8 +18,8 @@ use etl::{
     event::{Event, EventSequenceKey},
     pipeline::PipelineId,
     schema::{
-        ColumnModificationType, ColumnSchema, IdentityType, ReplicatedTableSchema, SchemaDiff,
-        SchemaOperation, TableId, TableName,
+        ColumnModificationType, IdentityType, ReplicatedTableSchema, SchemaDiff, SchemaOperation,
+        TableId, TableName,
     },
     store::DestinationStore,
 };
@@ -37,9 +37,7 @@ use crate::{
         client::{BigQueryClient, BigQueryOperationType},
         encoding::BigQueryTableRow,
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
-        schema::{
-            ColumnDefaultSupport, column_default_support, column_schemas_to_table_descriptor,
-        },
+        schema::{column_default_sql, column_schemas_to_table_descriptor},
     },
     table_name::try_stringify_table_name,
 };
@@ -763,8 +761,8 @@ where
         ensure_bigquery_primary_key_unchanged(&current_schema, new_replicated_table_schema)?;
 
         let diff = current_schema.diff(new_replicated_table_schema);
-
         let sequenced_bigquery_table_id = metadata.destination_table_id.parse()?;
+
         // Mark as applying before making changes (with the NEW snapshot_id and mask).
         //
         // NOTE: BigQuery does not support transactional DDL, so if the system crashes
@@ -877,26 +875,21 @@ where
                         )
                         .await?;
 
-                    match column_default_support(column_schema) {
-                        ColumnDefaultSupport::Supported(default_expression) => {
-                            self.client
-                                .set_column_default(
-                                    &self.dataset_id,
-                                    &sequenced_bigquery_table_id.to_string(),
-                                    &column_schema.name,
-                                    &column_schema.typ,
-                                    default_expression,
-                                )
-                                .await?;
-                        }
-                        ColumnDefaultSupport::Unsupported => {
-                            warn!(
-                                table_id = %table_id,
-                                column_name = %column_schema.name,
-                                "skipping unsupported source column default for bigquery"
-                            );
-                        }
-                        ColumnDefaultSupport::Absent => {}
+                    if let Some(default_expression) = column_default_sql(column_schema) {
+                        self.client
+                            .set_column_default(
+                                &self.dataset_id,
+                                &sequenced_bigquery_table_id.to_string(),
+                                &column_schema.name,
+                                &default_expression,
+                            )
+                            .await?;
+                    } else if column_schema.default_expression.is_some() {
+                        warn!(
+                            table_id = %table_id,
+                            column_name = %column_schema.name,
+                            "skipping unsupported source column default for bigquery"
+                        );
                     }
                 }
                 SchemaOperation::ModifyColumn {
@@ -924,22 +917,28 @@ where
                     }
                 }
                 SchemaOperation::ModifyColumn {
-                    old_column_schema,
                     new_column_schema,
                     modification_type: ColumnModificationType::Default,
-                } => match bigquery_default_action(old_column_schema, new_column_schema) {
-                    BigQueryDefaultAction::Set(default_expression) => {
+                    ..
+                } => {
+                    if let Some(default_expression) = column_default_sql(new_column_schema) {
                         self.client
                             .set_column_default(
                                 &self.dataset_id,
                                 &sequenced_bigquery_table_id.to_string(),
                                 &new_column_schema.name,
-                                &new_column_schema.typ,
-                                default_expression,
+                                &default_expression,
                             )
                             .await?;
-                    }
-                    BigQueryDefaultAction::Clear => {
+                    } else {
+                        if new_column_schema.default_expression.is_some() {
+                            warn!(
+                                table_id = %table_id,
+                                column_name = %new_column_schema.name,
+                                "skipping unsupported source column default for bigquery"
+                            );
+                        }
+
                         self.client
                             .clear_column_default(
                                 &self.dataset_id,
@@ -948,8 +947,7 @@ where
                             )
                             .await?;
                     }
-                    BigQueryDefaultAction::Noop => {}
-                },
+                }
             }
         }
 
@@ -1346,39 +1344,6 @@ fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema
     }
 
     Ok(())
-}
-
-/// Destination action for one source default-expression change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BigQueryDefaultAction<'a> {
-    /// Install or replace a supported destination default.
-    Set(&'a str),
-    /// Remove a previously supported destination default.
-    Clear,
-    /// Do not issue destination DDL.
-    Noop,
-}
-
-/// Plans destination default DDL from the old and new source column states.
-///
-/// Unsupported source defaults remain visible in the shared schema diff, but
-/// they never become BigQuery metadata. A transition away from an unsupported
-/// old default therefore needs no `DROP DEFAULT`.
-fn bigquery_default_action<'a>(
-    old_column_schema: &ColumnSchema,
-    new_column_schema: &'a ColumnSchema,
-) -> BigQueryDefaultAction<'a> {
-    if let ColumnDefaultSupport::Supported(default_expression) =
-        column_default_support(new_column_schema)
-    {
-        return BigQueryDefaultAction::Set(default_expression);
-    }
-
-    if matches!(column_default_support(old_column_schema), ColumnDefaultSupport::Supported(_)) {
-        BigQueryDefaultAction::Clear
-    } else {
-        BigQueryDefaultAction::Noop
-    }
 }
 
 /// Rejects source primary-key changes that BigQuery cannot apply in place.
@@ -2288,47 +2253,6 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
         assert!(error.to_string().contains("primary-key columns, names, or order"));
-    }
-
-    #[test]
-    fn bigquery_default_action_tracks_only_destination_supported_state() {
-        let without_default = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, true);
-        let supported_default =
-            without_default.clone().with_default_expression("'pending'::text".to_owned());
-        let unsupported_default =
-            without_default.clone().with_default_expression("lower('PENDING')".to_owned());
-        let primary_key_default = ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
-            .with_primary_key(1)
-            .with_default_expression("1".to_owned());
-
-        assert_eq!(
-            bigquery_default_action(&without_default, &supported_default),
-            BigQueryDefaultAction::Set("'pending'::text")
-        );
-        assert_eq!(
-            bigquery_default_action(&unsupported_default, &supported_default),
-            BigQueryDefaultAction::Set("'pending'::text")
-        );
-        assert_eq!(
-            bigquery_default_action(&supported_default, &without_default),
-            BigQueryDefaultAction::Clear
-        );
-        assert_eq!(
-            bigquery_default_action(&supported_default, &unsupported_default),
-            BigQueryDefaultAction::Clear
-        );
-        assert_eq!(
-            bigquery_default_action(&without_default, &unsupported_default),
-            BigQueryDefaultAction::Noop
-        );
-        assert_eq!(
-            bigquery_default_action(&unsupported_default, &without_default),
-            BigQueryDefaultAction::Noop
-        );
-        assert_eq!(
-            bigquery_default_action(&primary_key_default, &primary_key_default),
-            BigQueryDefaultAction::Noop
-        );
     }
 
     #[test]
