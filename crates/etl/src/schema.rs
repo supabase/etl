@@ -888,7 +888,7 @@ impl SchemaDiff {
     /// rename target is released by a listed drop or another pending rename.
     /// This constructor does not validate those invariants; violating them is a
     /// programmer error.
-    /// 
+    ///
     /// The planner tracks those occupied names as mutable execution state,
     /// while a separate reserved-name set covers both endpoints and every
     /// generated name. A name can therefore become free for a requested
