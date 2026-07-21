@@ -228,7 +228,8 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -239,7 +240,7 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: every column round-trips correctly ---
@@ -352,7 +353,8 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -363,9 +365,9 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
         .await;
 
@@ -377,7 +379,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         .await
         .expect("Failed to update update_flow row");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let query = current_state_query(engine, UPDATE_FLOW_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
     let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
@@ -504,7 +506,8 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -515,7 +518,7 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: ClickHouse data matches Postgres exactly ---
@@ -657,7 +660,8 @@ async fn pre_1970_and_far_future_dates_round_trip_inner(engine: ClickHouseEngine
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -668,7 +672,7 @@ async fn pre_1970_and_far_future_dates_round_trip_inner(engine: ClickHouseEngine
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: each date encodes as the expected signed day offset ---
@@ -770,7 +774,8 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -781,9 +786,9 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
         .await;
 
@@ -792,7 +797,7 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         .await
         .expect("Failed to delete delete_flow row");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let query = current_state_query(engine, DELETE_FLOW_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
     let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
@@ -870,7 +875,8 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -881,7 +887,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify first run produced exactly one row.
@@ -907,7 +913,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
 
     pipeline.start().await.unwrap();
 
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
@@ -919,7 +925,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
         .await
         .expect("Failed to insert post-restart row");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let rows: Vec<IdValueRow> = clickhouse_db.query(&restart_query()).await;
 
@@ -990,11 +996,12 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
         destination,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1029,11 +1036,12 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
         destination.clone(),
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1090,7 +1098,8 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1101,7 +1110,7 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     // Verify both rows arrived from table copy.
     let truncate_query =
@@ -1204,7 +1213,8 @@ async fn intermediate_flush_preserves_all_rows_inner(engine: ClickHouseEngine) {
         )
         .await;
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     // --- WHEN: pipeline copies data with aggressive flush splitting ---
     let mut pipeline = create_pipeline(
@@ -1216,7 +1226,7 @@ async fn intermediate_flush_preserves_all_rows_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: all rows arrive despite being split across many INSERTs ---
@@ -1311,8 +1321,10 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_a_ready = store.notify_on_table_state_type(table_a_id, TableStateType::Ready).await;
-    let table_b_ready = store.notify_on_table_state_type(table_b_id, TableStateType::Ready).await;
+    let table_a_ready_notify =
+        store.notify_on_table_state_type(table_a_id, TableStateType::Ready).await;
+    let table_b_ready_notify =
+        store.notify_on_table_state_type(table_b_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1323,9 +1335,9 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
     );
 
     pipeline.start().await.unwrap();
-    tokio::join!(table_a_ready.notified(), table_b_ready.notified());
+    tokio::join!(table_a_ready_notify.notified(), table_b_ready_notify.notified());
 
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Insert, table_a_id, 1),
             EventCondition::TableCount(EventType::Insert, table_b_id, 1),
@@ -1349,7 +1361,7 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
         .await
         .expect("Failed to insert streamed row into multi_b");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let query_a = current_state_query(engine, "test_multi__a", ID_VALUE_PROJECTION, &["id"], "id");
     let query_b = current_state_query(engine, "test_multi__b", ID_VALUE_PROJECTION, &["id"], "id");
@@ -1492,7 +1504,8 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1503,9 +1516,9 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Delete, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -1538,7 +1551,7 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
         .await
         .expect("Failed to insert post-delete row");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let query = current_state_query(
         engine,
@@ -1622,7 +1635,8 @@ async fn exclusive_large_batch_table_copy_inner(engine: ClickHouseEngine) {
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     // --- WHEN: pipeline copies all rows ---
     let mut pipeline = create_pipeline(
@@ -1634,7 +1648,7 @@ async fn exclusive_large_batch_table_copy_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: all rows arrive, spot-check a sample ---
@@ -1782,7 +1796,8 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1793,7 +1808,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     // Verify initial state.
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
@@ -1807,7 +1822,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     let initial_snapshot_id = initial_metadata.snapshot_id;
 
     // --- WHEN: add column and insert with new schema ---
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -1835,7 +1850,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
         .await
         .expect("Failed to insert Bob");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let query = current_state_query(
         engine,
@@ -1945,7 +1960,8 @@ async fn schema_change_add_column_defaults_merge_tree() {
             .await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1957,9 +1973,9 @@ async fn schema_change_add_column_defaults_merge_tree() {
 
     pipeline.start().await.unwrap();
 
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -1989,7 +2005,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
         .await
         .expect("failed to insert defaulted source row");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -2110,7 +2126,8 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -2121,7 +2138,7 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     // Verify initial schema.
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
@@ -2135,7 +2152,7 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     let initial_snapshot_id = initial_metadata.snapshot_id;
 
     // --- WHEN: rename + drop + add and insert with new schema ---
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -2171,7 +2188,7 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
         .await
         .expect("Failed to insert Bob");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let query = current_state_query(
         engine,

@@ -61,13 +61,13 @@ async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
         destination.clone(),
     );
 
-    let users_ready = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
+    users_ready_notify.notified().await;
 
     // WHEN: the pipeline shuts down
     let result = pipeline.shutdown_and_wait().await;
@@ -103,11 +103,12 @@ async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
         destination.clone(),
     );
 
-    let users_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
+    users_ready_notify.notified().await;
 
     // WHEN: a resync starts and the destination rejects the drop
     destination
@@ -117,11 +118,12 @@ async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
         )
         .await;
 
-    let users_errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+    let users_errored_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
 
     store.reset_table_state(table_id).await.unwrap();
 
-    users_errored.notified().await;
+    users_errored_notify.notified().await;
 
     // THEN: the table errors with a timed retry and nothing was torn down
     let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
@@ -136,9 +138,10 @@ async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
     assert_eq!(memory_destination.table_rows().await.get(&table_id).unwrap().len(), initial_rows);
 
     // THEN: the timed retry drops and recopies the table cleanly
-    let users_ready_again = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_ready_again_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
-    users_ready_again.notified().await;
+    users_ready_again_notify.notified().await;
 
     assert!(destination.was_table_dropped_for_copy(table_id).await);
     let table_rows = destination.get_table_rows().await;
@@ -172,11 +175,12 @@ async fn drop_table_for_copy_failure_after_write_keeps_table_restartable_until_r
         destination.clone(),
     );
 
-    let users_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
+    users_ready_notify.notified().await;
 
     // WHEN: a resync starts and the drop fails after being applied
     destination
@@ -189,11 +193,12 @@ async fn drop_table_for_copy_failure_after_write_keeps_table_restartable_until_r
         )
         .await;
 
-    let users_errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+    let users_errored_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
 
     store.reset_table_state(table_id).await.unwrap();
 
-    users_errored.notified().await;
+    users_errored_notify.notified().await;
 
     // THEN: the table errors with a timed retry and ETL state was not cleared
     let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
@@ -208,9 +213,10 @@ async fn drop_table_for_copy_failure_after_write_keeps_table_restartable_until_r
     assert!(!memory_destination.table_rows().await.contains_key(&table_id));
 
     // THEN: the timed retry replays the drop and recopies the table cleanly
-    let users_ready_again = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_ready_again_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
-    users_ready_again.notified().await;
+    users_ready_again_notify.notified().await;
 
     assert!(destination.was_table_dropped_for_copy(table_id).await);
     let table_rows = destination.get_table_rows().await;
@@ -241,11 +247,12 @@ async fn shutdown_drains_pending_write_events_before_destination_shutdown() {
         destination.clone(),
     );
 
-    let users_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
+    users_ready_notify.notified().await;
 
     let hold = destination.hold_next(FaultyOp::WriteEvents).await;
 
@@ -298,11 +305,12 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
         destination.clone(),
     );
 
-    let users_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
+    users_ready_notify.notified().await;
 
     let hold = destination.hold_next(FaultyOp::WriteEvents).await;
 
@@ -320,7 +328,7 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
     wait_for_new_walsender(client, &apply_slot_name, old_pid).await;
 
     // WHEN: the held response is released only after the reconnect
-    let replay_recorded = destination
+    let replay_recorded_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;
 
@@ -328,7 +336,7 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
 
     // THEN: the insert replays because the acknowledgement never reached the
     // old apply loop
-    replay_recorded.notified().await;
+    replay_recorded_notify.notified().await;
 
     let commit_lsns = table_insert_commit_lsns(&destination.get_events().await, table_id);
     assert_eq!(commit_lsns.len(), 2);
@@ -339,7 +347,7 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
     assert!(flush_lsn_at_kill < first_commit_lsn);
 
     // THEN: streaming continues without loss after the replay
-    let second_insert = destination
+    let second_insert_notify = destination
         .notify_on_events(move |events| {
             table_insert_commit_lsns(events, table_id)
                 .last()
@@ -349,7 +357,7 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
 
     insert_users_data(&mut database, &database_schema.users_schema().name, 2..=2).await;
 
-    second_insert.notified().await;
+    second_insert_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -382,11 +390,12 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
         destination.clone(),
     );
 
-    let users_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
+    users_ready_notify.notified().await;
 
     let hold = destination.hold_next(FaultyOp::WriteEvents).await;
 
@@ -399,7 +408,7 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
     let (_, active_pid) = replication_slot_state(client, &apply_slot_name).await;
     let old_pid = active_pid.expect("apply walsender should be active");
 
-    let first_insert_recorded = destination
+    let first_insert_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
@@ -407,7 +416,7 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
 
     hold.release_ok();
 
-    first_insert_recorded.notified().await;
+    first_insert_notify.notified().await;
     let first_commit_lsn = *table_insert_commit_lsns(&destination.get_events().await, table_id)
         .first()
         .expect("released insert should be recorded");
@@ -415,7 +424,7 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
     wait_for_new_walsender(client, &apply_slot_name, old_pid).await;
 
     // THEN: streaming continues without loss, replaying the insert at most once
-    let second_insert = destination
+    let second_insert_notify = destination
         .notify_on_events(move |events| {
             table_insert_commit_lsns(events, table_id)
                 .last()
@@ -425,7 +434,7 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
 
     insert_users_data(&mut database, &database_schema.users_schema().name, 2..=2).await;
 
-    second_insert.notified().await;
+    second_insert_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 

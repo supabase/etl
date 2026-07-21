@@ -75,7 +75,8 @@ async fn replacing_merge_tree_rejects_pkless_source_table() {
         .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
         .await;
 
-    let table_errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+    let table_errored_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -86,7 +87,7 @@ async fn replacing_merge_tree_rejects_pkless_source_table() {
     );
 
     pipeline.start().await.unwrap();
-    table_errored.notified().await;
+    table_errored_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: the Errored state reason names the PK-less rejection ---
@@ -139,7 +140,8 @@ async fn replacing_merge_tree_same_lsn_tx_insert_then_update_keeps_update() {
             .await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -150,10 +152,10 @@ async fn replacing_merge_tree_same_lsn_tx_insert_then_update_keeps_update() {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     // --- WHEN: INSERT + UPDATE in the same transaction ---
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Insert, table_id, 1),
             EventCondition::TableCount(EventType::Update, table_id, 1),
@@ -175,7 +177,7 @@ async fn replacing_merge_tree_same_lsn_tx_insert_then_update_keeps_update() {
     .expect("Failed to update");
     tx.commit_transaction().await;
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let query = current_state_query(
         ClickHouseEngine::ReplacingMergeTree,
@@ -242,7 +244,8 @@ async fn replacing_merge_tree_same_lsn_tx_delete_then_insert_keeps_insert() {
             .await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -253,10 +256,10 @@ async fn replacing_merge_tree_same_lsn_tx_delete_then_insert_keeps_insert() {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     // --- WHEN: DELETE + INSERT of the same id in one transaction ---
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Delete, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -275,7 +278,7 @@ async fn replacing_merge_tree_same_lsn_tx_delete_then_insert_keeps_insert() {
     .expect("Failed to re-insert");
     tx.commit_transaction().await;
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let query = current_state_query(
         ClickHouseEngine::ReplacingMergeTree,
@@ -333,7 +336,8 @@ async fn replacing_merge_tree_current_view_exposes_user_columns_and_current_stat
             .await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -344,9 +348,9 @@ async fn replacing_merge_tree_current_view_exposes_user_columns_and_current_stat
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
         .await;
     database
@@ -356,7 +360,7 @@ async fn replacing_merge_tree_current_view_exposes_user_columns_and_current_stat
         ))
         .await
         .expect("Failed to update row");
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     // --- WHEN: read via the __current view ---
     let rows: Vec<IdValueRow> = clickhouse_db
@@ -433,7 +437,8 @@ async fn composite_pk_pk_order_by_matches_pk_ordinal() {
         .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
         .await;
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -444,7 +449,7 @@ async fn composite_pk_pk_order_by_matches_pk_ordinal() {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- WHEN: query system.tables for the created ReplacingMergeTree ORDER BY
@@ -516,7 +521,8 @@ async fn replacing_merge_tree_streamed_update_wins_over_initial_copy_row() {
             .await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -527,10 +533,10 @@ async fn replacing_merge_tree_streamed_update_wins_over_initial_copy_row() {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     // --- WHEN: stream an UPDATE for the copied row ---
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
         .await;
     database
@@ -540,7 +546,7 @@ async fn replacing_merge_tree_streamed_update_wins_over_initial_copy_row() {
         ))
         .await
         .expect("Failed to update");
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let query = current_state_query(
         ClickHouseEngine::ReplacingMergeTree,
@@ -605,7 +611,8 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
             .await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -616,16 +623,16 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
         .await;
     database
         .run_sql(&format!("DELETE FROM {} WHERE id = 1", table_name.as_quoted_identifier()))
         .await
         .expect("Failed to delete");
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     // --- WHEN: operator runs OPTIMIZE ... FINAL CLEANUP ---
     let optimize_sql = optimize_final_cleanup_sql("test_final__cleanup");
@@ -708,7 +715,8 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
         let store = NotifyingStore::new();
         let pipeline_id: PipelineId = random();
         let destination = clickhouse_db.build_destination_with_engine(store.clone(), first).await;
-        let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+        let table_ready_notify =
+            store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
         let mut pipeline = create_pipeline(
             &database.config,
             pipeline_id,
@@ -717,7 +725,7 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
             destination,
         );
         pipeline.start().await.unwrap();
-        table_ready.notified().await;
+        table_ready_notify.notified().await;
         pipeline.shutdown_and_wait().await.unwrap();
     }
 
@@ -726,7 +734,8 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), second).await;
-    let table_errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+    let table_errored_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -736,7 +745,7 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
         destination,
     );
     pipeline.start().await.unwrap();
-    table_errored.notified().await;
+    table_errored_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: the Errored state reason names the engine mismatch ---

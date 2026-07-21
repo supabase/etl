@@ -160,10 +160,11 @@ async fn schema_change_add_column_defaults() {
             store.clone(),
             destination.clone(),
         );
-        let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+        let table_ready_notify =
+            store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
         pipeline.start().await.unwrap();
-        table_ready.notified().await;
+        table_ready_notify.notified().await;
 
         let zero_offset = OffsetToken::zero();
         let committed = poll_destination_offset(
@@ -180,7 +181,7 @@ async fn schema_change_add_column_defaults() {
             wait_for_initial_row(&sql, config.database(), config.schema(), &snowflake_table).await;
         assert_eq!(initial_rows, vec![vec![serde_json::json!("1"), serde_json::json!("Alice")]]);
 
-        let event_notify = destination
+        let events_notify = destination
             .wait_for_events(vec![
                 EventCondition::TableCount(EventType::Relation, table_id, 1),
                 EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -212,7 +213,7 @@ async fn schema_change_add_column_defaults() {
             .await
             .expect("failed to insert defaulted source row");
 
-        event_notify.notified().await;
+        events_notify.notified().await;
         pipeline.shutdown_and_wait().await.unwrap();
 
         let expected = vec![

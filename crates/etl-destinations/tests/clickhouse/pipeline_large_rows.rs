@@ -141,7 +141,8 @@ async fn large_row_inner(engine: ClickHouseEngine, field_chars: usize) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -152,9 +153,9 @@ async fn large_row_inner(engine: ClickHouseEngine, field_chars: usize) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination
+    let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
@@ -164,7 +165,7 @@ async fn large_row_inner(engine: ClickHouseEngine, field_chars: usize) {
         .await
         .expect("Failed to insert large JSONB row");
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let query = current_state_query(engine, LARGE_ROW_TABLE, SUMMARY_PROJECTION, &["id"], "id");
     let rows: Vec<LargeRowSummary> = clickhouse_db.query(&query).await;

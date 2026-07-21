@@ -80,7 +80,7 @@ struct DeferredCopyDestination<D> {
     /// Shared durability-control state.
     state: Arc<Mutex<DeferredCopyDestinationState>>,
     /// Notification emitted after the terminal barrier is held.
-    barrier_reached: Arc<Notify>,
+    barrier_reached_notify: Arc<Notify>,
 }
 
 impl<D> DeferredCopyDestination<D> {
@@ -89,13 +89,13 @@ impl<D> DeferredCopyDestination<D> {
         Self {
             inner,
             state: Arc::new(Mutex::new(DeferredCopyDestinationState::default())),
-            barrier_reached: Arc::new(Notify::new()),
+            barrier_reached_notify: Arc::new(Notify::new()),
         }
     }
 
     /// Returns a notification for the next terminal durability barrier.
     fn notify_on_barrier(&self) -> TimedNotify {
-        TimedNotify::new(Arc::clone(&self.barrier_reached))
+        TimedNotify::new(Arc::clone(&self.barrier_reached_notify))
     }
 
     /// Returns the number of nonempty copy writes received.
@@ -157,7 +157,7 @@ where
             state.barrier_result = Some(async_result);
             drop(state);
 
-            self.barrier_reached.notify_one();
+            self.barrier_reached_notify.notify_one();
 
             return Ok(());
         }
@@ -229,7 +229,7 @@ struct StalledCopyDestination<D> {
     /// Held result that keeps a table-copy write pending.
     pending_write_result: Arc<Mutex<Option<WriteTableRowsResult>>>,
     /// Notification emitted after the result is dropped or held.
-    stall_reached: Arc<Notify>,
+    stall_reached_notify: Arc<Notify>,
 }
 
 impl<D> StalledCopyDestination<D> {
@@ -241,13 +241,13 @@ impl<D> StalledCopyDestination<D> {
             mode,
             pending_drop_result: Arc::new(Mutex::new(None)),
             pending_write_result: Arc::new(Mutex::new(None)),
-            stall_reached: Arc::new(Notify::new()),
+            stall_reached_notify: Arc::new(Notify::new()),
         }
     }
 
     /// Returns a notification for the next stalled operation.
     fn notify_on_stall(&self) -> TimedNotify {
-        TimedNotify::new(Arc::clone(&self.stall_reached))
+        TimedNotify::new(Arc::clone(&self.stall_reached_notify))
     }
 }
 
@@ -285,7 +285,7 @@ where
             }
         }
 
-        self.stall_reached.notify_one();
+        self.stall_reached_notify.notify_one();
 
         Ok(())
     }
@@ -312,7 +312,7 @@ where
             }
         }
 
-        self.stall_reached.notify_one();
+        self.stall_reached_notify.notify_one();
 
         Ok(())
     }
@@ -390,11 +390,12 @@ async fn table_copy_errors_when_async_result_is_dropped() {
         destination,
     );
 
-    let table_errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+    let table_errored_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
 
     pipeline.start().await.unwrap();
 
-    table_errored.notified().await;
+    table_errored_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -431,11 +432,11 @@ async fn table_copy_shutdown_interrupts_pending_result_wait() {
         destination.clone(),
     );
 
-    let write_reached = destination.notify_on_stall();
+    let write_reached_notify = destination.notify_on_stall();
 
     pipeline.start().await.unwrap();
 
-    write_reached.notified().await;
+    write_reached_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -469,11 +470,12 @@ async fn drop_table_for_copy_errors_when_async_result_is_dropped() {
         destination.clone(),
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -487,11 +489,12 @@ async fn drop_table_for_copy_errors_when_async_result_is_dropped() {
         destination,
     );
 
-    let table_errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+    let table_errored_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
 
     pipeline.start().await.unwrap();
 
-    table_errored.notified().await;
+    table_errored_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -529,15 +532,16 @@ async fn drop_table_for_copy_shutdown_interrupts_pending_result_wait() {
         destination.clone(),
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let drop_reached = destination.notify_on_stall();
+    let drop_reached_notify = destination.notify_on_stall();
 
     store.reset_table_state(table_id).await.unwrap();
 
-    drop_reached.notified().await;
+    drop_reached_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -576,7 +580,8 @@ async fn reset_during_active_copy_is_overwritten_by_active_worker() {
         destination.clone(),
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -590,7 +595,7 @@ async fn reset_during_active_copy_is_overwritten_by_active_worker() {
     held_write.release_ok();
 
     // The table becomes ready since naturally since the copy just continued.
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -919,13 +924,14 @@ async fn table_copy_waits_for_durable_terminal_barrier_after_accepted_write() {
 
     // Arm notifications before starting because they only observe future
     // transitions.
-    let barrier_reached = destination.notify_on_barrier();
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let barrier_reached_notify = destination.notify_on_barrier();
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     // The destination now holds the terminal barrier result.
-    barrier_reached.notified().await;
+    barrier_reached_notify.notified().await;
 
     // A later Durable batch must not advance the table while the terminal
     // barrier remains pending.
@@ -938,7 +944,7 @@ async fn table_copy_waits_for_durable_terminal_barrier_after_accepted_write() {
 
     // Confirming the terminal barrier unlocks normal table-state progression.
     destination.complete_barrier(DestinationWriteStatus::Durable).await;
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
@@ -1038,17 +1044,17 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     );
 
     // We wait for both table states to be in sync done.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
-    let orders_state_notify = store
+    let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1275,12 +1281,12 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
         destination.clone(),
     );
 
-    let users_ready = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
-    users_ready.notified().await;
+    users_ready_notify.notified().await;
 
     let first_insert_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(
@@ -1625,17 +1631,17 @@ async fn table_copy_replicates_existing_data() {
     );
 
     // Register notifications for table copy completion.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
-    let orders_state_notify = store
+    let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1696,17 +1702,17 @@ async fn table_copy_and_sync_streams_new_data() {
     );
 
     // Register notifications for initial table copy completion.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
-    let orders_state_notify = store
+    let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
     // Insert additional data to test streaming.
     insert_mock_data(
@@ -1821,13 +1827,13 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     );
 
     // Register notifications for initial table copy completion.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     // Insert additional data to test streaming.
     let rows_inserted = 5;
@@ -1891,13 +1897,13 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     );
 
     // Register notifications for initial table copy completion.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 

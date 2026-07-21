@@ -96,7 +96,7 @@ async fn relation_message_updates_when_column_added() {
         )
         .await;
 
-    let events_received = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -120,7 +120,7 @@ async fn relation_message_updates_when_column_added() {
         .await
         .unwrap();
 
-    events_received.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
@@ -171,7 +171,7 @@ async fn relation_message_updates_when_column_removed() {
         )
         .await;
 
-    let events_received = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -185,7 +185,7 @@ async fn relation_message_updates_when_column_removed() {
 
     database.insert_values(table_name.clone(), &["name"], &[&"Bob"]).await.unwrap();
 
-    events_received.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
@@ -236,7 +236,7 @@ async fn relation_message_updates_when_column_renamed() {
         )
         .await;
 
-    let events_received = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -256,7 +256,7 @@ async fn relation_message_updates_when_column_renamed() {
         .await
         .unwrap();
 
-    events_received.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
@@ -307,7 +307,7 @@ async fn relation_message_updates_when_column_type_changes() {
         )
         .await;
 
-    let events_received = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -327,7 +327,7 @@ async fn relation_message_updates_when_column_type_changes() {
         .await
         .unwrap();
 
-    events_received.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
@@ -378,7 +378,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         )
         .await;
 
-    let schema_stored = store.notify_on_table_schema_count(table_id, 2).await;
+    let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
 
     database
         .alter_table(
@@ -391,7 +391,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         .await
         .unwrap();
 
-    schema_stored.notified().await;
+    schema_stored_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -429,7 +429,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
 
     pipeline.start().await.unwrap();
 
-    let notify = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(
                 EventType::Relation,
@@ -449,7 +449,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -510,7 +510,7 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
         )
         .await;
 
-    let events_received = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -578,7 +578,7 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
         .await
         .unwrap();
 
-    events_received.notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1093,15 +1093,15 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         destination.clone(),
     );
 
-    let parent_ready =
+    let parent_ready_notify =
         state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    parent_ready.notified().await;
+    parent_ready_notify.notified().await;
 
     // Wait for the Relation event (schema change) and Insert event.
-    let notify = destination
+    let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, parent_table_id, 1),
             EventCondition::TableCount(EventType::Insert, parent_table_id, 1),
@@ -1129,7 +1129,7 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
