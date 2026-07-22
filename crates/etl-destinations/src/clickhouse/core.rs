@@ -32,6 +32,7 @@ use crate::{
             supports_column_default, trailing_cdc_column_names,
         },
     },
+    recovery::previous_replication_mask_for_recovery,
     table_name::try_stringify_table_name,
 };
 
@@ -667,10 +668,17 @@ where
                             )
                         },
                     )?;
-                let old_schema = ReplicatedTableSchema::from_mask(
-                    old_table_schema,
-                    metadata.replication_mask.clone(),
+                // The metadata records the target mask, not the previous one,
+                // so project it back onto the previous schema; a raw copy has
+                // the wrong width whenever the change added or dropped
+                // columns.
+                let previous_replication_mask = previous_replication_mask_for_recovery(
+                    &old_table_schema,
+                    schema.inner(),
+                    &metadata.replication_mask,
                 );
+                let old_schema =
+                    ReplicatedTableSchema::from_mask(old_table_schema, previous_replication_mask);
                 let diff = old_schema.diff(schema);
                 self.apply_schema_diff(clickhouse_table_name, &diff, &old_schema, schema).await?;
             }
