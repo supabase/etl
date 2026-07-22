@@ -120,6 +120,8 @@ pub enum ErrorKind {
     DestinationNamespaceMissing,
     /// The destination table does not exist.
     DestinationTableMissing,
+    /// The destination schema is newer than a replayed schema snapshot.
+    DestinationSchemaRewind,
 
     // Data & Transformation Errors
     /// A value could not be converted between source and destination formats.

@@ -635,6 +635,24 @@ where
 
         match metadata.previous_snapshot_id {
             Some(prev_snapshot_id) => {
+                // Recovery replays the interrupted diff from the previous
+                // snapshot to the target snapshot recorded in the metadata. A
+                // schema arriving with any other snapshot is a stale replay
+                // and must not drive DDL: diffing against it could execute
+                // reverse DDL or wrongly mark the interrupted change applied.
+                let arriving_snapshot_id = schema.inner().snapshot_id;
+                if arriving_snapshot_id != metadata.snapshot_id {
+                    return Err(etl_error!(
+                        ErrorKind::DestinationSchemaRewind,
+                        "ClickHouse schema recovery received a stale schema snapshot",
+                        format!(
+                            "Table {} has an interrupted schema change targeting snapshot {}, but \
+                             received snapshot {}. Resynchronize the table to recover.",
+                            table_id, metadata.snapshot_id, arriving_snapshot_id
+                        )
+                    ));
+                }
+
                 let old_table_schema =
                     self.store.get_table_schema(&table_id, prev_snapshot_id).await?.ok_or_else(
                         || {
@@ -697,6 +715,16 @@ where
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         self.write_table_rows_inner(schema, table_rows).await
+    }
+    /// Writes a streaming event batch directly to the destination, awaiting
+    /// the write inline instead of reporting through the trait's async
+    /// completion result.
+    ///
+    /// Test-only entrypoint for exercising the production write path without
+    /// pipeline plumbing.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+        self.write_events_inner(events).await
     }
 
     async fn write_table_rows_inner(
@@ -761,6 +789,25 @@ where
 
         let current_snapshot_id = metadata.snapshot_id;
         let current_replication_mask = metadata.replication_mask.clone();
+
+        // Reject stale schema snapshots replayed after a restart. At-least-once
+        // delivery can re-send a relation event whose snapshot predates the
+        // schema already applied at the destination. Diffing backwards would
+        // execute reverse DDL (e.g. DROP COLUMN) and physically delete newer
+        // column data, and ClickHouse has no ETL-owned durable per-table DML
+        // watermark that would make replaying the following old events safe.
+        if new_snapshot_id < current_snapshot_id {
+            return Err(etl_error!(
+                ErrorKind::DestinationSchemaRewind,
+                "ClickHouse destination schema is newer than the replayed schema snapshot",
+                format!(
+                    "Table {} received schema snapshot {}, but the destination already applied \
+                     snapshot {}. Reverse DDL is not executed because it could delete newer \
+                     column data; resynchronize the table to recover.",
+                    table_id, new_snapshot_id, current_snapshot_id
+                )
+            ));
+        }
 
         if current_snapshot_id == new_snapshot_id
             && current_replication_mask == new_replication_mask
@@ -998,6 +1045,12 @@ where
     /// 2. Writes those rows concurrently.
     /// 3. Processes any Relation events (schema changes) sequentially.
     /// 4. Drains consecutive Truncate events (deduplicated) and executes them.
+    ///
+    /// Schema changes are applied only after all preceding inserts in the
+    /// batch finished durably: step 2 awaits every INSERT before step 3 runs
+    /// any DDL, and the client pins `wait_for_async_insert = 1`, so an insert
+    /// acknowledgement implies the rows are written to disk and cannot be
+    /// overtaken by a following `ALTER TABLE`.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 

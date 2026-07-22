@@ -300,6 +300,14 @@ impl ClickHouseClient {
                     )
                     .with_option("http_send_timeout", floor_secs(config.insert_timeout))
                     .with_option("http_receive_timeout", floor_secs(config.insert_timeout))
+                    // Force durable insert acknowledgements: when a server or
+                    // user profile enables `async_insert` with
+                    // `wait_for_async_insert = 0`, ClickHouse acks inserts
+                    // before writing them to disk, letting a following schema
+                    // change overtake acked rows. Pinning the setting keeps
+                    // every ack durable; it is a no-op when async inserts are
+                    // disabled.
+                    .with_option("wait_for_async_insert", "1")
             }),
             config,
         }
