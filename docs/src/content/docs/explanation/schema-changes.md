@@ -309,8 +309,12 @@ These behaviors are **not full destination DDL semantics** yet:
   newer columns and physically delete their data. ClickHouse has no ETL-owned
   durable per-table watermark that would make replaying the following old
   events safe, so the pipeline fails with a schema-rewind error and the
-  affected table must be resynchronized. Replication mask changes carry no
-  ordering, so a replayed stale mask cannot be detected the same way.
+  affected table must be resynchronized. This is not limited to exotic
+  replays: a single crash after a schema change was applied at the
+  destination but before the corresponding replication progress was
+  confirmed replays the stream from before the change and triggers the
+  same error. Replication mask changes carry no ordering, so a replayed
+  stale mask cannot be detected the same way.
 - Sessions can set `supabase_etl.skip_ddl_log = 'true'` as an emergency
   opt-out while recovering a system. DDL executed with that setting enabled is
   not logged for ETL.
