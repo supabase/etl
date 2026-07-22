@@ -2781,11 +2781,10 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
     reset_ducklake_test_hooks();
 }
 
-/// Marker-table rows should write Parquet files to avoid catalog-level
-/// contention.
+/// COPY writes replicated rows to Parquet while keeping helper markers inline.
 #[tokio::test(flavor = "multi_thread")]
-async fn applied_batches_table_writes_parquet() {
-    let lake = create_test_lake("applied_batches_table_writes_parquet").await;
+async fn copy_writes_table_parquet_and_inlines_applied_batch() {
+    let lake = create_test_lake("copy_writes_table_parquet_and_inlines_applied_batch").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
     let data = lake.data_dir.clone();
@@ -2818,15 +2817,18 @@ async fn applied_batches_table_writes_parquet() {
         )
         .await
         .unwrap();
+    destination.write_table_rows(&replicated_table_schema, Vec::new()).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
-    assert_eq!(count_internal_table_files(&data, "__etl_applied_table_batches"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy_complete"), 1);
+    assert_eq!(count_table_files(&data, &table_name), 1);
+    assert_eq!(count_internal_table_files(&data, "__etl_applied_table_batches"), 0);
 }
 
-/// Mixed table batches remain correct when multiple tables are written in one
-/// flush.
+/// Mixed table batches remain correct when multiple tables are written
+/// concurrently in one flush, without creating progress Parquet files.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_mixed_multi_table_batches() {
     use etl::{
@@ -2836,6 +2838,7 @@ async fn write_events_mixed_multi_table_batches() {
     let lake = create_test_lake("write_events_mixed_multi_table_batches").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
+    let data = lake.data_dir.clone();
 
     let _table_id_a = TableId::new(10);
     let _table_id_b = TableId::new(11);
@@ -2853,7 +2856,7 @@ async fn write_events_mixed_multi_table_batches() {
     let destination = DuckLakeDestination::new(
         catalog_url.clone(),
         data_url.clone(),
-        1,
+        4,
         None,
         None,
         None,
@@ -2931,6 +2934,7 @@ async fn write_events_mixed_multi_table_batches() {
     assert_eq!(count_applied_batches(&conn, &table_name_b, "mutation"), 0);
     assert_eq!(count_streaming_progress_rows(&conn, &table_name_a), 1);
     assert_eq!(count_streaming_progress_rows(&conn, &table_name_b), 1);
+    assert_eq!(count_internal_table_files(&data, "__etl_streaming_progress"), 0);
 
     let name_a: String = conn
         .query_row(

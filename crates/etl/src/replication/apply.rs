@@ -832,11 +832,11 @@ impl ApplyLoopState {
     /// feedback keeps reporting the last durable flush LSN until a later
     /// durable write proves the carried LSN safe.
     ///
-    /// If no later batch arrives, durability for the accepted write is
-    /// intentionally deferred until the next batch instead of being
-    /// acknowledged through a separate side channel. This may increase the
-    /// replay window while the stream is idle, but it preserves the single
-    /// pending-result apply-loop model.
+    /// Ordinarily, if no later batch arrives, durability for the accepted
+    /// write is deferred until replay or the next batch. A terminal table-sync
+    /// catchup is the exception: once keepalive progress reaches its target,
+    /// ETL dispatches an empty required-durability write through the same
+    /// pending-result path.
     fn is_idle(&self) -> bool {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
@@ -1309,10 +1309,10 @@ where
     /// 3. Batch flush deadline expiry.
     /// 4. Periodic keep alive status updates.
     ///
-    /// Like the active loop, each draining iteration advances idle table-sync
-    /// coordination before waiting. After the selected branch runs, it checks
-    /// again for idle table-sync work. Once buffered or in-flight destination
-    /// work is resolved, it sends the final shutdown status update and exits.
+    /// Shutdown drain does not start new idle table-sync coordination. If
+    /// permanent completion already started a required-durability barrier,
+    /// the result handler completes the table-sync handoff before this drain
+    /// is allowed to return.
     ///
     /// A write that already resolved as [`DestinationWriteStatus::Accepted`] is
     /// no longer pending work. If no later write makes it durable, the final
@@ -1771,6 +1771,20 @@ where
                     }
                 }
             }
+
+            // A keepalive-only table-sync completion records `Complete` before
+            // dispatching its empty durability barrier. The normal idle hook skips
+            // once an exit is requested, and shutdown drain does not run that hook.
+            // Complete the handoff here after the barrier has settled the carried
+            // commit LSN and the loop is fully idle again.
+            if metadata.metrics.items_count == 0
+                && metadata.durability == WriteEventsDurability::RequireDurable
+                && status == DestinationWriteStatus::Durable
+                && matches!(self.state.exit_intent, Some(ExitIntent::Complete))
+                && self.state.is_idle()
+            {
+                self.process_syncing_tables_when_idle().await?;
+            }
         }
 
         // If processing was paused, there must be a queued batch that still needs to be
@@ -1901,6 +1915,19 @@ where
         }
 
         let (events_batch, events_batch_bytes) = self.state.take_events_batch();
+
+        self.dispatch_write_events(events_batch, events_batch_bytes, reason).await
+    }
+
+    /// Dispatches one streaming write through the shared async-result path.
+    async fn dispatch_write_events(
+        &mut self,
+        events_batch: Vec<Event>,
+        events_batch_bytes: usize,
+        reason: &str,
+    ) -> EtlResult<()> {
+        debug_assert!(!self.state.has_pending_flush_result());
+
         let events_batch_size = events_batch.len();
         // `Complete` is terminal, so no later write is guaranteed to settle an
         // `Accepted` result. Its final batch must confirm cumulative durability
@@ -2656,6 +2683,15 @@ where
         self.schema_store.upsert_replication_progress(worker_type, flush_lsn).await
     }
 
+    /// Returns whether this table-sync worker has received its catchup target.
+    async fn table_sync_catchup_target_reached(&self) -> bool {
+        let WorkerContext::TableSync(ctx) = &self.worker_context else {
+            return false;
+        };
+
+        table_sync_worker::catchup_target_reached(ctx, self.state.last_received_lsn()).await
+    }
+
     /// Processes syncing tables when the apply loop is idle.
     ///
     /// Once an exit has already been requested we intentionally skip this class
@@ -2663,6 +2699,28 @@ where
     /// shutdown barriers.
     async fn maybe_process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
         if self.state.exit_intent.is_some() {
+            return Ok(());
+        }
+
+        // Catchup can reach its target through a keepalive after the last event batch
+        // returned `Accepted`. Once no transaction, buffered batch, or in-flight write
+        // remains, no terminal batch exists to carry `RequireDurable`, so dispatch an
+        // empty durability barrier.
+        if !self.state.handling_transaction()
+            && !self.state.has_unresolved_batch_work()
+            && self.state.last_commit_end_lsn.is_some()
+            && self.table_sync_catchup_target_reached().await
+        {
+            // Record completion before dispatch so intake stops and the empty write
+            // requires durability.
+            self.state.record_exit_intent(Some(ExitIntent::Complete));
+            self.dispatch_write_events(
+                Vec::new(),
+                0,
+                "table sync catchup reached without a terminal event batch",
+            )
+            .await?;
+
             return Ok(());
         }
 
@@ -3397,6 +3455,19 @@ mod apply_worker {
 /// Functions specific to the table sync worker.
 mod table_sync_worker {
     use super::*;
+
+    /// Returns whether the worker's catchup target has been received.
+    pub(super) async fn catchup_target_reached<S>(
+        ctx: &TableSyncWorkerContext<S>,
+        current_lsn: PgLsn,
+    ) -> bool {
+        let inner = ctx.table_sync_worker_state.lock().await;
+
+        matches!(
+            inner.table_state(),
+            TableState::Catchup { lsn: catchup_lsn } if current_lsn >= catchup_lsn
+        )
+    }
 
     /// Determines whether changes should be applied for a given table.
     ///

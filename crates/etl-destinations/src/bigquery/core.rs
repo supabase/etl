@@ -603,8 +603,8 @@ where
     /// Writes table-copy rows using the BigQuery upsert row format.
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal
-    /// batches based on estimated row size to maximize the 10MB per request
-    /// limit, and streams them to BigQuery concurrently.
+    /// batches based on the client's row-data target, and streams them to
+    /// BigQuery concurrently.
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -632,12 +632,12 @@ where
 
         // Create append requests from the split rows.
         let mut append_requests = Vec::with_capacity(table_rows_batches.len());
-        for (batch_index, table_rows) in table_rows_batches.into_iter().enumerate() {
+        for (request_index, table_rows) in table_rows_batches.into_iter().enumerate() {
             if !table_rows.is_empty() {
                 histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
-                let append_request = self.client.create_batch_append_request(
+                let append_request = self.client.create_append_request(
                     self.pipeline_id,
-                    batch_index,
+                    request_index,
                     &self.dataset_id,
                     &sequenced_bigquery_table_id_string,
                     table_descriptor.clone(),
@@ -651,7 +651,7 @@ where
         let (bytes_sent, bytes_received) = if append_requests.is_empty() {
             (0, 0)
         } else {
-            self.client.append_table_batches(append_requests).await?
+            self.client.append(append_requests).await?
         };
 
         if bytes_sent > 0 {
@@ -1057,7 +1057,7 @@ where
             if !table_id_to_data.is_empty() {
                 let mut append_requests = Vec::with_capacity(table_id_to_data.len());
 
-                for (batch_index, (_, (replicated_table_schema, table_rows))) in
+                for (request_index, (_, (replicated_table_schema, table_rows))) in
                     table_id_to_data.into_iter().enumerate()
                 {
                     let (sequenced_bigquery_table_id, table_descriptor) =
@@ -1066,9 +1066,9 @@ where
                         sequenced_bigquery_table_id.to_string();
                     histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
 
-                    let append_request = self.client.create_batch_append_request(
+                    let append_request = self.client.create_append_request(
                         self.pipeline_id,
-                        batch_index,
+                        request_index,
                         &self.dataset_id,
                         &sequenced_bigquery_table_id_string,
                         table_descriptor,
@@ -1081,7 +1081,7 @@ where
                 let (bytes_sent, bytes_received) = if append_requests.is_empty() {
                     (0, 0)
                 } else {
-                    self.client.append_table_batches(append_requests).await?
+                    self.client.append(append_requests).await?
                 };
 
                 if bytes_sent > 0 {
@@ -1293,6 +1293,11 @@ where
                 .drop_table_if_exists(&self.dataset_id, &sequenced_bigquery_table_id.to_string())
                 .await?;
         }
+
+        // Invalidate Storage Write API connections after dropping the physical
+        // tables. A subsequent copy can recreate a table with the same ID, and a
+        // cached connection may still refer to the previous table incarnation.
+        self.client.invalidate_all_connections().await;
 
         // Once destination cleanup is done, remove any stale local cache entries.
         let mut inner = self.inner.lock().await;
@@ -1815,7 +1820,7 @@ fn bigquery_delete_row(
 /// Calculates the optimal number of batches for table copy operations.
 ///
 /// Estimates the size of a single row by encoding the first row, then
-/// calculates how many rows would fit in approximately 10MB per batch.
+/// calculates how many rows would fit within the client's batch target.
 fn calculate_target_batches_for_table_copy(table_rows: &[BigQueryTableRow]) -> EtlResult<usize> {
     let Some(encoded_row) = table_rows.first() else {
         return Ok(0);
@@ -2526,13 +2531,13 @@ mod tests {
             .collect();
 
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
-        assert_eq!(result, 7);
+        assert_eq!(result, 3);
     }
 
     #[test]
     fn calculate_target_batches_very_large_single_row() {
-        // Create a row larger than max batch size (>10MB)
-        let huge_string = "x".repeat(15 * 1024 * 1024); // 15MB string
+        // Create a row larger than the client's batch target.
+        let huge_string = "x".repeat(MAX_BATCH_SIZE_BYTES + 1);
         let rows = vec![
             BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(huge_string)])).unwrap(),
         ];

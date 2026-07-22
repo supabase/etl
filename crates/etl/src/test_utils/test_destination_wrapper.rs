@@ -17,19 +17,18 @@ use crate::{
         PipelineDestination, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
-    event::{Event, EventType},
+    event::Event,
     runtime::concurrency::TaskSet,
     schema::{ReplicatedTableSchema, TableId},
     test_utils::{
-        event::{EventCondition, check_all_events_count, group_events_by_type},
+        event::{EventCondition, check_all_event_conditions, check_event_conditions},
         faults::{FaultAction, FaultInjector, FaultyOp, HoldHandle, apply_response_fault},
         notify::TimedNotify,
     },
 };
 
-type EventCheckFn = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
-type TableRowCheckFn = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
-type CombinedCheckFn =
+type EventsCheckFn = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
+type AllEventsCheckFn =
     Box<dyn Fn(&[Event], &HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
 
 struct Inner<D> {
@@ -37,9 +36,8 @@ struct Inner<D> {
     events: Vec<Event>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
     tables_dropped_for_copy: HashSet<TableId>,
-    event_conditions: Vec<(EventCheckFn, Arc<Notify>)>,
-    table_row_conditions: Vec<(TableRowCheckFn, Arc<Notify>)>,
-    combined_conditions: Vec<(CombinedCheckFn, Arc<Notify>)>,
+    event_notifications: Vec<(EventsCheckFn, Arc<Notify>)>,
+    all_event_notifications: Vec<(AllEventsCheckFn, Arc<Notify>)>,
     write_table_rows_called: u64,
     shutdown_called: bool,
 }
@@ -47,30 +45,19 @@ struct Inner<D> {
 impl<D> Inner<D> {
     fn check_conditions(&mut self) {
         // Check event conditions.
-        let events = self.events.clone();
-        self.event_conditions.retain(|(condition, notify)| {
-            let should_retain = !condition(&events);
+        let events = &self.events;
+        self.event_notifications.retain(|(condition, notify)| {
+            let should_retain = !condition(events);
             if !should_retain {
                 notify.notify_one();
             }
             should_retain
         });
 
-        // Check table row conditions.
-        let table_rows = self.table_rows.clone();
-        self.table_row_conditions.retain(|(condition, notify)| {
-            let should_retain = !condition(&table_rows);
-            if !should_retain {
-                notify.notify_one();
-            }
-            should_retain
-        });
-
-        // Check combined conditions.
-        let events = self.events.clone();
-        let table_rows = self.table_rows.clone();
-        self.combined_conditions.retain(|(condition, notify)| {
-            let should_retain = !condition(&events, &table_rows);
+        let table_rows = &self.table_rows;
+        // Check conditions spanning streaming events and table-copy rows.
+        self.all_event_notifications.retain(|(condition, notify)| {
+            let should_retain = !condition(events, table_rows);
             if !should_retain {
                 notify.notify_one();
             }
@@ -127,9 +114,8 @@ impl<D> TestDestinationWrapper<D> {
             events: Vec::new(),
             table_rows: HashMap::new(),
             tables_dropped_for_copy: HashSet::new(),
-            event_conditions: Vec::new(),
-            table_row_conditions: Vec::new(),
-            combined_conditions: Vec::new(),
+            event_notifications: Vec::new(),
+            all_event_notifications: Vec::new(),
             write_table_rows_called: 0,
             shutdown_called: false,
         };
@@ -163,51 +149,59 @@ impl<D> TestDestinationWrapper<D> {
     {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner.event_conditions.push((Box::new(condition), Arc::clone(&notify)));
+        inner.event_notifications.push((Box::new(condition), Arc::clone(&notify)));
 
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when future events exactly match the
-    /// requested per-type counts.
+    /// Registers a notification that fires when future events satisfy all
+    /// requested conditions.
+    ///
+    /// Only streaming events are counted. Use
+    /// [`TestDestinationWrapper::wait_for_all_events`] when copied table rows
+    /// should also count as inserts.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
     /// specified timeout if the expected event count is not reached. This
     /// prevents tests from hanging indefinitely.
-    pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
-        self.notify_on_events(move |events| {
-            let grouped_events = group_events_by_type(events);
+    pub async fn wait_for_events(&self, conditions: Vec<EventCondition>) -> TimedNotify {
+        self.notify_on_events(move |events| check_event_conditions(events, &conditions)).await
+    }
 
-            conditions.iter().all(|(event_type, count)| {
-                grouped_events.get(event_type).is_some_and(|inner| inner.len() == *count as usize)
-            })
-        })
-        .await
+    /// Registers a notification that fires when future events and table-copy
+    /// rows satisfy a condition.
+    ///
+    /// Table-copy rows are presented separately from streaming events so the
+    /// condition can decide how to interpret them.
+    pub async fn notify_on_all_events<F>(&self, condition: F) -> TimedNotify
+    where
+        F: Fn(&[Event], &HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync + 'static,
+    {
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+        inner.all_event_notifications.push((Box::new(condition), Arc::clone(&notify)));
+
+        TimedNotify::new(notify)
     }
 
     /// Registers a notification that fires when future events and table rows
     /// satisfy all requested conditions.
     ///
     /// Supports two condition types:
-    /// - [`EventCondition::Any`]: counts events across all tables
-    /// - [`EventCondition::Table`]: counts events for a specific table only
+    /// - [`EventCondition::AnyCount`]: counts events across all tables
+    /// - [`EventCondition::TableCount`]: counts events for a specific table
+    ///   only
     ///
-    /// For insert events, both streaming events and table copy rows are
-    /// counted.
+    /// Copied table rows are treated as insert events. Other event types only
+    /// count streaming events.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
     /// specified timeout if the expected count is not reached.
     pub async fn wait_for_all_events(&self, conditions: Vec<EventCondition>) -> TimedNotify {
-        let notify = Arc::new(Notify::new());
-        let mut inner = self.inner.write().await;
-
-        let condition: CombinedCheckFn = Box::new(move |events, table_rows| {
-            check_all_events_count(events, table_rows, conditions.clone())
-        });
-
-        inner.combined_conditions.push((condition, Arc::clone(&notify)));
-
-        TimedNotify::new(notify)
+        self.notify_on_all_events(move |events, table_rows| {
+            check_all_event_conditions(events, table_rows, &conditions)
+        })
+        .await
     }
 
     /// Clears the recorded table rows without touching the wrapped destination.

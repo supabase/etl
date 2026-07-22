@@ -25,83 +25,39 @@ use crate::snowflake::{
     sql_client::SqlClient,
     streaming::{
         AcceptedRowBatch, ChannelHandle, DEFAULT_COMMIT_POLL_INTERVAL, DEFAULT_COMMIT_WAIT_TIMEOUT,
-        OffsetToken, RestStreamClient, RowBatch, StreamClient, validate_committed_status,
+        OffsetToken, PendingDurabilityTarget, RestStreamClient, RowBatch, StreamClient,
+        validate_committed_status,
     },
 };
 
 type ChannelMap<C> = Arc<RwLock<HashMap<TableId, Arc<Mutex<ChannelHandle<C>>>>>>;
+
+/// Process-local state carried between the two phases of a table-copy reset.
+///
+/// With event admission blocked, [`Client::detach_table_for_copy`] runs inside
+/// the reset-preparation timeout: it discards the table's pending streaming
+/// target, removes its cached channel, and carries any removed channel together
+/// with its table name in this value.
+///
+/// [`Client::drop_detached_table_for_copy`] consumes the value outside that
+/// timeout to drop the Snowpipe channel and Snowflake table. This split keeps
+/// local draining and lock acquisition bounded without cancelling a remote
+/// drop whose outcome would then be unknown.
+///
+/// This value does not block event admission. The caller must retain its
+/// [`etl::destination::TaskSetDrainGuard`] until the remote drop returns.
+pub(super) struct DetachedTableForCopy<C> {
+    /// Previously cached channel handle, when one existed in this process.
+    channel: Option<Arc<Mutex<ChannelHandle<C>>>>,
+    /// Snowflake table name to drop after retiring local state.
+    table_name: String,
+}
 
 /// Maximum accepted Snowflake row batches before forcing a durability wait.
 const STREAMING_PENDING_MAX_ROW_BATCHES: usize = 64;
 
 /// Maximum accepted compressed bytes before forcing a durability wait.
 const STREAMING_PENDING_MAX_BYTES: usize = 256 * 1024 * 1024;
-
-/// Collapsed durability target for one Snowflake streaming channel.
-///
-/// Snowflake committed offsets are cumulative, so multiple accepted row
-/// batches can be represented by the latest target offset plus aggregate row
-/// and byte counts.
-#[derive(Debug, Clone)]
-struct PendingDurabilityTarget {
-    /// Latest accepted offset for this channel.
-    target_offset: OffsetToken,
-    /// Accepted rows since the baseline status.
-    rows: u64,
-    /// Compressed bytes accepted since the baseline status.
-    bytes: usize,
-    /// Snowflake row batches accepted since the baseline status.
-    row_batches: usize,
-    /// Cumulative inserted rows before the pending range began.
-    baseline_rows_inserted: u64,
-    /// Cumulative row errors before the pending range began.
-    baseline_rows_error_count: u64,
-}
-
-impl PendingDurabilityTarget {
-    /// Creates a pending durability target from the first accepted row batch.
-    fn new(batch: AcceptedRowBatch) -> Self {
-        Self {
-            target_offset: batch.target_offset,
-            rows: batch.rows,
-            bytes: batch.bytes,
-            row_batches: 1,
-            baseline_rows_inserted: batch.baseline_rows_inserted,
-            baseline_rows_error_count: batch.baseline_rows_error_count,
-        }
-    }
-
-    /// Extends this target with a later accepted row batch on the same channel.
-    fn record(&mut self, batch: AcceptedRowBatch) -> Result<()> {
-        let rows = self.rows.checked_add(batch.rows).ok_or_else(|| {
-            Error::Channel("Snowflake pending streaming row count overflowed.".into())
-        })?;
-        let bytes = self.bytes.checked_add(batch.bytes).ok_or_else(|| {
-            Error::Channel("Snowflake pending streaming byte count overflowed.".into())
-        })?;
-        let row_batches = self.row_batches.checked_add(1).ok_or_else(|| {
-            Error::Channel("Snowflake pending streaming batch count overflowed.".into())
-        })?;
-
-        self.target_offset = batch.target_offset;
-        self.rows = rows;
-        self.bytes = bytes;
-        self.row_batches = row_batches;
-
-        Ok(())
-    }
-
-    /// Converts this cumulative target into the validation input shape.
-    fn as_accepted_batch(&self) -> AcceptedRowBatch {
-        AcceptedRowBatch {
-            target_offset: self.target_offset.clone(),
-            rows: self.rows,
-            bytes: self.bytes,
-            baseline_rows_inserted: self.baseline_rows_inserted,
-            baseline_rows_error_count: self.baseline_rows_error_count,
-        }
-    }
-}
 
 /// Global accepted-but-not-durable Snowflake streaming state.
 #[derive(Debug, Default)]
@@ -163,19 +119,42 @@ impl PendingDurabilityState {
         self.targets.iter().map(|(table_id, target)| (*table_id, target.clone())).collect()
     }
 
+    /// Discards one table's pending target and updates aggregate accounting.
+    fn discard(&mut self, table_id: TableId) -> Result<()> {
+        let Some(target) = self.targets.get(&table_id) else {
+            return Ok(());
+        };
+        let target_row_batches = target.row_batches;
+        let target_bytes = target.bytes;
+
+        let row_batches = self.row_batches.checked_sub(target_row_batches).ok_or_else(|| {
+            Error::Channel("Snowflake pending streaming batch accounting underflowed.".into())
+        })?;
+        let bytes = self.bytes.checked_sub(target_bytes).ok_or_else(|| {
+            Error::Channel("Snowflake pending streaming byte accounting underflowed.".into())
+        })?;
+
+        self.targets.remove(&table_id);
+        self.row_batches = row_batches;
+        self.bytes = bytes;
+
+        Ok(())
+    }
+
     /// Removes targets whose current offset is covered by the proven target.
-    fn clear_committed(&mut self, committed: &[(TableId, OffsetToken)]) {
+    fn clear_committed(&mut self, committed: &[(TableId, OffsetToken)]) -> Result<()> {
         for (table_id, committed_target) in committed {
             let should_clear = self
                 .targets
                 .get(table_id)
                 .is_some_and(|target| &target.target_offset <= committed_target);
 
-            if should_clear && let Some(target) = self.targets.remove(table_id) {
-                self.row_batches = self.row_batches.saturating_sub(target.row_batches);
-                self.bytes = self.bytes.saturating_sub(target.bytes);
+            if should_clear {
+                self.discard(*table_id)?;
             }
         }
+
+        Ok(())
     }
 
     /// Records pending-window gauges.
@@ -454,9 +433,33 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         guard.reset().await
     }
 
-    /// Drop the table and destination-private replay state before a fresh copy.
-    pub async fn drop_table_for_copy(&self, table_id: TableId, table_name: &str) -> Result<()> {
-        let channel = self.channels.write().await.remove(&table_id);
+    /// Retires one table's process-local state before a fresh copy reset.
+    ///
+    /// Callers must first prevent new streaming tasks from being admitted and
+    /// wait for previously admitted tasks to finish. The returned token can
+    /// then be used to perform the potentially slow remote drop without
+    /// leaving a pending target that refers to a removed channel.
+    pub(super) async fn detach_table_for_copy(
+        &self,
+        table_id: TableId,
+        table_name: &str,
+    ) -> Result<DetachedTableForCopy<C>> {
+        let mut channels = self.channels.write().await;
+        let mut pending = self.pending_durability.lock().await;
+        pending.discard(table_id)?;
+
+        let channel = channels.remove(&table_id);
+        pending.observe_metrics();
+
+        Ok(DetachedTableForCopy { channel, table_name: table_name.to_owned() })
+    }
+
+    /// Drops the remote channel and table for previously detached local state.
+    pub(super) async fn drop_detached_table_for_copy(
+        &self,
+        detached: DetachedTableForCopy<C>,
+    ) -> Result<()> {
+        let DetachedTableForCopy { channel, table_name } = detached;
 
         let drop_channel_result = if let Some(channel) = channel {
             let mut guard = channel.lock().await;
@@ -467,7 +470,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                 self.pipeline_id,
                 self.database.clone(),
                 self.schema.clone(),
-                table_name.to_owned(),
+                table_name.clone(),
             );
             handle.drop_channel().await
         };
@@ -477,7 +480,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             Err(error) => return Err(error),
         }
 
-        self.sql_client.drop_table(table_name).await
+        self.sql_client.drop_table(&table_name).await
     }
 
     /// Refresh the table's ingestion state after a schema change.
@@ -494,13 +497,18 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.get_channel(*table_id).await?.lock().await.open().await.map(|_| ())
     }
 
-    /// Send table-copy row batches through the existing append-ack path.
+    /// Send table-copy row batches and retain their pending durability target.
     pub async fn send_table_copy_batches(
         &self,
         table_id: TableId,
         batches: Vec<RowBatch>,
     ) -> Result<()> {
-        self.get_channel(table_id).await?.lock().await.send_table_copy_batches(batches).await
+        self.get_channel(table_id).await?.lock().await.accept_table_copy_batches(batches).await
+    }
+
+    /// Wait until all accepted table-copy rows for one table are durable.
+    pub async fn wait_for_table_copy_durability(&self, table_id: TableId) -> Result<()> {
+        self.get_channel(table_id).await?.lock().await.wait_for_table_copy_durability().await
     }
 
     /// Send streaming row batches and record accepted-but-not-durable targets.
@@ -590,7 +598,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 
             {
                 let mut pending = self.pending_durability.lock().await;
-                pending.clear_committed(&committed);
+                pending.clear_committed(&committed)?;
                 pending.observe_metrics();
                 if pending.is_empty() {
                     return Ok(());
@@ -629,6 +637,16 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 mod tests {
     use super::*;
 
+    struct UnusedTokenProvider;
+
+    impl TokenProvider for UnusedTokenProvider {
+        async fn get_token(&self) -> Result<String> {
+            Err(Error::Auth("Unused test token provider.".to_owned()))
+        }
+
+        async fn invalidate_token(&self) {}
+    }
+
     fn accepted_batch(lsn: u64, ordinal: u64, rows: u64, bytes: usize) -> AcceptedRowBatch {
         AcceptedRowBatch {
             target_offset: OffsetToken::new(lsn.into(), ordinal),
@@ -637,6 +655,24 @@ mod tests {
             baseline_rows_inserted: 100,
             baseline_rows_error_count: 1,
         }
+    }
+
+    fn test_client() -> Client<UnusedTokenProvider, RestStreamClient<UnusedTokenProvider>> {
+        let config = Config::new("example-account", "test-user", "test-db", "test-schema").unwrap();
+        let auth = Arc::new(UnusedTokenProvider);
+        let http = reqwest::Client::new();
+        let sql_client =
+            SqlClient::new(config.clone_without_credentials(), Arc::clone(&auth), http.clone());
+        let stream_client =
+            Arc::new(RestStreamClient::new(config.account_url().to_owned(), auth, http));
+
+        Client::with_clients(
+            sql_client,
+            stream_client,
+            config.database().to_owned(),
+            config.schema().to_owned(),
+            PipelineId::from(1_u64),
+        )
     }
 
     #[test]
@@ -666,7 +702,7 @@ mod tests {
 
         state.record(first_table_id, accepted_batch(10, 1, 2, 20)).unwrap();
         state.record(second_table_id, accepted_batch(11, 1, 3, 30)).unwrap();
-        state.clear_committed(&[(first_table_id, OffsetToken::new(10_u64.into(), 1))]);
+        state.clear_committed(&[(first_table_id, OffsetToken::new(10_u64.into(), 1))]).unwrap();
 
         assert_eq!(state.targets.len(), 1);
         assert!(state.targets.contains_key(&second_table_id));
@@ -682,7 +718,7 @@ mod tests {
         state.record(table_id, accepted_batch(10, 1, 2, 20)).unwrap();
         let stale_committed_target = (table_id, OffsetToken::new(10_u64.into(), 1));
         state.record(table_id, accepted_batch(10, 2, 3, 30)).unwrap();
-        state.clear_committed(&[stale_committed_target]);
+        state.clear_committed(&[stale_committed_target]).unwrap();
 
         let target = state.targets.get(&table_id).unwrap();
         assert_eq!(target.target_offset, OffsetToken::new(10_u64.into(), 2));
@@ -703,5 +739,36 @@ mod tests {
 
         assert!(state.limits_reached());
         assert!(state.would_exceed_limits(1));
+    }
+
+    #[tokio::test]
+    async fn detach_table_for_copy_retires_channel_and_pending_target() {
+        let table_id = TableId::new(1);
+        let table_name = "TEST_TABLE";
+        let client = test_client();
+        let channel = Arc::new(Mutex::new(ChannelHandle::new(
+            Arc::clone(&client.stream_client),
+            client.pipeline_id,
+            client.database.clone(),
+            client.schema.clone(),
+            table_name.to_owned(),
+        )));
+        client.channels.write().await.insert(table_id, channel);
+        client
+            .pending_durability
+            .lock()
+            .await
+            .record(table_id, accepted_batch(10, 1, 2, 20))
+            .unwrap();
+
+        let detached = client.detach_table_for_copy(table_id, table_name).await.unwrap();
+
+        assert!(detached.channel.is_some());
+        assert_eq!(detached.table_name, table_name);
+        assert!(!client.channels.read().await.contains_key(&table_id));
+        let pending = client.pending_durability.lock().await;
+        assert!(pending.is_empty());
+        assert_eq!(pending.row_batches, 0);
+        assert_eq!(pending.bytes, 0);
     }
 }

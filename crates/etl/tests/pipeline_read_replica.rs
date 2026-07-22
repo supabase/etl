@@ -290,8 +290,8 @@ async fn pipeline_replicates_table_copy_and_cdc_from_read_replica() {
     // while the primary should only own the physical standby slot.
     assert_replication_slot_absent(&primary, &apply_slot_name).await;
 
-    let users_inserted = destination
-        .wait_for_all_events(vec![EventCondition::Table(
+    let users_insert_notify = destination
+        .wait_for_all_events(vec![EventCondition::TableCount(
             EventType::Insert,
             database_schema.users_schema().id,
             3,
@@ -301,7 +301,7 @@ async fn pipeline_replicates_table_copy_and_cdc_from_read_replica() {
     insert_users_data(&mut primary, &database_schema.users_schema().name, 3..=3).await;
     wait_for_read_replica_to_catch_up(&primary, &replica_config).await;
 
-    users_inserted.notified().await;
+    users_insert_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 

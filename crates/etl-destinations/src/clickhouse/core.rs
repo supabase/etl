@@ -873,6 +873,21 @@ where
         Ok(())
     }
 
+    /// Writes an initial-copy batch directly to the destination table,
+    /// awaiting the write inline instead of reporting through the trait's
+    /// async completion result.
+    ///
+    /// Test-only entrypoint for exercising the production write path without
+    /// pipeline plumbing.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_table_rows(
+        &self,
+        schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        self.write_table_rows_inner(schema, table_rows).await
+    }
+
     async fn write_table_rows_inner(
         &self,
         schema: &ReplicatedTableSchema,

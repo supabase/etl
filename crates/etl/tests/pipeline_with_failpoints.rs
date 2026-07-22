@@ -3,6 +3,12 @@
 use std::time::Duration;
 
 use etl::{
+    data::TableRow,
+    destination::{
+        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
+    },
+    error::EtlResult,
     event::{Event, EventType, InsertEvent},
     failpoints::{
         FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
@@ -10,10 +16,10 @@ use etl::{
         STORE_REPLICATION_PROGRESS_FP, TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
     },
     pipeline::PipelineId,
-    schema::{SnapshotId, TableId, TableSchema},
-    store::{StateStore, TableRetryPolicy, TableState, TableStateType},
+    schema::{ReplicatedTableSchema, SnapshotId, TableId, TableSchema},
+    store::{StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
-        database::{spawn_source_database, test_table_name},
+        database::{replication_slot_state, spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::FaultyOp,
         memory_destination::MemoryDestination,
@@ -27,21 +33,132 @@ use etl::{
         },
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{
-            TableSelection, assert_events_equal, insert_orders_data, insert_users_data,
-            setup_test_database_schema,
+            TableSelection, assert_events_equal, build_expected_users_inserts, insert_orders_data,
+            insert_users_data, setup_test_database_schema,
         },
     },
 };
 use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
     below_version,
+    slots::EtlReplicationSlot,
     tokio::test_utils::TableModification,
     version::POSTGRES_15,
 };
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
-use tokio_postgres::types::Type;
+use tokio::{sync::mpsc, time::sleep};
+use tokio_postgres::types::{PgLsn, Type};
+
+/// Relevant streaming write observed by [`DeferredEventsDestination`].
+enum DeferredEventsWrite {
+    /// Target-table event batch accepted at this commit end LSN.
+    Accepted { commit_end_lsn: PgLsn },
+    /// Empty required-durability write whose result remains held by the test.
+    DurabilityBarrier { result: WriteEventsResult },
+}
+
+/// Destination test double that accepts one table event batch and holds its
+/// barrier.
+#[derive(Clone)]
+struct DeferredEventsDestination {
+    /// Table whose next insert batch should be accepted.
+    table_id: TableId,
+    /// Channel used to expose the accepted batch and empty barrier to the test.
+    writes_tx: mpsc::UnboundedSender<DeferredEventsWrite>,
+}
+
+impl DeferredEventsDestination {
+    /// Creates a destination and its ordered streaming-write observer.
+    fn new(table_id: TableId) -> (Self, mpsc::UnboundedReceiver<DeferredEventsWrite>) {
+        let (writes_tx, writes_rx) = mpsc::unbounded_channel();
+
+        (Self { table_id, writes_tx }, writes_rx)
+    }
+}
+
+impl Destination for DeferredEventsDestination {
+    fn name() -> &'static str {
+        "deferred_events"
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        async_result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(()));
+
+        Ok(())
+    }
+
+    async fn write_table_rows(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        _table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(DestinationWriteStatus::Durable));
+
+        Ok(())
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        durability: WriteEventsDurability,
+        async_result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        let contains_target_insert = events.iter().any(|event| {
+            matches!(
+                event,
+                Event::Insert(insert) if insert.replicated_table_schema.id() == self.table_id
+            )
+        });
+
+        if contains_target_insert {
+            assert_eq!(durability, WriteEventsDurability::MayDefer);
+            let commit_end_lsn = events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Event::Commit(commit) => Some(commit.end_lsn),
+                    _ => None,
+                })
+                .expect("accepted event batch should contain its commit");
+
+            // Expose A before resolving its result so the test observes protocol order.
+            assert!(
+                self.writes_tx.send(DeferredEventsWrite::Accepted { commit_end_lsn }).is_ok(),
+                "streaming write observer should remain available"
+            );
+
+            // Accepted transfers ownership without proving durability, so ETL must carry A.
+            async_result.send(Ok(DestinationWriteStatus::Accepted));
+
+            return Ok(());
+        }
+
+        if events.is_empty() {
+            assert_eq!(durability, WriteEventsDurability::RequireDurable);
+            // Hold the empty barrier so the test can prove completion waits for it.
+            assert!(
+                self.writes_tx
+                    .send(DeferredEventsWrite::DurabilityBarrier { result: async_result })
+                    .is_ok(),
+                "streaming write observer should remain available"
+            );
+
+            return Ok(());
+        }
+
+        assert_eq!(durability, WriteEventsDurability::MayDefer);
+        async_result.send(Ok(DestinationWriteStatus::Durable));
+
+        Ok(())
+    }
+}
 
 enum ExpectedReplicatedEvent<'a> {
     Relation(&'a [(&'static str, Type)]),
@@ -141,13 +258,13 @@ async fn table_sync_worker_panic_marks_table_errored() {
     );
 
     // Register notifications for table sync states.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Errored)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -195,13 +312,13 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     );
 
     // Register notifications for table sync states.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Errored)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -252,7 +369,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
 
     // Register notifications for waiting on the manual retry which is expected to
     // be flipped by the max attempts handling.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state(database_schema.users_schema().id, |state| {
             matches!(state, TableState::Errored { retry_policy: TableRetryPolicy::ManualRetry, .. })
         })
@@ -260,7 +377,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -308,13 +425,13 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     );
 
     // We register the interest in waiting for both table syncs to have started.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     // We expect no errors, since the same table sync worker task is retried.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -364,13 +481,13 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     );
 
     // We register the interest in waiting for both table syncs to have started.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     // We expect no errors, since the same table sync worker task is retried.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -437,7 +554,7 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
     .await;
 
     let all_rows_notify = destination
-        .wait_for_all_events(vec![EventCondition::Table(
+        .wait_for_all_events(vec![EventCondition::TableCount(
             EventType::Insert,
             table_id,
             (copied_rows + catchup_rows) as u64,
@@ -509,15 +626,15 @@ async fn tx_ordinals_follow_wal_order_across_table_sync_and_apply_workers() {
     .with_max_table_sync_workers(2)
     .build();
 
-    // We hold the write table rows method since it can yield, which is not possible via the `pause`
-    // of failpoints. Yielding is important for this test, since the `pause` failpoint will block
-    // the tokio worker, stalling the test.
+    // We hold the write table rows method since it can yield, which is not possible
+    // via the `pause` of failpoints. Yielding is important for this test, since
+    // the `pause` failpoint will block the tokio worker, stalling the test.
     let first_copy = destination.hold_next(FaultyOp::WriteTableRows).await;
     let second_copy = destination.hold_next(FaultyOp::WriteTableRows).await;
 
-    let users_finished_copy =
+    let users_finished_copy_notify =
         store.notify_on_table_state_type(users_table_id, TableStateType::FinishedCopy).await;
-    let orders_finished_copy =
+    let orders_finished_copy_notify =
         store.notify_on_table_state_type(orders_table_id, TableStateType::FinishedCopy).await;
 
     pipeline.start().await.unwrap();
@@ -556,39 +673,152 @@ async fn tx_ordinals_follow_wal_order_across_table_sync_and_apply_workers() {
     // ordinals.
     write_two_table_transaction("table-sync").await;
 
-    let table_sync_events = destination
+    let table_sync_events_notify = destination
         .wait_for_all_events(vec![
-            EventCondition::Table(EventType::Insert, users_table_id, 1),
-            EventCondition::Table(EventType::Insert, orders_table_id, 1),
+            EventCondition::TableCount(EventType::Insert, users_table_id, 1),
+            EventCondition::TableCount(EventType::Insert, orders_table_id, 1),
         ])
         .await;
 
     first_copy.release_ok();
     second_copy.release_ok();
 
-    users_finished_copy.notified().await;
-    orders_finished_copy.notified().await;
-    table_sync_events.notified().await;
+    users_finished_copy_notify.notified().await;
+    orders_finished_copy_notify.notified().await;
+    table_sync_events_notify.notified().await;
 
     assert_insert_ordinals(&destination.get_events().await, 0);
 
     // The main apply worker now owns both tables. Its existing pgoutput session
     // may omit Relation messages, but the same WAL event order must produce the
     // same ordinals.
-    let apply_events = destination
+    let apply_events_notify = destination
         .wait_for_all_events(vec![
-            EventCondition::Table(EventType::Insert, users_table_id, 2),
-            EventCondition::Table(EventType::Insert, orders_table_id, 2),
+            EventCondition::TableCount(EventType::Insert, users_table_id, 2),
+            EventCondition::TableCount(EventType::Insert, orders_table_id, 2),
         ])
         .await;
 
     write_two_table_transaction("apply").await;
 
-    apply_events.notified().await;
+    apply_events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
     assert_insert_ordinals(&destination.get_events().await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
+
+    let other_database = spawn_source_database().await;
+    let other_database_table = test_table_name("table_sync_keepalive_wal");
+    other_database
+        .create_table(other_database_table.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
+
+    let pipeline_id: PipelineId = random();
+    let apply_slot_name: String =
+        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let finished_copy_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
+
+    pipeline.start().await.unwrap();
+    finished_copy_notify.notified().await;
+
+    // Commit one published row at A while the table-sync worker is paused, then
+    // advance cluster WAL to T in another database. Logical decoding skips that
+    // transaction entirely, so no event batch exists at T.
+    insert_users_data(&mut database, &users_schema.name, 1..=1).await;
+    other_database.insert_values(other_database_table, &["value"], &[&1_i32]).await.unwrap();
+    let client = database.client.as_ref().unwrap();
+    let target_lsn: PgLsn =
+        client.query_one("select pg_current_wal_flush_lsn()", &[]).await.unwrap().get(0);
+
+    // Ensure the apply worker observes T before choosing table sync's catchup
+    // target.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let row = client
+                .query_one(
+                    "select confirmed_flush_lsn from pg_replication_slots where slot_name = $1",
+                    &[&apply_slot_name],
+                )
+                .await
+                .unwrap();
+            let confirmed_flush_lsn: PgLsn = row.get(0);
+
+            if confirmed_flush_lsn >= target_lsn {
+                break;
+            }
+
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the apply slot to acknowledge cross-database WAL");
+
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+
+    // Accepted(A) must be followed by the empty barrier because no event batch
+    // exists at the later catchup target T to settle A's durability debt.
+    let (accepted_commit_end_lsn, barrier_result) =
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let Some(DeferredEventsWrite::Accepted { commit_end_lsn }) = writes_rx.recv().await
+            else {
+                panic!("expected accepted target-table event batch");
+            };
+            let Some(DeferredEventsWrite::DurabilityBarrier { result }) = writes_rx.recv().await
+            else {
+                panic!("expected empty required-durability barrier");
+            };
+
+            (commit_end_lsn, result)
+        })
+        .await
+        .expect("timed out waiting for accepted batch and durability barrier");
+
+    // This strict gap distinguishes keepalive-only completion from a terminal
+    // event batch, which the existing RequireDurable path already covers.
+    assert!(accepted_commit_end_lsn < target_lsn);
+
+    // Catchup and SyncWait are in-memory states. The last persisted state must
+    // remain FinishedCopy until the required barrier confirms durability.
+    let table_states = store.get_table_states().await;
+    assert_eq!(
+        table_states.get(&table_id).map(TableState::as_type),
+        Some(TableStateType::FinishedCopy)
+    );
+
+    // Confirming the barrier must unblock the transition to Ready.
+    barrier_result.send(Ok(DestinationWriteStatus::Durable));
+    table_ready_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -657,6 +887,103 @@ async fn table_sync_catchup_error_does_not_block_apply_worker() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn stored_durable_progress_prevents_replay_when_status_updates_are_skipped() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let apply_slot_name: String =
+        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready_notify.notified().await;
+
+    let initial_inserts_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=2).await;
+
+    initial_inserts_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // We check that the durable flush is stricly greater than the last confirmed
+    // flush lsn on the Postgres side, which should be the case, since we
+    // artificially stopped status updates.
+    let durable_flush_lsn =
+        store.get_replication_progress(WorkerType::Apply).await.unwrap().unwrap();
+    let (confirmed_flush_lsn, _) =
+        replication_slot_state(database.client.as_ref().unwrap(), &apply_slot_name).await;
+    assert!(confirmed_flush_lsn < durable_flush_lsn);
+
+    // We check the expected events after the first two inserts.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let inserts = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
+    let expected_inserts = build_expected_users_inserts(
+        1,
+        &database_schema.users_schema(),
+        vec![("user_1", 1), ("user_2", 2)],
+    );
+
+    assert_events_equal(inserts, &expected_inserts);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // We wait until 4 inserts have been reached, the previous ones + the current
+    // ones.
+    let new_inserts_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 4)])
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 3..=4).await;
+
+    new_inserts_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // We check the expected events after all the inserts.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let inserts = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
+    let expected_inserts = build_expected_users_inserts(
+        1,
+        &database_schema.users_schema(),
+        vec![("user_1", 1), ("user_2", 2), ("user_3", 3), ("user_4", 4)],
+    );
+    assert_events_equal(inserts, &expected_inserts);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_ddl_in_same_transaction()
  {
     let _scenario = FailScenario::setup();
@@ -681,7 +1008,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     .await;
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     let transaction = database.begin_transaction().await;
@@ -792,7 +1122,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     );
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     pipeline.start().await.unwrap();
@@ -828,7 +1161,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .await;
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     database.insert_values(table_name.clone(), &["name", "age"], &[&"first", &25]).await.unwrap();
@@ -932,7 +1268,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     );
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     pipeline.start().await.unwrap();
@@ -978,7 +1317,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     destination.clear_events().await;
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     let transaction = database.begin_transaction().await;
@@ -1074,7 +1416,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     );
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     pipeline.start().await.unwrap();
@@ -1110,7 +1455,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .await;
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     database
@@ -1202,7 +1550,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     );
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     pipeline.start().await.unwrap();
@@ -1239,8 +1590,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     // The reason for why we wait for two `Relation` messages is that since we have
     // a DDL event before DML statements, Postgres likely avoids sending an
     // initial `Relation` message since it's already sent given the DDL event.
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     // We immediately add a column to the table without any DML, to show the case
@@ -1275,7 +1629,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .await
         .unwrap();
 
-    notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Assert that we got all the events correctly.
@@ -1327,8 +1681,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 
     pipeline.start().await.unwrap();
 
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 3)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     database
@@ -1340,7 +1697,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .await
         .unwrap();
 
-    notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Assert that we got all the events correctly.
@@ -1365,7 +1722,10 @@ async fn schema_snapshots_are_pruned_after_confirmed_progress() {
         .await;
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     database
@@ -1476,16 +1836,20 @@ async fn publication_column_masks_replay_in_historical_wal_order_after_restart()
     );
 
     // Wait for the table to finish syncing.
-    let sync_done_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    sync_done_notify.notified().await;
+    table_ready_notify.notified().await;
 
     // Relation messages are generated lazily, but logical decoding must use
     // the publication projection visible at each insert's WAL position.
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     // State 1: Insert with all 3 columns (id, name, age).
@@ -1668,7 +2032,7 @@ async fn publication_column_masks_replay_in_historical_wal_order_after_restart()
     // progress, so the slot still holds all of run 1's WAL for replay; we no
     // longer need to suppress acks in run 2 (and doing so risks
     // wal_sender_timeout firing under slow CI and duplicating events, which
-    // would break the exact-count match in wait_for_events_count below).
+    // could duplicate events and invalidate the assertions below).
     fail::remove(SEND_STATUS_UPDATE_FP);
 
     // Restart after the live publication reached its final `(id)`
@@ -1683,13 +2047,16 @@ async fn publication_column_masks_replay_in_historical_wal_order_after_restart()
     );
 
     // Wait for 3 relation events and 3 insert events again after restart.
-    let events_notify_restart = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+    let restart_events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     pipeline.start().await.unwrap();
 
-    events_notify_restart.notified().await;
+    restart_events_notify.notified().await;
 
     // Historical catalog visibility must reproduce the original 3 -> 2 -> 1
     // relation masks rather than applying the live 1-column mask to every row.

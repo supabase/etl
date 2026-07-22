@@ -8,7 +8,7 @@ use etl::{
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
-        event::group_events_by_type_and_table_id,
+        event::{EventCondition, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
         pipeline::{PipelineBuilder, create_pipeline, create_pipeline_with_table_sync_copy_config},
@@ -131,7 +131,14 @@ async fn assert_selective_partition_initial_copy_case(
         notify.notified().await;
     }
 
-    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+    let event_conditions = expected_cdc_counts
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(table_id, count)| {
+            EventCondition::TableCount(EventType::Insert, *table_id, *count as u64)
+        })
+        .collect();
+    let inserts_notify = destination.wait_for_events(event_conditions).await;
 
     database
         .run_sql(&format!(
@@ -214,7 +221,6 @@ async fn assert_nested_partition_pipeline_case(
         (PublishedPartitionTarget::Leaf, _) => vec![(hierarchy.p_2026_01_table_id, 1)],
     };
     let expected_cdc_counts = expected_copy_counts.clone();
-    let expected_cdc_total = expected_cdc_counts.iter().map(|(_, count)| count).sum::<usize>();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
@@ -249,9 +255,14 @@ async fn assert_nested_partition_pipeline_case(
     let table_rows = destination.get_table_rows().await;
     assert_table_row_counts(&table_rows, &expected_copy_counts);
 
-    let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, expected_cdc_total as u64)])
-        .await;
+    let event_conditions = expected_cdc_counts
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(table_id, count)| {
+            EventCondition::TableCount(EventType::Insert, *table_id, *count as u64)
+        })
+        .collect();
+    let inserts_notify = destination.wait_for_events(event_conditions).await;
 
     let cdc_insert_values = match published_partition_target {
         PublishedPartitionTarget::Top => {
@@ -541,7 +552,9 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
         .unwrap();
 
     // Wait for CDC to deliver the new row.
-    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let inserts_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, parent_table_id, 1)])
+        .await;
 
     database
         .run_sql(&format!(
@@ -639,7 +652,9 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
 
     // Insert a row into an existing partition to ensure the pipeline is still
     // processing events.
-    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let inserts_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, parent_table_id, 1)])
+        .await;
 
     database
         .run_sql(&format!(
@@ -711,7 +726,9 @@ async fn parent_table_truncate_does_emit_truncate_event() {
     parent_ready_notify.notified().await;
 
     // Wait for the parent table truncate to be replicated.
-    let truncate_notify = destination.wait_for_events_count(vec![(EventType::Truncate, 1)]).await;
+    let truncate_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Truncate, parent_table_id, 1)])
+        .await;
 
     // We truncate the parent table.
     database
@@ -785,7 +802,9 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
 
     // Insert a row into an existing partition to ensure the pipeline is still
     // processing events.
-    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let inserts_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, parent_table_id, 1)])
+        .await;
 
     database
         .run_sql(&format!(
@@ -887,7 +906,9 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         .unwrap();
 
     // Wait for the parent table insert to be replicated.
-    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let inserts_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, parent_table_id, 1)])
+        .await;
 
     // Insert into the parent table (should be replicated to remaining partition
     // p2).
@@ -1248,7 +1269,9 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
         .unwrap();
 
     // Wait for the parent table insert to be replicated.
-    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    let inserts_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, parent_table_id, 1)])
+        .await;
 
     // Insert into parent table (should be replicated).
     database

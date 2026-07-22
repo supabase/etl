@@ -22,10 +22,7 @@ use gcp_bigquery_client::{
         query_parameter_value::QueryParameterValue, query_request::QueryRequest,
         query_response::ResultSet,
     },
-    storage::{
-        BatchAppendRequest, BatchAppendResult, StorageApiConfig, StreamName, TableBatch,
-        TableDescriptor,
-    },
+    storage::{AppendRequest, AppendResult, StorageApiConfig, StreamName, TableDescriptor},
     yup_oauth2::parse_service_account_key,
 };
 use metrics::counter;
@@ -119,18 +116,18 @@ impl fmt::Display for BigQueryOperationType {
     }
 }
 
-/// Result of processing a single batch, used to determine retry strategy.
+/// Result of processing one append request, used to determine retry strategy.
 #[derive(Debug)]
-enum BatchProcessResult {
-    /// Batch succeeded with byte metrics.
+enum AppendRequestProcessResult {
+    /// Request succeeded with byte metrics.
     Success { bytes_sent: usize, bytes_received: usize },
-    /// Batch had row-level errors.
+    /// Request had row-level errors.
     RowErrors { errors: Vec<RowError> },
-    /// Batch had a request-level error.
+    /// Request had a request-level error.
     RequestError { error: BQError },
 }
 
-/// Aggregated result of processing a set of append batches.
+/// Aggregated result of processing a set of append requests.
 #[derive(Debug)]
 enum AppendProcessingResult {
     Success {
@@ -145,8 +142,7 @@ enum AppendProcessingResult {
     Error(EtlError),
 }
 
-/// A batch append request that should be retried after a local Storage Write
-/// retry delay.
+/// An append request that should be retried after a local Storage Write delay.
 #[derive(Debug)]
 struct RetryableAppendRequest {
     request: BigQueryAppendRequest,
@@ -157,7 +153,7 @@ struct RetryableAppendRequest {
 #[derive(Debug, Clone)]
 pub(super) struct BigQueryAppendRequest {
     /// Request sent to the Storage Write API client.
-    request: BatchAppendRequest<BigQueryTableRow>,
+    request: AppendRequest<BigQueryTableRow>,
     /// BigQuery dataset id targeted by the request.
     dataset_id: BigQueryDatasetId,
     /// BigQuery table id targeted by the request.
@@ -174,10 +170,10 @@ fn format_retryable_storage_write_requests(requests: &[RetryableAppendRequest]) 
                 rest.iter().filter(|request| request.detail != first.detail).count();
 
             if distinct_other_details == 0 {
-                format!("{} ({} batches)", first.detail, requests.len())
+                format!("{} ({} requests)", first.detail, requests.len())
             } else {
                 format!(
-                    "{} ({} batches, {} additional retry details)",
+                    "{} ({} requests, {} additional retry details)",
                     first.detail,
                     requests.len(),
                     distinct_other_details
@@ -187,9 +183,9 @@ fn format_retryable_storage_write_requests(requests: &[RetryableAppendRequest]) 
     }
 }
 
-/// Creates a per-batch BigQuery trace identifier for Storage Write requests.
-fn create_append_trace_id(pipeline_id: PipelineId, table_id: &str, batch_index: usize) -> String {
-    format!("supabase_etl_{pipeline_id}_{table_id}_{batch_index}_{}", random::<u32>())
+/// Creates a per-request BigQuery trace identifier for Storage Write requests.
+fn create_append_trace_id(pipeline_id: PipelineId, table_id: &str, request_index: usize) -> String {
+    format!("supabase_etl_{pipeline_id}_{table_id}_{request_index}_{}", random::<u32>())
 }
 
 /// Computes the maximum number of inflight requests for the BigQuery Storage
@@ -225,18 +221,16 @@ fn storage_write_retry_delay_with_jitter(delay: Duration) -> Duration {
     half_delay + jitter
 }
 
-/// Processes a single batch result and determines success or failure mode.
+/// Processes one append result and determines its success or failure mode.
 ///
 /// Row errors are permanent failures (bad data, schema mismatch) and fail
 /// immediately. Request errors are surfaced for retry decision by the caller.
-fn process_single_batch_append_result(
-    batch_append_result: BatchAppendResult,
-) -> BatchProcessResult {
-    let successful_bytes_sent = batch_append_result.successful_bytes_sent;
+fn process_append_result(append_result: AppendResult) -> AppendRequestProcessResult {
+    let successful_bytes_sent = append_result.successful_bytes_sent;
     let mut total_bytes_received = 0;
     let mut row_errors = Vec::new();
 
-    for response in batch_append_result.responses {
+    for response in append_result.responses {
         match response {
             Ok(response) => {
                 total_bytes_received += response.encoded_len();
@@ -247,15 +241,15 @@ fn process_single_batch_append_result(
                 }
             }
             Err(status) => {
-                return BatchProcessResult::RequestError { error: BQError::from(status) };
+                return AppendRequestProcessResult::RequestError { error: BQError::from(status) };
             }
         }
     }
 
     if !row_errors.is_empty() {
-        BatchProcessResult::RowErrors { errors: row_errors }
+        AppendRequestProcessResult::RowErrors { errors: row_errors }
     } else {
-        BatchProcessResult::Success {
+        AppendRequestProcessResult::Success {
             bytes_sent: successful_bytes_sent,
             bytes_received: total_bytes_received,
         }
@@ -1221,8 +1215,7 @@ impl BigQueryClient {
         }
     }
 
-    /// Appends table batches to BigQuery using the concurrent Storage Write
-    /// API.
+    /// Appends requests to BigQuery using the concurrent Storage Write API.
     ///
     /// Accepts pre-constructed append requests and processes them concurrently.
     ///
@@ -1230,7 +1223,7 @@ impl BigQueryClient {
     /// the underlying Storage Write API library. This method also retries
     /// locally retryable Storage Write failures that can happen after BigQuery
     /// table metadata changes, then converts final failures into ETL errors.
-    pub(super) async fn append_table_batches(
+    pub(super) async fn append(
         &self,
         append_requests: Vec<BigQueryAppendRequest>,
     ) -> EtlResult<(usize, usize)> {
@@ -1247,7 +1240,7 @@ impl BigQueryClient {
         let mut retry_delay = STORAGE_WRITE_RETRY_DELAY;
 
         loop {
-            match self.append_table_batches_once(pending_requests).await? {
+            match self.append_once(pending_requests).await? {
                 AppendProcessingResult::Success { bytes_sent, bytes_received } => {
                     total_bytes_sent += bytes_sent;
                     total_bytes_received += bytes_received;
@@ -1267,8 +1260,8 @@ impl BigQueryClient {
                     pending_requests =
                         next_pending_requests.into_iter().map(|request| request.request).collect();
 
-                    let pending_batch_count = pending_requests.len();
-                    if pending_batch_count == 0 {
+                    let pending_request_count = pending_requests.len();
+                    if pending_request_count == 0 {
                         return Ok((total_bytes_sent, total_bytes_received));
                     }
 
@@ -1288,7 +1281,7 @@ impl BigQueryClient {
 
                     warn!(
                         attempt,
-                        pending_batch_count,
+                        pending_request_count,
                         retry_delay_ms = sleep_delay.as_millis() as u64,
                         error_detail = %retry_summary,
                         "retrying retryable bigquery storage write append error"
@@ -1305,7 +1298,7 @@ impl BigQueryClient {
     }
 
     /// Executes a single append attempt and classifies the result.
-    async fn append_table_batches_once(
+    async fn append_once(
         &self,
         append_requests: Vec<BigQueryAppendRequest>,
     ) -> EtlResult<AppendProcessingResult> {
@@ -1313,31 +1306,29 @@ impl BigQueryClient {
             return Ok(AppendProcessingResult::Success { bytes_sent: 0, bytes_received: 0 });
         }
 
-        debug!(batch_count = append_requests.len(), "streaming table batches concurrently");
+        debug!(request_count = append_requests.len(), "streaming append requests concurrently");
 
         let raw_append_requests =
             append_requests.iter().map(|request| request.request.clone()).collect::<Vec<_>>();
-        let batch_append_results =
-            self.client.storage().append_table_batches(raw_append_requests).await.inspect_err(
-                |err| {
-                    let error_code = error_code_label(err);
+        let append_results =
+            self.client.storage().append(raw_append_requests).await.inspect_err(|err| {
+                let error_code = error_code_label(err);
 
-                    counter!(
-                        ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
-                        "error_code" => error_code
-                    )
-                    .increment(1);
-                },
-            );
+                counter!(
+                    ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
+                    "error_code" => error_code
+                )
+                .increment(1);
+            });
 
-        let batch_append_results = match batch_append_results {
+        let append_results = match append_results {
             Ok(results) => results,
             Err(error) => {
                 let mut retryable_requests = Vec::new();
                 let mut has_non_retryable_request = false;
 
-                // A call-level Storage Write error is not tied to a single batch index. Retry
-                // only if the error is locally retryable for every append request in the call.
+                // A call-level Storage Write error is not tied to a single request index. Retry
+                // only if the error is locally retryable for every request in the call.
                 for request in append_requests {
                     if let Some(detail) =
                         retryable_storage_write_error_detail(self, &request, &error).await?
@@ -1364,24 +1355,27 @@ impl BigQueryClient {
         let mut total_bytes_sent = 0;
         let mut total_bytes_received = 0;
         let mut errors = Vec::new();
-        let mut retryable_batch_details = vec![None; append_requests.len()];
+        let mut retryable_request_details = vec![None; append_requests.len()];
 
-        for batch_append_result in batch_append_results {
-            let batch_index = batch_append_result.batch_index;
+        for append_result in append_results {
+            let request_index = append_result.request_index;
 
-            match process_single_batch_append_result(batch_append_result) {
-                BatchProcessResult::Success { bytes_sent, bytes_received } => {
-                    debug!(batch_index, bytes_sent, bytes_received, "batch processed successfully");
+            match process_append_result(append_result) {
+                AppendRequestProcessResult::Success { bytes_sent, bytes_received } => {
+                    debug!(
+                        request_index,
+                        bytes_sent, bytes_received, "append request processed successfully"
+                    );
 
                     total_bytes_sent += bytes_sent;
                     total_bytes_received += bytes_received;
                 }
-                BatchProcessResult::RowErrors { errors: row_errors } => {
+                AppendRequestProcessResult::RowErrors { errors: row_errors } => {
                     let error_count = row_errors.len();
                     if error_count > 0 {
                         error!(
-                            batch_index,
-                            error_count, "batch has row errors, failing append operation"
+                            request_index,
+                            error_count, "append request has row errors, failing append operation"
                         );
 
                         counter!(ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL)
@@ -1392,25 +1386,25 @@ impl BigQueryClient {
                         errors.push(row_error_to_etl_error(row_error));
                     }
                 }
-                BatchProcessResult::RequestError { error: request_error } => {
-                    // Batch-level request errors keep their batch index, so only the affected
-                    // append request needs to be classified and retried.
+                AppendRequestProcessResult::RequestError { error: request_error } => {
+                    // Request-level errors retain their request index, so only the affected
+                    // request needs to be classified and retried.
                     if let Some(detail) = retryable_storage_write_error_detail(
                         self,
-                        &append_requests[batch_index],
+                        &append_requests[request_index],
                         &request_error,
                     )
                     .await?
                     {
-                        retryable_batch_details[batch_index] = Some(detail);
+                        retryable_request_details[request_index] = Some(detail);
                         continue;
                     }
 
                     let error_code = error_code_label(&request_error);
                     warn!(
-                        batch_index,
+                        request_index,
                         error = %request_error,
-                        "batch failed with request error after library retries"
+                        "append request failed after library retries"
                     );
 
                     counter!(
@@ -1428,10 +1422,10 @@ impl BigQueryClient {
             return Ok(AppendProcessingResult::Error(errors.into()));
         }
 
-        if retryable_batch_details.iter().any(Option::is_some) {
+        if retryable_request_details.iter().any(Option::is_some) {
             let pending_requests = append_requests
                 .into_iter()
-                .zip(retryable_batch_details)
+                .zip(retryable_request_details)
                 .filter_map(|(request, detail)| {
                     detail.map(|detail| RetryableAppendRequest { request, detail })
                 })
@@ -1455,14 +1449,14 @@ impl BigQueryClient {
         self.client.storage().invalidate_all_connections().await;
     }
 
-    /// Creates a batch append request for a specific table with validated rows.
+    /// Creates an append request for a specific table with validated rows.
     ///
     /// Converts TableRow instances to BigQueryTableRow and creates a properly
     /// configured [`BigQueryAppendRequest`] for efficient append retries.
-    pub(super) fn create_batch_append_request(
+    pub(super) fn create_append_request(
         &self,
         pipeline_id: PipelineId,
-        batch_index: usize,
+        request_index: usize,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         table_descriptor: TableDescriptor,
@@ -1471,12 +1465,10 @@ impl BigQueryClient {
         let stream_name =
             StreamName::new_default(self.project_id.clone(), dataset_id.clone(), table_id.clone());
 
-        let table_batch = TableBatch::new(stream_name, table_descriptor, validated_rows);
-        let trace_id =
-            create_append_trace_id(pipeline_id, table_batch.stream_name().table(), batch_index);
+        let trace_id = create_append_trace_id(pipeline_id, stream_name.table(), request_index);
 
         Ok(BigQueryAppendRequest {
-            request: BatchAppendRequest::new(table_batch, trace_id),
+            request: AppendRequest::new(stream_name, table_descriptor, validated_rows, trace_id),
             dataset_id: dataset_id.clone(),
             table_id: table_id.clone(),
         })
@@ -1624,9 +1616,9 @@ mod tests {
     }
 
     #[test]
-    fn process_single_batch_append_result_reports_schema_propagation_error() {
-        let result = process_single_batch_append_result(BatchAppendResult {
-            batch_index: 0,
+    fn process_append_result_reports_schema_propagation_error() {
+        let result = process_append_result(AppendResult {
+            request_index: 0,
             responses: vec![
                 Ok(successful_append_response()),
                 Err(tonic::Status::invalid_argument("schema_mismatch_extra_fields")),
@@ -1635,15 +1627,15 @@ mod tests {
             successful_bytes_sent: 0,
         });
 
-        assert!(matches!(result, BatchProcessResult::RequestError { .. }));
+        assert!(matches!(result, AppendRequestProcessResult::RequestError { .. }));
     }
 
     #[test]
-    fn process_single_batch_append_result_uses_only_successful_byte_counts() {
+    fn process_append_result_uses_only_successful_byte_counts() {
         let response = successful_append_response();
         let successful_bytes_received = response.encoded_len();
-        let result = process_single_batch_append_result(BatchAppendResult {
-            batch_index: 0,
+        let result = process_append_result(AppendResult {
+            request_index: 0,
             responses: vec![Ok(response)],
             total_bytes_sent: 128,
             successful_bytes_sent: 64,
@@ -1651,7 +1643,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            BatchProcessResult::Success {
+            AppendRequestProcessResult::Success {
                 bytes_sent: 64,
                 bytes_received,
             } if bytes_received == successful_bytes_received
@@ -1690,9 +1682,9 @@ mod tests {
     }
 
     #[test]
-    fn process_single_batch_append_result_does_not_retry_generic_not_found() {
-        let result = process_single_batch_append_result(BatchAppendResult {
-            batch_index: 0,
+    fn process_append_result_does_not_retry_generic_not_found() {
+        let result = process_append_result(AppendResult {
+            request_index: 0,
             responses: vec![Err(tonic::Status::not_found(
                 "Table 123:dataset.test_users_0 was not found.",
             ))],
@@ -1700,7 +1692,7 @@ mod tests {
             successful_bytes_sent: 0,
         });
 
-        assert!(matches!(result, BatchProcessResult::RequestError { .. }));
+        assert!(matches!(result, AppendRequestProcessResult::RequestError { .. }));
     }
 
     #[test]

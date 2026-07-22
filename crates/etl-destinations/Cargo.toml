@@ -140,6 +140,7 @@ etl-postgres = { workspace = true, features = ["test-utils", "tokio"] }
 etl-telemetry = { workspace = true }
 futures = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
+proptest = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
 rust_decimal = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
