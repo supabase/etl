@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use etl::{
     pipeline::PipelineId,
-    schema::{ColumnModificationType, ColumnSchema, SchemaDiff, SchemaOperation, TableId},
+    schema::{ColumnModificationType, ColumnSchema, SchemaOperation, SchemaPlan, TableId},
 };
 use metrics::{counter, gauge, histogram};
 use tokio::{
@@ -348,14 +348,14 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     }
 
     /// Applies ordered add, drop, and modify column operations from a schema
-    /// diff.
-    pub async fn apply_schema_diff(&self, table_name: &str, diff: &SchemaDiff) -> Result<()> {
-        if diff.is_empty() {
+    /// plan.
+    pub async fn apply_schema_plan(&self, table_name: &str, plan: &SchemaPlan) -> Result<()> {
+        if plan.is_empty() {
             return Ok(());
         }
 
         // Apply the shared plan without regrouping operations.
-        for operation in diff.ordered_operations() {
+        for operation in plan.ordered_operations() {
             match operation {
                 SchemaOperation::DropColumn { column_schema } => {
                     self.sql_client.drop_column(table_name, &column_schema.name).await?;

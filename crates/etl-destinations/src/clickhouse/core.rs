@@ -11,8 +11,9 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnModification, ColumnModificationType, ColumnNameComparison, IdentityType, PgLsn,
-        ReplicatedTableSchema, SchemaDiff, SchemaOperation, TableId, Type, is_array_type,
+        ColumnModification, ColumnModificationType, ColumnNameEquivalence, IdentityType, PgLsn,
+        ReplicatedTableSchema, SchemaDiff, SchemaOperation, SchemaPlan, TableId, Type,
+        is_array_type,
     },
     store::{SchemaStore, StateStore},
 };
@@ -36,6 +37,9 @@ use crate::{
 };
 
 const MAX_ERROR_COLUMN_NAMES: usize = 12;
+/// ClickHouse column identifiers preserve exact case distinctions.
+const CLICKHOUSE_COLUMN_NAME_EQUIVALENCE: ColumnNameEquivalence =
+    ColumnNameEquivalence::CaseSensitive;
 
 /// Postgres CDC operation kind. Written to the `cdc_operation` column as the
 /// matching uppercase string (`"INSERT"`, `"UPDATE"`, `"DELETE"`) so downstream
@@ -159,10 +163,10 @@ fn clickhouse_user_column_names(
 
 /// Builds the idempotent metadata suffix of an already completed structural
 /// schema plan.
-fn metadata_only_schema_diff(
+fn metadata_only_schema_plan(
     diff: &SchemaDiff,
     target_schema: &ReplicatedTableSchema,
-) -> SchemaDiff {
+) -> EtlResult<SchemaPlan> {
     let columns_to_modify = diff
         .columns_to_modify
         .iter()
@@ -187,13 +191,12 @@ fn metadata_only_schema_diff(
         })
         .collect();
 
-    SchemaDiff::new(
-        Vec::new(),
-        Vec::new(),
-        columns_to_modify,
-        target_schema.column_schemas().map(|column| column.name.as_str()),
-        ColumnNameComparison::CaseSensitive,
-    )
+    SchemaDiff::new(Vec::new(), Vec::new(), columns_to_modify)
+        .plan(
+            target_schema.column_schemas().map(|column| column.name.as_str()),
+            CLICKHOUSE_COLUMN_NAME_EQUIVALENCE,
+        )
+        .map_err(Into::into)
 }
 
 /// Recoverable physical endpoint of a nontransactional ClickHouse schema
@@ -786,7 +789,8 @@ where
                     Arc::clone(&old_table_schema),
                     metadata.replication_mask.clone(),
                 );
-                let diff = old_schema.diff(schema, ColumnNameComparison::CaseSensitive);
+                let plan =
+                    old_schema.plan_schema_change(schema, CLICKHOUSE_COLUMN_NAME_EQUIVALENCE)?;
                 let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
                 let actual_user_column_names =
                     clickhouse_user_column_names(&actual_columns, self.inserter_config.engine)?;
@@ -804,7 +808,7 @@ where
                         .get(target_column.name.as_str())
                         .is_some_and(|ordinal| *ordinal != target_column.ordinal_position)
                 });
-                let has_structural_operations = diff.ordered_operations().iter().any(|operation| {
+                let has_structural_operations = plan.ordered_operations().iter().any(|operation| {
                     matches!(
                         operation,
                         SchemaOperation::DropColumn { .. }
@@ -826,14 +830,14 @@ where
 
                 match recovery_endpoint {
                     ClickHouseSchemaRecoveryEndpoint::Previous => {
-                        self.apply_schema_diff(clickhouse_table_name, &diff, &old_schema, schema)
+                        self.apply_schema_plan(clickhouse_table_name, &plan, &old_schema, schema)
                             .await?;
                     }
                     ClickHouseSchemaRecoveryEndpoint::Target => {
-                        let metadata_diff = metadata_only_schema_diff(&diff, schema);
-                        self.apply_schema_diff(
+                        let metadata_plan = metadata_only_schema_plan(plan.diff(), schema)?;
+                        self.apply_schema_plan(
                             clickhouse_table_name,
-                            &metadata_diff,
+                            &metadata_plan,
                             schema,
                             schema,
                         )
@@ -966,7 +970,7 @@ where
         );
 
         let clickhouse_table_name = &metadata.destination_table_id;
-        let diff = current_schema.diff(new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = current_schema.diff(new_schema);
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
             reject_pk_alters_under_replacing_merge_tree(
                 clickhouse_table_name,
@@ -975,6 +979,10 @@ where
                 new_schema,
             )?;
         }
+        let plan = diff.plan(
+            current_schema.column_schemas().map(|column| column.name.as_str()),
+            CLICKHOUSE_COLUMN_NAME_EQUIVALENCE,
+        )?;
         // Mark as Applying before DDL changes.
         let updated_metadata = DestinationTableMetadata::new_applied(
             clickhouse_table_name.clone(),
@@ -989,7 +997,7 @@ where
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
         if let Err(err) =
-            self.apply_schema_diff(clickhouse_table_name, &diff, &current_schema, new_schema).await
+            self.apply_schema_plan(clickhouse_table_name, &plan, &current_schema, new_schema).await
         {
             warn!(
                 "schema change failed for table {}: {}. Manual intervention may be required.",
@@ -1027,16 +1035,16 @@ where
     /// killed between individual ALTER statements the table may be left in a
     /// partially altered state. The `DestinationTableMetadata` Applying/Applied
     /// status tracks this for diagnostic purposes.
-    async fn apply_schema_diff(
+    async fn apply_schema_plan(
         &self,
         clickhouse_table_name: &str,
-        diff: &SchemaDiff,
+        plan: &SchemaPlan,
         current_schema: &ReplicatedTableSchema,
         new_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let is_replacing_merge_tree =
             matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree);
-        if diff.is_empty() {
+        if plan.is_empty() {
             if is_replacing_merge_tree {
                 self.refresh_current_view(clickhouse_table_name, new_schema).await?;
             }
@@ -1050,7 +1058,7 @@ where
         if is_replacing_merge_tree {
             reject_pk_alters_under_replacing_merge_tree(
                 clickhouse_table_name,
-                diff,
+                plan.diff(),
                 current_schema,
                 new_schema,
             )?;
@@ -1068,7 +1076,7 @@ where
             .collect();
 
         // Apply the shared plan without regrouping operations.
-        for operation in diff.ordered_operations() {
+        for operation in plan.ordered_operations() {
             match operation {
                 SchemaOperation::DropColumn { column_schema } => {
                     self.client.drop_column(clickhouse_table_name, &column_schema.name).await?;
@@ -1991,8 +1999,6 @@ mod tests {
             Vec::new(),
             vec![ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 3, true)],
             Vec::new(),
-            schema.column_schemas().map(|column| column.name.as_str()),
-            ColumnNameComparison::CaseSensitive,
         );
         reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
@@ -2013,8 +2019,6 @@ mod tests {
                     .with_primary_key(1),
             ],
             Vec::new(),
-            schema.column_schemas().map(|column| column.name.as_str()),
-            ColumnNameComparison::CaseSensitive,
         );
         let err = reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
@@ -2034,8 +2038,6 @@ mod tests {
             Vec::new(),
             Vec::new(),
             vec![rename_modification("value", "payload", 3)],
-            schema.column_schemas().map(|column| column.name.as_str()),
-            ColumnNameComparison::CaseSensitive,
         );
         reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
@@ -2049,13 +2051,8 @@ mod tests {
     #[test]
     fn reject_pk_alters_under_replacing_merge_tree_rejects_pk_rename() {
         let schema = replicated_schema_for_pk_alters();
-        let diff = SchemaDiff::new(
-            Vec::new(),
-            Vec::new(),
-            vec![rename_modification("id", "row_id", 2)],
-            schema.column_schemas().map(|column| column.name.as_str()),
-            ColumnNameComparison::CaseSensitive,
-        );
+        let diff =
+            SchemaDiff::new(Vec::new(), Vec::new(), vec![rename_modification("id", "row_id", 2)]);
         let err = reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
             &diff,
@@ -2088,7 +2085,7 @@ mod tests {
             ReplicationMask::all(&new_table_schema),
             IdentityMask::from_bytes(vec![1, 1, 0]),
         );
-        let diff = current_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = current_schema.diff(&new_schema);
 
         assert!(diff.is_empty());
         let error = reject_pk_alters_under_replacing_merge_tree(

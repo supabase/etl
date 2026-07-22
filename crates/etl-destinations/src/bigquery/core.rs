@@ -18,8 +18,8 @@ use etl::{
     event::{Event, EventSequenceKey},
     pipeline::PipelineId,
     schema::{
-        ColumnModificationType, ColumnNameComparison, IdentityType, ReplicatedTableSchema,
-        SchemaDiff, SchemaOperation, TableId, TableName,
+        ColumnModificationType, ColumnNameEquivalence, IdentityType, ReplicatedTableSchema,
+        SchemaOperation, SchemaPlan, TableId, TableName,
     },
     store::DestinationStore,
 };
@@ -46,6 +46,9 @@ use crate::{
 const BIGQUERY_SEQUENCE_ORDINAL_FIRST: u64 = 0;
 /// Internal CDC sequence ordinal for generated upserts after generated deletes.
 const BIGQUERY_SEQUENCE_ORDINAL_SECOND: u64 = 1;
+/// BigQuery column identifiers are compared case-insensitively.
+const BIGQUERY_COLUMN_NAME_EQUIVALENCE: ColumnNameEquivalence =
+    ColumnNameEquivalence::UnicodeCaseInsensitive;
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -760,8 +763,8 @@ where
         );
         ensure_bigquery_primary_key_unchanged(&current_schema, new_replicated_table_schema)?;
 
-        let diff = current_schema
-            .diff(new_replicated_table_schema, ColumnNameComparison::UnicodeCaseInsensitive);
+        let plan = current_schema
+            .plan_schema_change(new_replicated_table_schema, BIGQUERY_COLUMN_NAME_EQUIVALENCE)?;
         let sequenced_bigquery_table_id = metadata.destination_table_id.parse()?;
 
         // Mark as applying before making changes (with the NEW snapshot_id and mask).
@@ -785,7 +788,7 @@ where
             .await?;
 
         if let Err(err) =
-            self.apply_schema_diff(&table_id, &sequenced_bigquery_table_id, &diff).await
+            self.apply_schema_plan(&table_id, &sequenced_bigquery_table_id, &plan).await
         {
             warn!(
                 "schema change failed for table {}: {}. Manual intervention may be required.",
@@ -818,17 +821,17 @@ where
         Ok(())
     }
 
-    /// Applies a schema diff to the BigQuery table.
+    /// Applies a validated schema plan to the BigQuery table.
     ///
     /// Executes the necessary DDL operations (ADD COLUMN, DROP COLUMN, RENAME
     /// COLUMN) to transform the destination schema.
-    async fn apply_schema_diff(
+    async fn apply_schema_plan(
         &self,
         table_id: &TableId,
         sequenced_bigquery_table_id: &SequencedBigQueryTableId,
-        diff: &SchemaDiff,
+        plan: &SchemaPlan,
     ) -> EtlResult<()> {
-        if diff.is_empty() {
+        if plan.is_empty() {
             debug!(%table_id, "no schema changes to apply for table");
             return Ok(());
         }
@@ -836,13 +839,13 @@ where
         info!(
             "applying schema changes to table {}: {} additions, {} drops, {} column modifications",
             sequenced_bigquery_table_id,
-            diff.columns_to_add.len(),
-            diff.columns_to_drop.len(),
-            diff.columns_to_modify.len()
+            plan.diff().columns_to_add.len(),
+            plan.diff().columns_to_drop.len(),
+            plan.diff().columns_to_modify.len()
         );
 
         // Apply the shared plan without regrouping operations.
-        for operation in diff.ordered_operations() {
+        for operation in plan.ordered_operations() {
             match operation {
                 SchemaOperation::DropColumn { column_schema } => {
                     self.client
@@ -1316,6 +1319,8 @@ where
 /// BigQuery matches CDC rows by the destination table primary key, so the
 /// source table must expose that key when creating or writing the table.
 fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<()> {
+    replicated_table_schema.validate_destination_column_names(BIGQUERY_COLUMN_NAME_EQUIVALENCE)?;
+
     if replicated_table_schema.primary_key_column_schemas().len() == 0 {
         bail!(
             ErrorKind::SourceSchemaError,
@@ -2154,6 +2159,27 @@ mod tests {
         let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
 
         validate_bigquery_table_shape(&replicated_table_schema).unwrap();
+    }
+
+    #[test]
+    fn validate_bigquery_table_shape_rejects_case_colliding_columns() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+                ColumnSchema::new("Name".to_owned(), Type::TEXT, -1, 3, true),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
+
+        let error = validate_bigquery_table_shape(&replicated_table_schema)
+            .expect_err("BigQuery should reject source columns that differ only by case");
+
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(error.description(), Some("Source column names collide in the destination"));
+        assert!(error.detail().is_some_and(|detail| detail.contains("'name' and 'Name'")));
     }
 
     #[test]

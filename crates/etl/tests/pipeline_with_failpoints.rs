@@ -15,9 +15,12 @@ use etl::{
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
+        faults::FaultyOp,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline},
+        pipeline::{
+            PipelineBuilder, create_database_and_ready_pipeline_with_table, create_pipeline,
+        },
         schema::{
             assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
             assert_table_schema_column_names_types,
@@ -458,6 +461,134 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
     let grouped_events = group_events_by_type_and_table_id(&events);
     let catchup_events = grouped_events.get(&(EventType::Insert, table_id)).map_or(0, Vec::len);
     assert_eq!(catchup_events, catchup_rows);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tx_ordinals_follow_wal_order_across_table_sync_and_apply_workers() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+    let users_schema = database_schema.users_schema();
+    let orders_schema = database_schema.orders_schema();
+    let users_table_id = users_schema.id;
+    let orders_table_id = orders_schema.id;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let assert_insert_ordinals = |events: &[Event], occurrence| {
+        let insert_for = |table_id| {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
+                        Some(insert)
+                    }
+                    _ => None,
+                })
+                .nth(occurrence)
+                .unwrap()
+        };
+        let users_insert = insert_for(users_table_id);
+        let orders_insert = insert_for(orders_table_id);
+
+        assert_eq!(users_insert.commit_lsn, orders_insert.commit_lsn);
+        assert_eq!(users_insert.tx_ordinal, 1);
+        assert_eq!(orders_insert.tx_ordinal, 2);
+    };
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_max_table_sync_workers(2)
+    .build();
+
+    // We hold the write table rows method since it can yield, which is not possible via the `pause`
+    // of failpoints. Yielding is important for this test, since the `pause` failpoint will block
+    // the tokio worker, stalling the test.
+    let first_copy = destination.hold_next(FaultyOp::WriteTableRows).await;
+    let second_copy = destination.hold_next(FaultyOp::WriteTableRows).await;
+
+    let users_finished_copy =
+        store.notify_on_table_state_type(users_table_id, TableStateType::FinishedCopy).await;
+    let orders_finished_copy =
+        store.notify_on_table_state_type(orders_table_id, TableStateType::FinishedCopy).await;
+
+    pipeline.start().await.unwrap();
+
+    tokio::join!(first_copy.wait_reached(), second_copy.wait_reached());
+
+    let mut write_two_table_transaction = async |suffix: &str| {
+        let transaction = database.client.as_mut().unwrap().transaction().await.unwrap();
+        transaction
+            .execute(
+                &format!(
+                    "insert into {} (name, age) values ('user-{suffix}', 1)",
+                    users_schema.name.as_quoted_identifier()
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        transaction
+            .execute(
+                &format!(
+                    "insert into {} (description) values ('order-{suffix}')",
+                    orders_schema.name.as_quoted_identifier()
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+    };
+
+    // Both table snapshots precede this transaction, so both table-sync slots
+    // replay it after their copy results are released. Each worker skips the
+    // other table but must reserve its row ordinal before that ownership
+    // filter. Fresh slots also emit Relation messages, which must not consume
+    // ordinals.
+    write_two_table_transaction("table-sync").await;
+
+    let table_sync_events = destination
+        .wait_for_all_events(vec![
+            EventCondition::Table(EventType::Insert, users_table_id, 1),
+            EventCondition::Table(EventType::Insert, orders_table_id, 1),
+        ])
+        .await;
+
+    first_copy.release_ok();
+    second_copy.release_ok();
+
+    users_finished_copy.notified().await;
+    orders_finished_copy.notified().await;
+    table_sync_events.notified().await;
+
+    assert_insert_ordinals(&destination.get_events().await, 0);
+
+    // The main apply worker now owns both tables. Its existing pgoutput session
+    // may omit Relation messages, but the same WAL event order must produce the
+    // same ordinals.
+    let apply_events = destination
+        .wait_for_all_events(vec![
+            EventCondition::Table(EventType::Insert, users_table_id, 2),
+            EventCondition::Table(EventType::Insert, orders_table_id, 2),
+        ])
+        .await;
+
+    write_two_table_transaction("apply").await;
+
+    apply_events.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert_insert_ordinals(&destination.get_events().await, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

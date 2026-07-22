@@ -17,8 +17,9 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnModificationType, ColumnNameComparison, ColumnSchema, ReplicatedTableSchema,
-        ReplicationMask, SchemaDiff, SchemaOperation, SnapshotId, TableId, TableName, TableSchema,
+        ColumnModificationType, ColumnNameEquivalence, ColumnSchema, ReplicatedTableSchema,
+        ReplicationMask, SchemaDiff, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName,
+        TableSchema,
     },
     store::{DestinationStore, TableStateType},
 };
@@ -85,6 +86,9 @@ use crate::ducklake::{
 /// One connection is enough because inline-size sampling and metrics sampling
 /// are both best-effort background reads and can safely serialize.
 const DUCKLAKE_METADATA_PG_POOL_SIZE: u32 = 1;
+/// DuckLake column identifiers are compared without ASCII case distinctions.
+const DUCKLAKE_COLUMN_NAME_EQUIVALENCE: ColumnNameEquivalence =
+    ColumnNameEquivalence::AsciiCaseInsensitive;
 
 /// Prefix for ETL-owned tombstone columns that keep same-name replacement DDL
 /// replay-safe.
@@ -124,6 +128,12 @@ fn validate_ducklake_tombstone_namespace(schema: &ReplicatedTableSchema) -> EtlR
     }
 
     Ok(())
+}
+
+/// Validates that DuckLake can represent the replicated source table shape.
+fn validate_ducklake_table_shape(schema: &ReplicatedTableSchema) -> EtlResult<()> {
+    validate_ducklake_tombstone_namespace(schema)?;
+    schema.validate_destination_column_names(DUCKLAKE_COLUMN_NAME_EQUIVALENCE).map_err(Into::into)
 }
 
 /// Builds the shared Postgres metadata pool used by background samplers.
@@ -488,7 +498,7 @@ struct DuckLakeSchemaDdlStatement {
 
 /// Planned DuckLake schema DDL and the expected resulting column names.
 #[derive(Debug, PartialEq, Eq)]
-struct DuckLakeSchemaDiffPlan {
+struct DuckLakeSchemaDdlPlan {
     /// Statements to execute in order.
     statements: Vec<DuckLakeSchemaDdlStatement>,
     /// Destination column names after applying the plan.
@@ -572,11 +582,11 @@ fn tombstone_columns_to_cleanup_ducklake(
 
 /// Rejects recovery plans whose old and target schemas have the same cycle
 /// name set and therefore cannot be distinguished without a durable marker.
-fn ensure_schema_diff_recoverable_ducklake(
+fn ensure_ducklake_schema_plan_recoverable(
     table_name: &DuckLakeTableName,
-    diff: &SchemaDiff,
+    plan: &SchemaPlan,
 ) -> EtlResult<()> {
-    if diff.has_rename_cycles() {
+    if plan.has_rename_cycles() {
         return Err(etl_error!(
             ErrorKind::InvalidState,
             "DuckLake rename cycle recovery is ambiguous",
@@ -591,11 +601,12 @@ fn ensure_schema_diff_recoverable_ducklake(
 }
 
 /// Plans idempotent DuckLake schema DDL for the current destination columns.
-fn plan_schema_diff_sql_ducklake(
+fn plan_ducklake_schema_ddl(
     table_name: &DuckLakeTableName,
     mut column_names: Vec<String>,
-    diff: &SchemaDiff,
-) -> EtlResult<DuckLakeSchemaDiffPlan> {
+    plan: &SchemaPlan,
+) -> EtlResult<DuckLakeSchemaDdlPlan> {
+    let diff = plan.diff();
     let added_column_names: HashSet<_> =
         diff.columns_to_add.iter().map(|column| column.name.as_str()).collect();
     let rename_target_names: HashSet<_> = diff
@@ -620,7 +631,7 @@ fn plan_schema_diff_sql_ducklake(
     let mut statements = Vec::new();
 
     // Preserve shared operation order while rendering replay-safe DuckLake DDL.
-    for operation in diff.ordered_operations() {
+    for operation in plan.ordered_operations() {
         match operation {
             SchemaOperation::DropColumn { column_schema }
                 if reused_dropped_column_names.contains(column_schema.name.as_str()) =>
@@ -881,7 +892,7 @@ fn plan_schema_diff_sql_ducklake(
         }
     }
 
-    Ok(DuckLakeSchemaDiffPlan { statements, column_names })
+    Ok(DuckLakeSchemaDdlPlan { statements, column_names })
 }
 
 /// Reconstructs the previous replicated projection from DuckLake's
@@ -1543,7 +1554,7 @@ where
         &self,
         new_replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        validate_ducklake_tombstone_namespace(new_replicated_table_schema)?;
+        validate_ducklake_table_shape(new_replicated_table_schema)?;
         let table_id = new_replicated_table_schema.id();
         let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
         let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
@@ -1611,6 +1622,8 @@ where
             current_table_schema,
             current_replication_mask.clone(),
         );
+        let plan = current_schema
+            .plan_schema_change(new_replicated_table_schema, DUCKLAKE_COLUMN_NAME_EQUIVALENCE)?;
         self.cleanup_tombstone_columns_after_applied(&table_name, &current_schema).await;
 
         let updated_metadata = DestinationTableMetadata::new_applied(
@@ -1625,9 +1638,7 @@ where
         );
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
-        let diff = current_schema
-            .diff(new_replicated_table_schema, ColumnNameComparison::AsciiCaseInsensitive);
-        if let Err(error) = self.apply_schema_diff(&table_name, &diff).await {
+        if let Err(error) = self.apply_schema_plan(&table_name, &plan).await {
             warn!(
                 error = %error,
                 table_id = %table_id,
@@ -1654,34 +1665,34 @@ where
         Ok(())
     }
 
-    /// Applies a schema diff while serializing with table-local writes and
+    /// Applies a schema plan while serializing with table-local writes and
     /// external maintenance.
     ///
     /// A table that was copied with data inlining disabled must restore its
     /// streaming setting before DuckLake applies a later schema change. This
     /// lets DuckLake update its inlined-data representation with the DDL.
-    async fn apply_schema_diff(
+    async fn apply_schema_plan(
         &self,
         table_name: &DuckLakeTableName,
-        diff: &SchemaDiff,
+        plan: &SchemaPlan,
     ) -> EtlResult<()> {
-        if diff.is_empty() {
-            debug!(table = %table_name, "ducklake schema diff is empty");
+        if plan.is_empty() {
+            debug!(table = %table_name, "ducklake schema plan is empty");
             return Ok(());
         }
 
         info!(
             table = %table_name,
-            additions = diff.columns_to_add.len(),
-            drops = diff.columns_to_drop.len(),
-            modifications = diff.columns_to_modify.len(),
-            "ducklake applying schema diff"
+            additions = plan.diff().columns_to_add.len(),
+            drops = plan.diff().columns_to_drop.len(),
+            modifications = plan.diff().columns_to_modify.len(),
+            "ducklake applying schema plan"
         );
 
         let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         let table_name = table_name.clone();
-        let diff = diff.clone();
+        let plan = plan.clone();
 
         run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), move |conn| {
             let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
@@ -1699,8 +1710,8 @@ where
 
             let apply_result = (|| -> EtlResult<()> {
                 let column_names = read_ducklake_table_column_names_blocking(conn, &table_name)?;
-                let DuckLakeSchemaDiffPlan { statements, column_names: _column_names } =
-                    plan_schema_diff_sql_ducklake(&table_name, column_names, &diff)?;
+                let DuckLakeSchemaDdlPlan { statements, column_names: _column_names } =
+                    plan_ducklake_schema_ddl(&table_name, column_names, &plan)?;
 
                 for statement in statements {
                     execute_ddl(&statement.sql, statement.error_description)?;
@@ -1750,15 +1761,10 @@ where
             "ducklake destination table is missing replicated columns, reconciling"
         );
 
-        let diff = SchemaDiff::new(
-            missing_columns,
-            Vec::new(),
-            Vec::new(),
-            ducklake_columns.iter().map(String::as_str),
-            ColumnNameComparison::AsciiCaseInsensitive,
-        );
+        let plan = SchemaDiff::new(missing_columns, Vec::new(), Vec::new())
+            .plan(ducklake_columns.iter().map(String::as_str), DUCKLAKE_COLUMN_NAME_EQUIVALENCE)?;
 
-        self.apply_schema_diff(table_name, &diff).await
+        self.apply_schema_plan(table_name, &plan).await
     }
 
     /// Drops ETL tombstone columns after schema metadata is durably `Applied`.
@@ -2207,6 +2213,7 @@ where
         table_name: &DuckLakeTableName,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
+        validate_ducklake_table_shape(replicated_table_schema)?;
         let metadata = DestinationTableMetadata::new_applying(
             table_name.to_metadata_id()?,
             replicated_table_schema.inner().snapshot_id,
@@ -2374,10 +2381,10 @@ where
                     previous_table_schema,
                     previous_replication_mask,
                 );
-                let diff =
-                    old_schema.diff(&target_schema, ColumnNameComparison::AsciiCaseInsensitive);
-                ensure_schema_diff_recoverable_ducklake(table_name, &diff)?;
-                self.apply_schema_diff(table_name, &diff).await?;
+                let plan = old_schema
+                    .plan_schema_change(&target_schema, DUCKLAKE_COLUMN_NAME_EQUIVALENCE)?;
+                ensure_ducklake_schema_plan_recoverable(table_name, &plan)?;
+                self.apply_schema_plan(table_name, &plan).await?;
             }
             None => {
                 self.issue_create_table_stmt(table_name, &target_schema).await?;
@@ -2398,7 +2405,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
-        validate_ducklake_tombstone_namespace(replicated_table_schema)?;
+        validate_ducklake_table_shape(replicated_table_schema)?;
         let table_id = replicated_table_schema.id();
         let metadata = self.store.get_destination_table_metadata(table_id).await?;
         let table_name = metadata.as_ref().map_or_else(
@@ -2945,6 +2952,15 @@ mod tests {
         }
     }
 
+    fn shared_schema_plan<I, S>(diff: SchemaDiff, current_column_names: I) -> SchemaPlan
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        diff.plan(current_column_names, DUCKLAKE_COLUMN_NAME_EQUIVALENCE)
+            .expect("test schema diff should satisfy destination name invariants")
+    }
+
     #[test]
     fn key_row_from_updated_partial_row_uses_alternative_identity_columns() {
         let replicated_table_schema = make_alternative_identity_schema();
@@ -2983,19 +2999,20 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_renames_before_adding_reused_source_name() {
-        let diff = SchemaDiff::new(
-            vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
-            Vec::new(),
-            vec![rename_modification("name", "full_name", 2)],
+    fn plan_ducklake_schema_ddl_renames_before_adding_reused_source_name() {
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
+                Vec::new(),
+                vec![rename_modification("name", "full_name", 2)],
+            ),
             ["id", "name"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let plan = plan_schema_diff_sql_ducklake(
+        let plan = plan_ducklake_schema_ddl(
             &ducklake_table_name(),
             vec!["id".to_owned(), "name".to_owned()],
-            &diff,
+            &shared_plan,
         )
         .expect("schema diff should plan");
         let statement_sql: Vec<_> =
@@ -3012,19 +3029,20 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_applies_shared_rename_cycle_order() {
-        let diff = SchemaDiff::new(
-            Vec::new(),
-            Vec::new(),
-            vec![rename_modification("a", "b", 1), rename_modification("b", "a", 2)],
+    fn plan_ducklake_schema_ddl_applies_shared_rename_cycle_order() {
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                Vec::new(),
+                Vec::new(),
+                vec![rename_modification("a", "b", 1), rename_modification("b", "a", 2)],
+            ),
             ["a", "b"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let plan = plan_schema_diff_sql_ducklake(
+        let plan = plan_ducklake_schema_ddl(
             &ducklake_table_name(),
             vec!["a".to_owned(), "b".to_owned()],
-            &diff,
+            &shared_plan,
         )
         .expect("rename cycle should plan");
         let statement_sql: Vec<_> =
@@ -3042,19 +3060,20 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_applies_rename_cycle_when_physical_order_differs_from_ordinals() {
-        let diff = SchemaDiff::new(
-            Vec::new(),
-            Vec::new(),
-            vec![rename_modification("a", "b", 1), rename_modification("b", "a", 2)],
+    fn plan_ducklake_schema_ddl_applies_rename_cycle_when_physical_order_differs_from_ordinals() {
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                Vec::new(),
+                Vec::new(),
+                vec![rename_modification("a", "b", 1), rename_modification("b", "a", 2)],
+            ),
             ["a", "b"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let plan = plan_schema_diff_sql_ducklake(
+        let plan = plan_ducklake_schema_ddl(
             &ducklake_table_name(),
             vec!["b".to_owned(), "a".to_owned()],
-            &diff,
+            &shared_plan,
         )
         .expect("rename cycle should plan independently of physical order");
         let statement_sql: Vec<_> =
@@ -3072,38 +3091,40 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_recovery_rejects_rename_cycle_without_durable_marker() {
-        let diff = SchemaDiff::new(
-            Vec::new(),
-            Vec::new(),
-            vec![rename_modification("a", "b", 1), rename_modification("b", "a", 2)],
+    fn ducklake_schema_plan_recovery_rejects_rename_cycle_without_durable_marker() {
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                Vec::new(),
+                Vec::new(),
+                vec![rename_modification("a", "b", 1), rename_modification("b", "a", 2)],
+            ),
             ["a", "b"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let error =
-            ensure_schema_diff_recoverable_ducklake(&ducklake_table_name(), &diff).unwrap_err();
+        let error = ensure_ducklake_schema_plan_recoverable(&ducklake_table_name(), &shared_plan)
+            .unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::InvalidState);
     }
 
     #[test]
-    fn plan_schema_diff_adds_column_with_supported_default() {
-        let diff = SchemaDiff::new(
-            vec![
-                ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true)
-                    .with_default_expression("'pending'::text".to_owned()),
-            ],
-            Vec::new(),
-            Vec::new(),
+    fn plan_ducklake_schema_ddl_adds_column_with_supported_default() {
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                vec![
+                    ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true)
+                        .with_default_expression("'pending'::text".to_owned()),
+                ],
+                Vec::new(),
+                Vec::new(),
+            ),
             ["id", "name"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let plan = plan_schema_diff_sql_ducklake(
+        let plan = plan_ducklake_schema_ddl(
             &ducklake_table_name(),
             vec!["id".to_owned(), "name".to_owned()],
-            &diff,
+            &shared_plan,
         )
         .expect("schema diff should plan");
         let statement_sql: Vec<_> =
@@ -3119,19 +3140,20 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_skips_unsupported_default_drop() {
-        let diff = SchemaDiff::new(
-            Vec::new(),
-            Vec::new(),
-            vec![default_modification("status", 3, Some("array['unsupported']::text[]"), None)],
+    fn plan_ducklake_schema_ddl_skips_unsupported_default_drop() {
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                Vec::new(),
+                Vec::new(),
+                vec![default_modification("status", 3, Some("array['unsupported']::text[]"), None)],
+            ),
             ["id", "name", "status"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let plan = plan_schema_diff_sql_ducklake(
+        let plan = plan_ducklake_schema_ddl(
             &ducklake_table_name(),
             vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
-            &diff,
+            &shared_plan,
         )
         .expect("schema diff should plan");
 
@@ -3140,19 +3162,20 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_skips_replayed_rename_with_reused_source_name() {
-        let diff = SchemaDiff::new(
-            vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
-            Vec::new(),
-            vec![rename_modification("name", "full_name", 2)],
+    fn plan_ducklake_schema_ddl_skips_replayed_rename_with_reused_source_name() {
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
+                Vec::new(),
+                vec![rename_modification("name", "full_name", 2)],
+            ),
             ["id", "name"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let plan = plan_schema_diff_sql_ducklake(
+        let plan = plan_ducklake_schema_ddl(
             &ducklake_table_name(),
             vec!["id".to_owned(), "full_name".to_owned(), "name".to_owned()],
-            &diff,
+            &shared_plan,
         )
         .expect("schema diff replay should plan");
 
@@ -3161,22 +3184,23 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_skips_replayed_rename_with_source_name_as_rename_target() {
-        let diff = SchemaDiff::new(
-            Vec::new(),
-            Vec::new(),
-            vec![
-                rename_modification("name", "full_name", 2),
-                rename_modification("email", "name", 3),
-            ],
+    fn plan_ducklake_schema_ddl_skips_replayed_rename_with_source_name_as_rename_target() {
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                Vec::new(),
+                Vec::new(),
+                vec![
+                    rename_modification("name", "full_name", 2),
+                    rename_modification("email", "name", 3),
+                ],
+            ),
             ["id", "name", "email"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let plan = plan_schema_diff_sql_ducklake(
+        let plan = plan_ducklake_schema_ddl(
             &ducklake_table_name(),
             vec!["id".to_owned(), "full_name".to_owned(), "name".to_owned()],
-            &diff,
+            &shared_plan,
         )
         .expect("schema diff replay should plan");
 
@@ -3185,19 +3209,20 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_drops_stale_rename_source_when_target_exists() {
-        let diff = SchemaDiff::new(
-            Vec::new(),
-            Vec::new(),
-            vec![rename_modification("ddl_col_4_1", "ddl_col_4_0", 4)],
+    fn plan_ducklake_schema_ddl_drops_stale_rename_source_when_target_exists() {
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                Vec::new(),
+                Vec::new(),
+                vec![rename_modification("ddl_col_4_1", "ddl_col_4_0", 4)],
+            ),
             ["id", "ddl_col_4_1"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let plan = plan_schema_diff_sql_ducklake(
+        let plan = plan_ducklake_schema_ddl(
             &ducklake_table_name(),
             vec!["id".to_owned(), "ddl_col_4_1".to_owned(), "ddl_col_4_0".to_owned()],
-            &diff,
+            &shared_plan,
         )
         .expect("schema diff with stale rename source should plan");
         let statement_sql: Vec<_> =
@@ -3211,21 +3236,22 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_tombstones_dropped_column_when_name_is_reused_by_rename() {
+    fn plan_ducklake_schema_ddl_tombstones_dropped_column_when_name_is_reused_by_rename() {
         let dropped_column = ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true);
         let tombstone_name = dropped_column_tombstone_name_ducklake(&dropped_column);
-        let diff = SchemaDiff::new(
-            Vec::new(),
-            vec![dropped_column],
-            vec![rename_modification("name", "status", 2)],
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                Vec::new(),
+                vec![dropped_column],
+                vec![rename_modification("name", "status", 2)],
+            ),
             ["id", "name", "status"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let plan = plan_schema_diff_sql_ducklake(
+        let plan = plan_ducklake_schema_ddl(
             &ducklake_table_name(),
             vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
-            &diff,
+            &shared_plan,
         )
         .expect("schema diff should tombstone reused dropped name");
         let statement_sql: Vec<_> =
@@ -3245,21 +3271,22 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_tombstones_dropped_column_when_name_is_reused_by_add() {
+    fn plan_ducklake_schema_ddl_tombstones_dropped_column_when_name_is_reused_by_add() {
         let dropped_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true);
         let tombstone_name = dropped_column_tombstone_name_ducklake(&dropped_column);
-        let diff = SchemaDiff::new(
-            vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
-            vec![dropped_column],
-            Vec::new(),
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
+                vec![dropped_column],
+                Vec::new(),
+            ),
             ["id", "name"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let plan = plan_schema_diff_sql_ducklake(
+        let plan = plan_ducklake_schema_ddl(
             &ducklake_table_name(),
             vec!["id".to_owned(), "name".to_owned()],
-            &diff,
+            &shared_plan,
         )
         .expect("schema diff should tombstone reused dropped name");
         let statement_sql: Vec<_> =
@@ -3278,21 +3305,22 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_skips_replayed_reused_dropped_column_name() {
+    fn plan_ducklake_schema_ddl_skips_replayed_reused_dropped_column_name() {
         let dropped_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true);
         let tombstone_name = dropped_column_tombstone_name_ducklake(&dropped_column);
-        let diff = SchemaDiff::new(
-            vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
-            vec![dropped_column],
-            Vec::new(),
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
+                vec![dropped_column],
+                Vec::new(),
+            ),
             ["id", "name"],
-            ColumnNameComparison::AsciiCaseInsensitive,
         );
 
-        let plan = plan_schema_diff_sql_ducklake(
+        let plan = plan_ducklake_schema_ddl(
             &ducklake_table_name(),
             vec!["id".to_owned(), tombstone_name.clone(), "name".to_owned()],
-            &diff,
+            &shared_plan,
         )
         .expect("schema diff replay should plan");
 
@@ -3365,6 +3393,26 @@ mod tests {
         let error = validate_ducklake_tombstone_namespace(&schema).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn ducklake_rejects_case_colliding_source_columns() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("value".to_owned(), PgType::TEXT, -1, 1, true),
+                ColumnSchema::new("VALUE".to_owned(), PgType::TEXT, -1, 2, true),
+            ],
+        ));
+        let schema = ReplicatedTableSchema::all(table_schema);
+
+        let error = validate_ducklake_table_shape(&schema)
+            .expect_err("DuckLake should reject source columns that differ only by ASCII case");
+
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(error.description(), Some("Source column names collide in the destination"));
+        assert!(error.detail().is_some_and(|detail| detail.contains("'value' and 'VALUE'")));
     }
 
     #[test]

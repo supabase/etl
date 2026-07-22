@@ -15,7 +15,7 @@ use std::{
 
 use etl_postgres::{numeric::ParseNumericError, time::ParseTimeError};
 
-use crate::schema::SchemaError;
+use crate::schema::{SchemaError, SchemaPlanError};
 
 const MAX_SCHEMA_ERROR_COLUMN_NAMES: usize = 12;
 
@@ -1095,6 +1095,56 @@ impl From<SchemaError> for EtlError {
     }
 }
 
+/// Converts destination schema planning failures to classified ETL errors.
+impl From<SchemaPlanError> for EtlError {
+    #[track_caller]
+    fn from(err: SchemaPlanError) -> EtlError {
+        let (kind, description, detail) = match &err {
+            SchemaPlanError::DestinationColumnNameCollision {
+                endpoint,
+                column_name_equivalence,
+                first_column_name,
+                second_column_name,
+            } => (
+                ErrorKind::SourceSchemaError,
+                Cow::Borrowed("Source column names collide in the destination"),
+                Cow::Owned(format!(
+                    "The {endpoint} source schema contains columns '{first_column_name}' and \
+                     '{second_column_name}', which are equivalent under the destination's \
+                     {column_name_equivalence} column-name rules. Rename or exclude one of these \
+                     source columns."
+                )),
+            ),
+            SchemaPlanError::CurrentColumnNotFound { column_name } => (
+                ErrorKind::InvalidState,
+                Cow::Borrowed("Schema diff references a missing current column"),
+                Cow::Owned(format!(
+                    "The schema diff references current column '{column_name}', but that name was \
+                     not present in the supplied current endpoint."
+                )),
+            ),
+            SchemaPlanError::CurrentColumnClassifiedMultipleTimes { column_name } => (
+                ErrorKind::InvalidState,
+                Cow::Borrowed("Schema diff classifies a current column more than once"),
+                Cow::Owned(format!(
+                    "The schema diff classifies current column '{column_name}' as more than one \
+                     endpoint change."
+                )),
+            ),
+            SchemaPlanError::BlockedRenameTarget { current_column_name, target_column_name } => (
+                ErrorKind::InvalidState,
+                Cow::Borrowed("Schema rename plan cannot make progress"),
+                Cow::Owned(format!(
+                    "The rename from '{current_column_name}' to '{target_column_name}' is blocked \
+                     by a column outside the pending rename set."
+                )),
+            ),
+        };
+
+        EtlError::from_components(kind, description, Some(detail), Some(Arc::new(err)))
+    }
+}
+
 /// Builds a readable detail for unknown replicated columns.
 fn unknown_replicated_columns_detail(columns: &[String]) -> String {
     if columns.is_empty() {
@@ -1135,7 +1185,10 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
-    use crate::{bail, etl_error};
+    use crate::{
+        bail, etl_error,
+        schema::{SchemaEndpoint, SchemaPlanError},
+    };
 
     #[test]
     fn simple_error_creation() {
@@ -1155,6 +1208,21 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::SourceQueryFailed);
         assert_eq!(err.detail(), Some("Table 'users' doesn't exist"));
         assert_eq!(err.kinds(), vec![ErrorKind::SourceQueryFailed]);
+    }
+
+    #[test]
+    fn destination_column_name_collision_is_a_source_schema_error() {
+        let err = EtlError::from(SchemaPlanError::DestinationColumnNameCollision {
+            endpoint: SchemaEndpoint::Target,
+            column_name_equivalence: crate::schema::ColumnNameEquivalence::AsciiCaseInsensitive,
+            first_column_name: "a".to_owned(),
+            second_column_name: "A".to_owned(),
+        });
+
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(err.description(), Some("Source column names collide in the destination"));
+        assert!(err.detail().is_some_and(|detail| detail.contains("'a' and 'A'")));
+        assert!(err.source().is_some());
     }
 
     #[test]

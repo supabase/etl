@@ -644,8 +644,8 @@ struct ApplyLoopState {
     events_batch_bytes: usize,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
-    /// Number of events observed in the current transaction (excluding
-    /// BEGIN/COMMIT).
+    /// Number of row-change and truncate messages observed since the most
+    /// recent `BEGIN`.
     current_tx_events: u64,
     /// Next zero-based ordinal to assign to transaction events with sequence
     /// keys.
@@ -2019,19 +2019,15 @@ where
                 self.handle_relation_message(relation_body).await
             }
             LogicalReplicationMessage::Insert(insert_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_insert_message(start_lsn, insert_body).await
             }
             LogicalReplicationMessage::Update(update_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_update_message(start_lsn, update_body).await
             }
             LogicalReplicationMessage::Delete(delete_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_delete_message(start_lsn, delete_body).await
             }
             LogicalReplicationMessage::Truncate(truncate_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_truncate_message(start_lsn, truncate_body).await
             }
             LogicalReplicationMessage::Origin(_) => {
@@ -2222,14 +2218,15 @@ where
         start_lsn: PgLsn,
         message: &protocol::BeginBody,
     ) -> EtlResult<HandleMessageResult> {
-        let final_lsn = PgLsn::from(message.final_lsn());
-        self.state.remote_final_lsn = Some(final_lsn);
-
-        self.state.current_tx_begin_ts = Some(Instant::now());
         self.state.current_tx_events = 0;
         self.state.reset_tx_ordinal();
 
         let tx_ordinal = self.state.next_tx_ordinal();
+
+        let final_lsn = PgLsn::from(message.final_lsn());
+        self.state.remote_final_lsn = Some(final_lsn);
+
+        self.state.current_tx_begin_ts = Some(Instant::now());
         let event = parse_event_from_begin_message(start_lsn, final_lsn, tx_ordinal, message);
 
         Ok(HandleMessageResult::return_event(Event::Begin(event)))
@@ -2241,6 +2238,8 @@ where
         start_lsn: PgLsn,
         message: &protocol::CommitBody,
     ) -> EtlResult<HandleMessageResult> {
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let Some(remote_final_lsn) = self.state.remote_final_lsn.take() else {
             bail!(
                 ErrorKind::InvalidState,
@@ -2268,8 +2267,6 @@ where
             histogram!(ETL_TRANSACTION_DURATION_SECONDS).record(duration_seconds);
             counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
             histogram!(ETL_TRANSACTION_SIZE).record(self.state.current_tx_events as f64);
-
-            self.state.current_tx_events = 0;
         }
 
         let end_lsn = PgLsn::from(message.end_lsn());
@@ -2277,7 +2274,6 @@ where
         // Process syncing tables after commit (worker-specific behavior).
         let should_end_batch = self.process_syncing_tables_after_commit_event(end_lsn).await?;
 
-        let tx_ordinal = self.state.next_tx_ordinal();
         let event = parse_event_from_commit_message(start_lsn, commit_lsn, tx_ordinal, message);
 
         let mut result = HandleMessageResult {
@@ -2379,6 +2375,9 @@ where
         start_lsn: PgLsn,
         message: &protocol::InsertBody,
     ) -> EtlResult<HandleMessageResult> {
+        self.state.current_tx_events += 1;
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
                 ErrorKind::InvalidState,
@@ -2388,7 +2387,6 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
-        let tx_ordinal = self.state.next_tx_ordinal();
 
         let payload_bytes = insert_message_payload_bytes(message);
 
@@ -2423,6 +2421,9 @@ where
         start_lsn: PgLsn,
         message: &protocol::UpdateBody,
     ) -> EtlResult<HandleMessageResult> {
+        self.state.current_tx_events += 1;
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
                 ErrorKind::InvalidState,
@@ -2432,7 +2433,6 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
-        let tx_ordinal = self.state.next_tx_ordinal();
 
         let payload_bytes = update_message_payload_bytes(message);
 
@@ -2467,6 +2467,9 @@ where
         start_lsn: PgLsn,
         message: &protocol::DeleteBody,
     ) -> EtlResult<HandleMessageResult> {
+        self.state.current_tx_events += 1;
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
                 ErrorKind::InvalidState,
@@ -2476,7 +2479,6 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
-        let tx_ordinal = self.state.next_tx_ordinal();
 
         let payload_bytes = delete_message_payload_bytes(message);
 
@@ -2511,6 +2513,9 @@ where
         start_lsn: PgLsn,
         message: &protocol::TruncateBody,
     ) -> EtlResult<HandleMessageResult> {
+        self.state.current_tx_events += 1;
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
                 ErrorKind::InvalidState,
@@ -2518,7 +2523,6 @@ where
                 "Transaction must be active before processing TRUNCATE message"
             );
         };
-        let tx_ordinal = self.state.next_tx_ordinal();
 
         // Collect the replicated schemas for tables this worker currently owns.
         let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());

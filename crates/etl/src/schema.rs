@@ -337,9 +337,14 @@ impl<I: Iterator> ExactSizeIterator for SizedIterator<I> {
     }
 }
 
-/// Determines how a destination compares column names.
+/// Defines when a destination treats two column names as the same identifier.
+///
+/// This equivalence is used only to validate destination namespaces and plan
+/// physical schema operations. Logical columns remain identified by their
+/// PostgreSQL ordinal positions, and emitted operations retain exact source
+/// names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColumnNameComparison {
+pub enum ColumnNameEquivalence {
     /// Column names that differ only by case are distinct.
     CaseSensitive,
     /// Column names are compared after Unicode lowercase conversion.
@@ -349,13 +354,26 @@ pub enum ColumnNameComparison {
     AsciiCaseInsensitive,
 }
 
-impl ColumnNameComparison {
-    /// Returns the destination comparison key for a column name.
-    fn key(self, name: &str) -> String {
+impl ColumnNameEquivalence {
+    /// Returns a key representing the destination identifier equivalence class.
+    ///
+    /// The returned value is only a comparison key. It is never used as the
+    /// physical column name emitted to a destination.
+    fn equivalence_key(self, name: &str) -> String {
         match self {
             Self::CaseSensitive => name.to_owned(),
             Self::UnicodeCaseInsensitive => name.to_lowercase(),
             Self::AsciiCaseInsensitive => name.to_ascii_lowercase(),
+        }
+    }
+}
+
+impl fmt::Display for ColumnNameEquivalence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CaseSensitive => write!(f, "case-sensitive"),
+            Self::UnicodeCaseInsensitive => write!(f, "Unicode case-insensitive"),
+            Self::AsciiCaseInsensitive => write!(f, "ASCII case-insensitive"),
         }
     }
 }
@@ -639,14 +657,7 @@ impl ReplicatedTableSchema {
     /// DDL is running and are never stored as source schema versions. The
     /// planner emits only the operations needed to reach the schema used by the
     /// next row event.
-    ///
-    /// `column_name_comparison` must match the destination namespace so rename
-    /// readiness and generated temporary names reflect physical collisions.
-    pub fn diff(
-        &self,
-        new_schema: &ReplicatedTableSchema,
-        column_name_comparison: ColumnNameComparison,
-    ) -> SchemaDiff {
+    pub fn diff(&self, new_schema: &ReplicatedTableSchema) -> SchemaDiff {
         let mut old_columns: Vec<_> = self.column_schemas().collect();
         let mut new_columns: Vec<_> = new_schema.column_schemas().collect();
 
@@ -717,13 +728,49 @@ impl ReplicatedTableSchema {
         columns_to_drop.extend(old_columns[old_index..].iter().map(|column| (**column).clone()));
         columns_to_add.extend(new_columns[new_index..].iter().map(|column| (**column).clone()));
 
-        SchemaDiff::new(
-            columns_to_add,
-            columns_to_drop,
-            columns_to_modify,
-            old_columns.iter().map(|column| column.name.as_str()),
-            column_name_comparison,
-        )
+        SchemaDiff::new(columns_to_add, columns_to_drop, columns_to_modify)
+    }
+
+    /// Computes the exact endpoint diff and plans it for a destination.
+    ///
+    /// The diff is independent of destination identifier behavior. Planning
+    /// then validates both endpoint namespaces and orders physical operations
+    /// using `column_name_equivalence`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaPlanError`] when the destination cannot represent an
+    /// endpoint namespace or the derived diff cannot be planned safely.
+    pub fn plan_schema_change(
+        &self,
+        new_schema: &ReplicatedTableSchema,
+        column_name_equivalence: ColumnNameEquivalence,
+    ) -> Result<SchemaPlan, SchemaPlanError> {
+        self.diff(new_schema)
+            .plan(self.column_schemas().map(|column| column.name.as_str()), column_name_equivalence)
+    }
+
+    /// Validates that replicated column names are unique for a destination.
+    ///
+    /// Exact PostgreSQL names remain unchanged. This method only checks that
+    /// no two names belong to the same destination equivalence class.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaPlanError::DestinationColumnNameCollision`] when two
+    /// replicated columns would occupy the same destination namespace entry.
+    pub fn validate_destination_column_names(
+        &self,
+        column_name_equivalence: ColumnNameEquivalence,
+    ) -> Result<(), SchemaPlanError> {
+        let column_names: Vec<_> =
+            self.column_schemas().map(|column| column.name.clone()).collect();
+        collect_unique_column_names(
+            &column_names,
+            column_name_equivalence,
+            SchemaEndpoint::Target,
+        )?;
+        Ok(())
     }
 
     /// Builds the primary-key identity mask within the replicated schema
@@ -852,15 +899,10 @@ pub enum SchemaOperation {
 
 /// Represents differences between two schema versions.
 ///
-/// The classified columns describe facts visible in the two endpoint
-/// snapshots. [`SchemaDiff::ordered_operations`] is the destination execution
-/// contract and may additionally contain generated cycle-breaking renames.
-/// Keeping these views distinct prevents validation and replay code from
-/// mistaking a planner-generated temporary rename for source DDL.
-///
-/// The ordered plan is valid from the old endpoint schema. Destinations that
-/// replay a partially applied plan must separately reconcile it with their
-/// current physical schema.
+/// This type contains only exact facts from the PostgreSQL endpoint snapshots.
+/// It does not apply destination identifier semantics or contain generated
+/// temporary renames. Use [`SchemaDiff::plan`] to validate destination name
+/// compatibility and produce an executable [`SchemaPlan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaDiff {
     /// Columns that need to be added to the destination.
@@ -869,9 +911,6 @@ pub struct SchemaDiff {
     pub columns_to_drop: Vec<ColumnSchema>,
     /// Existing columns that need to be modified in the destination.
     pub columns_to_modify: Vec<ColumnModification>,
-    /// Operations in a column-name-safe execution order: drops, renames,
-    /// additions, then nullability/default modifications.
-    ordered_operations: Vec<SchemaOperation>,
 }
 
 impl SchemaDiff {
@@ -880,64 +919,104 @@ impl SchemaDiff {
     /// Prefer [`ReplicatedTableSchema::diff`] when both endpoint schemas are
     /// available. The column vectors and each modification-type vector must be
     /// in PostgreSQL `attnum` and canonical modification order, respectively.
-    /// `existing_column_names` must include every currently occupied
-    /// destination name so any generated cycle-breaking name is collision-free.
-    ///
-    /// The inputs must describe valid endpoint schemas for
-    /// `column_name_comparison`: endpoint names are unique, and every occupied
-    /// rename target is released by a listed drop or another pending rename.
-    /// This constructor does not validate those invariants; violating them is a
-    /// programmer error.
-    ///
-    /// The planner tracks those occupied names as mutable execution state,
-    /// while a separate reserved-name set covers both endpoints and every
-    /// generated name. A name can therefore become free for a requested
-    /// rename without becoming eligible for temporary use.
-    pub fn new<I, S>(
+    pub fn new(
         columns_to_add: Vec<ColumnSchema>,
         columns_to_drop: Vec<ColumnSchema>,
         columns_to_modify: Vec<ColumnModification>,
+    ) -> Self {
+        Self { columns_to_add, columns_to_drop, columns_to_modify }
+    }
+
+    /// Builds a destination-executable plan from this exact endpoint diff.
+    ///
+    /// `existing_column_names` must contain every column in the current
+    /// destination endpoint. Both the current and derived target endpoints are
+    /// validated under `column_name_equivalence` before operation ordering
+    /// begins. Exact names are retained in every emitted operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaPlanError`] if either endpoint contains destination-
+    /// equivalent column names or if the diff does not describe a valid
+    /// transition from the supplied current names.
+    pub fn plan<I, S>(
+        self,
         existing_column_names: I,
-        column_name_comparison: ColumnNameComparison,
-    ) -> Self
+        column_name_equivalence: ColumnNameEquivalence,
+    ) -> Result<SchemaPlan, SchemaPlanError>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        // The occupied column names are defined as the columns that we can't create or
-        // rename to. They will be used to determine the how to break or solve
-        // rename cycles.
         let existing_column_names: Vec<String> =
             existing_column_names.into_iter().map(Into::into).collect();
-        let occupied_column_name_keys: HashSet<String> =
-            existing_column_names.iter().map(|name| column_name_comparison.key(name)).collect();
+        let current_names_by_equivalence = collect_unique_column_names(
+            &existing_column_names,
+            column_name_equivalence,
+            SchemaEndpoint::Current,
+        )?;
+        validate_current_column_references(
+            &current_names_by_equivalence,
+            &self.columns_to_drop,
+            &self.columns_to_modify,
+            column_name_equivalence,
+        )?;
+        let mut target_names_by_equivalence = current_names_by_equivalence.clone();
 
-        // Generated names must avoid every endpoint name under the
-        // destination's comparison semantics.
-        let reserved_column_name_keys = existing_column_names
-            .iter()
+        // Remove every name absent from the target before inserting rename and
+        // addition targets. Endpoint changes are simultaneous facts here; the
+        // physical order needed to realize them is computed only afterward.
+        for column in &self.columns_to_drop {
+            remove_current_column_name(
+                &mut target_names_by_equivalence,
+                &column.name,
+                column_name_equivalence,
+            )?;
+        }
+        for modification in &self.columns_to_modify {
+            if modification.modification_types.contains(&ColumnModificationType::Rename) {
+                remove_current_column_name(
+                    &mut target_names_by_equivalence,
+                    &modification.old_column_schema.name,
+                    column_name_equivalence,
+                )?;
+            }
+        }
+        for modification in &self.columns_to_modify {
+            if modification.modification_types.contains(&ColumnModificationType::Rename) {
+                insert_target_column_name(
+                    &mut target_names_by_equivalence,
+                    &modification.new_column_schema.name,
+                    column_name_equivalence,
+                )?;
+            }
+        }
+        for column in &self.columns_to_add {
+            insert_target_column_name(
+                &mut target_names_by_equivalence,
+                &column.name,
+                column_name_equivalence,
+            )?;
+        }
+
+        let occupied_column_name_equivalence_keys =
+            current_names_by_equivalence.keys().cloned().collect();
+        let reserved_column_name_equivalence_keys = current_names_by_equivalence
+            .keys()
+            .chain(target_names_by_equivalence.keys())
             .cloned()
-            .chain(columns_to_add.iter().map(|column| column.name.clone()))
-            .chain(columns_to_drop.iter().map(|column| column.name.clone()))
-            .chain(columns_to_modify.iter().flat_map(|modification| {
-                [
-                    modification.old_column_schema.name.clone(),
-                    modification.new_column_schema.name.clone(),
-                ]
-            }))
-            .map(|name| column_name_comparison.key(&name))
             .collect();
 
         let ordered_operations = plan_schema_operations(
-            &columns_to_add,
-            &columns_to_drop,
-            &columns_to_modify,
-            occupied_column_name_keys,
-            reserved_column_name_keys,
-            column_name_comparison,
-        );
+            &self.columns_to_add,
+            &self.columns_to_drop,
+            &self.columns_to_modify,
+            occupied_column_name_equivalence_keys,
+            reserved_column_name_equivalence_keys,
+            column_name_equivalence,
+        )?;
 
-        Self { columns_to_add, columns_to_drop, columns_to_modify, ordered_operations }
+        Ok(SchemaPlan { diff: self, ordered_operations })
     }
 
     /// Returns `true` if there are no schema changes.
@@ -945,6 +1024,112 @@ impl SchemaDiff {
         self.columns_to_add.is_empty()
             && self.columns_to_drop.is_empty()
             && self.columns_to_modify.is_empty()
+    }
+}
+
+/// Identifies an endpoint while validating destination column names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaEndpoint {
+    /// The currently applied schema.
+    Current,
+    /// The desired schema after applying the diff.
+    Target,
+}
+
+impl fmt::Display for SchemaEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Current => write!(f, "current"),
+            Self::Target => write!(f, "target"),
+        }
+    }
+}
+
+/// Errors produced while validating or ordering a destination schema plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemaPlanError {
+    /// Two exact source names occupy the same destination namespace entry.
+    DestinationColumnNameCollision {
+        /// The endpoint containing the collision.
+        endpoint: SchemaEndpoint,
+        /// The destination name equivalence that produced the collision.
+        column_name_equivalence: ColumnNameEquivalence,
+        /// The first exact source column name.
+        first_column_name: String,
+        /// The second exact source column name.
+        second_column_name: String,
+    },
+    /// A classified removal or rename source is absent from the current names.
+    CurrentColumnNotFound {
+        /// The exact source column name referenced by the diff.
+        column_name: String,
+    },
+    /// One current column was classified as more than one endpoint change.
+    CurrentColumnClassifiedMultipleTimes {
+        /// The exact current column name classified more than once.
+        column_name: String,
+    },
+    /// A blocked rename target is not owned by another pending rename.
+    BlockedRenameTarget {
+        /// The exact current column name.
+        current_column_name: String,
+        /// The exact requested target name.
+        target_column_name: String,
+    },
+}
+
+impl fmt::Display for SchemaPlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DestinationColumnNameCollision {
+                endpoint,
+                column_name_equivalence,
+                first_column_name,
+                second_column_name,
+            } => write!(
+                f,
+                "Destination column names '{first_column_name}' and '{second_column_name}' \
+                 collide in the {endpoint} schema under {column_name_equivalence} equivalence"
+            ),
+            Self::CurrentColumnNotFound { column_name } => {
+                write!(f, "Schema diff references missing current column '{column_name}'")
+            }
+            Self::CurrentColumnClassifiedMultipleTimes { column_name } => {
+                write!(f, "Schema diff classifies current column '{column_name}' more than once")
+            }
+            Self::BlockedRenameTarget { current_column_name, target_column_name } => write!(
+                f,
+                "Rename from '{current_column_name}' to '{target_column_name}' is blocked by a \
+                 column outside the pending rename set"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SchemaPlanError {}
+
+/// A destination-validated schema diff with physical operations in safe order.
+///
+/// The exact endpoint facts remain available through [`SchemaPlan::diff`]. The
+/// generated operation sequence may additionally contain temporary renames
+/// used to break cycles under the destination's name equivalence rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaPlan {
+    /// The exact source endpoint difference.
+    diff: SchemaDiff,
+    /// Operations in destination-safe execution order.
+    ordered_operations: Vec<SchemaOperation>,
+}
+
+impl SchemaPlan {
+    /// Returns the exact endpoint diff represented by this plan.
+    pub fn diff(&self) -> &SchemaDiff {
+        &self.diff
+    }
+
+    /// Returns `true` if the endpoint schemas are identical.
+    pub fn is_empty(&self) -> bool {
+        self.diff.is_empty()
     }
 
     /// Returns the only destination-executable schema operations.
@@ -962,6 +1147,7 @@ impl SchemaDiff {
     /// endpoint renames.
     pub fn has_rename_cycles(&self) -> bool {
         let endpoint_rename_count = self
+            .diff
             .columns_to_modify
             .iter()
             .filter(|modification| {
@@ -984,6 +1170,101 @@ impl SchemaDiff {
 
         planned_rename_count > endpoint_rename_count
     }
+}
+
+/// Collects exact names by destination equivalence key and rejects collisions.
+fn collect_unique_column_names(
+    column_names: &[String],
+    column_name_equivalence: ColumnNameEquivalence,
+    endpoint: SchemaEndpoint,
+) -> Result<HashMap<String, String>, SchemaPlanError> {
+    let mut names_by_equivalence = HashMap::with_capacity(column_names.len());
+
+    for column_name in column_names {
+        let equivalence_key = column_name_equivalence.equivalence_key(column_name);
+        if let Some(first_column_name) =
+            names_by_equivalence.insert(equivalence_key, column_name.clone())
+        {
+            return Err(SchemaPlanError::DestinationColumnNameCollision {
+                endpoint,
+                column_name_equivalence,
+                first_column_name,
+                second_column_name: column_name.clone(),
+            });
+        }
+    }
+
+    Ok(names_by_equivalence)
+}
+
+/// Validates that every removal or modification owns one current column.
+fn validate_current_column_references(
+    current_names_by_equivalence: &HashMap<String, String>,
+    columns_to_drop: &[ColumnSchema],
+    columns_to_modify: &[ColumnModification],
+    column_name_equivalence: ColumnNameEquivalence,
+) -> Result<(), SchemaPlanError> {
+    let mut referenced_name_equivalence_keys = HashSet::new();
+    let referenced_column_names = columns_to_drop.iter().map(|column| column.name.as_str()).chain(
+        columns_to_modify.iter().map(|modification| modification.old_column_schema.name.as_str()),
+    );
+
+    for column_name in referenced_column_names {
+        let equivalence_key = column_name_equivalence.equivalence_key(column_name);
+        if current_names_by_equivalence.get(&equivalence_key).map(String::as_str)
+            != Some(column_name)
+        {
+            return Err(SchemaPlanError::CurrentColumnNotFound {
+                column_name: column_name.to_owned(),
+            });
+        }
+        if !referenced_name_equivalence_keys.insert(equivalence_key) {
+            return Err(SchemaPlanError::CurrentColumnClassifiedMultipleTimes {
+                column_name: column_name.to_owned(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Removes a current exact name while deriving the target endpoint namespace.
+fn remove_current_column_name(
+    names_by_equivalence: &mut HashMap<String, String>,
+    column_name: &str,
+    column_name_equivalence: ColumnNameEquivalence,
+) -> Result<(), SchemaPlanError> {
+    let equivalence_key = column_name_equivalence.equivalence_key(column_name);
+    let Some(existing_column_name) = names_by_equivalence.remove(&equivalence_key) else {
+        return Err(SchemaPlanError::CurrentColumnNotFound { column_name: column_name.to_owned() });
+    };
+
+    if existing_column_name != column_name {
+        return Err(SchemaPlanError::CurrentColumnNotFound { column_name: column_name.to_owned() });
+    }
+
+    Ok(())
+}
+
+/// Inserts an exact target name and rejects destination-equivalent names.
+fn insert_target_column_name(
+    names_by_equivalence: &mut HashMap<String, String>,
+    column_name: &str,
+    column_name_equivalence: ColumnNameEquivalence,
+) -> Result<(), SchemaPlanError> {
+    let equivalence_key = column_name_equivalence.equivalence_key(column_name);
+    if let Some(first_column_name) =
+        names_by_equivalence.insert(equivalence_key, column_name.to_owned())
+    {
+        return Err(SchemaPlanError::DestinationColumnNameCollision {
+            endpoint: SchemaEndpoint::Target,
+            column_name_equivalence,
+            first_column_name,
+            second_column_name: column_name.to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 /// A pending logical rename tracked by ordinal identity.
@@ -1020,23 +1301,24 @@ struct PendingRename {
 /// `temporary -> final`, so completing the plan always consumes the generated
 /// name without dropping or recreating the logical column.
 ///
-/// Exact names are retained in emitted operations. Name comparison keys are
-/// used only for occupancy, dependency, and temporary-name checks.
+/// Exact names are retained in emitted operations. Destination equivalence
+/// keys are used only for occupancy, dependency, and temporary-name checks.
 fn plan_schema_operations(
     columns_to_add: &[ColumnSchema],
     columns_to_drop: &[ColumnSchema],
     columns_to_modify: &[ColumnModification],
-    mut occupied_name_keys: HashSet<String>,
-    mut reserved_column_name_keys: HashSet<String>,
-    column_name_comparison: ColumnNameComparison,
-) -> Vec<SchemaOperation> {
+    mut occupied_name_equivalence_keys: HashSet<String>,
+    mut reserved_column_name_equivalence_keys: HashSet<String>,
+    column_name_equivalence: ColumnNameEquivalence,
+) -> Result<Vec<SchemaOperation>, SchemaPlanError> {
     let mut operations = Vec::new();
 
     // Phase 1: drop every column absent from the new endpoint. This frees all
     // names that renames or additions may reuse and gives every destination the
     // same simple structural ordering.
     for column in columns_to_drop {
-        occupied_name_keys.remove(&column_name_comparison.key(&column.name));
+        occupied_name_equivalence_keys
+            .remove(&column_name_equivalence.equivalence_key(&column.name));
         operations.push(SchemaOperation::DropColumn { column_schema: column.clone() });
     }
 
@@ -1048,7 +1330,7 @@ fn plan_schema_operations(
     // `waiting` answers which pending rename wants a name as its final target.
     // Endpoint name keys are unique by the caller contract, so each lookup has
     // at most one answer.
-    let mut waiting_ordinal_by_target_name_key = HashMap::new();
+    let mut waiting_ordinal_by_target_name_equivalence_key = HashMap::new();
     for modification in columns_to_modify {
         if !modification.modification_types.contains(&ColumnModificationType::Rename) {
             continue;
@@ -1057,8 +1339,8 @@ fn plan_schema_operations(
         let ordinal_position = modification.old_column_schema.ordinal_position;
         let new_name = &modification.new_column_schema.name;
 
-        waiting_ordinal_by_target_name_key
-            .insert(column_name_comparison.key(new_name), ordinal_position);
+        waiting_ordinal_by_target_name_equivalence_key
+            .insert(column_name_equivalence.equivalence_key(new_name), ordinal_position);
         pending_renames.insert(
             ordinal_position,
             PendingRename {
@@ -1074,8 +1356,9 @@ fn plan_schema_operations(
     let mut ready_renames: BTreeSet<i32> = pending_renames
         .iter()
         .filter_map(|(&ordinal_position, rename)| {
-            (!occupied_name_keys.contains(&column_name_comparison.key(&rename.target_name)))
-                .then_some(ordinal_position)
+            (!occupied_name_equivalence_keys
+                .contains(&column_name_equivalence.equivalence_key(&rename.target_name)))
+            .then_some(ordinal_position)
         })
         .collect();
     let mut temporary_name_sequence = 0_u64;
@@ -1090,10 +1373,13 @@ fn plan_schema_operations(
             // Moving this column consumes its target and frees its current
             // name. If another rename targets the freed name, that rename is
             // now ready; no scan of all pending renames is required.
-            let current_name_key = column_name_comparison.key(&rename.current_column_schema.name);
-            occupied_name_keys.remove(&current_name_key);
-            occupied_name_keys.insert(column_name_comparison.key(&rename.target_name));
-            if let Some(waiting_ordinal) = waiting_ordinal_by_target_name_key.get(&current_name_key)
+            let current_name_equivalence_key =
+                column_name_equivalence.equivalence_key(&rename.current_column_schema.name);
+            occupied_name_equivalence_keys.remove(&current_name_equivalence_key);
+            occupied_name_equivalence_keys
+                .insert(column_name_equivalence.equivalence_key(&rename.target_name));
+            if let Some(waiting_ordinal) =
+                waiting_ordinal_by_target_name_equivalence_key.get(&current_name_equivalence_key)
                 && pending_renames.contains_key(waiting_ordinal)
             {
                 ready_renames.insert(*waiting_ordinal);
@@ -1109,27 +1395,30 @@ fn plan_schema_operations(
             continue;
         }
 
-        // Every remaining target is occupied by another pending rename, so
-        // the endpoint schemas contain a rename cycle. The source statements
-        // necessarily used an intermediate name, but endpoint diffing neither
-        // observes nor needs to recover it. Choose the smallest ordinal as the
-        // stable cycle root and generate exactly one free name for this cycle.
+        // Endpoint validation guarantees that an unchanged column cannot own
+        // a pending rename's target: that would make the target endpoint
+        // non-unique. Therefore, every remaining target must be owned by
+        // another pending rename and the component is a genuine cycle.
         let Some((&ordinal_position, rename)) = pending_renames.first_key_value() else {
             break;
         };
-        debug_assert!(
-            pending_renames.values().any(|pending_rename| {
-                column_name_comparison.key(&pending_rename.current_column_schema.name)
-                    == column_name_comparison.key(&rename.target_name)
-            }),
-            "a blocked pending rename target should be owned by another pending rename"
-        );
+        if !pending_renames.values().any(|pending_rename| {
+            column_name_equivalence.equivalence_key(&pending_rename.current_column_schema.name)
+                == column_name_equivalence.equivalence_key(&rename.target_name)
+        }) {
+            return Err(SchemaPlanError::BlockedRenameTarget {
+                current_column_name: rename.current_column_schema.name.clone(),
+                target_column_name: rename.target_name.clone(),
+            });
+        }
         let temporary_name = loop {
             let candidate = format!(
                 "{SCHEMA_TEMPORARY_COLUMN_PREFIX}{ordinal_position}_{temporary_name_sequence}"
             );
             temporary_name_sequence += 1;
-            if reserved_column_name_keys.insert(column_name_comparison.key(&candidate)) {
+            if reserved_column_name_equivalence_keys
+                .insert(column_name_equivalence.equivalence_key(&candidate))
+            {
                 break candidate;
             }
         };
@@ -1145,10 +1434,14 @@ fn plan_schema_operations(
         // cycle member, after which the ordinary ready path unwinds the cycle.
         let old_column_schema = rename.current_column_schema.clone();
         rename.current_column_schema.name = temporary_name.clone();
-        let old_name_key = column_name_comparison.key(&old_column_schema.name);
-        occupied_name_keys.remove(&old_name_key);
-        occupied_name_keys.insert(column_name_comparison.key(&temporary_name));
-        if let Some(waiting_ordinal) = waiting_ordinal_by_target_name_key.get(&old_name_key) {
+        let old_name_equivalence_key =
+            column_name_equivalence.equivalence_key(&old_column_schema.name);
+        occupied_name_equivalence_keys.remove(&old_name_equivalence_key);
+        occupied_name_equivalence_keys
+            .insert(column_name_equivalence.equivalence_key(&temporary_name));
+        if let Some(waiting_ordinal) =
+            waiting_ordinal_by_target_name_equivalence_key.get(&old_name_equivalence_key)
+        {
             ready_renames.insert(*waiting_ordinal);
         }
         operations.push(SchemaOperation::ModifyColumn {
@@ -1198,7 +1491,7 @@ fn plan_schema_operations(
         }
     }
 
-    operations
+    Ok(operations)
 }
 
 #[cfg(test)]
@@ -1331,8 +1624,18 @@ mod tests {
         ColumnSchema::new(name.to_owned(), Type::TEXT, -1, ordinal_position, true)
     }
 
-    fn operation_names(diff: &SchemaDiff) -> Vec<String> {
-        diff.ordered_operations()
+    fn plan_schema_change(
+        old_schema: &ReplicatedTableSchema,
+        new_schema: &ReplicatedTableSchema,
+        column_name_equivalence: ColumnNameEquivalence,
+    ) -> SchemaPlan {
+        old_schema
+            .plan_schema_change(new_schema, column_name_equivalence)
+            .expect("test schema transition should be plannable")
+    }
+
+    fn operation_names(plan: &SchemaPlan) -> Vec<String> {
+        plan.ordered_operations()
             .iter()
             .map(|operation| match operation {
                 SchemaOperation::DropColumn { column_schema } => {
@@ -1370,29 +1673,31 @@ mod tests {
         old_schema: &ReplicatedTableSchema,
         new_schema: &ReplicatedTableSchema,
     ) {
-        assert_operations_converge_with_comparison(
+        assert_operations_converge_with_equivalence(
             old_schema,
             new_schema,
-            ColumnNameComparison::CaseSensitive,
+            ColumnNameEquivalence::CaseSensitive,
         );
     }
 
-    fn assert_operations_converge_with_comparison(
+    fn assert_operations_converge_with_equivalence(
         old_schema: &ReplicatedTableSchema,
         new_schema: &ReplicatedTableSchema,
-        column_name_comparison: ColumnNameComparison,
+        column_name_equivalence: ColumnNameEquivalence,
     ) {
-        let diff = old_schema.diff(new_schema, column_name_comparison);
+        let plan = plan_schema_change(old_schema, new_schema, column_name_equivalence);
         let mut columns_by_ordinal: BTreeMap<i32, ColumnSchema> = old_schema
             .column_schemas()
             .map(|column| (column.ordinal_position, column.clone()))
             .collect();
         let mut occupied_names: HashMap<String, i32> = old_schema
             .column_schemas()
-            .map(|column| (column_name_comparison.key(&column.name), column.ordinal_position))
+            .map(|column| {
+                (column_name_equivalence.equivalence_key(&column.name), column.ordinal_position)
+            })
             .collect();
 
-        for operation in diff.ordered_operations() {
+        for operation in plan.ordered_operations() {
             match operation {
                 SchemaOperation::DropColumn { column_schema } => {
                     assert_eq!(
@@ -1400,7 +1705,8 @@ mod tests {
                         Some(column_schema.clone())
                     );
                     assert_eq!(
-                        occupied_names.remove(&column_name_comparison.key(&column_schema.name)),
+                        occupied_names
+                            .remove(&column_name_equivalence.equivalence_key(&column_schema.name)),
                         Some(column_schema.ordinal_position)
                     );
                 }
@@ -1412,7 +1718,7 @@ mod tests {
                     );
                     assert_eq!(
                         occupied_names.insert(
-                            column_name_comparison.key(&column_schema.name),
+                            column_name_equivalence.equivalence_key(&column_schema.name),
                             column_schema.ordinal_position,
                         ),
                         None
@@ -1425,13 +1731,14 @@ mod tests {
                     );
                     if old_column_schema.name != new_column_schema.name {
                         assert_eq!(
-                            occupied_names
-                                .remove(&column_name_comparison.key(&old_column_schema.name)),
+                            occupied_names.remove(
+                                &column_name_equivalence.equivalence_key(&old_column_schema.name)
+                            ),
                             Some(old_column_schema.ordinal_position)
                         );
                         assert_eq!(
                             occupied_names.insert(
-                                column_name_comparison.key(&new_column_schema.name),
+                                column_name_equivalence.equivalence_key(&new_column_schema.name),
                                 new_column_schema.ordinal_position,
                             ),
                             None
@@ -1459,6 +1766,24 @@ mod tests {
         for index in start..values.len() {
             values.swap(start, index);
             permutations(values, start + 1, output);
+            values.swap(start, index);
+        }
+    }
+
+    fn partial_permutations(
+        values: &mut [String],
+        start: usize,
+        length: usize,
+        output: &mut Vec<Vec<String>>,
+    ) {
+        if start == length {
+            output.push(values[..length].to_vec());
+            return;
+        }
+
+        for index in start..values.len() {
+            values.swap(start, index);
+            partial_permutations(values, start + 1, length, output);
             values.swap(start, index);
         }
     }
@@ -1552,7 +1877,7 @@ mod tests {
             ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = old_schema.diff(&new_schema);
 
         assert!(diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
@@ -1572,7 +1897,7 @@ mod tests {
             ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = old_schema.diff(&new_schema);
 
         assert!(!diff.is_empty());
         assert_eq!(diff.columns_to_add.len(), 1);
@@ -1594,7 +1919,7 @@ mod tests {
             ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = old_schema.diff(&new_schema);
 
         assert!(!diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
@@ -1615,7 +1940,7 @@ mod tests {
             ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, true),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = old_schema.diff(&new_schema);
 
         assert!(!diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
@@ -1642,7 +1967,7 @@ mod tests {
                 .with_default_expression("'pending'::text".to_owned()),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = old_schema.diff(&new_schema);
 
         assert!(!diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
@@ -1673,7 +1998,7 @@ mod tests {
                 .with_default_expression("'pending'::text".to_owned()),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = old_schema.diff(&new_schema);
 
         assert!(diff.is_empty());
     }
@@ -1689,7 +2014,7 @@ mod tests {
             ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, true),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = old_schema.diff(&new_schema);
 
         assert!(!diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
@@ -1717,7 +2042,7 @@ mod tests {
                 .with_default_expression("'queued'::text".to_owned()),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = old_schema.diff(&new_schema);
 
         assert!(!diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
@@ -1748,7 +2073,7 @@ mod tests {
             ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 4, true),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = old_schema.diff(&new_schema);
 
         assert!(!diff.is_empty());
 
@@ -1778,7 +2103,7 @@ mod tests {
             ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = old_schema.diff(&new_schema);
 
         assert_eq!(diff.columns_to_add.len(), 2);
         let added_names: HashSet<&str> =
@@ -1800,7 +2125,7 @@ mod tests {
             ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let diff = old_schema.diff(&new_schema);
 
         assert!(diff.columns_to_add.is_empty());
         assert_eq!(diff.columns_to_drop.len(), 2);
@@ -1812,58 +2137,63 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_orders_drop_before_reusing_name_for_add() {
+    fn schema_plan_orders_drop_before_reusing_name_for_add() {
         let old_schema = create_replicated_schema(vec![text_column("value", 1)]);
         let new_schema = create_replicated_schema(vec![text_column("value", 2)]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
-        assert_eq!(operation_names(&diff), ["drop:value", "add:value"]);
+        assert_eq!(operation_names(&plan), ["drop:value", "add:value"]);
     }
 
     #[test]
-    fn schema_diff_orders_rename_chain_without_temporary_name() {
+    fn schema_plan_orders_rename_chain_without_temporary_name() {
         let old_schema = create_replicated_schema(vec![text_column("a", 1), text_column("b", 2)]);
         let new_schema = create_replicated_schema(vec![text_column("b", 1), text_column("c", 2)]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
-        assert_eq!(operation_names(&diff), ["rename:b->c", "rename:a->b"]);
+        assert_eq!(operation_names(&plan), ["rename:b->c", "rename:a->b"]);
     }
 
     #[test]
-    fn schema_diff_orders_rename_before_adding_old_name() {
+    fn schema_plan_orders_rename_before_adding_old_name() {
         let old_schema = create_replicated_schema(vec![text_column("a", 1)]);
         let new_schema = create_replicated_schema(vec![text_column("b", 1), text_column("a", 2)]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
-        assert_eq!(operation_names(&diff), ["rename:a->b", "add:a"]);
+        assert_eq!(operation_names(&plan), ["rename:a->b", "add:a"]);
     }
 
     #[test]
-    fn schema_diff_orders_drop_before_rename_target_reuse() {
+    fn schema_plan_orders_drop_before_rename_target_reuse() {
         let old_schema = create_replicated_schema(vec![text_column("a", 1), text_column("b", 2)]);
         let new_schema = create_replicated_schema(vec![text_column("b", 1)]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
-        assert_eq!(operation_names(&diff), ["drop:b", "rename:a->b"]);
+        assert_eq!(operation_names(&plan), ["drop:b", "rename:a->b"]);
     }
 
     #[test]
-    fn schema_diff_orders_unrelated_drop_before_rename() {
+    fn schema_plan_orders_unrelated_drop_before_rename() {
         let old_schema =
             create_replicated_schema(vec![text_column("a", 1), text_column("unused", 2)]);
         let new_schema = create_replicated_schema(vec![text_column("b", 1)]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
-        assert_eq!(operation_names(&diff), ["drop:unused", "rename:a->b"]);
+        assert_eq!(operation_names(&plan), ["drop:unused", "rename:a->b"]);
     }
 
     #[test]
-    fn schema_diff_plans_only_final_state_after_ddl_compression() {
+    fn schema_plan_plans_only_final_state_after_ddl_compression() {
         // The source may have renamed `a` through one or more transient names,
         // and may have dropped and recreated `value` repeatedly. With no DML
         // between those states, DDL snapshotting exposes only these endpoints.
@@ -1872,14 +2202,15 @@ mod tests {
         let new_schema =
             create_replicated_schema(vec![text_column("final_a", 1), text_column("value", 3)]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
-        assert_eq!(operation_names(&diff), ["drop:value", "rename:a->final_a", "add:value"]);
+        assert_eq!(operation_names(&plan), ["drop:value", "rename:a->final_a", "add:value"]);
         assert_operations_converge(&old_schema, &new_schema);
     }
 
     #[test]
-    fn schema_diff_uses_one_temporary_name_for_rename_cycle() {
+    fn schema_plan_uses_one_temporary_name_for_rename_cycle() {
         // PostgreSQL can produce this endpoint transition through staged
         // renames such as `a -> swap`, `b -> a`, and `swap -> b`. Without DML
         // between those statements, pgoutput exposes only the final relation
@@ -1887,11 +2218,12 @@ mod tests {
         let old_schema = create_replicated_schema(vec![text_column("a", 1), text_column("b", 2)]);
         let new_schema = create_replicated_schema(vec![text_column("b", 1), text_column("a", 2)]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
-        assert!(diff.has_rename_cycles());
+        assert!(plan.has_rename_cycles());
         assert_eq!(
-            operation_names(&diff),
+            operation_names(&plan),
             [
                 "rename:a->supabase_etl_schema_tmp_1_0",
                 "rename:b->a",
@@ -1902,7 +2234,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_deterministically_breaks_each_disjoint_rename_cycle_once() {
+    fn schema_plan_deterministically_breaks_each_disjoint_rename_cycle_once() {
         let old_schema = create_replicated_schema(vec![
             text_column("a", 1),
             text_column("b", 2),
@@ -1925,16 +2257,17 @@ mod tests {
         ];
 
         for _ in 0..10 {
-            let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+            let plan =
+                plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
-            assert!(diff.has_rename_cycles());
-            assert_eq!(operation_names(&diff), expected);
+            assert!(plan.has_rename_cycles());
+            assert_eq!(operation_names(&plan), expected);
             assert_operations_converge(&old_schema, &new_schema);
         }
     }
 
     #[test]
-    fn schema_diff_temporary_name_avoids_endpoint_columns() {
+    fn schema_plan_temporary_name_avoids_endpoint_columns() {
         let old_schema = create_replicated_schema(vec![
             text_column("a", 1),
             text_column("b", 2),
@@ -1946,10 +2279,14 @@ mod tests {
             text_column("SUPABASE_ETL_SCHEMA_TMP_1_0", 3),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::AsciiCaseInsensitive);
+        let plan = plan_schema_change(
+            &old_schema,
+            &new_schema,
+            ColumnNameEquivalence::AsciiCaseInsensitive,
+        );
 
         assert_eq!(
-            operation_names(&diff),
+            operation_names(&plan),
             [
                 "rename:a->supabase_etl_schema_tmp_1_1",
                 "rename:b->a",
@@ -1959,90 +2296,302 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_respects_destination_column_name_comparison() {
+    fn schema_plan_respects_destination_column_name_equivalence() {
         let old_schema = create_replicated_schema(vec![text_column("A", 1), text_column("b", 2)]);
         let new_schema = create_replicated_schema(vec![text_column("B", 1), text_column("A", 2)]);
 
-        let case_sensitive_diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
-        assert_eq!(operation_names(&case_sensitive_diff), ["rename:A->B", "rename:b->A"]);
-        assert_operations_converge_with_comparison(
+        let case_sensitive_plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
+        assert_eq!(operation_names(&case_sensitive_plan), ["rename:A->B", "rename:b->A"]);
+        assert_operations_converge_with_equivalence(
             &old_schema,
             &new_schema,
-            ColumnNameComparison::CaseSensitive,
+            ColumnNameEquivalence::CaseSensitive,
         );
 
-        let case_insensitive_diff =
-            old_schema.diff(&new_schema, ColumnNameComparison::AsciiCaseInsensitive);
+        let case_insensitive_plan = plan_schema_change(
+            &old_schema,
+            &new_schema,
+            ColumnNameEquivalence::AsciiCaseInsensitive,
+        );
         assert_eq!(
-            operation_names(&case_insensitive_diff),
+            operation_names(&case_insensitive_plan),
             [
                 "rename:A->supabase_etl_schema_tmp_1_0",
                 "rename:b->A",
                 "rename:supabase_etl_schema_tmp_1_0->B",
             ]
         );
-        assert_operations_converge_with_comparison(
+        assert_operations_converge_with_equivalence(
             &old_schema,
             &new_schema,
-            ColumnNameComparison::AsciiCaseInsensitive,
+            ColumnNameEquivalence::AsciiCaseInsensitive,
         );
 
         let old_schema = create_replicated_schema(vec![text_column("Ä", 1), text_column("b", 2)]);
         let new_schema = create_replicated_schema(vec![text_column("B", 1), text_column("ä", 2)]);
-        let unicode_case_insensitive_diff =
-            old_schema.diff(&new_schema, ColumnNameComparison::UnicodeCaseInsensitive);
+        let unicode_case_insensitive_plan = plan_schema_change(
+            &old_schema,
+            &new_schema,
+            ColumnNameEquivalence::UnicodeCaseInsensitive,
+        );
         assert_eq!(
-            operation_names(&unicode_case_insensitive_diff),
+            operation_names(&unicode_case_insensitive_plan),
             [
                 "rename:Ä->supabase_etl_schema_tmp_1_0",
                 "rename:b->ä",
                 "rename:supabase_etl_schema_tmp_1_0->B",
             ]
         );
-        assert_operations_converge_with_comparison(
+        assert_operations_converge_with_equivalence(
             &old_schema,
             &new_schema,
-            ColumnNameComparison::UnicodeCaseInsensitive,
+            ColumnNameEquivalence::UnicodeCaseInsensitive,
         );
     }
 
     #[test]
-    fn schema_diff_handles_case_insensitive_self_cycles_chains_and_drops() {
+    fn schema_plan_rejects_destination_equivalent_target_columns() {
+        let old_schema = create_replicated_schema(vec![text_column("a", 1), text_column("c", 2)]);
+        let new_schema = create_replicated_schema(vec![text_column("a", 1), text_column("A", 2)]);
+
+        // Diffing records the exact PostgreSQL rename independently of the
+        // destination namespace in which it will eventually be planned.
+        let diff = old_schema.diff(&new_schema);
+        assert_eq!(diff.columns_to_modify.len(), 1);
+        assert_eq!(diff.columns_to_modify[0].old_column_schema.name, "c");
+        assert_eq!(diff.columns_to_modify[0].new_column_schema.name, "A");
+
+        for equivalence in [
+            ColumnNameEquivalence::AsciiCaseInsensitive,
+            ColumnNameEquivalence::UnicodeCaseInsensitive,
+        ] {
+            let error = diff
+                .clone()
+                .plan(old_schema.column_schemas().map(|column| column.name.as_str()), equivalence)
+                .expect_err("case-insensitive destination should reject colliding target names");
+
+            assert_eq!(
+                error,
+                SchemaPlanError::DestinationColumnNameCollision {
+                    endpoint: SchemaEndpoint::Target,
+                    column_name_equivalence: equivalence,
+                    first_column_name: "a".to_owned(),
+                    second_column_name: "A".to_owned(),
+                }
+            );
+        }
+
+        let case_sensitive_plan = diff
+            .plan(
+                old_schema.column_schemas().map(|column| column.name.as_str()),
+                ColumnNameEquivalence::CaseSensitive,
+            )
+            .expect("case-sensitive destination should represent both target names");
+        assert_eq!(operation_names(&case_sensitive_plan), ["rename:c->A"]);
+    }
+
+    #[test]
+    fn schema_plan_rejects_destination_equivalent_current_columns() {
+        let old_schema = create_replicated_schema(vec![text_column("a", 1), text_column("A", 2)]);
+        let new_schema = old_schema.clone();
+
+        old_schema
+            .validate_destination_column_names(ColumnNameEquivalence::CaseSensitive)
+            .expect("case-sensitive destination should represent both exact names");
+
+        let error = old_schema
+            .plan_schema_change(&new_schema, ColumnNameEquivalence::AsciiCaseInsensitive)
+            .expect_err("case-insensitive destination should reject colliding current names");
+
+        assert_eq!(
+            error,
+            SchemaPlanError::DestinationColumnNameCollision {
+                endpoint: SchemaEndpoint::Current,
+                column_name_equivalence: ColumnNameEquivalence::AsciiCaseInsensitive,
+                first_column_name: "a".to_owned(),
+                second_column_name: "A".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn schema_plan_rejects_destination_equivalent_added_column() {
+        let old_schema = create_replicated_schema(vec![text_column("a", 1)]);
+        let new_schema = create_replicated_schema(vec![text_column("a", 1), text_column("A", 2)]);
+
+        let error = old_schema
+            .plan_schema_change(&new_schema, ColumnNameEquivalence::AsciiCaseInsensitive)
+            .expect_err("case-insensitive destination should reject colliding added name");
+
+        assert_eq!(
+            error,
+            SchemaPlanError::DestinationColumnNameCollision {
+                endpoint: SchemaEndpoint::Target,
+                column_name_equivalence: ColumnNameEquivalence::AsciiCaseInsensitive,
+                first_column_name: "a".to_owned(),
+                second_column_name: "A".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn schema_plan_distinguishes_ascii_and_unicode_case_equivalence() {
+        let old_schema = create_replicated_schema(vec![text_column("x", 1)]);
+        let new_schema = create_replicated_schema(vec![
+            text_column("x", 1),
+            text_column("Ä", 2),
+            text_column("ä", 3),
+        ]);
+
+        old_schema
+            .plan_schema_change(&new_schema, ColumnNameEquivalence::AsciiCaseInsensitive)
+            .expect("ASCII case equivalence should keep non-ASCII names distinct");
+        let error = old_schema
+            .plan_schema_change(&new_schema, ColumnNameEquivalence::UnicodeCaseInsensitive)
+            .expect_err("Unicode case equivalence should reject the colliding names");
+
+        assert_eq!(
+            error,
+            SchemaPlanError::DestinationColumnNameCollision {
+                endpoint: SchemaEndpoint::Target,
+                column_name_equivalence: ColumnNameEquivalence::UnicodeCaseInsensitive,
+                first_column_name: "Ä".to_owned(),
+                second_column_name: "ä".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn schema_plan_rejects_diff_referencing_missing_current_column() {
+        let diff = SchemaDiff::new(
+            Vec::new(),
+            Vec::new(),
+            vec![ColumnModification {
+                old_column_schema: text_column("missing", 1),
+                new_column_schema: text_column("renamed", 1),
+                modification_types: vec![ColumnModificationType::Rename],
+            }],
+        );
+
+        let error = diff
+            .plan(["existing"], ColumnNameEquivalence::CaseSensitive)
+            .expect_err("invalid diff should fail instead of entering the rename planner");
+
+        assert_eq!(
+            error,
+            SchemaPlanError::CurrentColumnNotFound { column_name: "missing".to_owned() }
+        );
+    }
+
+    #[test]
+    fn schema_plan_rejects_metadata_change_for_missing_current_column() {
+        let diff = SchemaDiff::new(
+            Vec::new(),
+            Vec::new(),
+            vec![ColumnModification {
+                old_column_schema: text_column("missing", 1),
+                new_column_schema: ColumnSchema::new(
+                    "missing".to_owned(),
+                    Type::TEXT,
+                    -1,
+                    1,
+                    false,
+                ),
+                modification_types: vec![ColumnModificationType::Nullability],
+            }],
+        );
+
+        let error = diff
+            .plan(["existing"], ColumnNameEquivalence::CaseSensitive)
+            .expect_err("all modification kinds should validate their current column");
+
+        assert_eq!(
+            error,
+            SchemaPlanError::CurrentColumnNotFound { column_name: "missing".to_owned() }
+        );
+    }
+
+    #[test]
+    fn schema_plan_rejects_current_column_classified_multiple_times() {
+        let column = text_column("existing", 1);
+        let diff = SchemaDiff::new(
+            Vec::new(),
+            vec![column.clone()],
+            vec![ColumnModification {
+                old_column_schema: column.clone(),
+                new_column_schema: ColumnSchema::new(
+                    column.name.clone(),
+                    Type::TEXT,
+                    -1,
+                    column.ordinal_position,
+                    false,
+                ),
+                modification_types: vec![ColumnModificationType::Nullability],
+            }],
+        );
+
+        let error = diff
+            .plan(["existing"], ColumnNameEquivalence::CaseSensitive)
+            .expect_err("one current column cannot be both dropped and modified");
+
+        assert_eq!(
+            error,
+            SchemaPlanError::CurrentColumnClassifiedMultipleTimes {
+                column_name: "existing".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn schema_plan_handles_case_insensitive_self_cycles_chains_and_drops() {
         let old_schema = create_replicated_schema(vec![text_column("a", 1)]);
         let new_schema = create_replicated_schema(vec![text_column("A", 1)]);
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::AsciiCaseInsensitive);
-        assert_eq!(
-            operation_names(&diff),
-            ["rename:a->supabase_etl_schema_tmp_1_0", "rename:supabase_etl_schema_tmp_1_0->A",]
-        );
-        assert_operations_converge_with_comparison(
+        let plan = plan_schema_change(
             &old_schema,
             &new_schema,
-            ColumnNameComparison::AsciiCaseInsensitive,
+            ColumnNameEquivalence::AsciiCaseInsensitive,
+        );
+        assert_eq!(
+            operation_names(&plan),
+            ["rename:a->supabase_etl_schema_tmp_1_0", "rename:supabase_etl_schema_tmp_1_0->A",]
+        );
+        assert_operations_converge_with_equivalence(
+            &old_schema,
+            &new_schema,
+            ColumnNameEquivalence::AsciiCaseInsensitive,
         );
 
         let old_schema = create_replicated_schema(vec![text_column("a", 1), text_column("B", 2)]);
         let new_schema = create_replicated_schema(vec![text_column("b", 1), text_column("C", 2)]);
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::AsciiCaseInsensitive);
-        assert_eq!(operation_names(&diff), ["rename:B->C", "rename:a->b"]);
-        assert_operations_converge_with_comparison(
+        let plan = plan_schema_change(
             &old_schema,
             &new_schema,
-            ColumnNameComparison::AsciiCaseInsensitive,
+            ColumnNameEquivalence::AsciiCaseInsensitive,
+        );
+        assert_eq!(operation_names(&plan), ["rename:B->C", "rename:a->b"]);
+        assert_operations_converge_with_equivalence(
+            &old_schema,
+            &new_schema,
+            ColumnNameEquivalence::AsciiCaseInsensitive,
         );
 
         let new_schema = create_replicated_schema(vec![text_column("b", 1)]);
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::AsciiCaseInsensitive);
-        assert_eq!(operation_names(&diff), ["drop:B", "rename:a->b"]);
-        assert_operations_converge_with_comparison(
+        let plan = plan_schema_change(
             &old_schema,
             &new_schema,
-            ColumnNameComparison::AsciiCaseInsensitive,
+            ColumnNameEquivalence::AsciiCaseInsensitive,
+        );
+        assert_eq!(operation_names(&plan), ["drop:B", "rename:a->b"]);
+        assert_operations_converge_with_equivalence(
+            &old_schema,
+            &new_schema,
+            ColumnNameEquivalence::AsciiCaseInsensitive,
         );
     }
 
     #[test]
-    fn schema_diff_operations_converge_for_every_four_column_rename_permutation() {
+    fn schema_plan_operations_converge_for_every_four_column_rename_permutation() {
         let old_schema = create_replicated_schema(vec![
             text_column("a", 1),
             text_column("b", 2),
@@ -2067,7 +2616,84 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_deterministically_converges_for_mixed_endpoint_schemas() {
+    fn schema_plan_exhaustively_validates_case_insensitive_endpoint_transitions() {
+        let old_schema = create_replicated_schema(vec![
+            text_column("a", 1),
+            text_column("b", 2),
+            text_column("Ä", 3),
+        ]);
+
+        for column_name_equivalence in [
+            ColumnNameEquivalence::AsciiCaseInsensitive,
+            ColumnNameEquivalence::UnicodeCaseInsensitive,
+        ] {
+            // Every subset of the three old and two possible new ordinals,
+            // combined with every exact-name assignment, covers drops, adds,
+            // chains, cycles, case-only renames, name reuse, and collisions.
+            for ordinal_mask in 0_u8..(1 << 5) {
+                let retained_ordinals: Vec<i32> = (1..=5)
+                    .filter(|ordinal_position| ordinal_mask & (1 << (ordinal_position - 1)) != 0)
+                    .collect();
+                let mut available_names = vec![
+                    "a".to_owned(),
+                    "A".to_owned(),
+                    "b".to_owned(),
+                    "B".to_owned(),
+                    "Ä".to_owned(),
+                    "ä".to_owned(),
+                ];
+                let mut name_assignments = Vec::new();
+                partial_permutations(
+                    &mut available_names,
+                    0,
+                    retained_ordinals.len(),
+                    &mut name_assignments,
+                );
+
+                for names in name_assignments {
+                    let new_schema = create_replicated_schema(
+                        retained_ordinals
+                            .iter()
+                            .zip(&names)
+                            .map(|(&ordinal_position, name)| text_column(name, ordinal_position))
+                            .collect(),
+                    );
+                    let unique_equivalence_key_count = names
+                        .iter()
+                        .map(|name| column_name_equivalence.equivalence_key(name))
+                        .collect::<HashSet<_>>()
+                        .len();
+                    let result =
+                        old_schema.plan_schema_change(&new_schema, column_name_equivalence);
+
+                    if unique_equivalence_key_count != names.len() {
+                        assert!(matches!(
+                            result,
+                            Err(SchemaPlanError::DestinationColumnNameCollision {
+                                endpoint: SchemaEndpoint::Target,
+                                column_name_equivalence: error_equivalence,
+                                ..
+                            }) if error_equivalence == column_name_equivalence
+                        ));
+                    } else {
+                        let plan = result.expect("injective endpoints should be plannable");
+                        assert_eq!(
+                            plan,
+                            plan_schema_change(&old_schema, &new_schema, column_name_equivalence,)
+                        );
+                        assert_operations_converge_with_equivalence(
+                            &old_schema,
+                            &new_schema,
+                            column_name_equivalence,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn schema_plan_deterministically_converges_for_mixed_endpoint_schemas() {
         let old_schema = create_replicated_schema(vec![
             text_column("a", 1),
             text_column("b", 2),
@@ -2093,25 +2719,37 @@ mod tests {
                         .map(|(&ordinal_position, name)| text_column(name, ordinal_position))
                         .collect(),
                 );
-                let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+                let plan = plan_schema_change(
+                    &old_schema,
+                    &new_schema,
+                    ColumnNameEquivalence::CaseSensitive,
+                );
 
-                assert_eq!(diff, old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive));
+                assert_eq!(
+                    plan,
+                    plan_schema_change(
+                        &old_schema,
+                        &new_schema,
+                        ColumnNameEquivalence::CaseSensitive
+                    )
+                );
                 assert_operations_converge(&old_schema, &new_schema);
             }
         }
     }
 
     #[test]
-    fn schema_diff_modifies_column_after_final_rename() {
+    fn schema_plan_modifies_column_after_final_rename() {
         let old_schema = create_replicated_schema(vec![text_column("a", 1)]);
         let new_schema = create_replicated_schema(vec![
             text_column("b", 1).with_default_expression("'new'::text".to_owned()),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
         assert!(matches!(
-            diff.ordered_operations(),
+            plan.ordered_operations(),
             [
                 SchemaOperation::ModifyColumn {
                     new_column_schema: renamed_column_schema,
@@ -2128,7 +2766,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_applies_structural_operations_before_modifying_a_renamed_column() {
+    fn schema_plan_applies_structural_operations_before_modifying_a_renamed_column() {
         let old_schema = create_replicated_schema(vec![
             ColumnSchema::new("a".to_owned(), Type::TEXT, -1, 1, false)
                 .with_default_expression("'old'::text".to_owned()),
@@ -2140,10 +2778,11 @@ mod tests {
             text_column("a", 4),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
         assert!(matches!(
-            diff.ordered_operations(),
+            plan.ordered_operations(),
             [
                 SchemaOperation::DropColumn { column_schema: blocking_drop },
                 SchemaOperation::DropColumn { column_schema: unrelated_drop },
@@ -2175,7 +2814,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_modifies_cycle_member_after_its_final_rename() {
+    fn schema_plan_modifies_cycle_member_after_its_final_rename() {
         let old_schema = create_replicated_schema(vec![
             ColumnSchema::new("a".to_owned(), Type::TEXT, -1, 1, false)
                 .with_default_expression("'old'::text".to_owned()),
@@ -2186,10 +2825,11 @@ mod tests {
             text_column("a", 2),
         ]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
         assert!(matches!(
-            diff.ordered_operations(),
+            plan.ordered_operations(),
             [
                 SchemaOperation::ModifyColumn {
                     old_column_schema: first_old_column_schema,
@@ -2229,13 +2869,14 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_handles_columns_constructed_out_of_ordinal_order() {
+    fn schema_plan_handles_columns_constructed_out_of_ordinal_order() {
         let old_schema = create_replicated_schema(vec![text_column("b", 2), text_column("a", 1)]);
         let new_schema = create_replicated_schema(vec![text_column("c", 3), text_column("b", 2)]);
 
-        let diff = old_schema.diff(&new_schema, ColumnNameComparison::CaseSensitive);
+        let plan =
+            plan_schema_change(&old_schema, &new_schema, ColumnNameEquivalence::CaseSensitive);
 
-        assert_eq!(operation_names(&diff), ["drop:a", "add:c"]);
+        assert_eq!(operation_names(&plan), ["drop:a", "add:c"]);
         assert_operations_converge(&old_schema, &new_schema);
     }
 }

@@ -11,7 +11,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{DeleteEvent, Event, InsertEvent, UpdateEvent},
-    schema::{ColumnNameComparison, ColumnSchema, ReplicatedTableSchema, TableId},
+    schema::{ColumnNameEquivalence, ColumnSchema, ReplicatedTableSchema, TableId},
     store::DestinationStore,
 };
 use tracing::{info, warn};
@@ -388,6 +388,8 @@ where
 
         let new_columns: Vec<_> = new_schema.column_schemas().cloned().collect();
         schema::validate_no_cdc_collisions(&new_columns).map_err(EtlError::from)?;
+        let plan =
+            current_schema.plan_schema_change(new_schema, ColumnNameEquivalence::CaseSensitive)?;
 
         let table_name = try_stringify_table_name(new_schema.name())?.to_uppercase();
         self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
@@ -404,9 +406,8 @@ where
         );
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
-        let diff = current_schema.diff(new_schema, ColumnNameComparison::CaseSensitive);
         if let Err(err) =
-            self.client.apply_schema_diff(&table_name, &diff).await.map_err(EtlError::from)
+            self.client.apply_schema_plan(&table_name, &plan).await.map_err(EtlError::from)
         {
             warn!(
                 table_id = ?table_id,
