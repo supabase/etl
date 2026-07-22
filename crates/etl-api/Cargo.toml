@@ -18,12 +18,13 @@ path = "src/main.rs"
 name = "etl-api"
 
 [features]
-default = ["bigquery", "clickhouse", "ducklake", "iceberg", "snowflake"]
+default = ["bigquery", "clickhouse", "ducklake", "iceberg", "snowflake", "postgres"]
 bigquery = ["etl-destinations/bigquery"]
 clickhouse = ["etl-destinations/clickhouse"]
 ducklake = ["etl-destinations/ducklake"]
 iceberg = ["etl-destinations/iceberg"]
 snowflake = ["etl-destinations/snowflake"]
+postgres = ["etl-destinations/postgres"]
 
 [dependencies]
 

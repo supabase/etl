@@ -61,6 +61,12 @@ impl DestinationValidator {
                 &[IdentityType::Full],
                 &[IdentityType::PrimaryKey, IdentityType::AlternativeKey, IdentityType::Full],
             ),
+            ApiDestinationConfig::Postgres { .. } => ReplicaIdentityValidator::new(
+                publication_name,
+                "Postgres",
+                &[IdentityType::PrimaryKey, IdentityType::Full],
+                &[IdentityType::PrimaryKey, IdentityType::Full],
+            ),
         })
     }
 
@@ -115,6 +121,7 @@ impl Validator for DestinationValidator {
             ApiDestinationConfig::Iceberg { .. } => iceberg::validate(&self.config, ctx).await,
             ApiDestinationConfig::Ducklake { .. } => ducklake::validate(&self.config, ctx).await,
             ApiDestinationConfig::Snowflake { .. } => snowflake::validate(&self.config, ctx).await,
+            ApiDestinationConfig::Postgres { .. } => postgres::validate(&self.config, ctx).await,
         }?;
 
         if let Some(validator) = self.replica_identity_validator() {
@@ -325,3 +332,43 @@ mod snowflake {
 }
 
 disabled_destination!(snowflake, "snowflake", "Snowflake");
+
+/// Postgres validation adapter.
+#[cfg(feature = "postgres")]
+mod postgres {
+    use super::{ApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
+
+    /// Validates a Postgres destination configuration.
+    pub(super) async fn validate(
+        config: &ApiDestinationConfig,
+        _ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        let ApiDestinationConfig::Postgres { host, name, username, .. } = config else {
+            unreachable!("Destination config should match Postgres.");
+        };
+
+        let mut failures = Vec::new();
+        if host.trim().is_empty() {
+            failures.push(ValidationFailure::critical(
+                "Postgres Host Required",
+                "Enter the Postgres host that ETL should connect to.",
+            ));
+        }
+        if name.trim().is_empty() {
+            failures.push(ValidationFailure::critical(
+                "Postgres Database Required",
+                "Choose the Postgres database where replicated tables should be written.",
+            ));
+        }
+        if username.trim().is_empty() {
+            failures.push(ValidationFailure::critical(
+                "Postgres Username Required",
+                "Enter the Postgres user that ETL should connect with.",
+            ));
+        }
+
+        Ok(failures)
+    }
+}
+
+disabled_destination!(postgres, "postgres", "Postgres");

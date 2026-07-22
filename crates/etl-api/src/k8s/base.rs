@@ -100,6 +100,11 @@ pub enum DestinationType {
         /// secret entry.
         passphrase_secret_required: bool,
     },
+    /// Postgres destination.
+    Postgres {
+        /// Whether the StatefulSet must reference the Postgres password secret.
+        password_secret_required: bool,
+    },
 }
 
 impl DestinationType {
@@ -112,6 +117,7 @@ impl DestinationType {
             DestinationType::ClickHouse { .. } => DestinationKind::ClickHouse,
             DestinationType::Ducklake => DestinationKind::Ducklake,
             DestinationType::Snowflake { .. } => DestinationKind::Snowflake,
+            DestinationType::Postgres { .. } => DestinationKind::Postgres,
         }
     }
 }
@@ -130,6 +136,9 @@ impl From<&StoredDestinationConfig> for DestinationType {
                 DestinationType::Snowflake {
                     passphrase_secret_required: private_key_passphrase.is_some(),
                 }
+            }
+            StoredDestinationConfig::Postgres { password, .. } => {
+                DestinationType::Postgres { password_secret_required: password.is_some() }
             }
         }
     }

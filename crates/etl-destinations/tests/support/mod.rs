@@ -3,7 +3,8 @@ pub(crate) mod bigquery;
 pub(crate) mod clickhouse;
 #[cfg(any(
     all(feature = "bigquery", feature = "test-utils"),
-    all(feature = "clickhouse", feature = "test-utils")
+    all(feature = "clickhouse", feature = "test-utils"),
+    all(feature = "postgres", feature = "test-utils")
 ))]
 pub(crate) mod crypto;
 #[cfg(feature = "ducklake")]

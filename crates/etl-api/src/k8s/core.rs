@@ -95,6 +95,13 @@ pub enum Secrets {
         /// S3-compatible secret access key.
         s3_secret_access_key: String,
     },
+    /// Credentials for Postgres destinations.
+    Postgres {
+        /// PostgreSQL source database password.
+        postgres_password: String,
+        /// Destination Postgres password.
+        password: Option<String>,
+    },
     /// Credentials for Snowflake destinations.
     Snowflake {
         /// PostgreSQL source database password.
@@ -360,6 +367,10 @@ fn build_secrets_from_configs(
                     .map(|p| p.expose_secret().to_owned()),
             }
         }
+        StoredDestinationConfig::Postgres { password, .. } => Secrets::Postgres {
+            postgres_password,
+            password: password.as_ref().map(|p| p.expose_secret().to_owned()),
+        },
     };
 
     Ok(secrets)
@@ -432,6 +443,14 @@ async fn create_or_update_dynamic_replicator_secrets(
                 .await?;
         }
         Secrets::ClickHouse { postgres_password, password } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
+            if let Some(password) = password.as_deref() {
+                k8s_client.create_or_update_clickhouse_secret(prefix, Some(password)).await?;
+            } else {
+                k8s_client.delete_clickhouse_secret(prefix).await?;
+            }
+        }
+        Secrets::Postgres { postgres_password, password } => {
             k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
             if let Some(password) = password.as_deref() {
                 k8s_client.create_or_update_clickhouse_secret(prefix, Some(password)).await?;

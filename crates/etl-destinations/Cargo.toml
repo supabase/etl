@@ -83,10 +83,22 @@ snowflake = [
     "dep:tracing",
     "dep:zstd",
 ]
+postgres = [
+    "dep:bytes",
+    "dep:etl-postgres",
+    "dep:parking_lot",
+    "dep:pg_escape",
+    "dep:rustls",
+    "dep:serde_json",
+    "dep:tokio",
+    "dep:tokio-postgres",
+    "dep:tracing",
+    "dep:uuid",
+]
 egress = ["etl/egress"]
-# We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only
-# put here the extra dependencies needed.
-test-utils = ["dep:uuid"]
+# We assume that `test-utils` is always used in conjunction with a destination
+# feature; uuid is the shared extra dependency for test helpers.
+test-utils = ["dep:uuid", "etl-postgres?/test-utils"]
 
 [dependencies]
 
@@ -101,6 +113,7 @@ duckdb = { workspace = true, optional = true, features = ["appender-arrow", "bun
 etl = { workspace = true }
 etl-config = { workspace = true }
 etl-maintenance = { workspace = true, optional = true }
+etl-postgres = { workspace = true, optional = true, features = ["tokio"] }
 futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
 humantime = { workspace = true, optional = true }
@@ -117,6 +130,7 @@ r2d2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
 regex = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls"] }
+rustls = { workspace = true, optional = true, features = ["aws-lc-rs", "logging"] }
 secrecy = { workspace = true, optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
