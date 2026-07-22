@@ -607,6 +607,20 @@ impl From<std::str::Utf8Error> for EtlError {
     }
 }
 
+/// Converts [`simdutf8::basic::Utf8Error`] to [`EtlError`] with
+/// [`ErrorKind::ConversionError`].
+impl From<simdutf8::basic::Utf8Error> for EtlError {
+    fn from(err: simdutf8::basic::Utf8Error) -> EtlError {
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::ConversionError,
+            Cow::Borrowed("UTF-8 conversion failed"),
+            None,
+            Some(source),
+        )
+    }
+}
+
 /// Converts [`std::string::FromUtf8Error`] to [`EtlError`] with
 /// [`ErrorKind::ConversionError`].
 impl From<std::string::FromUtf8Error> for EtlError {
