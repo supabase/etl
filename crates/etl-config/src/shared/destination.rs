@@ -4,6 +4,8 @@ use url::Url;
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
+use crate::shared::connection::{PgConnectionConfig, PgConnectionConfigWithoutSecrets};
+
 const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
@@ -76,6 +78,8 @@ pub enum DestinationKind {
     Iceberg,
     /// Snowflake destination.
     Snowflake,
+    /// Postgres destination.
+    Postgres,
 }
 
 impl DestinationKind {
@@ -87,6 +91,7 @@ impl DestinationKind {
             DestinationKind::Ducklake => "ducklake",
             DestinationKind::Iceberg => "iceberg",
             DestinationKind::Snowflake => "snowflake",
+            DestinationKind::Postgres => "postgres",
         }
     }
 }
@@ -195,6 +200,15 @@ pub enum DestinationConfig {
         /// Snowflake role.
         role: Option<String>,
     },
+    /// Postgres destination configuration.
+    Postgres {
+        /// Connection settings for the destination Postgres database.
+        pg_connection: PgConnectionConfig,
+        /// Optional schema override. When set, all tables are created in this
+        /// schema while preserving source table names. When omitted, source
+        /// `schema.table` names are preserved.
+        destination_schema: Option<String>,
+    },
 }
 
 impl DestinationConfig {
@@ -211,6 +225,7 @@ impl DestinationConfig {
             DestinationConfig::Iceberg { .. } => DestinationKind::Iceberg,
             DestinationConfig::Ducklake { .. } => DestinationKind::Ducklake,
             DestinationConfig::Snowflake { .. } => DestinationKind::Snowflake,
+            DestinationConfig::Postgres { .. } => DestinationKind::Postgres,
         }
     }
 }
@@ -413,6 +428,14 @@ pub enum DestinationConfigWithoutSecrets {
         #[serde(skip_serializing_if = "Option::is_none")]
         role: Option<String>,
     },
+    /// Postgres destination configuration without secrets.
+    Postgres {
+        /// Connection settings for the destination Postgres database.
+        pg_connection: PgConnectionConfigWithoutSecrets,
+        /// Optional schema override.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination_schema: Option<String>,
+    },
 }
 
 impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
@@ -477,6 +500,12 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 schema,
                 role,
             },
+            DestinationConfig::Postgres { pg_connection, destination_schema } => {
+                DestinationConfigWithoutSecrets::Postgres {
+                    pg_connection: pg_connection.into(),
+                    destination_schema,
+                }
+            }
         }
     }
 }
@@ -518,5 +547,6 @@ mod tests {
         assert_eq!(DestinationKind::Ducklake.as_str(), "ducklake");
         assert_eq!(DestinationKind::Iceberg.as_str(), "iceberg");
         assert_eq!(DestinationKind::Snowflake.as_str(), "snowflake");
+        assert_eq!(DestinationKind::Postgres.as_str(), "postgres");
     }
 }

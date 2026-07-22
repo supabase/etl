@@ -10,7 +10,7 @@ current implementation is intentionally conservative: the source-side event
 trigger captures a rich PostgreSQL-shaped snapshot, while ETL currently models
 well-understood column changes: **adds, drops, renames, and column default
 changes**. Built-in destination support varies by destination DDL
-capabilities. **BigQuery, ClickHouse, DuckLake, and Snowflake** apply supported
+capabilities. **BigQuery, ClickHouse, DuckLake, Snowflake, and Postgres** apply supported
 schema changes automatically; Iceberg is deprecated for new deployments and does
 not support schema-change DDL.
 
@@ -75,6 +75,7 @@ ETL has one shared schema-change signal, but **DDL behavior is implemented per d
 |-------------|----------------------|
 | BigQuery | Supports add, drop, rename, `REQUIRED` to `NULLABLE` relaxation, and supported literal default metadata. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. PostgreSQL remains responsible for enforcing later `SET NOT NULL` changes because BigQuery cannot tighten an existing column in place. |
 | ClickHouse | Supports add, drop, rename, and supported literal defaults. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. |
+| Postgres | Supports add, drop, rename, DROP NOT NULL, and supported literal defaults. SET NOT NULL on existing columns is skipped with a warning. Tables are current-state UPSERT tables without CDC meta columns. Schema DDL is applied as DROP, then RENAME, then ADD, then nullability/default changes. Source `timetz` / `timetz[]` columns are created as `text` / `text[]` so binds match the string encoding used for those values. |
 | DuckLake | Supports add, drop, rename, and supported literal defaults. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
 | Snowflake | Supports add, drop, rename, create-table literal defaults, and literal add-column defaults. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. |
 | Iceberg | Deprecated for now. Schema-change DDL is not a supported path for new deployments. |
@@ -181,8 +182,14 @@ Destination support may be narrower than parser support:
 |-------------|----------------------------|
 | BigQuery | Supports compatible string, numeric, boolean, date, time, timestamp, JSON, and UUID literals. Added columns are created nullable and supported defaults are set afterward for future writes. |
 | ClickHouse | Supports compatible string, numeric, boolean, date, time, timestamp, JSON, and UUID literals. Defaults are metadata only unless separately materialized. |
+| Postgres | Supports the same portable literal defaults as the source Postgres expressions ETL can parse. |
 | DuckLake | Supports compatible string, numeric, date, time, timestamp, JSON, and UUID literals. Boolean defaults are currently skipped by the DuckLake destination. |
 | Snowflake | `CREATE TABLE` supports compatible string, numeric, boolean, date, time, timestamp, JSON, and UUID literals. `ADD COLUMN` only receives the literal subset Snowflake allows for add-column defaults: string, numeric, and boolean literals. Later default changes on existing columns are skipped. |
+
+API-created Postgres destinations currently force TLS disabled
+(`TlsConfig::disabled()`). Library and replicator configs can still enable TLS
+through `PgConnectionConfig.tls`. Source `timetz` values are stored in
+destination `text` columns for reliable parameterized binds.
 
 When changing a default from one supported expression to an unsupported
 expression, destinations that can safely remove defaults drop the old supported
@@ -227,7 +234,7 @@ A practical flow is:
    actually ready for following row events.
 7. Process following row events with the new schema.
 
-The built-in BigQuery, ClickHouse, DuckLake, and Snowflake destinations follow
+The built-in BigQuery, ClickHouse, DuckLake, Snowflake, and Postgres destinations follow
 this shape: they mark destination schema metadata as `Applying`, apply the
 supported DDL operations, then mark the schema as `Applied`. Because destination
 DDL is not always transactional, a crash while metadata is `Applying` may require
@@ -290,7 +297,7 @@ These behaviors are **not full destination DDL semantics** yet:
 - `ADD COLUMN ... DEFAULT` semantics differ by destination. ETL intentionally
   avoids destination DDL that rewrites all existing rows. BigQuery leaves
   pre-existing destination rows null for newly added defaulted columns, while
-  ClickHouse, DuckLake, and Snowflake can expose supported add-time defaults
+  ClickHouse, DuckLake, Snowflake, and Postgres can expose supported add-time defaults
   without ETL issuing a materialization rewrite. Snowflake only receives
   add-column defaults for source defaults that can be rendered as Snowflake
   literals.

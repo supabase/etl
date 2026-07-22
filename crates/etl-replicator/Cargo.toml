@@ -13,13 +13,14 @@ path = "src/bin/etl-ducklake-maintenance.rs"
 required-features = ["ducklake"]
 
 [features]
-default = ["bigquery", "clickhouse", "ducklake", "iceberg", "snowflake"]
+default = ["bigquery", "clickhouse", "ducklake", "iceberg", "snowflake", "postgres"]
 any-destination = []
 bigquery = ["any-destination", "etl-destinations/bigquery"]
 clickhouse = ["any-destination", "etl-destinations/clickhouse"]
 ducklake = ["any-destination", "etl-destinations/ducklake", "etl-maintenance/ducklake"]
 iceberg = ["any-destination", "etl-destinations/iceberg"]
 snowflake = ["any-destination", "etl-destinations/snowflake"]
+postgres = ["any-destination", "etl-destinations/postgres"]
 egress = ["etl/egress", "etl-destinations/egress"]
 
 [dependencies]

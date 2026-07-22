@@ -1395,6 +1395,19 @@ fn create_container_environment_json(
                     .push(create_snowflake_passphrase_env_var_json(&snowflake_secret_name));
             }
         }
+        DestinationType::Postgres { password_secret_required } => {
+            let postgres_secret_name = create_postgres_secret_name(prefix);
+            let postgres_secret_env_var_json =
+                create_postgres_secret_env_var_json(&postgres_secret_name);
+            container_environment.push(postgres_secret_env_var_json);
+
+            if password_secret_required {
+                let destination_secret_name = create_clickhouse_secret_name(prefix);
+                container_environment.push(create_postgres_destination_password_env_var_json(
+                    &destination_secret_name,
+                ));
+            }
+        }
     }
     container_environment
 }
@@ -1541,6 +1554,18 @@ fn create_bq_secret_env_var_json(bq_secret_name: &str) -> serde_json::Value {
         "secretKeyRef": {
           "name": bq_secret_name,
           "key": BQ_SERVICE_ACCOUNT_KEY_NAME
+        }
+      }
+    })
+}
+
+fn create_postgres_destination_password_env_var_json(secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__POSTGRES__PG_CONNECTION__PASSWORD",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": secret_name,
+          "key": CLICKHOUSE_PASSWORD_NAME
         }
       }
     })
