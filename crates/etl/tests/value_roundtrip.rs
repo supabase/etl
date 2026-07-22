@@ -14,7 +14,8 @@
 //! Known codec gaps stay outside the generated envelope and are documented on
 //! the strategies that would otherwise reach them: temporal `infinity`
 //! values, `BC` dates, years above 9999, and the `24:00:00` time are all
-//! legal in Postgres but are rejected by the codec today.
+//! legal in Postgres but are rejected by the codec today. Multidimensional
+//! arrays are also rejected; their property pins reject-not-corrupt.
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
@@ -103,6 +104,67 @@ async fn int8_array_values_roundtrip_through_text_codec() {
     run_property("int8[] text roundtrip", &strategy, |values| {
         let rendered = query_text(client, &render, &[values])?;
         assert_parses_to(&Type::INT8_ARRAY, &rendered, &Cell::Array(ArrayCell::I64(values.clone())))
+    });
+}
+
+/// Formats an int8 array literal with an explicit lower bound, e.g.
+/// `[0:1]={7,8}`.
+fn shifted_bounds_literal(lower: i16, values: &[Option<i64>]) -> String {
+    let upper = i32::from(lower) + values.len() as i32 - 1;
+    let elements =
+        values.iter().map(|v| v.map_or("NULL".to_owned(), |v| v.to_string())).collect::<Vec<_>>();
+
+    format!("[{lower}:{upper}]={{{}}}", elements.join(","))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shifted_lower_bound_arrays_roundtrip_through_text_codec() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    let render = client.prepare("select (($1::text)::int8[])::text").await.unwrap();
+
+    // Postgres renders arrays whose lower bound is not 1 with an explicit
+    // dimensions prefix, e.g. `[0:1]={7,8}`. Subscripts carry no value
+    // information for a one-dimensional array, so the codec must skip the
+    // prefix and preserve the elements.
+    let strategy = (-8i16..=8, proptest::collection::vec(option::of(any::<i64>()), 1..=8));
+    run_property("shifted lower bound int8[] text roundtrip", &strategy, |(lower, values)| {
+        let literal = shifted_bounds_literal(*lower, values);
+        let rendered = query_text(client, &render, &[&literal])?;
+        assert_parses_to(&Type::INT8_ARRAY, &rendered, &Cell::Array(ArrayCell::I64(values.clone())))
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multidimensional_arrays_are_rejected_by_text_codec() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    let render = client.prepare("select (array[$1::text[], $2::text[]])::text").await.unwrap();
+
+    // `ArrayCell` is one-dimensional, so the codec cannot represent a
+    // multidimensional value. It must reject the rendered text loudly instead
+    // of flattening or corrupting elements; this property pins
+    // reject-not-corrupt until real support exists.
+    let strategy = (1usize..=4).prop_flat_map(|cols| {
+        (
+            proptest::collection::vec(option::of(pg_text()), cols..=cols),
+            proptest::collection::vec(option::of(pg_text()), cols..=cols),
+        )
+    });
+    run_property("multidimensional text[] rejection", &strategy, |(first, second)| {
+        let rendered = query_text(client, &render, &[first, second])?;
+        let result = parse_text_cell(&Type::TEXT_ARRAY, &rendered);
+        prop_assert!(
+            result.is_err(),
+            "codec accepted multidimensional array {:?} as {:?}",
+            rendered,
+            result
+        );
+        Ok(())
     });
 }
 
