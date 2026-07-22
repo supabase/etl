@@ -2507,3 +2507,110 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
         .expect_err("recovery with a stale schema snapshot should be rejected");
     assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
 }
+
+/// Tests that interrupted schema-change recovery replays the diff and marks
+/// the change applied when the arriving schema matches the recovery target.
+///
+/// # GIVEN
+///
+/// A destination table physically created at snapshot 100 (id, name) whose
+/// metadata was then flipped to `Applying` targeting snapshot 200 (id, name,
+/// email) with previous snapshot 100 -- the state a crash leaves behind after
+/// `handle_relation_event` recorded the change but before the DDL completed.
+///
+/// # WHEN
+///
+/// A write arrives carrying the target snapshot 200, as happens when the
+/// rows following the interrupted relation event replay after a restart.
+///
+/// # THEN
+///
+/// Recovery replays the interrupted diff (adds `email`), transitions the
+/// metadata to `Applied` at snapshot 200, and the write succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+
+    let table_id = TableId::new(4243);
+    let table_name = TableName::new("public".to_owned(), "recovery_replay".to_owned());
+    let old_columns = vec![
+        ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+        ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+    ];
+    // Recovery loads the previous snapshot from the schema store, so the old
+    // schema must be stored, not just passed to the write call.
+    let old_table_schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            table_id,
+            table_name.clone(),
+            old_columns.clone(),
+            SnapshotId::new(PgLsn::from(100)),
+        ))
+        .await
+        .unwrap();
+    let old_mask = ReplicationMask::all(&old_table_schema);
+    let old_schema = ReplicatedTableSchema::from_mask(old_table_schema, old_mask.clone());
+
+    let destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+
+    // Create the physical table and `Applied` metadata at snapshot 100.
+    destination.write_table_rows(&old_schema, vec![]).await.unwrap();
+
+    let mut new_columns = old_columns;
+    new_columns.push(ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true));
+    let new_table_schema = Arc::new(TableSchema::with_snapshot_id(
+        table_id,
+        table_name,
+        new_columns,
+        SnapshotId::new(PgLsn::from(200)),
+    ));
+    let new_mask = ReplicationMask::all(&new_table_schema);
+    let new_schema = ReplicatedTableSchema::from_mask(new_table_schema, new_mask.clone());
+
+    // Simulate a crash after the change was recorded as `Applying` but before
+    // the DDL completed.
+    let applied_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation");
+    let clickhouse_table_name = applied_metadata.destination_table_id.clone();
+    let interrupted_metadata = DestinationTableMetadata::new_applied(
+        clickhouse_table_name.clone(),
+        SnapshotId::new(PgLsn::from(100)),
+        old_mask,
+    )
+    .with_schema_change(
+        SnapshotId::new(PgLsn::from(200)),
+        new_mask,
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
+
+    // A restarted destination (empty table cache, so metadata is consulted)
+    // receiving the target snapshot must replay the interrupted diff.
+    let restarted_destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+    restarted_destination.write_table_rows(&new_schema, vec![]).await.unwrap();
+
+    let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
+    assert_eq!(columns, vec!["id", "name", "email"], "recovery must add the interrupted column");
+
+    let recovered_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should be applied after recovery");
+    assert_eq!(
+        recovered_metadata.snapshot_id,
+        SnapshotId::new(PgLsn::from(200)),
+        "recovery must mark the target snapshot applied"
+    );
+}
