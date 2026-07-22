@@ -2255,6 +2255,7 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
         );
     }
 }
+
 /// Row struct for the stale-replay test after the add-column change.
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
 struct StaleReplayRow {

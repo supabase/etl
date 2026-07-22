@@ -724,6 +724,7 @@ where
     ) -> EtlResult<()> {
         self.write_table_rows_inner(schema, table_rows).await
     }
+
     /// Writes a streaming event batch directly to the destination, awaiting
     /// the write inline instead of reporting through the trait's async
     /// completion result.
