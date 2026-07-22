@@ -1056,10 +1056,10 @@ where
     /// 4. Drains consecutive Truncate events (deduplicated) and executes them.
     ///
     /// Schema changes are applied only after all preceding inserts in the
-    /// batch finished durably: step 2 awaits every INSERT before step 3 runs
-    /// any DDL, and the client pins `wait_for_async_insert = 1`, so an insert
-    /// acknowledgement implies the rows are written to disk and cannot be
-    /// overtaken by a following `ALTER TABLE`.
+    /// batch are complete: step 2 awaits every INSERT before step 3 runs any
+    /// DDL, and the client pins `wait_for_async_insert = 1`, so an insert
+    /// acknowledgement implies the rows were flushed into the table and
+    /// cannot be overtaken by a following `ALTER TABLE`.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
