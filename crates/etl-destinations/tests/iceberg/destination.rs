@@ -5,6 +5,7 @@ use etl::{
     store::TableStateType,
     test_utils::{
         database::spawn_source_database,
+        event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
@@ -100,17 +101,17 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     );
 
     // Register notifications for table copy completion.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
-    let orders_state_notify = store
+    let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -249,22 +250,27 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     );
 
     // Register notifications for table copy completion (Ready for both tables).
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
-    let orders_state_notify = store
+    let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
     // Wait until initial sync is done before producing CDC events.
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
     // === CDC INSERT EVENTS ===
-    // We'll expect 2 inserts per table -> 4 insert events total.
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    // We'll expect 2 inserts per table.
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+        ])
+        .await;
 
     // Insert rows AFTER Ready so they are captured as CDC events.
     insert_mock_data(
@@ -277,12 +283,16 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     .await;
 
     // Wait for all CDC insert events to be written to Iceberg.
-    event_notify.notified().await;
-    destination.clear_events().await;
+    events_notify.notified().await;
 
     // === CDC UPDATE EVENTS ===
-    // We'll expect 2 updates per table -> 4 update events total.
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 4)]).await;
+    // We'll expect 2 updates per table.
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Update, database_schema.users_schema().id, 2),
+            EventCondition::TableCount(EventType::Update, database_schema.orders_schema().id, 2),
+        ])
+        .await;
 
     // Update users
     database
@@ -305,12 +315,16 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         .unwrap();
 
     // Wait for all CDC update events to be written to Iceberg.
-    event_notify.notified().await;
-    destination.clear_events().await;
+    events_notify.notified().await;
 
     // === CDC DELETE EVENTS ===
-    // We'll expect 1 delete per table -> 2 delete events total.
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 2)]).await;
+    // We'll expect 1 delete per table.
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Delete, database_schema.users_schema().id, 1),
+            EventCondition::TableCount(EventType::Delete, database_schema.orders_schema().id, 1),
+        ])
+        .await;
 
     // Delete user with id 1
     database
@@ -325,7 +339,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         .unwrap();
 
     // Wait for all CDC delete events to be written to Iceberg.
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     // base table names
     let users_table = table_name_to_iceberg_table_name(
@@ -521,21 +535,26 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     );
 
     // Register notifications for table copy completion (Ready for both tables).
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
-    let orders_state_notify = store
+    let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
     // Wait until initial sync is done before producing CDC events.
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
-    // We'll expect 2 inserts per table -> 4 insert events total.
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    // We'll expect 2 inserts per table.
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 2),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 2),
+        ])
+        .await;
 
     // Insert 2 rows per each table (captured as CDC UPSERT events).
     insert_mock_data(
@@ -548,10 +567,14 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     .await;
 
     // Wait for all expected insert events to be processed.
-    event_notify.notified().await;
-    destination.clear_events().await;
+    events_notify.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Truncate, 2)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Truncate, database_schema.users_schema().id, 1),
+            EventCondition::TableCount(EventType::Truncate, database_schema.orders_schema().id, 1),
+        ])
+        .await;
 
     // Truncate both tables in the source; destination should drop and recreate base
     // + CDC tables.
@@ -559,8 +582,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     database.truncate_table(database_schema.orders_schema().name.clone()).await.unwrap();
 
     // Wait for all expected truncate events to be processed.
-    event_notify.notified().await;
-    destination.clear_events().await;
+    events_notify.notified().await;
 
     // base table names
     let users_table = table_name_to_iceberg_table_name(
@@ -580,8 +602,13 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     assert!(actual_users.is_empty());
     assert!(actual_orders.is_empty());
 
-    // We'll expect 2 inserts per table -> 4 insert events total.
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    // We'll expect 2 inserts per table.
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, database_schema.users_schema().id, 4),
+            EventCondition::TableCount(EventType::Insert, database_schema.orders_schema().id, 4),
+        ])
+        .await;
 
     // Insert 2 extra rows per each table after truncation.
     insert_mock_data(
@@ -594,8 +621,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     .await;
 
     // Wait for all expected insert and truncate events to be processed.
-    event_notify.notified().await;
-    destination.clear_events().await;
+    events_notify.notified().await;
 
     // After truncate, pre-truncate CDC rows should be gone (tables were dropped).
     // Only post-truncate rows remain.

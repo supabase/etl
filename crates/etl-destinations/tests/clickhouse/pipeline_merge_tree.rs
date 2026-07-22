@@ -9,6 +9,7 @@ use etl::{
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
+        event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
@@ -81,7 +82,8 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
             .await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database_1.config,
@@ -92,9 +94,11 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 2)]).await;
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 2)])
+        .await;
 
     // --- WHEN: two transactions commit sequentially on separate connections ---
     let tx_a = database_1.begin_transaction().await;
@@ -115,7 +119,7 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
     .expect("Failed to execute update_b");
     tx_b.commit_transaction().await;
 
-    event_notify.notified().await;
+    events_notify.notified().await;
 
     let rows: Vec<EventLogRow> = clickhouse_db.query(TX_ORDER_SELECT).await;
 

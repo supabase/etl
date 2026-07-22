@@ -255,13 +255,13 @@ async fn table_sync_worker_panic_marks_table_errored() {
     );
 
     // Register notifications for table sync states.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Errored)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -309,13 +309,13 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     );
 
     // Register notifications for table sync states.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Errored)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -366,7 +366,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
 
     // Register notifications for waiting on the manual retry which is expected to
     // be flipped by the max attempts handling.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state(database_schema.users_schema().id, |state| {
             matches!(state, TableState::Errored { retry_policy: TableRetryPolicy::ManualRetry, .. })
         })
@@ -374,7 +374,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -422,13 +422,13 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     );
 
     // We register the interest in waiting for both table syncs to have started.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     // We expect no errors, since the same table sync worker task is retried.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -478,13 +478,13 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     );
 
     // We register the interest in waiting for both table syncs to have started.
-    let users_state_notify = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
+    users_ready_notify.notified().await;
 
     // We expect no errors, since the same table sync worker task is retried.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -551,7 +551,7 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
     .await;
 
     let all_rows_notify = destination
-        .wait_for_all_events(vec![EventCondition::Table(
+        .wait_for_all_events(vec![EventCondition::TableCount(
             EventType::Insert,
             table_id,
             (copied_rows + catchup_rows) as u64,
@@ -610,11 +610,11 @@ async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
         destination.clone(),
     );
 
-    let finished_copy =
+    let finished_copy_notify =
         store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
 
     pipeline.start().await.unwrap();
-    finished_copy.notified().await;
+    finished_copy_notify.notified().await;
 
     // Commit one published row at A while the table-sync worker is paused, then
     // advance cluster WAL to T in another database. Logical decoding skips that
@@ -648,8 +648,8 @@ async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
     .await
     .expect("timed out waiting for the apply slot to acknowledge cross-database WAL");
 
-    let sync_done = store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
-    let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
@@ -683,11 +683,9 @@ async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
         Some(TableStateType::FinishedCopy)
     );
 
-    // Confirming the barrier must unblock both table-sync handoff and the apply
-    // worker transition to Ready.
+    // Confirming the barrier must unblock the transition to Ready.
     barrier_result.send(Ok(DestinationWriteStatus::Durable));
-    sync_done.notified().await;
-    ready.notified().await;
+    table_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
@@ -782,17 +780,20 @@ async fn stored_durable_progress_prevents_replay_when_status_updates_are_skipped
         destination.clone(),
     );
 
-    let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    ready.notified().await;
+    table_ready_notify.notified().await;
 
-    let initial_inserts = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+    let initial_inserts_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
 
     insert_users_data(&mut database, &database_schema.users_schema().name, 1..=2).await;
 
-    initial_inserts.notified().await;
+    initial_inserts_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -827,13 +828,15 @@ async fn stored_durable_progress_prevents_replay_when_status_updates_are_skipped
 
     // We wait until 4 inserts have been reached, the previous ones + the current
     // ones.
-    let new_inserts = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+    let new_inserts_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 4)])
+        .await;
 
     pipeline.start().await.unwrap();
 
     insert_users_data(&mut database, &database_schema.users_schema().name, 3..=4).await;
 
-    new_inserts.notified().await;
+    new_inserts_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -874,7 +877,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     .await;
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     let transaction = database.begin_transaction().await;
@@ -985,7 +991,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     );
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     pipeline.start().await.unwrap();
@@ -1021,7 +1030,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .await;
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     database.insert_values(table_name.clone(), &["name", "age"], &[&"first", &25]).await.unwrap();
@@ -1125,7 +1137,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     );
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     pipeline.start().await.unwrap();
@@ -1171,7 +1186,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     destination.clear_events().await;
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     let transaction = database.begin_transaction().await;
@@ -1267,7 +1285,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     );
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     pipeline.start().await.unwrap();
@@ -1303,7 +1324,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .await;
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     database
@@ -1395,7 +1419,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     );
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     pipeline.start().await.unwrap();
@@ -1432,8 +1459,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     // The reason for why we wait for two `Relation` messages is that since we have
     // a DDL event before DML statements, Postgres likely avoids sending an
     // initial `Relation` message since it's already sent given the DDL event.
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     // We immediately add a column to the table without any DML, to show the case
@@ -1468,7 +1498,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .await
         .unwrap();
 
-    notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Assert that we got all the events correctly.
@@ -1520,8 +1550,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 
     pipeline.start().await.unwrap();
 
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 3)])
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     database
@@ -1533,7 +1566,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .await
         .unwrap();
 
-    notify.notified().await;
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Assert that we got all the events correctly.
@@ -1558,7 +1591,10 @@ async fn schema_snapshots_are_pruned_after_confirmed_progress() {
         .await;
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
         .await;
 
     database
@@ -1669,15 +1705,19 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
     );
 
     // Wait for the table to finish syncing.
-    let sync_done_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    sync_done_notify.notified().await;
+    table_ready_notify.notified().await;
 
     // We expect 3 relation events (one per publication change) and 3 insert events.
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     // State 1: Insert with all 4 columns (id, name, age, email).
@@ -1848,7 +1888,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
     // progress, so the slot still holds all of run 1's WAL for replay; we no
     // longer need to suppress acks in run 2 (and doing so risks
     // wal_sender_timeout firing under slow CI and duplicating events, which
-    // would break the exact-count match in wait_for_events_count below).
+    // could duplicate events and invalidate the assertions below).
     fail::remove(SEND_STATUS_UPDATE_FP);
 
     // Restart the pipeline -- Postgres will resend the data since we don't
@@ -1862,13 +1902,16 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
     );
 
     // Wait for 3 relation events and 3 insert events again after restart.
-    let events_notify_restart = destination
-        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+    let restart_events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 3),
+            EventCondition::TableCount(EventType::Insert, table_id, 3),
+        ])
         .await;
 
     pipeline.start().await.unwrap();
 
-    events_notify_restart.notified().await;
+    restart_events_notify.notified().await;
 
     // Verify the same events are received after restart.
     let events_after_restart = destination.get_events().await;
