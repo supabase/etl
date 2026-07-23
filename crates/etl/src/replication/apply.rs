@@ -44,7 +44,7 @@ use crate::{
     data::SizeHint,
     destination::{
         ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DestinationWriteStatus,
-        EventsBatchMetrics, PendingWriteEventsResult, PipelineDestination, WriteEventsDurability,
+        EventBatchMetrics, PendingWriteEventsResult, PipelineDestination, WriteEventsDurability,
         WriteEventsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
@@ -62,7 +62,7 @@ use crate::{
     },
     pipeline::PipelineId,
     postgres::{
-        EventsStream, OutOfBandSourcePool, StatusUpdateResult, StatusUpdateType,
+        OutOfBandSourcePool, ReplicationMessageStream, StatusUpdateResult, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
@@ -646,9 +646,9 @@ struct ApplyLoopState {
     /// Shared replication lag metrics derived from apply-loop progress.
     replication_lag_metrics: ReplicationLagMetrics,
     /// A batch of events to send to the destination.
-    events_batch: Vec<Event>,
+    event_batch: Vec<Event>,
     /// Decoded in-memory size estimate used only to decide when to flush.
-    events_batch_size_hint_bytes: usize,
+    event_batch_size_hint_bytes: usize,
     /// Total PostgreSQL tuple bytes retained separately for usage accounting.
     total_streaming_payload: StreamingPayload,
     /// Instant from when a transaction began.
@@ -710,8 +710,8 @@ impl ApplyLoopState {
             remote_final_lsn: None,
             replication_progress,
             replication_lag_metrics,
-            events_batch: Vec::new(),
-            events_batch_size_hint_bytes: 0,
+            event_batch: Vec::new(),
+            event_batch_size_hint_bytes: 0,
             total_streaming_payload: StreamingPayload::default(),
             current_tx_begin_ts: None,
             current_tx_events: 0,
@@ -733,29 +733,29 @@ impl ApplyLoopState {
     /// Adds an event to the batch.
     fn add_event_to_batch(&mut self, event: Event, streaming_payload: StreamingPayload) {
         // Track decoded memory pressure for batching independently of source bytes.
-        self.events_batch_size_hint_bytes =
-            self.events_batch_size_hint_bytes.saturating_add(event.size_hint());
+        self.event_batch_size_hint_bytes =
+            self.event_batch_size_hint_bytes.saturating_add(event.size_hint());
         self.total_streaming_payload.merge(streaming_payload);
 
         // We add the element to the pending batch.
-        self.events_batch.push(event);
+        self.event_batch.push(event);
     }
 
-    /// Takes the events batch for further processing and leaves behind a
+    /// Takes the event batch for further processing and leaves behind a
     /// replacement sized for the emitted batch.
-    fn take_events_batch(&mut self) -> (Vec<Event>, StreamingPayload) {
+    fn take_event_batch(&mut self) -> (Vec<Event>, StreamingPayload) {
         debug_assert!(self.has_pending_batch());
 
         // We replace the old vector with a new one of the same length, under the
         // assumption that we do mostly steady-state streaming, so it's highly
         // likely that the next batch will need the same memory footprint.
-        let replacement_capacity = self.events_batch.len();
-        let events_batch =
-            std::mem::replace(&mut self.events_batch, Vec::with_capacity(replacement_capacity));
-        self.events_batch_size_hint_bytes = 0;
+        let replacement_capacity = self.event_batch.len();
+        let event_batch =
+            std::mem::replace(&mut self.event_batch, Vec::with_capacity(replacement_capacity));
+        self.event_batch_size_hint_bytes = 0;
         let total_streaming_payload = std::mem::take(&mut self.total_streaming_payload);
 
-        (events_batch, total_streaming_payload)
+        (event_batch, total_streaming_payload)
     }
 
     /// Returns the bootstrap snapshot used before a table has shared protocol
@@ -932,7 +932,7 @@ impl ApplyLoopState {
     /// Returns `true` if there is a pending batch of events waiting to be
     /// flushed.
     fn has_pending_batch(&self) -> bool {
-        !self.events_batch.is_empty()
+        !self.event_batch.is_empty()
     }
 
     /// Returns `true` if there is a batch flush in flight whose result has not
@@ -1165,25 +1165,25 @@ where
             )
             .await?;
 
-        let events_stream = EventsStream::wrap(logical_replication_stream);
-        let events_stream = BackpressureStream::wrap(
-            events_stream,
+        let replication_message_stream = ReplicationMessageStream::wrap(logical_replication_stream);
+        let replication_message_stream = BackpressureStream::wrap(
+            replication_message_stream,
             self.worker_context.apply_stream_id(),
             self.memory_monitor.subscribe(),
         );
-        pin!(events_stream);
+        pin!(replication_message_stream);
         let mut connection_updates_rx = replication_client.connection_updates_rx();
 
         loop {
             let iteration_result = if self.state.is_draining_for_shutdown() {
                 self.run_draining_shutdown_iteration(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     &mut connection_updates_rx,
                 )
                 .await
             } else {
                 self.run_active_iteration(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     replication_client,
                     &mut connection_updates_rx,
                 )
@@ -1229,7 +1229,7 @@ where
     /// return yet.
     async fn run_active_iteration(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         replication_client: &PgReplicationClient,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
@@ -1250,7 +1250,7 @@ where
             // PRIORITY 1: Handle shutdown signals.
             // Shutdown stops new intake first and then lets the loop drain or wait as needed.
             _ = self.shutdown_rx.changed() => {
-                self.handle_shutdown_signal(events_stream.as_mut()).await?;
+                self.handle_shutdown_signal(replication_message_stream.as_mut()).await?;
             }
 
             // PRIORITY 2: Handle PostgreSQL connection lifecycle updates.
@@ -1274,9 +1274,9 @@ where
 
             // PRIORITY 5: Process incoming replication messages from PostgreSQL.
             // New WAL messages are only accepted while the loop is still actively ingesting.
-            maybe_message = events_stream.next(), if self.state.can_process_messages() => {
+            maybe_message = replication_message_stream.next(), if self.state.can_process_messages() => {
                 self.handle_stream_message(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     maybe_message,
                     replication_client,
                 )
@@ -1291,7 +1291,7 @@ where
             // PostgreSQL primary keep alive messages during normal operation.
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     true,
                     StatusUpdateType::PeriodicKeepAlive,
                 )
@@ -1331,12 +1331,12 @@ where
     /// after restart.
     async fn run_draining_shutdown_iteration(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
         // If we are done with unresolved work, we can finish the shutdown.
         if !self.state.has_unresolved_batch_work() {
-            self.send_shutdown_flush_status_update(events_stream.as_mut()).await?;
+            self.send_shutdown_flush_status_update(replication_message_stream.as_mut()).await?;
 
             return Ok(Some(self.finish_shutdown()));
         }
@@ -1363,7 +1363,7 @@ where
             // PRIORITY 4: Emit a periodic status update while shutdown is draining.
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     true,
                     StatusUpdateType::PeriodicKeepAlive,
                 )
@@ -1376,7 +1376,7 @@ where
 
         // If we are done with unresolved work, we can finish the shutdown.
         if !self.state.has_unresolved_batch_work() {
-            self.send_shutdown_flush_status_update(events_stream.as_mut()).await?;
+            self.send_shutdown_flush_status_update(replication_message_stream.as_mut()).await?;
 
             return Ok(Some(self.finish_shutdown()));
         }
@@ -1479,7 +1479,7 @@ where
     /// does not complete within an acceptable timeframe.
     async fn handle_shutdown_signal(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
     ) -> EtlResult<()> {
         let worker_type = self.worker_context.worker_type();
 
@@ -1508,7 +1508,7 @@ where
             "shutdown signal received, no unresolved work left, sending final status update",
         );
 
-        self.send_shutdown_flush_status_update(events_stream.as_mut()).await
+        self.send_shutdown_flush_status_update(replication_message_stream.as_mut()).await
     }
 
     /// Sends the final shutdown status update to let Postgres advance its
@@ -1519,10 +1519,14 @@ where
     /// persisted as durable ETL progress.
     async fn send_shutdown_flush_status_update(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
     ) -> EtlResult<()> {
-        self.send_status_update(events_stream.as_mut(), true, StatusUpdateType::ShutdownFlush)
-            .await?;
+        self.send_status_update(
+            replication_message_stream.as_mut(),
+            true,
+            StatusUpdateType::ShutdownFlush,
+        )
+        .await?;
 
         Ok(())
     }
@@ -1537,11 +1541,11 @@ where
     /// stream and the final shutdown update still use this same helper.
     async fn send_status_update(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
-        let status_update_result = events_stream
+        let status_update_result = replication_message_stream
             .as_mut()
             .stream_mut()
             .send_status_update(
@@ -1824,7 +1828,7 @@ where
     /// Processes the message and manages batch timing.
     async fn handle_stream_message(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         maybe_message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<()> {
@@ -1838,7 +1842,8 @@ where
         // If the Postgres had an error, we want to raise it immediately.
         let message = message?;
 
-        self.handle_replication_message_and_flush(events_stream.as_mut(), message).await
+        self.handle_replication_message_and_flush(replication_message_stream.as_mut(), message)
+            .await
     }
 
     /// Creates an error for when the replication stream ends unexpectedly.
@@ -1871,10 +1876,11 @@ where
     /// Handles a replication message and flushes the batch if necessary.
     async fn handle_replication_message_and_flush(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<()> {
-        let result = self.handle_replication_message(events_stream.as_mut(), message).await?;
+        let result =
+            self.handle_replication_message(replication_message_stream.as_mut(), message).await?;
 
         if let Some(event) = result.event {
             // We add the element to the pending batch.
@@ -1890,7 +1896,7 @@ where
 
         // We check for the batch flushing conditions before deciding whether to flush
         // or not.
-        let batch_size_hint_bytes_reached = self.state.events_batch_size_hint_bytes
+        let batch_size_hint_bytes_reached = self.state.event_batch_size_hint_bytes
             >= self.cached_batch_budget.current_batch_size_bytes();
         let early_flush_requested = result.end_batch;
         let should_flush = batch_size_hint_bytes_reached || early_flush_requested;
@@ -1927,21 +1933,21 @@ where
             return Ok(());
         }
 
-        let (events_batch, total_streaming_payload) = self.state.take_events_batch();
+        let (event_batch, total_streaming_payload) = self.state.take_event_batch();
 
-        self.dispatch_write_events(events_batch, total_streaming_payload, reason).await
+        self.dispatch_write_events(event_batch, total_streaming_payload, reason).await
     }
 
     /// Dispatches one streaming write through the shared async-result path.
     async fn dispatch_write_events(
         &mut self,
-        events_batch: Vec<Event>,
+        event_batch: Vec<Event>,
         total_streaming_payload: StreamingPayload,
         reason: &str,
     ) -> EtlResult<()> {
         debug_assert!(!self.state.has_pending_flush_result());
 
-        let event_count = events_batch.len();
+        let event_count = event_batch.len();
         // `Complete` is terminal, so no later write is guaranteed to settle an
         // `Accepted` result. Its final batch must confirm cumulative durability
         // before the apply loop can complete.
@@ -1961,7 +1967,7 @@ where
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: self.state.last_commit_end_lsn.take(),
             durability,
-            metrics: EventsBatchMetrics {
+            metrics: EventBatchMetrics {
                 event_count,
                 streaming_payload: total_streaming_payload,
                 dispatched_at: Instant::now(),
@@ -1972,7 +1978,7 @@ where
         // the pending receiver is stored on the loop state until the
         // destination signals completion.
         let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
-        self.destination.write_events(events_batch, durability, flush_result).await?;
+        self.destination.write_events(event_batch, durability, flush_result).await?;
         self.state.pending_flush_result = Some(pending_flush_result);
 
         // We reset the deadline for the batch, since we are now flushing a new batch.
@@ -1989,7 +1995,7 @@ where
     /// Dispatches replication protocol messages to appropriate handlers.
     async fn handle_replication_message(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
         counter!(
@@ -2025,7 +2031,7 @@ where
                 );
 
                 self.send_status_update(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     message.reply() == 1,
                     StatusUpdateType::KeepAlive,
                 )
@@ -2165,7 +2171,7 @@ where
 
         let table_id = schema_change_message.table_id();
         let command_tag = schema_change_message.command_tag.clone();
-        let columns_count = schema_change_message.columns.len();
+        let column_count = schema_change_message.columns.len();
 
         // Exactly one worker owns protocol interpretation for a table at a time. If
         // this worker is not the owner, it must skip the DDL so the owning
@@ -2228,7 +2234,7 @@ where
             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
             COMMAND_TAG_LABEL => command_tag.clone(),
         )
-        .record(columns_count as f64);
+        .record(column_count as f64);
 
         info!(
             table_id = table_id_u32,

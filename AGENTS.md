@@ -131,6 +131,12 @@
   runtime plumbing, and store implementation details private or crate-private.
 - Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
 - Prefer clear, boring code over clever abstractions.
+- In compound identifiers, use singular nouns as attributive modifiers, such
+  as `EventBatchMetrics`, `event_batch`, `event_count`, and `row_count`, not
+  `EventsBatchMetrics`, `events_batch`, `events_count`, or `rows_count`. Keep
+  plurals when the noun is the semantic head or a verb's direct object, such as
+  `table_rows`, `syncing_tables`, and `write_events`, and preserve established
+  external names.
 - Prefer existing workspace patterns over introducing new local conventions.
 - Keep item order local and readable: place supporting helpers and types before
   their use when practical, and group type-centered code as `struct`, inherent

@@ -114,9 +114,9 @@ pub(crate) type PendingWriteEventsResult<T = DestinationWriteStatus> =
 pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 
-/// Metrics for an events batch carried through its asynchronous completion.
+/// Metrics for an event batch carried through its asynchronous completion.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct EventsBatchMetrics {
+pub(crate) struct EventBatchMetrics {
     /// Number of events in the batch.
     pub event_count: usize,
     /// Total PostgreSQL tuple bytes used for source metrics and usage
@@ -143,7 +143,7 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Durability requirement supplied with the dispatched write.
     pub durability: WriteEventsDurability,
     /// Dispatch-time metrics for the batch.
-    pub metrics: EventsBatchMetrics,
+    pub metrics: EventBatchMetrics,
 }
 
 /// Sender half of a typed asynchronous completion result.
@@ -259,9 +259,9 @@ mod tests {
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: Some(PgLsn::from(42)),
             durability: WriteEventsDurability::MayDefer,
-            metrics: EventsBatchMetrics {
+            metrics: EventBatchMetrics {
                 event_count: 1,
-                streaming_payload: crate::source_payload::StreamingPayload::insert(7),
+                streaming_payload: StreamingPayload::insert(7),
                 dispatched_at: Instant::now(),
             },
         };

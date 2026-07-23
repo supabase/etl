@@ -13,5 +13,5 @@ pub mod migrations;
 
 pub(crate) use source_pool::OutOfBandSourcePool;
 pub(crate) use stream::{
-    EventsStream, StatusUpdateResult, StatusUpdateType, TableCopyRow, TableCopyStream,
+    ReplicationMessageStream, StatusUpdateResult, StatusUpdateType, TableCopyRow, TableCopyStream,
 };

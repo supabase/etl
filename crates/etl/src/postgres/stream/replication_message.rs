@@ -84,9 +84,9 @@ impl Display for StatusUpdateType {
 }
 
 pin_project! {
-    /// A stream that yields replication events from a Postgres logical replication stream and keeps
-    /// track of last sent status updates.
-    pub(crate) struct EventsStream {
+    /// A stream that yields replication messages from a Postgres logical
+    /// replication stream and tracks the last sent status updates.
+    pub(crate) struct ReplicationMessageStream {
         #[pin]
         stream: LogicalReplicationStream,
         last_update: Option<Instant>,
@@ -95,8 +95,9 @@ pin_project! {
     }
 }
 
-impl EventsStream {
-    /// Creates a new [`EventsStream`] from a [`LogicalReplicationStream`].
+impl ReplicationMessageStream {
+    /// Creates a new [`ReplicationMessageStream`] from a
+    /// [`LogicalReplicationStream`].
     pub(crate) fn wrap(stream: LogicalReplicationStream) -> Self {
         Self { stream, last_update: None, last_write_lsn: None, last_flush_lsn: None }
     }
@@ -225,7 +226,7 @@ impl EventsStream {
     }
 }
 
-impl Stream for EventsStream {
+impl Stream for ReplicationMessageStream {
     type Item = EtlResult<ReplicationMessage<LogicalReplicationMessage>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
