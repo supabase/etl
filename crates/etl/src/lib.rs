@@ -199,7 +199,7 @@ mod postgres;
 mod replication;
 mod runtime;
 pub mod schema;
-mod source_payload;
+mod source_payload_metadata;
 pub mod store;
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-utils"))]

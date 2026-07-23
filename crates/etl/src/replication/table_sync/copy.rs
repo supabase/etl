@@ -47,7 +47,7 @@ use crate::{
         },
     },
     schema::{ReplicatedTableSchema, TableId},
-    source_payload::{SourcePayload, TableCopyPayload},
+    source_payload_metadata::{SourcePayloadMetadata, TableCopyPayloadMetadata},
 };
 
 /// Target number of CTID ranges per worker when copy is parallel.
@@ -750,18 +750,18 @@ where
 
                 let table_copy_rows = table_rows?;
                 let row_count = table_copy_rows.len() as u64;
-                let mut total_table_copy_payload = TableCopyPayload::default();
+                let mut table_copy_batch_metadata = TableCopyPayloadMetadata::default();
                 let table_rows = table_copy_rows
                     .into_iter()
                     .map(|table_copy_row| {
-                        let (table_row, table_copy_payload) = table_copy_row.into_parts();
-                        table_copy_payload.record_row_size();
-                        total_table_copy_payload.merge(table_copy_payload);
-                        table_row
+                        let (row, metadata) = table_copy_row.into_parts();
+                        metadata.record_row_size();
+                        table_copy_batch_metadata.merge(metadata);
+                        row
                     })
                     .collect();
 
-                total_table_copy_payload.record_received();
+                table_copy_batch_metadata.record_received();
                 counter!(
                     ETL_EVENTS_RECEIVED_TOTAL,
                     WORKER_TYPE_LABEL => "table_sync",
@@ -783,7 +783,7 @@ where
                 };
                 let write_status = completed_flush_result.into_result()?;
 
-                total_table_copy_payload.record_processed(D::name());
+                table_copy_batch_metadata.record_processed(D::name());
                 counter!(
                     ETL_EVENTS_PROCESSED_TOTAL,
                     WORKER_TYPE_LABEL => "table_sync",

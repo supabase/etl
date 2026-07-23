@@ -1,10 +1,10 @@
-//! Source-side PostgreSQL row payload accounting.
+//! Source-side PostgreSQL row payload metadata and accounting.
 //!
-//! Initial-copy payload is the body of each backend `CopyData` message: the
-//! text-format row including delimiters, escaping, and its terminating newline.
-//! Streaming payload is the text or binary value data inside pgoutput tuples.
-//! PostgreSQL message framing, tuple framing, TCP/TLS overhead, ETL metadata,
-//! and destination encoding are excluded.
+//! Initial-copy metadata measures the body of each backend `CopyData` message:
+//! the text-format row including delimiters, escaping, and its terminating
+//! newline. Streaming metadata measures the text or binary value data inside
+//! pgoutput tuples. PostgreSQL message framing, tuple framing, TCP/TLS
+//! overhead, ETL metadata, and destination encoding are excluded.
 
 use metrics::{counter, histogram};
 
@@ -12,44 +12,45 @@ use crate::observability::{
     ETL_BYTES_PROCESSED_TOTAL, ETL_BYTES_RECEIVED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL,
 };
 
-/// Source-payload accounting shared by table copy and streaming.
+/// Source-payload metadata shared by table copy and streaming.
 ///
-/// A payload records source ingress when it is decoded and records successful
+/// The metadata records source ingress when it is decoded and successful
 /// processing after the destination acknowledges the corresponding write. It
-/// measures the PostgreSQL representation used for usage accounting, not the
-/// decoded in-memory size reported by [`crate::data::SizeHint`].
-pub(crate) trait SourcePayload: Sized {
-    /// Records this payload as received from PostgreSQL.
+/// measures the PostgreSQL representation used for metrics and usage
+/// accounting, not the decoded in-memory size reported by
+/// [`crate::data::SizeHint`].
+pub(crate) trait SourcePayloadMetadata: Sized {
+    /// Records these source bytes as received from PostgreSQL.
     fn record_received(self);
 
     /// Records the row-size distribution for an individual source row event.
     ///
-    /// This method must only be called before merging, when this payload
+    /// This method must only be called before merging, when this metadata
     /// represents one individual COPY row or logical-replication row event.
     fn record_row_size(self);
 
-    /// Records this payload after a successful destination write result.
+    /// Records these source bytes after a successful destination write result.
     fn record_processed(self, destination_type: &'static str);
 
-    /// Merges another payload from the same source path into this payload.
+    /// Merges compatible source payload metadata into this metadata.
     fn merge(&mut self, other: Self);
 }
 
-/// PostgreSQL COPY row-body bytes.
+/// Metadata for PostgreSQL COPY row-body bytes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TableCopyPayload {
+pub(crate) struct TableCopyPayloadMetadata {
     /// Initial-copy row bytes.
     copy_bytes: u64,
 }
 
-impl TableCopyPayload {
-    /// Creates a payload for one PostgreSQL COPY `CopyData` row body.
+impl TableCopyPayloadMetadata {
+    /// Creates metadata for one PostgreSQL COPY `CopyData` row body.
     pub(crate) fn new(copy_bytes: u64) -> Self {
         Self { copy_bytes }
     }
 }
 
-impl SourcePayload for TableCopyPayload {
+impl SourcePayloadMetadata for TableCopyPayloadMetadata {
     fn record_received(self) {
         record_received_bytes([("copy", self.copy_bytes)]);
     }
@@ -72,9 +73,9 @@ impl SourcePayload for TableCopyPayload {
     }
 }
 
-/// PostgreSQL logical-replication tuple-value bytes.
+/// Metadata for PostgreSQL logical-replication tuple-value bytes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StreamingPayload {
+pub(crate) struct StreamingPayloadMetadata {
     /// Insert new-tuple bytes.
     insert_bytes: u64,
     /// Update new- and old-identity-tuple bytes.
@@ -83,18 +84,18 @@ pub(crate) struct StreamingPayload {
     delete_bytes: u64,
 }
 
-impl StreamingPayload {
-    /// Creates a logical-replication insert tuple-value payload.
+impl StreamingPayloadMetadata {
+    /// Creates metadata for logical-replication insert tuple-value bytes.
     pub(crate) fn insert(insert_bytes: u64) -> Self {
         Self { insert_bytes, ..Self::default() }
     }
 
-    /// Creates a logical-replication update tuple-value payload.
+    /// Creates metadata for logical-replication update tuple-value bytes.
     pub(crate) fn update(update_bytes: u64) -> Self {
         Self { update_bytes, ..Self::default() }
     }
 
-    /// Creates a logical-replication delete tuple-value payload.
+    /// Creates metadata for logical-replication delete tuple-value bytes.
     pub(crate) fn delete(delete_bytes: u64) -> Self {
         Self { delete_bytes, ..Self::default() }
     }
@@ -110,13 +111,13 @@ impl StreamingPayload {
         .filter(|(_, bytes)| *bytes != 0)
     }
 
-    /// Returns the total bytes represented by this payload.
+    /// Returns the total bytes represented by this metadata.
     fn total_bytes(self) -> u64 {
         self.insert_bytes.saturating_add(self.update_bytes).saturating_add(self.delete_bytes)
     }
 }
 
-impl SourcePayload for StreamingPayload {
+impl SourcePayloadMetadata for StreamingPayloadMetadata {
     fn record_received(self) {
         record_received_bytes(self.by_event_type());
     }
@@ -321,15 +322,15 @@ mod tests {
     }
 
     #[test]
-    fn streaming_payloads_accumulate_without_losing_operation_breakdown() {
-        let mut total_streaming_payload = StreamingPayload::insert(3);
-        total_streaming_payload.merge(StreamingPayload::update(5));
-        total_streaming_payload.merge(StreamingPayload::delete(7));
-        total_streaming_payload.merge(StreamingPayload::insert(11));
+    fn streaming_metadata_accumulates_without_losing_operation_breakdown() {
+        let mut streaming_payload_metadata = StreamingPayloadMetadata::insert(3);
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::update(5));
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::delete(7));
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::insert(11));
 
-        assert_eq!(total_streaming_payload.total_bytes(), 26);
+        assert_eq!(streaming_payload_metadata.total_bytes(), 26);
         assert_eq!(
-            total_streaming_payload.by_event_type().collect::<Vec<_>>(),
+            streaming_payload_metadata.by_event_type().collect::<Vec<_>>(),
             [("insert", 14), ("update", 5), ("delete", 7)]
         );
     }
@@ -339,16 +340,16 @@ mod tests {
         let recorder = CapturingRecorder::default();
 
         with_local_recorder(&recorder, || {
-            let first_table_copy_payload = TableCopyPayload::new(3);
-            let second_table_copy_payload = TableCopyPayload::new(5);
-            first_table_copy_payload.record_row_size();
-            second_table_copy_payload.record_row_size();
+            let first_metadata = TableCopyPayloadMetadata::new(3);
+            let second_metadata = TableCopyPayloadMetadata::new(5);
+            first_metadata.record_row_size();
+            second_metadata.record_row_size();
 
-            let mut total_table_copy_payload = TableCopyPayload::default();
-            total_table_copy_payload.merge(first_table_copy_payload);
-            total_table_copy_payload.merge(second_table_copy_payload);
-            total_table_copy_payload.record_received();
-            total_table_copy_payload.record_processed("test_destination");
+            let mut table_copy_batch_metadata = TableCopyPayloadMetadata::default();
+            table_copy_batch_metadata.merge(first_metadata);
+            table_copy_batch_metadata.merge(second_metadata);
+            table_copy_batch_metadata.record_received();
+            table_copy_batch_metadata.record_processed("test_destination");
         });
 
         assert_eq!(
@@ -384,18 +385,18 @@ mod tests {
     }
 
     #[test]
-    fn received_and_processed_payloads_render_to_distinct_metrics() {
+    fn received_and_processed_metadata_renders_to_distinct_metrics() {
         let recorder = CapturingRecorder::default();
 
         with_local_recorder(&recorder, || {
-            let insert_streaming_payload = StreamingPayload::insert(3);
-            insert_streaming_payload.record_received();
-            let update_streaming_payload = StreamingPayload::update(5);
-            update_streaming_payload.record_received();
+            let insert_metadata = StreamingPayloadMetadata::insert(3);
+            insert_metadata.record_received();
+            let update_metadata = StreamingPayloadMetadata::update(5);
+            update_metadata.record_received();
 
-            let mut total_streaming_payload = insert_streaming_payload;
-            total_streaming_payload.merge(update_streaming_payload);
-            total_streaming_payload.record_processed("test_destination");
+            let mut streaming_payload_metadata = insert_metadata;
+            streaming_payload_metadata.merge(update_metadata);
+            streaming_payload_metadata.record_processed("test_destination");
         });
 
         assert_eq!(
@@ -426,19 +427,19 @@ mod tests {
     }
 
     #[test]
-    fn zero_byte_payloads_do_not_emit_metrics() {
+    fn zero_byte_metadata_does_not_emit_metrics() {
         let recorder = CapturingRecorder::default();
 
         with_local_recorder(&recorder, || {
-            let table_copy_payload = TableCopyPayload::new(0);
-            table_copy_payload.record_received();
-            table_copy_payload.record_row_size();
-            table_copy_payload.record_processed("test_destination");
+            let table_copy_metadata = TableCopyPayloadMetadata::new(0);
+            table_copy_metadata.record_received();
+            table_copy_metadata.record_row_size();
+            table_copy_metadata.record_processed("test_destination");
 
-            let streaming_payload = StreamingPayload::insert(0);
-            streaming_payload.record_received();
-            streaming_payload.record_row_size();
-            streaming_payload.record_processed("test_destination");
+            let streaming_metadata = StreamingPayloadMetadata::insert(0);
+            streaming_metadata.record_received();
+            streaming_metadata.record_row_size();
+            streaming_metadata.record_processed("test_destination");
         });
 
         assert!(recorder.increments.lock().unwrap().is_empty());

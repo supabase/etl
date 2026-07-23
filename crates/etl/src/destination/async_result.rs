@@ -14,7 +14,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     runtime::concurrency::{ShutdownResult, ShutdownRx},
-    source_payload::StreamingPayload,
+    source_payload_metadata::StreamingPayloadMetadata,
 };
 
 /// Durability status reported by streaming and table-copy destination writes.
@@ -114,21 +114,6 @@ pub(crate) type PendingWriteEventsResult<T = DestinationWriteStatus> =
 pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 
-/// Metrics for an event batch carried through its asynchronous completion.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct EventBatchMetrics {
-    /// Number of events in the batch.
-    pub event_count: usize,
-    /// Total PostgreSQL tuple bytes used for source metrics and usage
-    /// accounting.
-    ///
-    /// These are independent from the decoded [`crate::data::SizeHint`] used
-    /// to determine when the batch is dispatched.
-    pub streaming_payload: StreamingPayload,
-    /// Instant at which the batch was handed off to the destination.
-    pub dispatched_at: Instant,
-}
-
 /// Metadata carried by apply-loop event write completions.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ApplyLoopAsyncResultMetadata {
@@ -142,8 +127,12 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     pub commit_end_lsn: Option<PgLsn>,
     /// Durability requirement supplied with the dispatched write.
     pub durability: WriteEventsDurability,
-    /// Dispatch-time metrics for the batch.
-    pub metrics: EventBatchMetrics,
+    /// Number of events in the dispatched batch.
+    pub event_count: usize,
+    /// PostgreSQL tuple bytes accumulated for the dispatched event batch.
+    pub streaming_payload_metadata: StreamingPayloadMetadata,
+    /// Instant at which the event batch was handed off to the destination.
+    pub dispatched_at: Instant,
 }
 
 /// Sender half of a typed asynchronous completion result.
@@ -259,11 +248,9 @@ mod tests {
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: Some(PgLsn::from(42)),
             durability: WriteEventsDurability::MayDefer,
-            metrics: EventBatchMetrics {
-                event_count: 1,
-                streaming_payload: StreamingPayload::insert(7),
-                dispatched_at: Instant::now(),
-            },
+            event_count: 1,
+            streaming_payload_metadata: StreamingPayloadMetadata::insert(7),
+            dispatched_at: Instant::now(),
         };
         let (result_tx, pending_result) = WriteEventsResult::new(metadata);
 

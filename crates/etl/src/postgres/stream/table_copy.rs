@@ -12,30 +12,30 @@ use crate::{
     error::EtlResult,
     postgres::codec::parse_table_row_from_postgres_copy_bytes,
     schema::ColumnSchema,
-    source_payload::TableCopyPayload,
+    source_payload_metadata::TableCopyPayloadMetadata,
 };
 
-/// A decoded table-copy row paired with its PostgreSQL `CopyData` body size.
+/// A decoded table-copy row paired with its PostgreSQL source metadata.
 #[derive(Debug)]
 pub(crate) struct TableCopyRow {
     /// Decoded row sent to the destination.
     row: TableRow,
-    /// Text-format row bytes, including delimiters, escaping, and the newline.
-    table_copy_payload: TableCopyPayload,
+    /// Metadata for the text-format row received from PostgreSQL.
+    metadata: TableCopyPayloadMetadata,
 }
 
 impl TableCopyRow {
-    /// Consumes the row and returns its decoded value and table-copy payload.
-    pub(crate) fn into_parts(self) -> (TableRow, TableCopyPayload) {
-        (self.row, self.table_copy_payload)
+    /// Consumes the row and returns its decoded value and source metadata.
+    pub(crate) fn into_parts(self) -> (TableRow, TableCopyPayloadMetadata) {
+        (self.row, self.metadata)
     }
 }
 
 impl SizeHint for TableCopyRow {
     /// Returns the decoded row estimate used to control batching.
     ///
-    /// The raw PostgreSQL COPY body is retained separately in
-    /// `table_copy_payload` for metrics and usage accounting.
+    /// The PostgreSQL COPY source metadata is retained separately for metrics
+    /// and usage accounting.
     fn size_hint(&self) -> usize {
         self.row.size_hint()
     }
@@ -82,13 +82,13 @@ impl Stream for TableCopyStream {
             Poll::Pending => Poll::Pending,
             // Row copy received.
             Poll::Ready(Some(Ok(row))) => {
-                let table_copy_payload = TableCopyPayload::new(row.len() as u64);
+                let metadata = TableCopyPayloadMetadata::new(row.len() as u64);
 
                 // Conversion step: transform raw bytes into structured TableRow.
                 // This is where most errors occur due to data format or type issues.
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.as_slice())
                 {
-                    Ok(row) => Poll::Ready(Some(Ok(TableCopyRow { row, table_copy_payload }))),
+                    Ok(row) => Poll::Ready(Some(Ok(TableCopyRow { row, metadata }))),
                     Err(err) => Poll::Ready(Some(Err(err))),
                 }
             }
