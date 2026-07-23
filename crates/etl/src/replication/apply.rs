@@ -87,7 +87,7 @@ use crate::{
     schema::{
         IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
     },
-    source_payload_metadata::{SourcePayloadMetadata, StreamingPayloadMetadata},
+    source_payload_metadata::StreamingPayloadMetadata,
     store::{PipelineStore, SchemaStore, SharedStateStore, StateStore, TableSchemaRetention},
 };
 

@@ -5,36 +5,16 @@
 //! newline. Streaming metadata measures the text or binary value data inside
 //! pgoutput tuples. PostgreSQL message framing, tuple framing, TCP/TLS
 //! overhead, ETL metadata, and destination encoding are excluded.
+//!
+//! Streaming operation presence is tracked separately from byte count so a
+//! zero-byte row event remains an observation instead of being treated as
+//! absent.
 
 use metrics::{counter, histogram};
 
 use crate::observability::{
     ETL_BYTES_PROCESSED_TOTAL, ETL_BYTES_RECEIVED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL,
 };
-
-/// Source-payload metadata shared by table copy and streaming.
-///
-/// The metadata records source ingress when it is decoded and successful
-/// processing after the destination acknowledges the corresponding write. It
-/// measures the PostgreSQL representation used for metrics and usage
-/// accounting, not the decoded in-memory size reported by
-/// [`crate::data::SizeHint`].
-pub(crate) trait SourcePayloadMetadata: Sized {
-    /// Records these source bytes as received from PostgreSQL.
-    fn record_received(self);
-
-    /// Records the row-size distribution for an individual source row event.
-    ///
-    /// This method must only be called before merging, when this metadata
-    /// represents one individual COPY row or logical-replication row event.
-    fn record_row_size(self);
-
-    /// Records these source bytes after a successful destination write result.
-    fn record_processed(self, destination_type: &'static str);
-
-    /// Merges compatible source payload metadata into this metadata.
-    fn merge(&mut self, other: Self);
-}
 
 /// Metadata for PostgreSQL COPY row-body bytes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -48,18 +28,22 @@ impl TableCopyPayloadMetadata {
     pub(crate) fn new(copy_bytes: u64) -> Self {
         Self { copy_bytes }
     }
-}
 
-impl SourcePayloadMetadata for TableCopyPayloadMetadata {
-    fn record_received(self) {
+    /// Records these source bytes as received from PostgreSQL.
+    pub(crate) fn record_received(self) {
         record_received_bytes([("copy", self.copy_bytes)]);
     }
 
-    fn record_row_size(self) {
+    /// Records the row-size distribution for an individual COPY row.
+    ///
+    /// This method must only be called before merging, when this metadata
+    /// represents one individual COPY row.
+    pub(crate) fn record_row_size(self) {
         record_row_size_metrics([("copy", self.copy_bytes)]);
     }
 
-    fn record_processed(self, destination_type: &'static str) {
+    /// Records these source bytes after a successful destination write result.
+    pub(crate) fn record_processed(self, destination_type: &'static str) {
         record_processed_metrics(
             [("copy", self.copy_bytes)],
             destination_type,
@@ -68,39 +52,43 @@ impl SourcePayloadMetadata for TableCopyPayloadMetadata {
         );
     }
 
-    fn merge(&mut self, other: Self) {
+    /// Merges compatible source payload metadata into this metadata.
+    pub(crate) fn merge(&mut self, other: Self) {
         self.copy_bytes = self.copy_bytes.saturating_add(other.copy_bytes);
     }
 }
 
-/// Metadata for PostgreSQL logical-replication tuple-value bytes.
+/// Metadata for PostgreSQL logical-replication row-event tuple-value bytes.
+///
+/// `None` means that the operation is absent. `Some(0)` means that the
+/// operation is present but its emitted tuple values contain zero bytes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StreamingPayloadMetadata {
-    /// Insert new-tuple bytes.
-    insert_bytes: u64,
-    /// Update new- and old-identity-tuple bytes.
-    update_bytes: u64,
-    /// Delete old-identity-tuple bytes.
-    delete_bytes: u64,
+    /// Insert new-tuple bytes, if an insert is represented.
+    insert_bytes: Option<u64>,
+    /// Update new- and old-identity-tuple bytes, if an update is represented.
+    update_bytes: Option<u64>,
+    /// Delete old-identity-tuple bytes, if a delete is represented.
+    delete_bytes: Option<u64>,
 }
 
 impl StreamingPayloadMetadata {
     /// Creates metadata for logical-replication insert tuple-value bytes.
     pub(crate) fn insert(insert_bytes: u64) -> Self {
-        Self { insert_bytes, ..Self::default() }
+        Self { insert_bytes: Some(insert_bytes), ..Self::default() }
     }
 
     /// Creates metadata for logical-replication update tuple-value bytes.
     pub(crate) fn update(update_bytes: u64) -> Self {
-        Self { update_bytes, ..Self::default() }
+        Self { update_bytes: Some(update_bytes), ..Self::default() }
     }
 
     /// Creates metadata for logical-replication delete tuple-value bytes.
     pub(crate) fn delete(delete_bytes: u64) -> Self {
-        Self { delete_bytes, ..Self::default() }
+        Self { delete_bytes: Some(delete_bytes), ..Self::default() }
     }
 
-    /// Returns operation labels with nonzero byte counts.
+    /// Returns represented operation labels and byte counts.
     fn by_event_type(self) -> impl Iterator<Item = (&'static str, u64)> {
         [
             ("insert", self.insert_bytes),
@@ -108,25 +96,29 @@ impl StreamingPayloadMetadata {
             ("delete", self.delete_bytes),
         ]
         .into_iter()
-        .filter(|(_, bytes)| *bytes != 0)
+        .filter_map(|(event_type, bytes)| bytes.map(|bytes| (event_type, bytes)))
     }
 
     /// Returns the total bytes represented by this metadata.
     fn total_bytes(self) -> u64 {
-        self.insert_bytes.saturating_add(self.update_bytes).saturating_add(self.delete_bytes)
+        self.by_event_type().fold(0, |total, (_, bytes)| total.saturating_add(bytes))
     }
-}
 
-impl SourcePayloadMetadata for StreamingPayloadMetadata {
-    fn record_received(self) {
+    /// Records represented source bytes as received from PostgreSQL.
+    pub(crate) fn record_received(self) {
         record_received_bytes(self.by_event_type());
     }
 
-    fn record_row_size(self) {
+    /// Records the row-size distribution for an individual streaming event.
+    ///
+    /// This method must only be called before merging, when this metadata
+    /// represents one individual logical-replication row event.
+    pub(crate) fn record_row_size(self) {
         record_row_size_metrics(self.by_event_type());
     }
 
-    fn record_processed(self, destination_type: &'static str) {
+    /// Records represented source bytes after a successful destination write.
+    pub(crate) fn record_processed(self, destination_type: &'static str) {
         record_processed_metrics(
             self.by_event_type(),
             destination_type,
@@ -135,36 +127,42 @@ impl SourcePayloadMetadata for StreamingPayloadMetadata {
         );
     }
 
-    fn merge(&mut self, other: Self) {
-        self.insert_bytes = self.insert_bytes.saturating_add(other.insert_bytes);
-        self.update_bytes = self.update_bytes.saturating_add(other.update_bytes);
-        self.delete_bytes = self.delete_bytes.saturating_add(other.delete_bytes);
+    /// Merges compatible source payload metadata into this metadata.
+    pub(crate) fn merge(&mut self, other: Self) {
+        merge_optional_bytes(&mut self.insert_bytes, other.insert_bytes);
+        merge_optional_bytes(&mut self.update_bytes, other.update_bytes);
+        merge_optional_bytes(&mut self.delete_bytes, other.delete_bytes);
     }
 }
 
-/// Records nonzero individual row-size observations at ingestion.
+/// Merges an optional byte count while preserving whether it is represented.
+fn merge_optional_bytes(current: &mut Option<u64>, other: Option<u64>) {
+    let Some(other) = other else {
+        return;
+    };
+
+    match current {
+        Some(current) => *current = current.saturating_add(other),
+        None => *current = Some(other),
+    }
+}
+
+/// Records individual row-size observations at ingestion.
 fn record_row_size_metrics(event_bytes: impl IntoIterator<Item = (&'static str, u64)>) {
     for (event_type, bytes) in event_bytes {
-        if bytes == 0 {
-            continue;
-        }
-
         histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => event_type).record(bytes as f64);
     }
 }
 
-/// Records nonzero source-payload byte counters at ingestion.
+/// Records represented source-payload byte counters at ingestion.
 fn record_received_bytes(event_bytes: impl IntoIterator<Item = (&'static str, u64)>) {
     for (event_type, bytes) in event_bytes {
-        if bytes == 0 {
-            continue;
-        }
-
         counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => event_type).increment(bytes);
     }
 }
 
-/// Records nonzero source-payload metrics and billing after acknowledgement.
+/// Records represented source-payload metrics and nonzero billing after
+/// acknowledgement.
 fn record_processed_metrics(
     event_bytes: impl IntoIterator<Item = (&'static str, u64)>,
     destination_type: &'static str,
@@ -172,10 +170,6 @@ fn record_processed_metrics(
     bytes_sent: u64,
 ) {
     for (event_type, bytes) in event_bytes {
-        if bytes == 0 {
-            continue;
-        }
-
         counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => event_type).increment(bytes);
     }
 
@@ -336,6 +330,38 @@ mod tests {
     }
 
     #[test]
+    fn streaming_metadata_preserves_absent_and_zero_byte_operations() {
+        let mut streaming_payload_metadata = StreamingPayloadMetadata::default();
+        assert!(streaming_payload_metadata.by_event_type().next().is_none());
+
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::insert(0));
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::update(5));
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::default());
+
+        assert_eq!(streaming_payload_metadata.total_bytes(), 5);
+        assert_eq!(
+            streaming_payload_metadata.by_event_type().collect::<Vec<_>>(),
+            [("insert", 0), ("update", 5)]
+        );
+    }
+
+    #[test]
+    fn optional_byte_merge_preserves_presence_and_saturates() {
+        let cases = [
+            (None, None, None),
+            (None, Some(0), Some(0)),
+            (Some(0), None, Some(0)),
+            (Some(2), Some(3), Some(5)),
+            (Some(u64::MAX), Some(1), Some(u64::MAX)),
+        ];
+
+        for (mut current, other, expected) in cases {
+            merge_optional_bytes(&mut current, other);
+            assert_eq!(current, expected);
+        }
+    }
+
+    #[test]
     fn table_copy_batch_aggregates_counters_and_preserves_row_sizes() {
         let recorder = CapturingRecorder::default();
 
@@ -427,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_byte_metadata_does_not_emit_metrics() {
+    fn zero_byte_metadata_emits_only_represented_metrics() {
         let recorder = CapturingRecorder::default();
 
         with_local_recorder(&recorder, || {
@@ -440,9 +466,52 @@ mod tests {
             streaming_metadata.record_received();
             streaming_metadata.record_row_size();
             streaming_metadata.record_processed("test_destination");
+
+            let absent_streaming_metadata = StreamingPayloadMetadata::default();
+            absent_streaming_metadata.record_received();
+            absent_streaming_metadata.record_row_size();
+            absent_streaming_metadata.record_processed("test_destination");
         });
 
-        assert!(recorder.increments.lock().unwrap().is_empty());
-        assert!(recorder.observations.lock().unwrap().is_empty());
+        assert_eq!(
+            *recorder.increments.lock().unwrap(),
+            [
+                CounterIncrement {
+                    metric: ETL_BYTES_RECEIVED_TOTAL.to_owned(),
+                    event_type: "copy".to_owned(),
+                    value: 0,
+                },
+                CounterIncrement {
+                    metric: ETL_BYTES_PROCESSED_TOTAL.to_owned(),
+                    event_type: "copy".to_owned(),
+                    value: 0,
+                },
+                CounterIncrement {
+                    metric: ETL_BYTES_RECEIVED_TOTAL.to_owned(),
+                    event_type: "insert".to_owned(),
+                    value: 0,
+                },
+                CounterIncrement {
+                    metric: ETL_BYTES_PROCESSED_TOTAL.to_owned(),
+                    event_type: "insert".to_owned(),
+                    value: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            *recorder.observations.lock().unwrap(),
+            [
+                HistogramObservation {
+                    metric: ETL_ROW_SIZE_BYTES.to_owned(),
+                    event_type: "copy".to_owned(),
+                    value: 0.0,
+                },
+                HistogramObservation {
+                    metric: ETL_ROW_SIZE_BYTES.to_owned(),
+                    event_type: "insert".to_owned(),
+                    value: 0.0,
+                },
+            ]
+        );
     }
 }

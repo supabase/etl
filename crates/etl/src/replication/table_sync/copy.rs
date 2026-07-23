@@ -47,7 +47,7 @@ use crate::{
         },
     },
     schema::{ReplicatedTableSchema, TableId},
-    source_payload_metadata::{SourcePayloadMetadata, TableCopyPayloadMetadata},
+    source_payload_metadata::TableCopyPayloadMetadata,
 };
 
 /// Target number of CTID ranges per worker when copy is parallel.

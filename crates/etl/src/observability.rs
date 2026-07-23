@@ -246,8 +246,8 @@ pub(crate) fn register_metrics() {
         describe_histogram!(
             ETL_ROW_SIZE_BYTES,
             Unit::Bytes,
-            "Distribution of individual PostgreSQL COPY row-body or pgoutput tuple-value sizes in \
-             bytes, labeled by event_type."
+            "Distribution of individual PostgreSQL COPY row-body or pgoutput row-event \
+             tuple-value payload sizes in bytes, labeled by event_type."
         );
 
         describe_counter!(
