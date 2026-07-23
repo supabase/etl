@@ -16,7 +16,7 @@ use etl::{
             replication_slot_state, spawn_source_database, test_table_name, wait_for_new_walsender,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
-        faults::FaultyOp,
+        faults::{FaultAction, FaultyOp},
         memory_destination::MemoryDestination,
         notify::TimedNotify,
         notifying_store::NotifyingStore,
@@ -325,6 +325,49 @@ where
     ) -> EtlResult<()> {
         self.inner.write_events(events, durability, async_result).await
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_rejects_second_start_before_destination_startup() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready_notify = store
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .await;
+
+    pipeline.start().await.unwrap();
+    table_ready_notify.notified().await;
+
+    destination
+        .inject_fault(
+            FaultyOp::Startup,
+            FaultAction::reject(
+                ErrorKind::DestinationError,
+                "Second destination startup should not run",
+            ),
+        )
+        .await;
+
+    let second_start_result = pipeline.start().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let err = second_start_result.unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidState);
 }
 
 #[tokio::test(flavor = "multi_thread")]
