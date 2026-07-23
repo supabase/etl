@@ -8,6 +8,7 @@ use crate::{
     bail,
     data::{ArrayCell, Cell},
     error::{ErrorKind, EtlResult},
+    etl_error,
     postgres::codec::{
         bool::parse_bool,
         hex,
@@ -151,20 +152,85 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
     }
 }
 
+/// Strips the explicit dimensions prefix from an array literal, if present.
+///
+/// Postgres prefixes array output with dimensions whenever a lower bound is
+/// not 1, e.g. `[0:1]={7,8}`. Bounds carry no value information for a
+/// one-dimensional array, so the prefix is validated and skipped. More than
+/// one dimension group means a multidimensional value, which [`ArrayCell`]
+/// cannot represent and the codec rejects.
+fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
+    // Skips an optionally negative ASCII integer, returning the index just
+    // past it, or `None` when no digits are present.
+    fn skip_integer(bytes: &[u8], mut index: usize) -> Option<usize> {
+        if bytes.get(index) == Some(&b'-') {
+            index += 1;
+        }
+
+        let digits_start = index;
+        while matches!(bytes.get(index), Some(b'0'..=b'9')) {
+            index += 1;
+        }
+
+        (index > digits_start).then_some(index)
+    }
+
+    let bytes = input.as_bytes();
+    if bytes.first() != Some(&b'[') {
+        return Ok(input);
+    }
+
+    let malformed =
+        || etl_error!(ErrorKind::ConversionError, "Array input has a malformed dimensions prefix");
+
+    let mut groups = 0usize;
+    let mut index = 0usize;
+    while bytes.get(index) == Some(&b'[') {
+        let after_lower = skip_integer(bytes, index + 1).ok_or_else(malformed)?;
+        if bytes.get(after_lower) != Some(&b':') {
+            return Err(malformed());
+        }
+
+        let after_upper = skip_integer(bytes, after_lower + 1).ok_or_else(malformed)?;
+        if bytes.get(after_upper) != Some(&b']') {
+            return Err(malformed());
+        }
+
+        index = after_upper + 1;
+        groups += 1;
+    }
+
+    if bytes.get(index) != Some(&b'=') {
+        return Err(malformed());
+    }
+
+    if groups > 1 {
+        bail!(ErrorKind::ConversionError, "Multidimensional array input is not supported");
+    }
+
+    // The prefix is all ASCII, so `index + 1` is a character boundary.
+    input.get(index + 1..).ok_or_else(malformed)
+}
+
 /// Parses Postgres array literal syntax into a typed [`ArrayCell`].
 ///
 /// This function handles Postgres's array format with curly braces, comma
 /// separation, and proper quoting. It supports null values (unquoted "null"),
-/// escaped characters within quoted strings, and delegates element parsing
-/// to the provided closure.
+/// escaped characters within quoted strings, an explicit dimensions prefix
+/// (e.g. `[0:1]={7,8}`), and delegates element parsing to the provided
+/// closure.
 ///
-/// The parser correctly handles quote escaping, comma separation within quotes,
-/// and distinguishes between null values and the string "null".
+/// The parser correctly handles quote escaping, comma separation within
+/// quotes, and distinguishes between null values and the string "null".
+/// Multidimensional values are rejected because [`ArrayCell`] is
+/// one-dimensional.
 fn parse_cell_from_postgres_text_array<P, M, T>(str: &str, mut parse: P, m: M) -> EtlResult<Cell>
 where
     P: FnMut(&str) -> EtlResult<Option<T>>,
     M: FnOnce(Vec<Option<T>>) -> ArrayCell,
 {
+    let str = strip_array_dimensions_prefix(str)?;
+
     if str.len() < 2 {
         bail!(ErrorKind::ConversionError, "Array input too short");
     }
@@ -197,6 +263,15 @@ where
                         in_quotes = !in_quotes;
                     }
                     '\\' => in_escape = true,
+                    // The outer braces are stripped before the loop, so an
+                    // unquoted brace in the body can only come from a nested
+                    // array, which `ArrayCell` cannot represent.
+                    '{' | '}' if !in_quotes => {
+                        bail!(
+                            ErrorKind::ConversionError,
+                            "Multidimensional array input is not supported"
+                        );
+                    }
                     ',' if !in_quotes => {
                         break;
                     }
@@ -275,6 +350,67 @@ mod tests {
         // The error should be a parsing error, not related to NULL handling
         let error = result.unwrap_err();
         assert!(!error.to_string().contains("NULL"));
+    }
+
+    #[test]
+    fn parse_array_with_shifted_lower_bound_skips_dimensions_prefix() {
+        let cell = parse_cell_from_postgres_text(&Type::INT8_ARRAY, "[0:1]={7,8}").unwrap();
+        assert_eq!(cell, Cell::Array(ArrayCell::I64(vec![Some(7), Some(8)])));
+
+        let cell = parse_cell_from_postgres_text(&Type::INT8_ARRAY, "[-3:-2]={7,NULL}").unwrap();
+        assert_eq!(cell, Cell::Array(ArrayCell::I64(vec![Some(7), None])));
+
+        let cell = parse_cell_from_postgres_text(&Type::TEXT_ARRAY, "[3:3]={\"a b\"}").unwrap();
+        assert_eq!(cell, Cell::Array(ArrayCell::String(vec![Some("a b".to_owned())])));
+    }
+
+    #[test]
+    fn parse_array_with_malformed_dimensions_prefix_fails() {
+        for input in [
+            "[",
+            "[]={1}",
+            "[0:1",
+            "[0:1]",
+            "[0:1]{1,2}",
+            "[0:1={1,2}",
+            "[:1]={1}",
+            "[0:]={1}",
+            "[a:b]={1}",
+            "[0--1:1]={1}",
+            "[0:1]=",
+        ] {
+            let result = parse_cell_from_postgres_text(&Type::INT8_ARRAY, input);
+            assert!(result.is_err(), "input {input:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn parse_multidimensional_array_fails() {
+        // Nested unquoted braces, with and without a dimensions prefix. The
+        // text[] cases are regression tests for silent corruption: the flat
+        // parser used to return the inner braces as element content, turning
+        // `{{NULL},{NULL}}` into two non-null `"{NULL}"` strings.
+        for input in ["{{1,2},{3,4}}", "[1:2][1:2]={{1,2},{3,4}}", "{{1}}"] {
+            let result = parse_cell_from_postgres_text(&Type::INT8_ARRAY, input);
+            assert!(result.is_err(), "input {input:?} was accepted");
+        }
+
+        for input in ["{{NULL},{NULL}}", "{{a,b},{c,d}}", "{a,{b}}", "{a}}"] {
+            let result = parse_cell_from_postgres_text(&Type::TEXT_ARRAY, input);
+            assert!(result.is_err(), "input {input:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn parse_array_with_quoted_braces_is_not_multidimensional() {
+        let cell = parse_cell_from_postgres_text(&Type::TEXT_ARRAY, "{\"{\",\"}\"}").unwrap();
+        assert_eq!(
+            cell,
+            Cell::Array(ArrayCell::String(vec![Some("{".to_owned()), Some("}".to_owned())]))
+        );
+
+        let cell = parse_cell_from_postgres_text(&Type::TEXT_ARRAY, "{\"{a,b}\"}").unwrap();
+        assert_eq!(cell, Cell::Array(ArrayCell::String(vec![Some("{a,b}".to_owned())])));
     }
 
     #[test]
