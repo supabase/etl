@@ -612,6 +612,11 @@ cargo install cargo-fuzz
 cargo +nightly fuzz run parse_text_cell -- -max_total_time=60
 ```
 
+CI runs every target for 120 seconds daily via
+`.github/workflows/fuzz.yml`. Each run restores the newest cached corpus
+for its target and saves the grown one, so coverage accumulates across
+days; crash inputs are uploaded as workflow artifacts on failure.
+
 ## Troubleshooting
 
 ### Database Connection Issues
