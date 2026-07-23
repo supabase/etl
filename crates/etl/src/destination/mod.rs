@@ -25,6 +25,7 @@ pub use base::Destination;
 pub use capabilities::PipelineDestination;
 pub use metadata::{
     AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
+    DestinationWriteStreamState,
 };
 
 pub use crate::runtime::concurrency::{TaskSet, TaskSetDrainGuard};
