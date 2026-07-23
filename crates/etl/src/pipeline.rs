@@ -136,7 +136,14 @@ where
     /// table metadata and schemas, creates the worker pool for table
     /// synchronization, and starts the apply worker for processing replication
     /// stream events.
+    ///
+    /// After this method succeeds, subsequent calls return
+    /// [`ErrorKind::InvalidState`] without performing any startup work.
     pub async fn start(&mut self) -> EtlResult<()> {
+        if !matches!(&self.state, PipelineState::NotStarted) {
+            bail!(ErrorKind::InvalidState, "Pipeline has already been started");
+        }
+
         info!(
             publication_name = %self.config.publication_name,
             pipeline_id = %self.config.id,
