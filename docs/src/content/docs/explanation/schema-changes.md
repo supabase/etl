@@ -76,7 +76,7 @@ ETL has one shared schema-change signal, but **DDL behavior is implemented per d
 | BigQuery | Supports add, drop, rename, `REQUIRED` to `NULLABLE` relaxation, and supported literal default metadata. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. PostgreSQL remains responsible for enforcing later `SET NOT NULL` changes because BigQuery cannot tighten an existing column in place. |
 | ClickHouse | Supports add, drop, rename, and supported literal defaults. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. Relation events whose schema snapshot is older than the applied destination snapshot are rejected instead of executing reverse DDL; recovering from that state requires resynchronizing the table. |
 | DuckLake | Supports add, drop, rename, and supported literal defaults. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
-| Snowflake | Supports add, drop, rename, create-table literal defaults, and literal add-column defaults. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. |
+| Snowflake | Supports add, drop, rename, create-table literal defaults, and literal add-column defaults. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. Relation events whose schema snapshot is older than the applied destination snapshot are skipped because Snowflake's durable channel offset safely deduplicates their replayed row events. |
 | Iceberg | Deprecated for now. Schema-change DDL is not a supported path for new deployments. |
 | Custom destinations | Destination authors decide which `Event::Relation` changes to apply, reject, or handle manually. |
 
@@ -315,6 +315,14 @@ These behaviors are **not full destination DDL semantics** yet:
   confirmed replays the stream from before the change and triggers the
   same error. Replication mask changes carry no ordering, so a replayed
   stale mask cannot be detected the same way.
+- Snowflake skips stale schema snapshots instead of rewinding. Before applying
+  schema DDL, Snowflake waits for all preceding row batches to become durable.
+  On restart, reopening the table's channel restores its committed offset, so
+  row events associated with an older relation snapshot are deduplicated. The
+  older relation is therefore already reflected in the destination, while
+  executing its backwards diff could drop newer columns and delete their data.
+  Replication mask changes carry no ordering, so a replayed stale mask cannot
+  be detected the same way.
 - Sessions can set `supabase_etl.skip_ddl_log = 'true'` as an emergency
   opt-out while recovering a system. DDL executed with that setting enabled is
   not logged for ETL.

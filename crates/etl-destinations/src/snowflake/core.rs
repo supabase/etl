@@ -472,6 +472,21 @@ where
         let current_replication_mask = metadata.replication_mask.clone();
         let new_replication_mask = new_schema.replication_mask().clone();
 
+        // Snowflake waits for all preceding row batches to become durable
+        // before applying schema DDL. On replay, those rows are at or below the
+        // channel's restored committed offset and will be skipped. The older
+        // relation event is therefore already reflected in the destination,
+        // diffing backwards could drop newer columns and delete their data.
+        if new_snapshot_id < current_snapshot_id {
+            info!(
+                table_id = %table_id,
+                received_snapshot_id = %new_snapshot_id,
+                applied_snapshot_id = %current_snapshot_id,
+                "skipping stale Snowflake relation event"
+            );
+            return Ok(false);
+        }
+
         if current_snapshot_id == new_snapshot_id
             && current_replication_mask == new_replication_mask
         {
@@ -740,8 +755,9 @@ mod tests {
 
     use etl::{
         data::{Cell, PartialTableRow},
+        event::RelationEvent,
         pipeline::PipelineId,
-        schema::{IdentityMask, ReplicationMask, TableName, TableSchema, Type},
+        schema::{IdentityMask, PgLsn, ReplicationMask, SnapshotId, TableName, TableSchema, Type},
         store::StateStore,
         test_utils::notifying_store::NotifyingStore,
     };
@@ -826,6 +842,55 @@ mod tests {
             metadata.destination_table_id,
             try_stringify_table_name(schema.name()).unwrap().to_uppercase()
         );
+    }
+
+    /// A stale relation event must not drive reverse Snowflake DDL.
+    #[tokio::test]
+    async fn stale_relation_event_is_skipped() {
+        let (destination, store) = test_destination();
+        let table_id = TableId::new(3);
+        let table_name = TableName::new("public".to_owned(), "users".to_owned());
+        let stale_table_schema = Arc::new(TableSchema::with_snapshot_id(
+            table_id,
+            table_name.clone(),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+            ],
+            SnapshotId::new(PgLsn::from(100_u64)),
+        ));
+        let stale_schema = ReplicatedTableSchema::all(stale_table_schema);
+        let applied_table_schema = Arc::new(TableSchema::with_snapshot_id(
+            table_id,
+            table_name,
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
+            ],
+            SnapshotId::new(PgLsn::from(200_u64)),
+        ));
+        let applied_schema = ReplicatedTableSchema::all(applied_table_schema);
+        let metadata = DestinationTableMetadata::new_applied(
+            "PUBLIC_USERS".to_owned(),
+            applied_schema.inner().snapshot_id,
+            applied_schema.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(table_id, metadata.clone()).await.unwrap();
+
+        let status = destination
+            .writer
+            .process_admitted_events(vec![Event::Relation(RelationEvent {
+                start_lsn: PgLsn::from(100_u64),
+                commit_lsn: PgLsn::from(100_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: stale_schema,
+            })])
+            .await
+            .expect("stale relation event should be skipped");
+
+        assert_eq!(status, DestinationWriteStatus::Durable);
+        assert_eq!(store.get_destination_table_metadata(table_id).await.unwrap(), Some(metadata));
     }
 
     #[test]

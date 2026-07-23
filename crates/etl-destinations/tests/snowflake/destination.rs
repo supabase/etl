@@ -471,9 +471,11 @@ async fn write_events_delete_key_only() {
     .await;
 }
 
+/// A restart replay must skip an older relation snapshot and its committed
+/// rows without executing reverse DDL.
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
-async fn schema_evolution_add_column() {
+async fn schema_evolution_add_column_skips_stale_replay() {
     let harness = TestHarness::new();
     let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
     let sf_table = snowflake_table_name("public", &src_table);
@@ -580,23 +582,108 @@ async fn schema_evolution_add_column() {
         .await;
         assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
 
+        // Recreate the destination to restore the channel's durable offset,
+        // then replay the stream from before the schema change. Both rows are
+        // already committed, and the stale relation must not remove `email`.
+        let restarted_destination = Destination::new(
+            Client::new(build_auth(), PipelineId::from(1_u64)),
+            harness.store.clone(),
+        );
+        let replay_status = invoke_write_events(
+            &restarted_destination,
+            WriteEventsDurability::MayDefer,
+            vec![
+                Event::Relation(RelationEvent {
+                    start_lsn: PgLsn::from(0_u64),
+                    commit_lsn: PgLsn::from(0_u64),
+                    tx_ordinal: 0,
+                    replicated_table_schema: initial_replicated.clone(),
+                }),
+                Event::Insert(InsertEvent {
+                    start_lsn: PgLsn::from(1_u64),
+                    commit_lsn: PgLsn::from(1_u64),
+                    tx_ordinal: 0,
+                    replicated_table_schema: initial_replicated.clone(),
+                    table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())]),
+                }),
+                Event::Relation(RelationEvent {
+                    start_lsn: PgLsn::from(100_u64),
+                    commit_lsn: PgLsn::from(100_u64),
+                    tx_ordinal: 0,
+                    replicated_table_schema: evolved_replicated.clone(),
+                }),
+                Event::Insert(InsertEvent {
+                    start_lsn: PgLsn::from(101_u64),
+                    commit_lsn: PgLsn::from(101_u64),
+                    tx_ordinal: 0,
+                    replicated_table_schema: evolved_replicated.clone(),
+                    table_row: TableRow::new(vec![
+                        Cell::I32(2),
+                        Cell::String("Bob".into()),
+                        Cell::String("bob@example.com".into()),
+                    ]),
+                }),
+            ],
+        )
+        .await
+        .expect("replayed events should be skipped");
+        assert_eq!(replay_status, DestinationWriteStatus::Durable);
+
+        let resumed_status = invoke_write_events(
+            &restarted_destination,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Insert(InsertEvent {
+                start_lsn: PgLsn::from(102_u64),
+                commit_lsn: PgLsn::from(102_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: evolved_replicated.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(3),
+                    Cell::String("Charlie".into()),
+                    Cell::String("charlie@example.com".into()),
+                ]),
+            })],
+        )
+        .await
+        .expect("streaming should resume after stale replay");
+        assert_eq!(resumed_status, DestinationWriteStatus::Durable);
+
         let fqn = format!(
             "\"{}\".\"{}\".\"{sf_table}\"",
             harness.config.database(),
             harness.config.schema()
         );
-        let rows =
-            query_rows(&harness.sql, &format!("SELECT \"email\" FROM {fqn} WHERE \"id\" = '2'"))
-                .await
-                .expect("query_rows for email column failed");
+        let rows = query_rows(
+            &harness.sql,
+            &format!("SELECT \"id\", \"email\" FROM {fqn} ORDER BY \"id\""),
+        )
+        .await
+        .expect("query_rows after stale replay failed");
 
-        assert_eq!(rows.len(), 1, "expected one row for id=2");
+        assert_eq!(rows.len(), 3, "replay must not duplicate committed rows");
+        assert_eq!(rows[0][0], serde_json::Value::String("1".into()));
+        assert_eq!(rows[0][1], serde_json::Value::Null);
+        assert_eq!(rows[1][0], serde_json::Value::String("2".into()));
         assert_eq!(
-            rows[0][0],
+            rows[1][1],
             serde_json::Value::String("bob@example.com".into()),
-            "expected email = 'bob@example.com', got: {:?}",
-            rows[0][0]
+            "newer column data must survive stale replay"
         );
+        assert_eq!(rows[2][0], serde_json::Value::String("3".into()));
+        assert_eq!(
+            rows[2][1],
+            serde_json::Value::String("charlie@example.com".into()),
+            "streaming must resume with the applied schema"
+        );
+
+        let final_metadata = harness
+            .store
+            .get_applied_destination_table_metadata(table_id)
+            .await
+            .unwrap()
+            .expect("destination metadata should remain applied");
+        assert_eq!(final_metadata.snapshot_id, new_snapshot_id);
+        assert_eq!(final_metadata.replication_mask, *evolved_replicated.replication_mask());
     })
     .await;
 }
