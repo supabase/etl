@@ -638,14 +638,14 @@ where
             Some(prev_snapshot_id) => {
                 // Recovery replays the interrupted diff from the previous
                 // snapshot to the target snapshot recorded in the metadata. A
-                // schema arriving with any other snapshot is a stale replay
-                // and must not drive DDL: diffing against it could execute
+                // schema arriving with any other snapshot, older or newer,
+                // must not drive DDL: diffing against it could execute
                 // reverse DDL or wrongly mark the interrupted change applied.
                 let arriving_snapshot_id = schema.inner().snapshot_id;
                 if arriving_snapshot_id != metadata.snapshot_id {
                     return Err(etl_error!(
                         ErrorKind::DestinationSchemaRewind,
-                        "ClickHouse schema recovery received a stale schema snapshot",
+                        "ClickHouse schema recovery received a mismatched schema snapshot",
                         format!(
                             "Table {} has an interrupted schema change targeting snapshot {}, but \
                              received snapshot {}. Resynchronize the table to recover.",
