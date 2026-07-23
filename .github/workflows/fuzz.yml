@@ -57,7 +57,12 @@ jobs:
             fuzz-corpus-${{ matrix.target }}-
 
       - name: Run Fuzz Target
-        run: cargo +nightly-2026-04-15 fuzz run ${{ matrix.target }} -- -max_total_time=120
+        # The prebuilt cargo-fuzz binary is musl-linked, and cargo-fuzz
+        # defaults --target to its own compile-time triple. Build for the
+        # runner's real host triple so ASan links against glibc.
+        run: |
+          host="$(rustc +nightly-2026-04-15 --print host-tuple)"
+          cargo +nightly-2026-04-15 fuzz run ${{ matrix.target }} --target "$host" -- -max_total_time=120
 
       - name: Save Corpus
         if: always()
