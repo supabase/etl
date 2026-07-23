@@ -90,7 +90,7 @@ pub fn parse_copy_row(data: &[u8]) -> EtlResult<TableRow> {
                 format!("column_{index}"),
                 text_cell_fuzz_type(*selector).clone(),
                 -1,
-                index as i32,
+                i32::try_from(index).expect("column count is at most 8"),
                 true,
             )
         })
