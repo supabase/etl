@@ -126,9 +126,9 @@ async fn shifted_lower_bound_arrays_roundtrip_through_text_codec() {
     let render = client.prepare("select (($1::text)::int8[])::text").await.unwrap();
 
     // Postgres renders arrays whose lower bound is not 1 with an explicit
-    // dimensions prefix, e.g. `[0:1]={7,8}`. Subscripts carry no value
-    // information for a one-dimensional array, so the codec must skip the
-    // prefix and preserve the elements.
+    // dimensions prefix, e.g. `[0:1]={7,8}`. `ArrayCell` represents these
+    // arrays as ordered elements without subscript bounds, so the codec
+    // intentionally discards the prefix while preserving the elements.
     let strategy = (-8i16..=8, proptest::collection::vec(option::of(any::<i64>()), 1..=8));
     run_property("shifted lower bound int8[] text roundtrip", &strategy, |(lower, values)| {
         let literal = shifted_bounds_literal(*lower, values);
