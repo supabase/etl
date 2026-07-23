@@ -17,8 +17,8 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnModification, ColumnSchema, ReplicatedTableSchema, ReplicationMask, SchemaDiff,
-        SnapshotId, TableId, TableName, TableSchema,
+        ColumnModification, ColumnSchema, ReplicatedTableSchema, SchemaDiff, SnapshotId, TableId,
+        TableName, TableSchema,
     },
     store::{DestinationStore, TableStateType},
 };
@@ -41,44 +41,48 @@ use tokio::{
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::ducklake::{
-    ATTACH_DATA_INLINING_ROW_LIMIT, COPY_DATA_INLINING_ROW_LIMIT, DuckLakeTableName, LAKE_CATALOG,
-    S3Config,
-    batches::{
-        TableMutation, TrackedTableMutation, TrackedTruncateEvent, apply_table_batch_with_retry,
-        apply_table_batches_with_retry, ensure_applied_batches_table_exists,
-        ensure_streaming_progress_table_exists, prepare_copy_complete_table_batch,
-        prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
-        read_table_streaming_progress_sequence_key, retain_mutations_after_sequence_key,
-        retain_truncates_after_sequence_key,
+use crate::{
+    ducklake::{
+        ATTACH_DATA_INLINING_ROW_LIMIT, COPY_DATA_INLINING_ROW_LIMIT, DuckLakeTableName,
+        LAKE_CATALOG, S3Config,
+        batches::{
+            TableMutation, TrackedTableMutation, TrackedTruncateEvent,
+            apply_table_batch_with_retry, apply_table_batches_with_retry,
+            ensure_applied_batches_table_exists, ensure_streaming_progress_table_exists,
+            prepare_copy_complete_table_batch, prepare_copy_table_batch,
+            prepare_mutation_table_batches, prepare_truncate_table_batch,
+            read_table_streaming_progress_sequence_key, retain_mutations_after_sequence_key,
+            retain_truncates_after_sequence_key,
+        },
+        client::{
+            DuckLakeConnectionManager, DuckLakeInterruptRegistry, build_warm_ducklake_pool,
+            format_query_error_detail, run_duckdb_blocking,
+        },
+        config::{
+            MAINTENANCE_TARGET_FILE_SIZE, MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, build_setup_plan,
+            current_duckdb_extension_strategy, maintenance_target_file_size_sql,
+            resolve_expire_snapshots_older_than, validate_expire_snapshots_older_than_sql,
+        },
+        external_maintenance::ExternalMaintenanceOperations,
+        inline_size::DuckLakePendingInlineSizeSampler,
+        metrics::{
+            DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
+            query_table_storage_metrics, register_metrics,
+            resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
+        },
+        replay_epoch::{
+            begin_table_replay_epoch_transition, complete_table_replay_epoch_transition,
+            ensure_replay_epoch_table_exists, read_table_replay_epoch,
+        },
+        schema::{
+            build_add_column_sql_ducklake, build_create_table_sql_ducklake,
+            build_drop_column_sql_ducklake, build_drop_default_sql_ducklake,
+            build_rename_column_sql_ducklake, build_set_default_sql_ducklake,
+            supports_column_default_ducklake,
+        },
+        sql::qualified_lake_table_name,
     },
-    client::{
-        DuckLakeConnectionManager, DuckLakeInterruptRegistry, build_warm_ducklake_pool,
-        format_query_error_detail, run_duckdb_blocking,
-    },
-    config::{
-        MAINTENANCE_TARGET_FILE_SIZE, MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, build_setup_plan,
-        current_duckdb_extension_strategy, maintenance_target_file_size_sql,
-        resolve_expire_snapshots_older_than, validate_expire_snapshots_older_than_sql,
-    },
-    external_maintenance::ExternalMaintenanceOperations,
-    inline_size::DuckLakePendingInlineSizeSampler,
-    metrics::{
-        DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
-        query_table_storage_metrics, register_metrics, resolve_ducklake_metadata_schema_blocking,
-        spawn_ducklake_metrics_sampler,
-    },
-    replay_epoch::{
-        begin_table_replay_epoch_transition, complete_table_replay_epoch_transition,
-        ensure_replay_epoch_table_exists, read_table_replay_epoch,
-    },
-    schema::{
-        build_add_column_sql_ducklake, build_create_table_sql_ducklake,
-        build_drop_column_sql_ducklake, build_drop_default_sql_ducklake,
-        build_rename_column_sql_ducklake, build_set_default_sql_ducklake,
-        supports_column_default_ducklake,
-    },
-    sql::qualified_lake_table_name,
+    recovery::previous_replication_mask_for_recovery,
 };
 
 /// Shared Postgres metadata pool size for DuckLake background samplers.
@@ -819,35 +823,6 @@ fn plan_schema_diff_sql_ducklake(
     }
 
     Ok(DuckLakeSchemaDiffPlan { statements, column_names })
-}
-
-/// Builds the best previous-schema replication mask available during recovery.
-///
-/// [`DestinationTableMetadata`] stores the target mask, not the previous mask.
-/// For a source-schema change we project target bits back by ordinal position.
-/// Columns that no longer exist in the target schema are treated as previously
-/// replicated so the idempotent DDL planner can drop them if they exist.
-fn previous_replication_mask_for_recovery(
-    previous_schema: &TableSchema,
-    target_schema: &TableSchema,
-    target_replication_mask: &ReplicationMask,
-) -> ReplicationMask {
-    let mask = previous_schema
-        .column_schemas
-        .iter()
-        .map(|previous_column| {
-            target_schema
-                .column_schemas
-                .iter()
-                .position(|target_column| {
-                    target_column.ordinal_position == previous_column.ordinal_position
-                })
-                .and_then(|index| target_replication_mask.as_slice().get(index).copied())
-                .unwrap_or(1)
-        })
-        .collect();
-
-    ReplicationMask::from_bytes(mask)
 }
 
 /// Returns target replicated columns that are missing from DuckLake.
@@ -2796,7 +2771,7 @@ mod tests {
         data::{Cell, PartialTableRow, TableRow},
         schema::{
             ColumnChange, ColumnModification, ColumnSchema, IdentityMask, ReplicationMask,
-            SchemaDiff, SnapshotId, TableSchema, Type as PgType,
+            SchemaDiff, TableSchema, Type as PgType,
         },
         store::{MemoryStore, SchemaStore},
     };
@@ -3245,62 +3220,6 @@ mod tests {
             missing_columns.iter().map(|column| column.name.as_str()).collect();
 
         assert_eq!(missing_column_names, vec!["email"]);
-    }
-
-    #[test]
-    fn previous_replication_mask_for_recovery_matches_previous_schema_width() {
-        let previous_schema = TableSchema::new(
-            TableId::new(4),
-            TableName::new("public".to_owned(), "users".to_owned()),
-            vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, true),
-            ],
-        );
-        let target_schema = TableSchema::with_snapshot_id(
-            previous_schema.id,
-            previous_schema.name.clone(),
-            vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, true),
-                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
-            ],
-            SnapshotId::from(42_u64),
-        );
-        let target_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
-
-        let previous_mask =
-            previous_replication_mask_for_recovery(&previous_schema, &target_schema, &target_mask);
-
-        assert_eq!(previous_mask.to_bytes(), vec![1, 0]);
-    }
-
-    #[test]
-    fn previous_replication_mask_for_recovery_keeps_removed_columns_for_drop_diff() {
-        let previous_schema = TableSchema::new(
-            TableId::new(5),
-            TableName::new("public".to_owned(), "users".to_owned()),
-            vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
-                ColumnSchema::new("old_col".to_owned(), PgType::TEXT, -1, 3, true),
-            ],
-        );
-        let target_schema = TableSchema::with_snapshot_id(
-            previous_schema.id,
-            previous_schema.name.clone(),
-            vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
-            ],
-            SnapshotId::from(43_u64),
-        );
-        let target_mask = ReplicationMask::from_bytes(vec![1, 1]);
-
-        let previous_mask =
-            previous_replication_mask_for_recovery(&previous_schema, &target_schema, &target_mask);
-
-        assert_eq!(previous_mask.to_bytes(), vec![1, 1, 1]);
     }
 
     fn path_to_file_url(path: &Path) -> Url {
