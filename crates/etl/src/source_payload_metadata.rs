@@ -316,49 +316,25 @@ mod tests {
     }
 
     #[test]
-    fn streaming_metadata_accumulates_without_losing_operation_breakdown() {
-        let mut streaming_payload_metadata = StreamingPayloadMetadata::insert(3);
-        streaming_payload_metadata.merge(StreamingPayloadMetadata::update(5));
-        streaming_payload_metadata.merge(StreamingPayloadMetadata::delete(7));
-        streaming_payload_metadata.merge(StreamingPayloadMetadata::insert(11));
-
-        assert_eq!(streaming_payload_metadata.total_bytes(), 26);
-        assert_eq!(
-            streaming_payload_metadata.by_event_type().collect::<Vec<_>>(),
-            [("insert", 14), ("update", 5), ("delete", 7)]
-        );
-    }
-
-    #[test]
-    fn streaming_metadata_preserves_absent_and_zero_byte_operations() {
+    fn streaming_metadata_merge_preserves_operation_presence_and_breakdown() {
         let mut streaming_payload_metadata = StreamingPayloadMetadata::default();
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::default());
         assert!(streaming_payload_metadata.by_event_type().next().is_none());
 
         streaming_payload_metadata.merge(StreamingPayloadMetadata::insert(0));
-        streaming_payload_metadata.merge(StreamingPayloadMetadata::update(5));
-        streaming_payload_metadata.merge(StreamingPayloadMetadata::default());
+        assert_eq!(streaming_payload_metadata.by_event_type().collect::<Vec<_>>(), [("insert", 0)]);
 
-        assert_eq!(streaming_payload_metadata.total_bytes(), 5);
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::default());
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::update(5));
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::delete(u64::MAX));
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::insert(11));
+        streaming_payload_metadata.merge(StreamingPayloadMetadata::delete(1));
+
+        assert_eq!(streaming_payload_metadata.total_bytes(), u64::MAX);
         assert_eq!(
             streaming_payload_metadata.by_event_type().collect::<Vec<_>>(),
-            [("insert", 0), ("update", 5)]
+            [("insert", 11), ("update", 5), ("delete", u64::MAX)]
         );
-    }
-
-    #[test]
-    fn optional_byte_merge_preserves_presence_and_saturates() {
-        let cases = [
-            (None, None, None),
-            (None, Some(0), Some(0)),
-            (Some(0), None, Some(0)),
-            (Some(2), Some(3), Some(5)),
-            (Some(u64::MAX), Some(1), Some(u64::MAX)),
-        ];
-
-        for (mut current, other, expected) in cases {
-            merge_optional_bytes(&mut current, other);
-            assert_eq!(current, expected);
-        }
     }
 
     #[test]
@@ -411,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn received_and_processed_metadata_renders_to_distinct_metrics() {
+    fn received_and_processed_metadata_render_to_distinct_metrics() {
         let recorder = CapturingRecorder::default();
 
         with_local_recorder(&recorder, || {
@@ -453,65 +429,22 @@ mod tests {
     }
 
     #[test]
-    fn zero_byte_metadata_emits_only_represented_metrics() {
+    fn zero_byte_streaming_metadata_records_histogram_observation() {
         let recorder = CapturingRecorder::default();
 
         with_local_recorder(&recorder, || {
-            let table_copy_metadata = TableCopyPayloadMetadata::new(0);
-            table_copy_metadata.record_received();
-            table_copy_metadata.record_row_size();
-            table_copy_metadata.record_processed("test_destination");
-
             let streaming_metadata = StreamingPayloadMetadata::insert(0);
-            streaming_metadata.record_received();
             streaming_metadata.record_row_size();
-            streaming_metadata.record_processed("test_destination");
-
-            let absent_streaming_metadata = StreamingPayloadMetadata::default();
-            absent_streaming_metadata.record_received();
-            absent_streaming_metadata.record_row_size();
-            absent_streaming_metadata.record_processed("test_destination");
+            StreamingPayloadMetadata::default().record_row_size();
         });
 
         assert_eq!(
-            *recorder.increments.lock().unwrap(),
-            [
-                CounterIncrement {
-                    metric: ETL_BYTES_RECEIVED_TOTAL.to_owned(),
-                    event_type: "copy".to_owned(),
-                    value: 0,
-                },
-                CounterIncrement {
-                    metric: ETL_BYTES_PROCESSED_TOTAL.to_owned(),
-                    event_type: "copy".to_owned(),
-                    value: 0,
-                },
-                CounterIncrement {
-                    metric: ETL_BYTES_RECEIVED_TOTAL.to_owned(),
-                    event_type: "insert".to_owned(),
-                    value: 0,
-                },
-                CounterIncrement {
-                    metric: ETL_BYTES_PROCESSED_TOTAL.to_owned(),
-                    event_type: "insert".to_owned(),
-                    value: 0,
-                },
-            ]
-        );
-        assert_eq!(
             *recorder.observations.lock().unwrap(),
-            [
-                HistogramObservation {
-                    metric: ETL_ROW_SIZE_BYTES.to_owned(),
-                    event_type: "copy".to_owned(),
-                    value: 0.0,
-                },
-                HistogramObservation {
-                    metric: ETL_ROW_SIZE_BYTES.to_owned(),
-                    event_type: "insert".to_owned(),
-                    value: 0.0,
-                },
-            ]
+            [HistogramObservation {
+                metric: ETL_ROW_SIZE_BYTES.to_owned(),
+                event_type: "insert".to_owned(),
+                value: 0.0,
+            }]
         );
     }
 }

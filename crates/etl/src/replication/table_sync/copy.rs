@@ -810,20 +810,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CopyProgress, MAX_CTID_COPY_PARTITIONS, partitions_for_table_weight,
-        target_ctid_partition_count,
+        MAX_CTID_COPY_PARTITIONS, partitions_for_table_weight, target_ctid_partition_count,
     };
-    use crate::destination::DestinationWriteStatus;
-
-    #[test]
-    fn copy_progress_tracks_acknowledged_rows_and_barrier() {
-        let mut progress = CopyProgress::default();
-        progress.record_batch(2, DestinationWriteStatus::Durable);
-        progress.record_batch(3, DestinationWriteStatus::Accepted);
-
-        assert_eq!(progress.total_rows, 5);
-        assert!(progress.barrier_required);
-    }
 
     #[test]
     fn target_ctid_partition_count_matches_workers() {

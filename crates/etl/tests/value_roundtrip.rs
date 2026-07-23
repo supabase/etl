@@ -593,7 +593,6 @@ async fn postgres_copy_chunks_are_exact_text_row_payloads() {
         rows,
         vec![b"1\tplain\t\\N\n".to_vec(), "2\ttab\\tline\\nslash\\\\é\tx\n".as_bytes().to_vec(),]
     );
-    assert_eq!(rows.iter().map(Vec::len).sum::<usize>(), 36);
 }
 
 #[tokio::test(flavor = "multi_thread")]

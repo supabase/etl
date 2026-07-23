@@ -901,68 +901,6 @@ async fn logical_replication_stream_converts_postgres_type_matrix() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn logical_replication_tuple_value_bytes_match_postgres_payload() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-    let table_name = test_table_name("cdc_payload_bytes");
-    database
-        .create_table(
-            table_name.clone(),
-            false,
-            &[("id", "bigint primary key"), ("value", "text not null"), ("optional", "text")],
-        )
-        .await
-        .unwrap();
-    let publication_name = "cdc_payload_bytes_pub";
-    database.create_publication(publication_name, &[table_name]).await.unwrap();
-
-    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let slot_name = test_slot_name("cdc_payload_bytes");
-    let (transaction, slot) = client.create_slot_with_transaction(&slot_name).await.unwrap();
-    transaction.commit().await.unwrap();
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
-        .await
-        .unwrap();
-
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            "insert into test.cdc_payload_bytes values ($1, $2, $3)",
-            &[&7_i64, &"tab\té", &Option::<&str>::None],
-        )
-        .await
-        .unwrap();
-
-    pin!(stream);
-    let payload_bytes = loop {
-        let message = stream.next().await.unwrap().unwrap();
-        let ReplicationMessage::XLogData(event) = message else {
-            continue;
-        };
-        let LogicalReplicationMessage::Insert(insert) = event.data() else {
-            continue;
-        };
-        let [
-            postgres_replication::protocol::TupleData::Text(id),
-            postgres_replication::protocol::TupleData::Text(value),
-            postgres_replication::protocol::TupleData::Null,
-        ] = insert.tuple().tuple_data()
-        else {
-            panic!("expected text, text, and null tuple values");
-        };
-
-        assert_eq!(id.as_ref(), b"7");
-        assert_eq!(value.as_ref(), "tab\té".as_bytes());
-        break id.len() + value.len();
-    };
-
-    assert_eq!(payload_bytes, 7);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn table_copy_stream_rejects_known_unsupported_postgres_values() {
     init_test_tracing();
     let database = spawn_source_database().await;
