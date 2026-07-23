@@ -8,6 +8,7 @@ use crate::{
     bail,
     data::{ArrayCell, Cell},
     error::{ErrorKind, EtlResult},
+    etl_error,
     postgres::codec::{
         bool::parse_bool,
         hex,
@@ -179,16 +180,12 @@ fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
         return Ok(input);
     }
 
+    let malformed =
+        || etl_error!(ErrorKind::ConversionError, "Array input has a malformed dimensions prefix");
+
     let mut groups = 0usize;
     let mut index = 0usize;
     while bytes.get(index) == Some(&b'[') {
-        let malformed = || {
-            crate::etl_error!(
-                ErrorKind::ConversionError,
-                "Array input has a malformed dimensions prefix"
-            )
-        };
-
         let after_lower = skip_integer(bytes, index + 1).ok_or_else(malformed)?;
         if bytes.get(after_lower) != Some(&b':') {
             return Err(malformed());
@@ -204,7 +201,7 @@ fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
     }
 
     if bytes.get(index) != Some(&b'=') {
-        bail!(ErrorKind::ConversionError, "Array input has a malformed dimensions prefix");
+        return Err(malformed());
     }
 
     if groups > 1 {
@@ -212,12 +209,7 @@ fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
     }
 
     // The prefix is all ASCII, so `index + 1` is a character boundary.
-    input.get(index + 1..).ok_or_else(|| {
-        crate::etl_error!(
-            ErrorKind::ConversionError,
-            "Array input has a malformed dimensions prefix"
-        )
-    })
+    input.get(index + 1..).ok_or_else(malformed)
 }
 
 /// Parses Postgres array literal syntax into a typed [`ArrayCell`].
