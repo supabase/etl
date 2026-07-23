@@ -1,7 +1,15 @@
+use std::sync::Arc;
+
 use etl::{
-    event::EventType,
+    destination::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    error::ErrorKind,
+    event::{Event, EventType, RelationEvent},
     pipeline::PipelineId,
-    store::{StateStore, TableStateType},
+    schema::{
+        ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
+        TableName, TableSchema, Type,
+    },
+    store::{SchemaStore, StateStore, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -2246,4 +2254,364 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
             "__current view should match the evolved ReplacingMergeTree schema"
         );
     }
+}
+
+/// Row struct for the stale-replay test after the add-column change.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct StaleReplayRow {
+    id: i64,
+    name: String,
+    email: Option<String>,
+}
+
+/// Tests that a stale relation event replayed after a restart is rejected
+/// instead of rewinding the destination schema.
+///
+/// # GIVEN
+///
+/// A Postgres table (id, name) copied to ClickHouse, then `ADD COLUMN email`
+/// and one streamed row carrying data in the new column, so the destination
+/// applied the newer schema snapshot and holds data in `email`.
+///
+/// # WHEN
+///
+/// A fresh destination built on the same store (simulating a process restart
+/// that replays from an older LSN) receives a relation event carrying the
+/// retained pre-change schema snapshot.
+///
+/// # THEN
+///
+/// The write fails with `ErrorKind::DestinationSchemaRewind`, no reverse DDL
+/// runs (the `email` column and its data survive), and destination metadata
+/// still points at the newer snapshot.
+///
+/// # Regression
+///
+/// Without the rewind guard, the destination diffed the applied schema against
+/// the stale one and executed `DROP COLUMN email`, physically deleting the
+/// newer column data before the newer relation event re-added it as empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_relation_replay_rejected_merge_tree() {
+    stale_relation_replay_rejected_inner(ClickHouseEngine::MergeTree).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_relation_replay_rejected_replacing_merge_tree() {
+    stale_relation_replay_rejected_inner(ClickHouseEngine::ReplacingMergeTree).await;
+}
+
+async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: table with one row, copied to ClickHouse ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("schema_stale_replay");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("name", "text not null")])
+        .await
+        .expect("Failed to create table");
+
+    let publication_name = "test_pub_ch_stale_replay";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (name) VALUES ('Alice')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert Alice");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
+    );
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    let initial_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation");
+    let initial_snapshot_id = initial_metadata.snapshot_id;
+
+    // Add a column and stream one row that carries data in it.
+    let event_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
+        .await;
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn { name: "email", data_type: "text" }],
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (name, email) VALUES ('Bob', 'bob@example.com')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert Bob");
+    event_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let applied_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after schema change");
+    let applied_snapshot_id = applied_metadata.snapshot_id;
+    assert!(
+        applied_snapshot_id > initial_snapshot_id,
+        "snapshot_id should increase after schema change"
+    );
+    let clickhouse_table_name = applied_metadata.destination_table_id.clone();
+
+    // --- WHEN: a fresh destination on the same store replays the old relation ---
+    let stale_table_schema = store
+        .get_table_schema(&table_id, initial_snapshot_id)
+        .await
+        .unwrap()
+        .expect("pre-change schema snapshot should still be retained");
+    let stale_schema = ReplicatedTableSchema::from_mask(
+        stale_table_schema,
+        initial_metadata.replication_mask.clone(),
+    );
+
+    let restarted_destination =
+        clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
+    let result = restarted_destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            start_lsn: PgLsn::from(0),
+            commit_lsn: PgLsn::from(0),
+            tx_ordinal: 0,
+            replicated_table_schema: stale_schema,
+        })])
+        .await;
+
+    // --- THEN: the stale snapshot is rejected and no reverse DDL ran ---
+    let err = result.expect_err("stale relation replay should be rejected");
+    assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
+
+    let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
+    assert_eq!(columns, vec!["id", "name", "email"], "email column must survive the stale replay");
+
+    let query =
+        current_state_query(engine, &clickhouse_table_name, "id, name, email", &["id"], "id");
+    let rows: Vec<StaleReplayRow> = clickhouse_db.query(&query).await;
+    assert_eq!(rows.len(), 2, "expected Alice + Bob");
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].name, "Alice");
+    assert_eq!(rows[1].id, 2);
+    assert_eq!(rows[1].name, "Bob");
+    assert_eq!(
+        rows[1].email,
+        Some("bob@example.com".to_owned()),
+        "newer column data must survive the stale replay"
+    );
+
+    let final_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should still exist after the rejected replay");
+    assert_eq!(
+        final_metadata.snapshot_id, applied_snapshot_id,
+        "metadata must stay at the newer snapshot"
+    );
+}
+
+/// Tests that interrupted schema-change recovery rejects a stale schema
+/// snapshot instead of replaying DDL against it.
+///
+/// # GIVEN
+///
+/// Destination metadata in `Applying` state targeting snapshot 200 with
+/// previous snapshot 100 (an interrupted schema change).
+///
+/// # WHEN
+///
+/// The recovery path runs with a schema carrying snapshot 100 -- a stale
+/// replay arriving before the interrupted change's relation event.
+///
+/// # THEN
+///
+/// The write fails with `ErrorKind::DestinationSchemaRewind` instead of
+/// diffing against the stale schema and wrongly marking the interrupted
+/// change as applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+
+    let table_id = TableId::new(4242);
+    let table_schema = Arc::new(TableSchema::with_snapshot_id(
+        table_id,
+        TableName::new("public".to_owned(), "stale_recovery".to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+        ],
+        SnapshotId::new(PgLsn::from(100)),
+    ));
+    let replication_mask = ReplicationMask::all(&table_schema);
+    let stale_schema =
+        ReplicatedTableSchema::from_mask(Arc::clone(&table_schema), replication_mask.clone());
+
+    // Interrupted schema change: metadata targets snapshot 200, previous 100.
+    let metadata = DestinationTableMetadata::new_applied(
+        "public_stale_recovery".to_owned(),
+        SnapshotId::new(PgLsn::from(100)),
+        replication_mask.clone(),
+    )
+    .with_schema_change(
+        SnapshotId::new(PgLsn::from(200)),
+        replication_mask,
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(table_id, metadata).await.unwrap();
+
+    let destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+
+    let err = destination
+        .write_table_rows(&stale_schema, vec![])
+        .await
+        .expect_err("recovery with a stale schema snapshot should be rejected");
+    assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
+}
+
+/// Tests that interrupted schema-change recovery replays the diff and marks
+/// the change applied when the arriving schema matches the recovery target.
+///
+/// # GIVEN
+///
+/// A destination table physically created at snapshot 100 (id, name) whose
+/// metadata was then flipped to `Applying` targeting snapshot 200 (id, name,
+/// email) with previous snapshot 100 -- the state a crash leaves behind after
+/// `handle_relation_event` recorded the change but before the DDL completed.
+///
+/// # WHEN
+///
+/// A write arrives carrying the target snapshot 200, as happens when the
+/// rows following the interrupted relation event replay after a restart.
+///
+/// # THEN
+///
+/// Recovery replays the interrupted diff (adds `email`), transitions the
+/// metadata to `Applied` at snapshot 200, and the write succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+
+    let table_id = TableId::new(4243);
+    let table_name = TableName::new("public".to_owned(), "recovery_replay".to_owned());
+    let old_columns = vec![
+        ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+        ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+    ];
+    // Recovery loads the previous snapshot from the schema store, so the old
+    // schema must be stored, not just passed to the write call.
+    let old_table_schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            table_id,
+            table_name.clone(),
+            old_columns.clone(),
+            SnapshotId::new(PgLsn::from(100)),
+        ))
+        .await
+        .unwrap();
+    let old_mask = ReplicationMask::all(&old_table_schema);
+    let old_schema = ReplicatedTableSchema::from_mask(old_table_schema, old_mask.clone());
+
+    let destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+
+    // Create the physical table and `Applied` metadata at snapshot 100.
+    destination.write_table_rows(&old_schema, vec![]).await.unwrap();
+
+    let mut new_columns = old_columns;
+    new_columns.push(ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true));
+    let new_table_schema = Arc::new(TableSchema::with_snapshot_id(
+        table_id,
+        table_name,
+        new_columns,
+        SnapshotId::new(PgLsn::from(200)),
+    ));
+    let new_mask = ReplicationMask::all(&new_table_schema);
+    let new_schema = ReplicatedTableSchema::from_mask(new_table_schema, new_mask.clone());
+
+    // Simulate a crash after the change was recorded as `Applying` but before
+    // the DDL completed.
+    let applied_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation");
+    let clickhouse_table_name = applied_metadata.destination_table_id.clone();
+    let interrupted_metadata = DestinationTableMetadata::new_applied(
+        clickhouse_table_name.clone(),
+        SnapshotId::new(PgLsn::from(100)),
+        old_mask,
+    )
+    .with_schema_change(
+        SnapshotId::new(PgLsn::from(200)),
+        new_mask,
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
+
+    // A restarted destination (empty table cache, so metadata is consulted)
+    // receiving the target snapshot must replay the interrupted diff.
+    let restarted_destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+    restarted_destination.write_table_rows(&new_schema, vec![]).await.unwrap();
+
+    let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
+    assert_eq!(columns, vec!["id", "name", "email"], "recovery must add the interrupted column");
+
+    let recovered_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should be applied after recovery");
+    assert_eq!(
+        recovered_metadata.snapshot_id,
+        SnapshotId::new(PgLsn::from(200)),
+        "recovery must mark the target snapshot applied"
+    );
 }
