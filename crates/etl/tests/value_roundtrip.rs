@@ -561,6 +561,42 @@ async fn copy_single_row(client: &Client, query: &str) -> Result<Vec<u8>, tokio_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn postgres_copy_chunks_are_exact_text_row_payloads() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    client
+        .execute("create table test.copy_payload (id int8, value text, optional text)", &[])
+        .await
+        .unwrap();
+    client
+        .execute(
+            "insert into test.copy_payload values (1, 'plain', null), (2, \
+             E'tab\\tline\\nslash\\\\é', 'x')",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let stream = client
+        .copy_out("copy (select * from test.copy_payload order by id) to stdout with (format text)")
+        .await
+        .unwrap();
+    futures::pin_mut!(stream);
+    let mut rows = Vec::new();
+    while let Some(row) = stream.next().await {
+        rows.push(row.unwrap().to_vec());
+    }
+
+    assert_eq!(
+        rows,
+        vec![b"1\tplain\t\\N\n".to_vec(), "2\ttab\\tline\\nslash\\\\é\tx\n".as_bytes().to_vec(),]
+    );
+    assert_eq!(rows.iter().map(Vec::len).sum::<usize>(), 36);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn copy_rows_roundtrip_through_copy_codec() {
     init_test_tracing();
 

@@ -13,7 +13,7 @@ use tokio::{
 use crate::{
     data::TableRow,
     destination::{
-        ApplyLoopAsyncResultMetadata, Destination, DispatchMetrics, DropTableForCopyResult,
+        ApplyLoopAsyncResultMetadata, Destination, DropTableForCopyResult, EventsBatchMetrics,
         PipelineDestination, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
@@ -378,8 +378,9 @@ where
             WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
                 commit_end_lsn: None,
                 durability,
-                metrics: DispatchMetrics {
-                    items_count: events.len(),
+                metrics: EventsBatchMetrics {
+                    event_count: events.len(),
+                    streaming_payload: Default::default(),
                     dispatched_at: Instant::now(),
                 },
             });

@@ -119,8 +119,8 @@ impl fmt::Display for BigQueryOperationType {
 /// Result of processing one append request, used to determine retry strategy.
 #[derive(Debug)]
 enum AppendRequestProcessResult {
-    /// Request succeeded with byte metrics.
-    Success { bytes_sent: usize, bytes_received: usize },
+    /// Request succeeded.
+    Success,
     /// Request had row-level errors.
     RowErrors { errors: Vec<RowError> },
     /// Request had a request-level error.
@@ -130,15 +130,8 @@ enum AppendRequestProcessResult {
 /// Aggregated result of processing a set of append requests.
 #[derive(Debug)]
 enum AppendProcessingResult {
-    Success {
-        bytes_sent: usize,
-        bytes_received: usize,
-    },
-    Retry {
-        bytes_sent: usize,
-        bytes_received: usize,
-        pending_requests: Vec<RetryableAppendRequest>,
-    },
+    Success,
+    Retry { pending_requests: Vec<RetryableAppendRequest> },
     Error(EtlError),
 }
 
@@ -226,15 +219,11 @@ fn storage_write_retry_delay_with_jitter(delay: Duration) -> Duration {
 /// Row errors are permanent failures (bad data, schema mismatch) and fail
 /// immediately. Request errors are surfaced for retry decision by the caller.
 fn process_append_result(append_result: AppendResult) -> AppendRequestProcessResult {
-    let successful_bytes_sent = append_result.successful_bytes_sent;
-    let mut total_bytes_received = 0;
     let mut row_errors = Vec::new();
 
     for response in append_result.responses {
         match response {
             Ok(response) => {
-                total_bytes_received += response.encoded_len();
-
                 // Row-level errors are permanent failures (bad data, schema mismatch, etc).
                 if !response.row_errors.is_empty() {
                     row_errors.extend(response.row_errors);
@@ -249,10 +238,7 @@ fn process_append_result(append_result: AppendResult) -> AppendRequestProcessRes
     if !row_errors.is_empty() {
         AppendRequestProcessResult::RowErrors { errors: row_errors }
     } else {
-        AppendRequestProcessResult::Success {
-            bytes_sent: successful_bytes_sent,
-            bytes_received: total_bytes_received,
-        }
+        AppendRequestProcessResult::Success
     }
 }
 
@@ -1238,14 +1224,12 @@ impl BigQueryClient {
     pub(super) async fn append(
         &self,
         append_requests: Vec<BigQueryAppendRequest>,
-    ) -> EtlResult<(usize, usize)> {
+    ) -> EtlResult<()> {
         if append_requests.is_empty() {
-            return Ok((0, 0));
+            return Ok(());
         }
 
         let mut pending_requests = append_requests;
-        let mut total_bytes_sent = 0;
-        let mut total_bytes_received = 0;
 
         let started_at = Instant::now();
         let mut attempt = 1;
@@ -1253,20 +1237,8 @@ impl BigQueryClient {
 
         loop {
             match self.append_once(pending_requests).await? {
-                AppendProcessingResult::Success { bytes_sent, bytes_received } => {
-                    total_bytes_sent += bytes_sent;
-                    total_bytes_received += bytes_received;
-
-                    return Ok((total_bytes_sent, total_bytes_received));
-                }
-                AppendProcessingResult::Retry {
-                    pending_requests: next_pending_requests,
-                    bytes_sent,
-                    bytes_received,
-                } => {
-                    total_bytes_sent += bytes_sent;
-                    total_bytes_received += bytes_received;
-
+                AppendProcessingResult::Success => return Ok(()),
+                AppendProcessingResult::Retry { pending_requests: next_pending_requests } => {
                     let retry_summary =
                         format_retryable_storage_write_requests(&next_pending_requests);
                     pending_requests =
@@ -1274,7 +1246,7 @@ impl BigQueryClient {
 
                     let pending_request_count = pending_requests.len();
                     if pending_request_count == 0 {
-                        return Ok((total_bytes_sent, total_bytes_received));
+                        return Ok(());
                     }
 
                     let elapsed = started_at.elapsed();
@@ -1315,7 +1287,7 @@ impl BigQueryClient {
         append_requests: Vec<BigQueryAppendRequest>,
     ) -> EtlResult<AppendProcessingResult> {
         if append_requests.is_empty() {
-            return Ok(AppendProcessingResult::Success { bytes_sent: 0, bytes_received: 0 });
+            return Ok(AppendProcessingResult::Success);
         }
 
         debug!(request_count = append_requests.len(), "streaming append requests concurrently");
@@ -1355,8 +1327,6 @@ impl BigQueryClient {
                 if !has_non_retryable_request && !retryable_requests.is_empty() {
                     return Ok(AppendProcessingResult::Retry {
                         pending_requests: retryable_requests,
-                        bytes_sent: 0,
-                        bytes_received: 0,
                     });
                 }
 
@@ -1364,8 +1334,6 @@ impl BigQueryClient {
             }
         };
 
-        let mut total_bytes_sent = 0;
-        let mut total_bytes_received = 0;
         let mut errors = Vec::new();
         let mut retryable_request_details = vec![None; append_requests.len()];
 
@@ -1373,14 +1341,8 @@ impl BigQueryClient {
             let request_index = append_result.request_index;
 
             match process_append_result(append_result) {
-                AppendRequestProcessResult::Success { bytes_sent, bytes_received } => {
-                    debug!(
-                        request_index,
-                        bytes_sent, bytes_received, "append request processed successfully"
-                    );
-
-                    total_bytes_sent += bytes_sent;
-                    total_bytes_received += bytes_received;
+                AppendRequestProcessResult::Success => {
+                    debug!(request_index, "append request processed successfully");
                 }
                 AppendRequestProcessResult::RowErrors { errors: row_errors } => {
                     let error_count = row_errors.len();
@@ -1443,17 +1405,10 @@ impl BigQueryClient {
                 })
                 .collect();
 
-            return Ok(AppendProcessingResult::Retry {
-                bytes_sent: total_bytes_sent,
-                bytes_received: total_bytes_received,
-                pending_requests,
-            });
+            return Ok(AppendProcessingResult::Retry { pending_requests });
         }
 
-        Ok(AppendProcessingResult::Success {
-            bytes_sent: total_bytes_sent,
-            bytes_received: total_bytes_received,
-        })
+        Ok(AppendProcessingResult::Success)
     }
 
     /// Invalidates all connections used by the storage write api.
@@ -1643,9 +1598,8 @@ mod tests {
     }
 
     #[test]
-    fn process_append_result_uses_only_successful_byte_counts() {
+    fn process_append_result_reports_success_without_row_errors() {
         let response = successful_append_response();
-        let successful_bytes_received = response.encoded_len();
         let result = process_append_result(AppendResult {
             request_index: 0,
             responses: vec![Ok(response)],
@@ -1653,13 +1607,7 @@ mod tests {
             successful_bytes_sent: 64,
         });
 
-        assert!(matches!(
-            result,
-            AppendRequestProcessResult::Success {
-                bytes_sent: 64,
-                bytes_received,
-            } if bytes_received == successful_bytes_received
-        ));
+        assert!(matches!(result, AppendRequestProcessResult::Success));
     }
 
     #[test]

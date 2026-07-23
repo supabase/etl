@@ -4,21 +4,42 @@ use std::{
 };
 
 use futures::Stream;
-use metrics::{counter, histogram};
 use pin_project_lite::pin_project;
 use tokio_postgres::CopyOutStream;
 
 use crate::{
-    data::TableRow,
+    data::{SizeHint, TableRow},
     error::EtlResult,
-    observability::{
-        ACTION_LABEL, ETL_BYTES_PROCESSED_TOTAL, ETL_BYTES_RECEIVED_TOTAL,
-        ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL, ETL_ROW_SIZE_BYTES,
-        EVENT_TYPE_LABEL, WORKER_TYPE_LABEL,
-    },
     postgres::codec::parse_table_row_from_postgres_copy_bytes,
     schema::ColumnSchema,
+    source_payload::TableCopyPayload,
 };
+
+/// A decoded table-copy row paired with its PostgreSQL `CopyData` body size.
+#[derive(Debug)]
+pub(crate) struct TableCopyRow {
+    /// Decoded row sent to the destination.
+    row: TableRow,
+    /// Text-format row bytes, including delimiters, escaping, and the newline.
+    table_copy_payload: TableCopyPayload,
+}
+
+impl TableCopyRow {
+    /// Consumes the row and returns its decoded value and table-copy payload.
+    pub(crate) fn into_parts(self) -> (TableRow, TableCopyPayload) {
+        (self.row, self.table_copy_payload)
+    }
+}
+
+impl SizeHint for TableCopyRow {
+    /// Returns the decoded row estimate used to control batching.
+    ///
+    /// The raw PostgreSQL COPY body is retained separately in
+    /// `table_copy_payload` for metrics and usage accounting.
+    fn size_hint(&self) -> usize {
+        self.row.size_hint()
+    }
+}
 
 pin_project! {
     /// A stream that yields rows from a Postgres COPY operation.
@@ -43,36 +64,10 @@ impl TableCopyStream {
     pub(crate) fn wrap(stream: CopyOutStream, column_schemas: Vec<ColumnSchema>) -> Self {
         Self { stream, column_schemas }
     }
-
-    /// Records source-side metrics for a COPY row received from Postgres.
-    fn record_row_received(row_size_bytes: u64) {
-        counter!(
-            ETL_EVENTS_RECEIVED_TOTAL,
-            WORKER_TYPE_LABEL => "table_sync",
-            ACTION_LABEL => "table_copy",
-        )
-        .increment(1);
-
-        counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => "copy").increment(row_size_bytes);
-    }
-
-    /// Records pipeline-side metrics for a COPY row read from the stream.
-    fn record_row_processed(row_size_bytes: u64) {
-        counter!(
-            ETL_EVENTS_PROCESSED_TOTAL,
-            WORKER_TYPE_LABEL => "table_sync",
-            ACTION_LABEL => "table_copy",
-        )
-        .increment(1);
-
-        counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "copy").increment(row_size_bytes);
-
-        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy").record(row_size_bytes as f64);
-    }
 }
 
 impl Stream for TableCopyStream {
-    type Item = EtlResult<TableRow>;
+    type Item = EtlResult<TableCopyRow>;
 
     /// Polls the stream for the next converted table row with comprehensive
     /// error handling.
@@ -87,16 +82,13 @@ impl Stream for TableCopyStream {
             Poll::Pending => Poll::Pending,
             // Row copy received.
             Poll::Ready(Some(Ok(row))) => {
-                let row_size_bytes = row.len() as u64;
-
-                Self::record_row_received(row_size_bytes);
-                Self::record_row_processed(row_size_bytes);
+                let table_copy_payload = TableCopyPayload::new(row.len() as u64);
 
                 // Conversion step: transform raw bytes into structured TableRow.
                 // This is where most errors occur due to data format or type issues.
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.as_slice())
                 {
-                    Ok(row) => Poll::Ready(Some(Ok(row))),
+                    Ok(row) => Poll::Ready(Some(Ok(TableCopyRow { row, table_copy_payload }))),
                     Err(err) => Poll::Ready(Some(Err(err))),
                 }
             }

@@ -14,6 +14,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     runtime::concurrency::{ShutdownResult, ShutdownRx},
+    source_payload::StreamingPayload,
 };
 
 /// Durability status reported by streaming and table-copy destination writes.
@@ -113,11 +114,17 @@ pub(crate) type PendingWriteEventsResult<T = DestinationWriteStatus> =
 pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 
-/// Dispatch-time metrics carried through an asynchronous completion result.
+/// Metrics for an events batch carried through its asynchronous completion.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct DispatchMetrics {
-    /// Number of items in the dispatched batch.
-    pub items_count: usize,
+pub(crate) struct EventsBatchMetrics {
+    /// Number of events in the batch.
+    pub event_count: usize,
+    /// Total PostgreSQL tuple bytes used for source metrics and usage
+    /// accounting.
+    ///
+    /// These are independent from the decoded [`crate::data::SizeHint`] used
+    /// to determine when the batch is dispatched.
+    pub streaming_payload: StreamingPayload,
     /// Instant at which the batch was handed off to the destination.
     pub dispatched_at: Instant,
 }
@@ -136,7 +143,7 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Durability requirement supplied with the dispatched write.
     pub durability: WriteEventsDurability,
     /// Dispatch-time metrics for the batch.
-    pub metrics: DispatchMetrics,
+    pub metrics: EventsBatchMetrics,
 }
 
 /// Sender half of a typed asynchronous completion result.
@@ -252,7 +259,11 @@ mod tests {
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: Some(PgLsn::from(42)),
             durability: WriteEventsDurability::MayDefer,
-            metrics: DispatchMetrics { items_count: 1, dispatched_at: Instant::now() },
+            metrics: EventsBatchMetrics {
+                event_count: 1,
+                streaming_payload: crate::source_payload::StreamingPayload::insert(7),
+                dispatched_at: Instant::now(),
+            },
         };
         let (result_tx, pending_result) = WriteEventsResult::new(metadata);
 
