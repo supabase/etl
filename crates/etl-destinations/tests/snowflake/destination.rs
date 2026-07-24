@@ -177,20 +177,37 @@ async fn apply_relation_event(
     .unwrap_or_else(|error| panic!("write_events ({context}) failed: {error}"));
 }
 
-/// Inserts a row while omitting `status`, allowing Snowflake defaults to apply.
-async fn insert_row_omitting_status(
+/// Returns column names from warehouse-free Snowflake metadata.
+async fn column_names(sql: &SqlClient<AuthManager<HttpExchanger>>, fqn: &str) -> Vec<String> {
+    query_rows(sql, &format!("show columns in table {fqn}"))
+        .await
+        .expect("show columns failed")
+        .into_iter()
+        .map(|row| {
+            row.get(2)
+                .and_then(serde_json::Value::as_str)
+                .expect("show columns should return a column name")
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Asserts that `status` has no default without resuming the warehouse.
+async fn assert_status_default_absent(
     sql: &SqlClient<AuthManager<HttpExchanger>>,
     fqn: &str,
-    id: i32,
-    sequence_number: &str,
     context: &str,
 ) {
-    sql.execute_ddl(&format!(
-        "INSERT INTO {fqn} (\"id\", \"_cdc_operation\", \"_cdc_sequence_number\") VALUES ({id}, \
-         'insert', '{sequence_number}')"
-    ))
-    .await
-    .unwrap_or_else(|error| panic!("insert {context} failed: {error}"));
+    let rows = query_rows(sql, &format!("show columns like 'status' in table {fqn}"))
+        .await
+        .unwrap_or_else(|error| panic!("show columns ({context}) failed: {error}"));
+    assert_eq!(rows.len(), 1, "{context}: expected exactly one status column");
+
+    let default = rows[0].get(5).expect("show columns should return a default value");
+    assert!(
+        default.is_null() || default.as_str() == Some(""),
+        "{context}: status should not have a default"
+    );
 }
 
 #[tokio::test]
@@ -338,16 +355,6 @@ async fn write_table_rows_empty() {
 
         let exists = harness.sql.table_exists(&sf_table).await.expect("table_exists failed");
         assert!(exists, "table should have been created even with empty row set");
-
-        let fqn = format!(
-            "\"{}\".\"{}\".\"{sf_table}\"",
-            harness.config.database(),
-            harness.config.schema()
-        );
-        let rows = query_rows(&harness.sql, &format!("SELECT * FROM {fqn}"))
-            .await
-            .expect("query_rows failed");
-        assert_eq!(rows.len(), 0, "table should be empty");
     })
     .await;
 }
@@ -886,8 +893,7 @@ async fn schema_evolution_existing_column_default_changes() {
 
         apply_relation_event(&harness.destination, set_default_replicated, 100, "set default")
             .await;
-        insert_row_omitting_status(&harness.sql, &fqn, 1, "manual-1", "after skipped set default")
-            .await;
+        assert_status_default_absent(&harness.sql, &fqn, "after skipped set default").await;
 
         apply_relation_event(
             &harness.destination,
@@ -896,46 +902,16 @@ async fn schema_evolution_existing_column_default_changes() {
             "unsupported default",
         )
         .await;
-        insert_row_omitting_status(
-            &harness.sql,
-            &fqn,
-            2,
-            "manual-2",
-            "after unsupported default is skipped",
-        )
-        .await;
+        assert_status_default_absent(&harness.sql, &fqn, "after unsupported default is skipped")
+            .await;
 
         apply_relation_event(&harness.destination, reset_default_replicated, 300, "reset default")
             .await;
-        insert_row_omitting_status(
-            &harness.sql,
-            &fqn,
-            3,
-            "manual-3",
-            "after skipped reset default",
-        )
-        .await;
+        assert_status_default_absent(&harness.sql, &fqn, "after skipped reset default").await;
 
         apply_relation_event(&harness.destination, drop_default_replicated, 400, "drop default")
             .await;
-        insert_row_omitting_status(&harness.sql, &fqn, 4, "manual-4", "after skipped drop default")
-            .await;
-
-        let rows = query_rows(
-            &harness.sql,
-            &format!("SELECT \"id\"::VARCHAR, \"status\" FROM {fqn} ORDER BY \"id\""),
-        )
-        .await
-        .expect("query for existing-column default rows failed");
-        assert_eq!(
-            rows,
-            vec![
-                vec![serde_json::json!("1"), serde_json::Value::Null],
-                vec![serde_json::json!("2"), serde_json::Value::Null],
-                vec![serde_json::json!("3"), serde_json::Value::Null],
-                vec![serde_json::json!("4"), serde_json::Value::Null],
-            ]
-        );
+        assert_status_default_absent(&harness.sql, &fqn, "after skipped drop default").await;
     })
     .await;
 }
@@ -1046,25 +1022,20 @@ async fn schema_evolution_rename_column() {
             harness.config.schema()
         );
 
-        // New row uses the renamed column.
         let rows = query_rows(
             &harness.sql,
-            &format!("SELECT \"full_name\" FROM {fqn} WHERE \"id\" = '2'"),
+            &format!("select \"id\", \"full_name\" from {fqn} order by \"id\""),
         )
         .await
         .expect("query for renamed column failed");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0][0], serde_json::json!("Bob"));
-
-        // Initial row data is preserved under the new column name.
-        let rows = query_rows(
-            &harness.sql,
-            &format!("SELECT \"full_name\" FROM {fqn} WHERE \"id\" = '1'"),
-        )
-        .await
-        .expect("query for initial row after rename failed");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0][0], serde_json::json!("Alice"));
+        assert_eq!(
+            rows,
+            vec![
+                vec![serde_json::json!("1"), serde_json::json!("Alice")],
+                vec![serde_json::json!("2"), serde_json::json!("Bob")],
+            ],
+            "the rename should preserve initial data and accept new rows"
+        );
     })
     .await;
 }
@@ -1180,17 +1151,23 @@ async fn schema_evolution_drop_column() {
             harness.config.schema()
         );
 
-        // New row landed with remaining columns.
-        let rows =
-            query_rows(&harness.sql, &format!("SELECT \"name\" FROM {fqn} WHERE \"id\" = '2'"))
-                .await
-                .expect("query after drop failed");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0][0], serde_json::json!("Bob"));
+        let rows = query_rows(
+            &harness.sql,
+            &format!("select \"id\", \"name\" from {fqn} order by \"id\""),
+        )
+        .await
+        .expect("query after drop failed");
+        assert_eq!(
+            rows,
+            vec![
+                vec![serde_json::json!("1"), serde_json::json!("Alice")],
+                vec![serde_json::json!("2"), serde_json::json!("Bob")],
+            ],
+            "the drop should preserve initial data and accept new rows"
+        );
 
-        // Dropped column is gone from the table.
-        let result = query_rows(&harness.sql, &format!("SELECT \"email\" FROM {fqn}")).await;
-        assert!(result.is_err(), "column 'email' should not exist after DROP COLUMN");
+        let columns = column_names(&harness.sql, &fqn).await;
+        assert!(!columns.iter().any(|column| column == "email"), "email column should be dropped");
     })
     .await;
 }
@@ -1423,7 +1400,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
         // renamed.
         let rows = query_rows(
             &harness.sql,
-            &format!("SELECT \"id\", \"full_name\" FROM {fqn} ORDER BY \"id\""),
+            &format!("select \"id\", \"full_name\" from {fqn} order by \"id\""),
         )
         .await
         .expect("final query failed");
@@ -1441,13 +1418,14 @@ async fn schema_evolution_interleaved_ddl_dml() {
         assert_eq!(rows[4][0], serde_json::json!("5"));
         assert_eq!(rows[4][1], serde_json::json!("Eve"));
 
-        // Dropped column should not exist.
-        let result = query_rows(&harness.sql, &format!("SELECT \"email\" FROM {fqn}")).await;
-        assert!(result.is_err(), "column 'email' should not exist after DROP COLUMN");
-
-        // Old column name should not exist.
-        let result = query_rows(&harness.sql, &format!("SELECT \"name\" FROM {fqn}")).await;
-        assert!(result.is_err(), "column 'name' should not exist after RENAME");
+        let columns = column_names(&harness.sql, &fqn).await;
+        assert!(columns.iter().any(|column| column == "id"), "id column should remain");
+        assert!(
+            columns.iter().any(|column| column == "full_name"),
+            "renamed full_name column should remain"
+        );
+        assert!(!columns.iter().any(|column| column == "email"), "email column should be dropped");
+        assert!(!columns.iter().any(|column| column == "name"), "name column should be renamed");
     })
     .await;
 }

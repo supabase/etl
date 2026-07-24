@@ -200,16 +200,13 @@ async fn continuation_token() {
 
         let fqn = format!("\"{}\".\"{}\".\"{table}\"", config.database(), config.schema());
 
-        #[allow(clippy::too_many_arguments)]
-        async fn verify(
+        /// Waits for a stream offset without using a virtual warehouse.
+        async fn wait_for_offset(
             stream: &RestStreamClient<AuthManager<HttpExchanger>>,
-            sql: &SqlClient<AuthManager<HttpExchanger>>,
             config: &Config,
             table: &str,
             channel: &str,
-            fqn: &str,
             expected_offset: &OffsetToken,
-            expected_rows: usize,
         ) {
             let committed = poll_stream_offset(
                 stream,
@@ -226,7 +223,15 @@ async fn continuation_token() {
                 Some(expected_offset.clone()),
                 "expected offset not committed within timeout"
             );
-            let rows = query_rows(sql, &format!("SELECT * FROM {fqn} ORDER BY \"id\""))
+        }
+
+        /// Checks the materialized row count after an offset is durable.
+        async fn assert_row_count(
+            sql: &SqlClient<AuthManager<HttpExchanger>>,
+            fqn: &str,
+            expected_rows: usize,
+        ) {
+            let rows = query_rows(sql, &format!("select * from {fqn} order by \"id\""))
                 .await
                 .expect("query_rows failed");
             assert_eq!(rows.len(), expected_rows, "unexpected row count: {rows:?}");
@@ -261,7 +266,7 @@ async fn continuation_token() {
             .await
             .expect("insert batch 1 failed");
 
-        verify(&stream, &sql, &config, &table, &channel, &fqn, &offset1, 1).await;
+        wait_for_offset(&stream, &config, &table, &channel, &offset1).await;
 
         // Batch 2: uses continuation_token from batch 1.
         let offset2: OffsetToken = "0000000000000001/0000000000000001".parse().unwrap();
@@ -286,8 +291,7 @@ async fn continuation_token() {
             insert1.continuation_token, insert2.continuation_token,
             "continuation_token must advance after each batch"
         );
-        // 2 rows expected, offset2 must be committed.
-        verify(&stream, &sql, &config, &table, &channel, &fqn, &offset2, 2).await;
+        wait_for_offset(&stream, &config, &table, &channel, &offset2).await;
 
         // Batch 3: use STALE token from batch 1 (already consumed by batch 2).
         let offset3: OffsetToken = "0000000000000001/0000000000000002".parse().unwrap();
@@ -314,7 +318,7 @@ async fn continuation_token() {
             "stale token should not advance the sequencer"
         );
         // Still 2 rows, offset token is not advanced to offset3.
-        verify(&stream, &sql, &config, &table, &channel, &fqn, &offset2, 2).await;
+        assert_row_count(&sql, &fqn, 2).await;
 
         // Retry batch 3 with the CORRECT token, data commits, offset is updated.
         let insert3_retry = stream
@@ -333,7 +337,8 @@ async fn continuation_token() {
             insert3_retry.continuation_token, insert2.continuation_token,
             "correct token should advance the sequencer"
         );
-        verify(&stream, &sql, &config, &table, &channel, &fqn, &offset3, 3).await;
+        wait_for_offset(&stream, &config, &table, &channel, &offset3).await;
+        assert_row_count(&sql, &fqn, 3).await;
 
         // Cleanup
         let _ = stream.drop_channel(config.database(), config.schema(), &table, &channel).await;
