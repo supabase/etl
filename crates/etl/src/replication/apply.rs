@@ -2810,7 +2810,7 @@ where
     let states = store.get_table_states().await?;
     Ok(states
         .iter()
-        .filter(|(_, state)| !state.as_type().is_done())
+        .filter(|(_, state)| state.as_type().is_syncing())
         .map(|(id, state)| (*id, state.clone()))
         .collect())
 }
@@ -2880,9 +2880,13 @@ mod apply_worker {
         D: PipelineDestination,
     {
         for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
-            let exit_intent =
-                process_single_syncing_table_after_commit(ctx, table_id, table_state, current_lsn)
-                    .await?;
+            let exit_intent = process_single_syncing_table_after_commit_event(
+                ctx,
+                table_id,
+                table_state,
+                current_lsn,
+            )
+            .await?;
 
             if exit_intent.is_some() {
                 return Ok(exit_intent);
@@ -2985,7 +2989,7 @@ mod apply_worker {
     /// Handles SyncWait → Catchup transitions, waits for workers already in
     /// Catchup, and spawns new workers.
     /// Does NOT handle SyncDone → Ready transitions.
-    async fn process_single_syncing_table_after_commit<S, D>(
+    async fn process_single_syncing_table_after_commit_event<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         table_id: TableId,
         table_state: TableState,

@@ -22,10 +22,7 @@ use super::{
     child::ChildPgReplicationClient,
     query::PgReplicationQueryTarget,
     transaction::PgReplicationTransaction,
-    types::{
-        CreateSlotResult, GetOrCreateSlotResult, GetSlotResult, PostgresConnectionUpdate,
-        SlotState, SnapshotAction,
-    },
+    types::{CreateSlotResult, GetSlotResult, PostgresConnectionUpdate, SlotState, SnapshotAction},
     utils::get_row_value,
 };
 use crate::{
@@ -512,29 +509,6 @@ impl PgReplicationClient {
             "Replication slot not found",
             format!("Replication slot '{}' not found in database", slot_name)
         );
-    }
-
-    /// Gets an existing replication slot or creates a new one if it doesn't
-    /// exist.
-    ///
-    /// This method first attempts to get the slot by name. If the slot doesn't
-    /// exist, it creates a new one.
-    ///
-    /// Returns an enum indicating whether the slot was created or already
-    /// existed.
-    pub(crate) async fn get_or_create_slot(
-        &self,
-        slot_name: &str,
-    ) -> EtlResult<GetOrCreateSlotResult> {
-        match self.get_slot(slot_name).await {
-            Ok(slot) => Ok(GetOrCreateSlotResult::GetSlot(slot)),
-            Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
-                let create_result = self.create_slot(slot_name).await?;
-
-                Ok(GetOrCreateSlotResult::CreateSlot(create_result))
-            }
-            Err(e) => Err(e),
-        }
     }
 
     /// Deletes a replication slot with the specified name.

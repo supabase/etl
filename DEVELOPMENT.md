@@ -597,6 +597,26 @@ TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=p
 
 **Note:** Ensure PostgreSQL is running and accessible at the configured host and port before running tests. The test suite will fail if it cannot connect to the database or if the required environment variables are not set.
 
+## Fuzzing
+
+The `fuzz/` crate contains `cargo-fuzz` targets for the parsers that consume
+external input: the Postgres text cell codec (`parse_text_cell`), the COPY
+row codec (`parse_copy_row`), the bytea hex parser
+(`parse_bytea_hex_string`), and a parse/print/parse stability check for
+numeric text values (`numeric_text_roundtrip`). Hand-written seeds live in
+`fuzz/corpus/<target>/`; generated corpus entries should not be committed.
+
+```bash
+# Install the runner once, then fuzz a target on the nightly toolchain
+cargo install cargo-fuzz
+cargo +nightly fuzz run parse_text_cell -- -max_total_time=60
+```
+
+CI runs every target for 120 seconds daily via
+`.github/workflows/fuzz.yml`. Each run restores the newest cached corpus
+for its target and saves the grown one, so coverage accumulates across
+days; crash inputs are uploaded as workflow artifacts on failure.
+
 ## Troubleshooting
 
 ### Database Connection Issues
