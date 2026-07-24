@@ -148,9 +148,9 @@ impl From<TableRow> for BigQuerySchemaDivergenceRow {
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct BigQuerySchemaChangeRow {
     pub(crate) id: i32,
-    pub(crate) full_name: String,
-    pub(crate) age: i32,
-    pub(crate) email: Option<String>,
+    pub(crate) status: String,
+    pub(crate) name: Option<String>,
+    pub(crate) age: Option<String>,
 }
 
 impl From<TableRow> for BigQuerySchemaChangeRow {
@@ -159,9 +159,9 @@ impl From<TableRow> for BigQuerySchemaChangeRow {
 
         BigQuerySchemaChangeRow {
             id: parse_table_cell(columns[0].clone()).unwrap(),
-            full_name: parse_table_cell(columns[1].clone()).unwrap(),
-            age: parse_table_cell(columns[2].clone()).unwrap(),
-            email: parse_table_cell(columns[3].clone()),
+            status: parse_table_cell(columns[1].clone()).unwrap(),
+            name: parse_table_cell(columns[2].clone()),
+            age: parse_table_cell(columns[3].clone()),
         }
     }
 }

@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use etl::{
     pipeline::PipelineId,
-    schema::{ColumnChange, ColumnModification, ColumnSchema, SchemaDiff, TableId},
+    schema::{ColumnModificationType, ColumnSchema, SchemaOperation, SchemaPlan, TableId},
 };
 use metrics::{counter, gauge, histogram};
 use tokio::{
@@ -326,75 +326,82 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         Ok(true)
     }
 
-    /// Apply column additions, renames, updates, and removals from a schema
-    /// diff.
-    pub async fn apply_schema_diff(&self, table_name: &str, diff: &SchemaDiff) -> Result<()> {
-        if diff.is_empty() {
+    /// Applies ordered add, drop, and modify column operations from a schema
+    /// plan.
+    pub async fn apply_schema_plan(&self, table_name: &str, plan: &SchemaPlan) -> Result<()> {
+        if plan.is_empty() {
             return Ok(());
         }
 
-        for col in &diff.columns_to_add {
-            let add_column_default_clause = schema::add_column_default_clause(col);
-            self.sql_client
-                .add_column(
-                    table_name,
-                    &col.name,
-                    schema::type_name(&col.typ),
-                    add_column_default_clause.as_deref(),
-                )
-                .await?;
-        }
-
-        for change in &diff.columns_to_change {
-            for modification in &change.modifications {
-                let ColumnModification::Rename { old_name, new_name } = modification else {
-                    continue;
-                };
-
-                self.sql_client.rename_column(table_name, old_name, new_name).await?;
-            }
-        }
-
-        for change in &diff.columns_to_change {
-            for modification in &change.modifications {
-                match modification {
-                    ColumnModification::Rename { .. } => {}
-                    ColumnModification::Nullability { old_nullable, new_nullable } => {
-                        warn!(
+        // Apply the shared plan without regrouping operations.
+        for operation in plan.ordered_operations() {
+            match operation {
+                SchemaOperation::DropColumn { column_schema } => {
+                    self.sql_client.drop_column(table_name, &column_schema.name).await?;
+                }
+                SchemaOperation::ModifyColumn {
+                    old_column_schema,
+                    new_column_schema,
+                    modification_type: ColumnModificationType::Rename,
+                } => {
+                    self.sql_client
+                        .rename_column(table_name, &old_column_schema.name, &new_column_schema.name)
+                        .await?;
+                }
+                SchemaOperation::AddColumn { column_schema } => {
+                    let add_column_default_clause =
+                        schema::add_column_default_clause(column_schema);
+                    self.sql_client
+                        .add_column(
                             table_name,
-                            column_name = %change.new_column.name,
-                            old_nullable,
-                            new_nullable,
-                            "skipping source column nullability change for Snowflake"
+                            &column_schema.name,
+                            schema::type_name(&column_schema.typ),
+                            add_column_default_clause.as_deref(),
+                        )
+                        .await?;
+                }
+                SchemaOperation::ModifyColumn {
+                    old_column_schema,
+                    new_column_schema,
+                    modification_type: ColumnModificationType::Nullability,
+                } => {
+                    warn!(
+                        table_name,
+                        column_name = %new_column_schema.name,
+                        old_nullable = old_column_schema.nullable,
+                        new_nullable = new_column_schema.nullable,
+                        "skipping source column nullability change for Snowflake"
+                    );
+                }
+                SchemaOperation::ModifyColumn {
+                    old_column_schema,
+                    new_column_schema,
+                    modification_type: ColumnModificationType::Default,
+                } => {
+                    if new_column_schema.default_expression.is_some() {
+                        Self::warn_skipping_column_default_change(
+                            table_name,
+                            &new_column_schema.name,
                         );
-                    }
-                    ColumnModification::Default { old_expression, new_expression } => {
-                        if new_expression.is_some() {
-                            Self::warn_skipping_column_default_change(table_name, change);
-                        } else {
-                            Self::warn_skipping_column_default_drop(
-                                table_name,
-                                change,
-                                old_expression.as_deref(),
-                            );
-                        }
+                    } else {
+                        Self::warn_skipping_column_default_drop(
+                            table_name,
+                            old_column_schema,
+                            new_column_schema,
+                        );
                     }
                 }
             }
-        }
-
-        for col in &diff.columns_to_remove {
-            self.sql_client.drop_column(table_name, &col.name).await?;
         }
 
         Ok(())
     }
 
     /// Logs that Snowflake default-change DDL is being skipped.
-    fn warn_skipping_column_default_change(table_name: &str, change: &ColumnChange) {
+    fn warn_skipping_column_default_change(table_name: &str, column_name: &str) {
         warn!(
             table_name,
-            column_name = %change.new_column.name,
+            column_name,
             "skipping source column default change for Snowflake because ALTER COLUMN SET DEFAULT \
              is only supported for existing sequence defaults"
         );
@@ -403,16 +410,16 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     /// Logs that Snowflake default-drop DDL is being skipped.
     fn warn_skipping_column_default_drop(
         table_name: &str,
-        change: &ColumnChange,
-        old_expression: Option<&str>,
+        old_column_schema: &ColumnSchema,
+        new_column_schema: &ColumnSchema,
     ) {
-        if old_expression.is_some_and(|default_expression| {
-            schema::supports_column_default(default_expression, &change.old_column.typ)
+        if old_column_schema.default_expression.as_deref().is_some_and(|default_expression| {
+            schema::supports_column_default(default_expression, &old_column_schema.typ)
         }) {
             warn!(
                 table_name,
-                column_name = %change.new_column.name,
-                "skipping source column default removal for Snowflake because defaults introduced \
+                column_name = %new_column_schema.name,
+                "skipping source column default drop for Snowflake because defaults introduced \
                  by ALTER TABLE ADD COLUMN cannot be dropped safely"
             );
         }

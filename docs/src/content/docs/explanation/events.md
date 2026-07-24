@@ -257,12 +257,32 @@ again after supported schema changes.
 
 ```rust
 pub struct RelationEvent {
-    pub start_lsn: PgLsn,
-    pub commit_lsn: PgLsn,
-    pub tx_ordinal: u64,
     pub replicated_table_schema: ReplicatedTableSchema,
 }
 ```
+
+Relation messages are generated at runtime from `pgoutput`'s session-local
+schema cache; they are not WAL-backed changes. Which relation messages appear
+is therefore session-dependent: a fresh session resets the cache and can
+re-emit schema metadata during replay. `RelationEvent` intentionally has no
+start LSN, commit LSN, transaction ordinal, or sequence key. Those values would
+look like a durable replay identity even though they are not stable across
+sessions. Destinations should treat each relation event as an ordered schema
+barrier for the row events that follow it, not as a checkpoint or deduplication
+key.
+
+During replay, logical decoding uses historical catalog state at each row
+change's WAL position. Committed publication column-list changes are therefore
+reflected in the corresponding relation masks: rows written before and after a
+publication change are decoded with their respective projections. Session
+dependence affects when relation metadata is emitted or re-emitted, not the
+historical projection used to decode a row.
+
+The carried `SnapshotId` identifies the underlying stored table schema, not the
+complete `ReplicatedTableSchema`. A relation event for the same snapshot can
+carry different replication or identity masks, so destinations must preserve
+those mask changes. Relation delivery order and transaction position are
+session-dependent and must not be used as snapshot identity.
 
 PostgreSQL pgoutput builds relation messages by walking the table descriptor in
 `pg_attribute.attnum` order and skipping columns that are not published. It
@@ -319,9 +339,11 @@ async fn write_events(
 
 ## Understanding LSN Fields
 
-Every event includes **LSN (Log Sequence Number)** fields plus a transaction-local
-ordinal that are critical for understanding event ordering, checkpointing, and
-idempotent destination writes.
+WAL-backed data and transaction events include **LSN (Log Sequence Number)**
+fields plus a transaction-local ordinal. These values are critical for ordering,
+checkpointing, and idempotent destination writes. `RelationEvent` is the
+exception: it is session-generated schema metadata and must be processed in
+stream order rather than assigned a durable sequence key.
 
 ### What is an LSN?
 
@@ -333,7 +355,7 @@ An LSN is a pointer to a position in Postgres's **Write-Ahead Log (WAL)**. It's 
 |-------|---------|----------|
 | `start_lsn` | Position where this event was recorded in the WAL | Debugging and WAL-position context |
 | `commit_lsn` | Position where the transaction will commit | Transaction grouping, recovery checkpoints |
-| `tx_ordinal` | Zero-based order of the event within its transaction | Ordering and idempotency within a transaction |
+| `tx_ordinal` | Zero-based order among sequence-key-bearing events in its transaction | Ordering and idempotency within a transaction |
 
 **Key insight:** Multiple events share the same `commit_lsn` when they belong
 to the same transaction. ETL uses `commit_lsn` plus `tx_ordinal` as the stable
@@ -351,16 +373,19 @@ COMMIT;                   -- Transaction commits at 0/16B3800
 ```
 
 Both inserts have the same `commit_lsn` because they commit together. Their
-`tx_ordinal` values distinguish their order within the transaction.
+`tx_ordinal` values distinguish their order among the transaction events that
+carry sequence keys. Session-generated relation messages do not consume an
+ordinal.
 
 ### Using LSNs
 
-**For ordering:** Use `commit_lsn` to order transactions and `tx_ordinal` to
-order events within the same transaction.
+**For ordering:** For events that expose a sequence key, use `commit_lsn` to
+order transactions and `tx_ordinal` to order events within the same
+transaction. Preserve `RelationEvent` ordering directly as a schema barrier.
 
-**For idempotency:** Use the event sequence key, equivalent to
-`(commit_lsn, tx_ordinal)`, together with the destination's table or row key
-when detecting replays.
+**For idempotency:** For events that expose one, use the event sequence key,
+equivalent to `(commit_lsn, tx_ordinal)`, together with the destination's table
+or row key when detecting replays. Do not use relation events as replay keys.
 
 **For checkpointing:** Store the highest `commit_lsn` you've processed. On restart, you can resume from that point.
 

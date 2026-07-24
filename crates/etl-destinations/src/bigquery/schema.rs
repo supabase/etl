@@ -16,6 +16,20 @@ const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 /// Special column name for Change Data Capture sequence ordering in BigQuery.
 const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
 
+/// Returns the BigQuery default for a complete source column, if supported.
+///
+/// This applies both expression-and-type compatibility and column-level
+/// restrictions, including BigQuery's prohibition on primary-key defaults.
+pub(super) fn column_default_sql(column_schema: &ColumnSchema) -> Option<String> {
+    if column_schema.primary_key() {
+        return None;
+    }
+
+    column_schema.default_expression.as_deref().and_then(|default_expression| {
+        default_expression_sql(default_expression, &column_schema.typ)
+    })
+}
+
 /// Generates SQL column specification for CREATE TABLE statements.
 pub(super) fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
     let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
@@ -23,16 +37,12 @@ pub(super) fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
     let mut column_spec =
         format!("{} {}", column_name, postgres_to_bigquery_type(&column_schema.typ));
 
-    if let Some(rendered_default_expression) =
-        column_schema.default_expression.as_deref().and_then(|default_expression| {
-            default_expression_sql(default_expression, &column_schema.typ)
-        })
-    {
-        column_spec.push_str(&format!(" default {rendered_default_expression}"));
+    if let Some(default_expression) = column_default_sql(column_schema) {
+        column_spec.push_str(&format!(" default {default_expression}"));
     } else if column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
-            "skipping unsupported source column default for BigQuery table creation"
+            "skipping unsupported source column default for bigquery table creation"
         );
     }
 
@@ -43,13 +53,8 @@ pub(super) fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
     Ok(column_spec)
 }
 
-/// Returns whether a column default can be represented in BigQuery SQL.
-pub(crate) fn supports_column_default(default_expression: &str, typ: &Type) -> bool {
-    default_expression_sql(default_expression, typ).is_some()
-}
-
 /// Returns a rendered default expression for BigQuery, if supported.
-pub(super) fn default_expression_sql(default_expression: &str, typ: &Type) -> Option<String> {
+fn default_expression_sql(default_expression: &str, typ: &Type) -> Option<String> {
     parse_default_expression(default_expression, typ)
         .and_then(|expression| render_default_expression(&expression, typ))
 }
@@ -431,6 +436,34 @@ mod tests {
     }
 
     #[test]
+    fn column_spec_skips_primary_key_default() {
+        let column_schema = ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+            .with_primary_key(1)
+            .with_default_expression("1".to_owned());
+
+        let spec = column_spec(&column_schema).expect("column spec generation");
+
+        assert_eq!(spec, "`id` int64 not null");
+    }
+
+    #[test]
+    fn column_default_sql_uses_complete_column_schema() {
+        let without_default = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 1, true);
+        let supported_default =
+            without_default.clone().with_default_expression("'pending'::text".to_owned());
+        let unsupported_default =
+            without_default.clone().with_default_expression("lower('PENDING')".to_owned());
+        let primary_key_default = ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+            .with_primary_key(1)
+            .with_default_expression("1".to_owned());
+
+        assert_eq!(column_default_sql(&without_default), None);
+        assert_eq!(column_default_sql(&supported_default).as_deref(), Some("'pending'"));
+        assert_eq!(column_default_sql(&unsupported_default), None);
+        assert_eq!(column_default_sql(&primary_key_default), None);
+    }
+
+    #[test]
     fn default_expression_renders_portable_expressions() {
         let cases = [
             (Type::TEXT, "true", "'true'"),
@@ -470,7 +503,6 @@ mod tests {
 
         for (typ, expression) in cases {
             assert_eq!(default_expression_sql(expression, &typ), None);
-            assert!(!supports_column_default(expression, &typ));
         }
     }
 

@@ -210,6 +210,23 @@ impl TruncateEvent {
 /// current replication mask for the table. This event notifies downstream
 /// consumers about which columns are being replicated for a table.
 ///
+/// PostgreSQL generates relation messages at runtime from `pgoutput`'s
+/// session-local schema cache; they are not WAL-backed changes. Which relation
+/// messages appear is therefore session-dependent: a fresh session resets the
+/// cache and can re-emit schema metadata during replay. This event
+/// intentionally has no LSN, transaction ordinal, or sequence key because such
+/// metadata would not be a durable replay identity. Consumers should instead
+/// treat it as an ordered schema barrier for the row events that follow it.
+/// During replay, logical decoding uses historical catalog state at each row
+/// change's WAL position, so committed publication column-list changes are
+/// reflected in the corresponding relation masks. Session dependence affects
+/// when that metadata is emitted or re-emitted, not the historical projection
+/// used to decode a row.
+/// The carried [`crate::schema::SnapshotId`] identifies the underlying stored
+/// table schema, not the complete [`ReplicatedTableSchema`]. Consumers must
+/// also preserve replication and identity mask changes, including when the
+/// snapshot ID is unchanged.
+///
 /// PostgreSQL emits relation-message columns in `pg_attribute.attnum` order,
 /// skipping unpublished columns, and sends tuple data in that same order. The
 /// masks are built by unique column name, so ordering is not needed for mask
@@ -220,22 +237,9 @@ impl TruncateEvent {
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct RelationEvent {
-    /// LSN position where the event started.
-    pub start_lsn: PgLsn,
-    /// LSN position where the transaction of this event will commit.
-    pub commit_lsn: PgLsn,
-    /// Zero-based ordinal of this event within the transaction.
-    pub tx_ordinal: u64,
-    /// The replicated table schema containing the table schema, replication
-    /// mask, and identity mask.
+    /// The replicated table schema containing the stable snapshot ID, table
+    /// schema, replication mask, and identity mask.
     pub replicated_table_schema: ReplicatedTableSchema,
-}
-
-impl RelationEvent {
-    /// Returns the sequence key for this event.
-    pub fn event_sequence_key(&self) -> EventSequenceKey {
-        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
-    }
 }
 
 /// Represents a single replication event from Postgres logical replication.
@@ -323,7 +327,8 @@ impl SizeHint for Event {
 pub struct EventSequenceKey {
     /// Commit LSN identifying transaction order across transactions.
     pub commit_lsn: PgLsn,
-    /// Zero-based ordinal identifying order within the same transaction.
+    /// Zero-based ordinal identifying sequence-key-bearing event order within
+    /// the same transaction.
     pub tx_ordinal: u64,
 }
 

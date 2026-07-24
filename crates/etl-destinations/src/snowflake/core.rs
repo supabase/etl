@@ -11,7 +11,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{DeleteEvent, Event, InsertEvent, UpdateEvent},
-    schema::{ColumnSchema, ReplicatedTableSchema, TableId},
+    schema::{ColumnNameEquivalence, ColumnSchema, ReplicatedTableSchema, TableId},
     store::DestinationStore,
 };
 use tokio::{
@@ -519,6 +519,11 @@ where
             current_replication_mask.clone(),
         );
 
+        let new_columns: Vec<_> = new_schema.column_schemas().cloned().collect();
+        schema::validate_no_cdc_collisions(&new_columns).map_err(EtlError::from)?;
+        let plan =
+            current_schema.plan_schema_change(new_schema, ColumnNameEquivalence::CaseSensitive)?;
+
         let table_name = try_stringify_table_name(new_schema.name())?.to_uppercase();
         self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
 
@@ -534,9 +539,8 @@ where
         );
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
-        let diff = current_schema.diff(new_schema);
         if let Err(err) =
-            self.client.apply_schema_diff(&table_name, &diff).await.map_err(EtlError::from)
+            self.client.apply_schema_plan(&table_name, &plan).await.map_err(EtlError::from)
         {
             warn!(
                 table_id = ?table_id,
@@ -550,8 +554,6 @@ where
             .store_destination_table_metadata(table_id, updated_metadata.to_applied())
             .await?;
 
-        let new_columns: Vec<_> = new_schema.column_schemas().cloned().collect();
-        schema::validate_no_cdc_collisions(&new_columns).map_err(EtlError::from)?;
         self.client.refresh_table(&table_id).await.map_err(EtlError::from)?;
 
         info!(table_id = ?table_id, "schema change applied");
@@ -881,9 +883,6 @@ mod tests {
         let status = destination
             .writer
             .process_admitted_events(vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100_u64),
-                commit_lsn: PgLsn::from(100_u64),
-                tx_ordinal: 0,
                 replicated_table_schema: stale_schema,
             })])
             .await

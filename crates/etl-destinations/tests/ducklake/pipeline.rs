@@ -41,13 +41,13 @@ struct SchemaAddRow {
     score: Option<i32>,
 }
 
-/// Expected row shape after adding, dropping, and renaming columns.
+/// Expected row shape after a rename cycle and same-name replacement.
 #[derive(Debug, Eq, PartialEq)]
 struct SchemaMultiRow {
     id: i64,
-    full_name: String,
-    status: Option<String>,
-    email: Option<String>,
+    status: String,
+    name: Option<String>,
+    age: Option<String>,
 }
 
 /// Expected row shape after schema evolution followed by mutations.
@@ -234,8 +234,8 @@ fn query_schema_add_rows(conn: &Connection, table_name: &DuckLakeTableName) -> V
     result
 }
 
-/// Queries rows after add/drop/rename schema changes using blocking DuckDB
-/// APIs.
+/// Queries rows after an ordered name-reuse schema change using blocking
+/// DuckDB APIs.
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
@@ -244,7 +244,7 @@ fn query_schema_multi_rows(
     table_name: &DuckLakeTableName,
 ) -> Vec<SchemaMultiRow> {
     let sql = format!(
-        "select id, full_name, status, email from {} order by id",
+        "select id, status, name, age from {} order by id",
         qualified_lake_table_name(table_name)
     );
     let mut statement = conn.prepare(&sql).expect("failed to prepare schema multi query");
@@ -254,9 +254,9 @@ fn query_schema_multi_rows(
     while let Some(row) = rows.next().expect("failed to read schema multi row") {
         result.push(SchemaMultiRow {
             id: row.get(0).expect("failed to read id"),
-            full_name: row.get(1).expect("failed to read full_name"),
-            status: row.get(2).expect("failed to read status"),
-            email: row.get(3).expect("failed to read email"),
+            status: row.get(1).expect("failed to read status"),
+            name: row.get(2).expect("failed to read name"),
+            age: row.get(3).expect("failed to read age"),
         });
     }
 
@@ -1136,7 +1136,7 @@ async fn schema_change_is_visible_to_already_open_connection() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_add_drop_rename() {
+async fn schema_change_ordered_name_reuse() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
@@ -1162,7 +1162,7 @@ async fn schema_change_add_drop_rename() {
         .await
         .expect("failed to insert Alice");
 
-    let lake = create_test_lake("schema_change_add_drop_rename").await;
+    let lake = create_test_lake("schema_change_ordered_name_reuse").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
@@ -1193,25 +1193,43 @@ async fn schema_change_add_drop_rename() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "supabase_etl_source_swap",
+            }],
         )
         .await
         .expect("failed to rename source column");
     database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn { old_name: "status", new_name: "name" }],
+        )
         .await
-        .expect("failed to drop source column");
+        .expect("failed to rename source column");
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn { name: "email", data_type: "text" }],
+            &[TableModification::RenameColumn {
+                old_name: "supabase_etl_source_swap",
+                new_name: "status",
+            }],
         )
         .await
-        .expect("failed to add source column");
+        .expect("failed to complete source rename cycle");
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::DropColumn { name: "age" },
+                TableModification::AddColumn { name: "age", data_type: "text" },
+            ],
+        )
+        .await
+        .expect("failed to replace source column");
     database
         .run_sql(&format!(
-            "insert into {} (full_name, status, email) values ('Bob', 'pending', \
-             'bob@example.com')",
+            "insert into {} (status, name, age) values ('Bob', 'pending', 'thirty')",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1224,19 +1242,23 @@ async fn schema_change_add_drop_rename() {
 
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(
+        query_table_columns(&conn, &ducklake_table_name),
+        vec!["id", "status", "name", "age"]
+    );
+    assert_eq!(
         query_schema_multi_rows(&conn, &ducklake_table_name),
         vec![
             SchemaMultiRow {
                 id: 1,
-                full_name: "Alice".to_owned(),
-                status: Some("active".to_owned()),
-                email: None,
+                status: "Alice".to_owned(),
+                name: Some("active".to_owned()),
+                age: None,
             },
             SchemaMultiRow {
                 id: 2,
-                full_name: "Bob".to_owned(),
-                status: Some("pending".to_owned()),
-                email: Some("bob@example.com".to_owned()),
+                status: "Bob".to_owned(),
+                name: Some("pending".to_owned()),
+                age: Some("thirty".to_owned()),
             },
         ]
     );

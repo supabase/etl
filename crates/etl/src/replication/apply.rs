@@ -716,10 +716,11 @@ struct ApplyLoopState {
     event_batch: EventBatch,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
-    /// Number of events observed in the current transaction (excluding
-    /// BEGIN/COMMIT).
+    /// Number of row-change and truncate messages observed since the most
+    /// recent `BEGIN`.
     current_tx_events: u64,
-    /// Next zero-based ordinal to assign to transaction-scoped events.
+    /// Next zero-based ordinal to assign to transaction events with sequence
+    /// keys.
     next_tx_ordinal: u64,
     /// Whether the loop is draining buffered destination work for shutdown.
     draining_for_shutdown: bool,
@@ -2092,22 +2093,18 @@ where
                 self.handle_commit_message(start_lsn, commit_body).await
             }
             LogicalReplicationMessage::Relation(relation_body) => {
-                self.handle_relation_message(start_lsn, relation_body).await
+                self.handle_relation_message(relation_body).await
             }
             LogicalReplicationMessage::Insert(insert_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_insert_message(start_lsn, insert_body).await
             }
             LogicalReplicationMessage::Update(update_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_update_message(start_lsn, update_body).await
             }
             LogicalReplicationMessage::Delete(delete_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_delete_message(start_lsn, delete_body).await
             }
             LogicalReplicationMessage::Truncate(truncate_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_truncate_message(start_lsn, truncate_body).await
             }
             LogicalReplicationMessage::Origin(_) => {
@@ -2232,7 +2229,11 @@ where
         let snapshot_id: SnapshotId = start_lsn.into();
         let table_schema = schema_change_message.into_table_schema(snapshot_id);
 
-        // Store the new schema version in the store.
+        // Store the complete post-statement schema version. If more DDL
+        // messages for this table arrive before any DML, each snapshot remains
+        // available for historical replay but the waiting cache advances to
+        // the newest one. The later Relation event therefore exposes only the
+        // final endpoint that had observable row traffic.
         if let Err(err) = self.schema_store.store_table_schema(table_schema).await {
             counter!(
                 ETL_DDL_SCHEMA_CHANGES_TOTAL,
@@ -2281,14 +2282,15 @@ where
         start_lsn: PgLsn,
         message: &protocol::BeginBody,
     ) -> EtlResult<HandleMessageResult> {
-        let final_lsn = PgLsn::from(message.final_lsn());
-        self.state.remote_final_lsn = Some(final_lsn);
-
-        self.state.current_tx_begin_ts = Some(Instant::now());
         self.state.current_tx_events = 0;
         self.state.reset_tx_ordinal();
 
         let tx_ordinal = self.state.next_tx_ordinal();
+
+        let final_lsn = PgLsn::from(message.final_lsn());
+        self.state.remote_final_lsn = Some(final_lsn);
+
+        self.state.current_tx_begin_ts = Some(Instant::now());
         let event = parse_event_from_begin_message(start_lsn, final_lsn, tx_ordinal, message);
 
         Ok(HandleMessageResult::return_event(Event::Begin(event)))
@@ -2300,6 +2302,8 @@ where
         start_lsn: PgLsn,
         message: &protocol::CommitBody,
     ) -> EtlResult<HandleMessageResult> {
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let Some(remote_final_lsn) = self.state.remote_final_lsn.take() else {
             bail!(
                 ErrorKind::InvalidState,
@@ -2327,8 +2331,6 @@ where
             histogram!(ETL_TRANSACTION_DURATION_SECONDS).record(duration_seconds);
             counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
             histogram!(ETL_TRANSACTION_SIZE).record(self.state.current_tx_events as f64);
-
-            self.state.current_tx_events = 0;
         }
 
         let end_lsn = PgLsn::from(message.end_lsn());
@@ -2336,7 +2338,6 @@ where
         // Process syncing tables after commit (worker-specific behavior).
         let should_end_batch = self.process_syncing_tables_after_commit_event(end_lsn).await?;
 
-        let tx_ordinal = self.state.next_tx_ordinal();
         let event = parse_event_from_commit_message(start_lsn, commit_lsn, tx_ordinal, message);
 
         let mut result = HandleMessageResult {
@@ -2362,7 +2363,6 @@ where
     /// use by DML handlers.
     async fn handle_relation_message(
         &mut self,
-        start_lsn: PgLsn,
         message: &protocol::RelationBody,
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
@@ -2374,7 +2374,6 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
-        let tx_ordinal = self.state.next_tx_ordinal();
 
         // Exactly one worker owns protocol interpretation for a table at a time.
         // Non-owning workers skip `RELATION` handling and rely on the owner to
@@ -2429,12 +2428,7 @@ where
 
         self.shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
 
-        let relation_event = RelationEvent {
-            start_lsn,
-            commit_lsn: remote_final_lsn,
-            tx_ordinal,
-            replicated_table_schema,
-        };
+        let relation_event = RelationEvent { replicated_table_schema };
 
         Ok(HandleMessageResult::return_event(Event::Relation(relation_event)))
     }
@@ -2445,6 +2439,9 @@ where
         start_lsn: PgLsn,
         message: &protocol::InsertBody,
     ) -> EtlResult<HandleMessageResult> {
+        self.state.current_tx_events += 1;
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
                 ErrorKind::InvalidState,
@@ -2454,7 +2451,6 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
-        let tx_ordinal = self.state.next_tx_ordinal();
 
         // Capture the source payload metadata and emit the initial metrics.
         let streaming_payload_metadata =
@@ -2489,6 +2485,9 @@ where
         start_lsn: PgLsn,
         message: &protocol::UpdateBody,
     ) -> EtlResult<HandleMessageResult> {
+        self.state.current_tx_events += 1;
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
                 ErrorKind::InvalidState,
@@ -2498,7 +2497,6 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
-        let tx_ordinal = self.state.next_tx_ordinal();
 
         // Capture the source payload metadata and emit the initial metrics.
         let streaming_payload_metadata =
@@ -2533,6 +2531,9 @@ where
         start_lsn: PgLsn,
         message: &protocol::DeleteBody,
     ) -> EtlResult<HandleMessageResult> {
+        self.state.current_tx_events += 1;
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
                 ErrorKind::InvalidState,
@@ -2542,7 +2543,6 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
-        let tx_ordinal = self.state.next_tx_ordinal();
 
         // Capture the source payload metadata and emit the initial metrics.
         let streaming_payload_metadata =
@@ -2577,6 +2577,9 @@ where
         start_lsn: PgLsn,
         message: &protocol::TruncateBody,
     ) -> EtlResult<HandleMessageResult> {
+        self.state.current_tx_events += 1;
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
                 ErrorKind::InvalidState,
@@ -2584,7 +2587,6 @@ where
                 "Transaction must be active before processing TRUNCATE message"
             );
         };
-        let tx_ordinal = self.state.next_tx_ordinal();
 
         // Collect the replicated schemas for tables this worker currently owns.
         let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());

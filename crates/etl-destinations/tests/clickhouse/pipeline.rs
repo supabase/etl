@@ -2047,60 +2047,32 @@ async fn schema_change_add_column_defaults_merge_tree() {
     );
 }
 
-/// Row struct for the combined schema change test after all changes.
-/// Columns: id, full_name (renamed), status (kept), email (added).
-/// age is dropped.
+/// Row returned after a rename cycle and same-name column replacement.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
 struct CombinedSchemaChangeRow {
     id: i64,
-    full_name: String,
-    status: Option<String>,
-    email: Option<String>,
+    status: String,
+    name: Option<String>,
+    age: Option<String>,
 }
 
-/// Tests that multiple schema changes (ADD, DROP, RENAME) in Postgres all
-/// propagate to ClickHouse correctly.
-///
-/// # GIVEN
-///
-/// A Postgres table with columns (id serial PK, name text not null, age integer
-/// not null, status text) and one row ('Alice', 25, 'active'), copied to
-/// ClickHouse.
-///
-/// # WHEN
-///
-/// Three schema changes are applied:
-/// 1. RENAME COLUMN name TO full_name
-/// 2. DROP COLUMN age
-/// 3. ADD COLUMN email text
-/// A new row ('Bob', 'pending', 'bob@example.com') is inserted with the updated
-/// schema.
-///
-/// # THEN
-///
-/// The ClickHouse table has columns: id, full_name, status, email.
-/// - 'age' is dropped.
-/// - 'name' is renamed to 'full_name'.
-/// - 'email' is added.
-/// Alice's row has 'Alice' under 'full_name', 'active' for status, NULL for
-/// email. Bob's row has the new values.
+/// Exercises the ordered planner adapter for both ClickHouse engines.
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_add_drop_rename_merge_tree() {
-    schema_change_add_drop_rename_inner(ClickHouseEngine::MergeTree).await;
+async fn schema_change_ordered_name_reuse_merge_tree() {
+    schema_change_ordered_name_reuse_inner(ClickHouseEngine::MergeTree).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_add_drop_rename_replacing_merge_tree() {
-    schema_change_add_drop_rename_inner(ClickHouseEngine::ReplacingMergeTree).await;
+async fn schema_change_ordered_name_reuse_replacing_merge_tree() {
+    schema_change_ordered_name_reuse_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
-async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
+async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
     init_test_tracing();
     install_crypto_provider();
 
     let clickhouse_table_name = "test_schema__multi";
 
-    // --- GIVEN: table with one row, copied to ClickHouse ---
     let database = spawn_source_database().await;
     let table_name = test_table_name("schema_multi");
 
@@ -2148,7 +2120,6 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     pipeline.start().await.unwrap();
     table_ready_notify.notified().await;
 
-    // Verify initial schema.
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(initial_columns, vec!["id", "name", "age", "status"]);
 
@@ -2159,7 +2130,6 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
         .expect("metadata should exist after table creation");
     let initial_snapshot_id = initial_metadata.snapshot_id;
 
-    // --- WHEN: rename + drop + add and insert with new schema ---
     let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
@@ -2169,28 +2139,47 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "supabase_etl_source_swap",
+            }],
         )
-        .await
-        .unwrap();
-
-    database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
         .await
         .unwrap();
 
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn { name: "email", data_type: "text" }],
+            &[TableModification::RenameColumn { old_name: "status", new_name: "name" }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "supabase_etl_source_swap",
+                new_name: "status",
+            }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::DropColumn { name: "age" },
+                TableModification::AddColumn { name: "age", data_type: "text" },
+            ],
         )
         .await
         .unwrap();
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (full_name, status, email) VALUES ('Bob', 'pending', \
-             'bob@example.com')",
+            "INSERT INTO {} (status, name, age) VALUES ('Bob', 'pending', 'thirty')",
             table_name.as_quoted_identifier(),
         ))
         .await
@@ -2198,20 +2187,12 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
 
     events_notify.notified().await;
 
-    let query = current_state_query(
-        engine,
-        clickhouse_table_name,
-        "id, full_name, status, email",
-        &["id"],
-        "id",
-    );
+    let query =
+        current_state_query(engine, clickhouse_table_name, "id, status, name, age", &["id"], "id");
     let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db.query(&query).await;
     let current_view_rows = if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
         let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db
-            .query(
-                "SELECT id, full_name, status, email FROM \"test_schema__multi__current\" ORDER \
-                 BY id",
-            )
+            .query("SELECT id, status, name, age FROM \"test_schema__multi__current\" ORDER BY id")
             .await;
         Some(rows)
     } else {
@@ -2220,9 +2201,8 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- THEN: ClickHouse schema reflects all changes ---
     let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
-    assert_eq!(final_columns, vec!["id", "full_name", "status", "email"]);
+    assert_eq!(final_columns, vec!["id", "status", "name", "age"]);
 
     let final_metadata = store
         .get_applied_destination_table_metadata(table_id)
@@ -2236,17 +2216,15 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
 
     assert_eq!(rows.len(), 2, "expected Alice + Bob");
 
-    // Alice: pre-change row.
     assert_eq!(rows[0].id, 1);
-    assert_eq!(rows[0].full_name, "Alice", "renamed column should preserve data");
-    assert_eq!(rows[0].status, Some("active".to_owned()));
-    assert_eq!(rows[0].email, None, "Alice's email should be NULL (added after her row)");
+    assert_eq!(rows[0].status, "Alice");
+    assert_eq!(rows[0].name, Some("active".to_owned()));
+    assert_eq!(rows[0].age, None);
 
-    // Bob: post-change row.
     assert_eq!(rows[1].id, 2);
-    assert_eq!(rows[1].full_name, "Bob");
-    assert_eq!(rows[1].status, Some("pending".to_owned()));
-    assert_eq!(rows[1].email, Some("bob@example.com".to_owned()));
+    assert_eq!(rows[1].status, "Bob");
+    assert_eq!(rows[1].name, Some("pending".to_owned()));
+    assert_eq!(rows[1].age, Some("thirty".to_owned()));
 
     if let Some(view_rows) = current_view_rows {
         assert_eq!(
@@ -2406,9 +2384,6 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
     let result = restarted_destination
         .write_events(vec![Event::Relation(RelationEvent {
-            start_lsn: PgLsn::from(0),
-            commit_lsn: PgLsn::from(0),
-            tx_ordinal: 0,
             replicated_table_schema: stale_schema,
         })])
         .await;

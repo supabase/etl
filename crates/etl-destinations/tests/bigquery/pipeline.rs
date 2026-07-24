@@ -2196,6 +2196,36 @@ async fn schema_change_add_column_defaults() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
+    let destination_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist after applying defaults");
+    let defaults = bigquery_database
+        .query_column_defaults_by_id(&destination_metadata.destination_table_id)
+        .await;
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "status")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("'new'")
+    );
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "score")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("15")
+    );
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "active")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("true")
+    );
+
     let rows = bigquery_database.query_table(table_name).await.unwrap();
     let mut rows = parse_bigquery_table_rows::<BigQueryDefaultsRow>(rows);
     rows.sort();
@@ -2365,6 +2395,22 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
+    let destination_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist after clearing the default");
+    let defaults = bigquery_database
+        .query_column_defaults_by_id(&destination_metadata.destination_table_id)
+        .await;
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "divergent_default")
+            .and_then(|column| column.column_default.as_deref()),
+        None
+    );
+
     let rows = bigquery_database.query_table(table_name).await.unwrap();
     let mut rows = parse_bigquery_table_rows::<BigQuerySchemaDivergenceRow>(rows);
     rows.sort();
@@ -2458,16 +2504,9 @@ async fn table_schema_change() {
 
     events_notify.notified().await;
 
-    // Apply multiple schema changes:
-    // 1. Rename name -> full_name
-    // 2. Drop the status column
-    // 3. Add email column
-    //
-    // Note: Each DDL change is captured via the DDL event trigger and stored in the
-    // schema store, but PostgreSQL sends only ONE Relation message with the
-    // final schema when the next DML operation (INSERT) occurs. The schema
-    // diffing in handle_relation_event then computes and applies all changes at
-    // once.
+    // PostgreSQL requires each column rename to be a separate statement. With
+    // no intervening DML, pgoutput emits no intermediate Relation, so the
+    // destination observes the old and final names as one rename cycle.
     let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 2),
@@ -2478,20 +2517,42 @@ async fn table_schema_change() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "supabase_etl_source_swap",
+            }],
         )
-        .await
-        .unwrap();
-
-    database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "status" }])
         .await
         .unwrap();
 
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn { name: "email", data_type: "text" }],
+            &[TableModification::RenameColumn { old_name: "status", new_name: "name" }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "supabase_etl_source_swap",
+                new_name: "status",
+            }],
+        )
+        .await
+        .unwrap();
+
+    // Exercise same-name replacement in one multi-action ALTER TABLE. DDL
+    // capture records only its final snapshot, where `age` has a new attnum.
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::DropColumn { name: "age" },
+                TableModification::AddColumn { name: "age", data_type: "text" },
+            ],
         )
         .await
         .unwrap();
@@ -2500,8 +2561,8 @@ async fn table_schema_change() {
     database
         .insert_values(
             table_name.clone(),
-            &["full_name", "age", "email"],
-            &[&"Bob", &30, &"bob@example.com"],
+            &["status", "name", "age"],
+            &[&"Bob", &"pending", &"thirty"],
         )
         .await
         .unwrap();
@@ -2520,18 +2581,32 @@ async fn table_schema_change() {
         "snapshot_id should have increased after schema change"
     );
 
+    let table_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .expect("BigQuery table schema should exist after schema change");
+    assert!(
+        table_schema.column_names().iter().all(|name| !name.starts_with("supabase_etl_")),
+        "planner-generated columns must not remain after a successful schema change"
+    );
+
     let rows = bigquery_database.query_table(table_name).await.unwrap();
     let mut rows = parse_bigquery_table_rows::<BigQuerySchemaChangeRow>(rows);
     rows.sort();
     assert_eq!(
         rows,
         vec![
-            BigQuerySchemaChangeRow { id: 1, full_name: "Alice".to_owned(), age: 25, email: None },
+            BigQuerySchemaChangeRow {
+                id: 1,
+                status: "Alice".to_owned(),
+                name: Some("active".to_owned()),
+                age: None,
+            },
             BigQuerySchemaChangeRow {
                 id: 2,
-                full_name: "Bob".to_owned(),
-                age: 30,
-                email: Some("bob@example.com".to_owned()),
+                status: "Bob".to_owned(),
+                name: Some("pending".to_owned()),
+                age: Some("thirty".to_owned()),
             },
         ]
     );

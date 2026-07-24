@@ -5,7 +5,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     pipeline::PipelineId,
-    schema::{ColumnSchema, ReplicatedTableSchema, Type, is_array_type},
+    schema::{ColumnSchema, ReplicatedTableSchema, is_array_type},
 };
 use gcp_bigquery_client::{
     Client,
@@ -38,7 +38,7 @@ use crate::{
         metrics::{
             ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
         },
-        schema::{create_columns_spec, default_expression_sql, postgres_to_bigquery_type},
+        schema::{create_columns_spec, postgres_to_bigquery_type},
         sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
     },
     retry::{RetryDecision, RetryPolicy, retry_with_backoff},
@@ -1067,26 +1067,14 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Sets a supported default expression on a BigQuery column.
-    pub async fn set_column_default(
+    /// Sets a rendered default expression on a BigQuery column.
+    pub(super) async fn set_column_default(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         column_name: &str,
-        typ: &Type,
         default_expression: &str,
     ) -> EtlResult<()> {
-        let Some(rendered_default_expression) = default_expression_sql(default_expression, typ)
-        else {
-            warn!(
-                dataset_id = %dataset_id,
-                table_id = %table_id,
-                column_name = %column_name,
-                "skipping unsupported source column default for bigquery"
-            );
-            return Ok(());
-        };
-
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
         let column_name = quote_identifier(column_name, "BigQuery column name")?;
 
@@ -1094,7 +1082,7 @@ impl BigQueryClient {
 
         let query = format!(
             "alter table {full_table_name} alter column {column_name} set default \
-             {rendered_default_expression}"
+             {default_expression}"
         );
 
         let _ = self.query(QueryRequest::new(query)).await?;
@@ -1103,7 +1091,7 @@ impl BigQueryClient {
     }
 
     /// Clears a default expression from a BigQuery column when present.
-    pub async fn clear_column_default(
+    pub(super) async fn clear_column_default(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
