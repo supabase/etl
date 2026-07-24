@@ -21,8 +21,7 @@ use crate::{
         client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
     },
     replication::{
-        ApplyLoop, ApplyLoopResult, ApplyWorkerContext, SharedTableCache, WorkerContext,
-        WorkerType, state::TableStateType,
+        ApplyLoop, ApplyLoopResult, ApplyWorkerContext, SharedTableCache, WorkerContext, WorkerType,
     },
     runtime::{
         BatchBudgetController, MemoryMonitor, TableSyncWorkerPool,
@@ -361,10 +360,9 @@ where
 /// - [`InvalidatedSlotBehavior::Recreate`]: Deletes the slot, resets all tables
 ///   to Init, clears stale apply progress, and creates a new slot
 ///
-/// When creating a new slot, this function validates that all tables are in the
-/// Init state. If any table is not in Init state when creating a new slot, it
-/// indicates that data was synchronized based on a different apply worker
-/// lineage, which would break replication correctness.
+/// When creating a new slot, this function warns if any tables already depend
+/// on the apply worker for replication. Those tables can miss changes between
+/// the previous slot stopping and the new slot being created.
 async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
@@ -374,9 +372,24 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
     let worker_type = WorkerType::Apply;
 
-    // We try to get or create the slot. Both operations will return an LSN that we
-    // can use to start streaming events.
-    let slot = replication_client.get_or_create_slot(&slot_name).await?;
+    // Inspect the slot before creating it so stale progress from the previous
+    // lineage can be deleted first. Creating the slot before cleanup would leave
+    // a crash window where a later restart could pair the new slot with old
+    // durable progress.
+    let slot = match replication_client.get_slot(&slot_name).await {
+        Ok(slot) => GetOrCreateSlotResult::GetSlot(slot),
+        Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
+            warn_if_tables_may_have_missed_changes(store).await?;
+            store.delete_replication_progress(worker_type).await?;
+
+            let slot = replication_client.create_slot(&slot_name).await?;
+            GetOrCreateSlotResult::CreateSlot(slot)
+        }
+        Err(err) => return Err(err),
+    };
+
+    // Once we have the slot, we determine the start lsn, which is the consistent
+    // point from which Postgres tells us to start streaming from.
     let slot_start_lsn = slot.get_start_lsn();
 
     match &slot {
@@ -385,7 +398,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
                 slot_name,
                 %slot_start_lsn,
                 confirmed_flush_lsn = %result.confirmed_flush_lsn,
-                "apply worker resume position selected from existing replication slot"
+                "apply worker replication position selected from existing replication slot"
             );
         }
         GetOrCreateSlotResult::CreateSlot(result) => {
@@ -393,7 +406,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
                 slot_name,
                 %slot_start_lsn,
                 consistent_point = %result.consistent_point,
-                "apply worker resume position selected from new replication slot"
+                "apply worker replication position selected from new replication slot"
             );
         }
     }
@@ -414,68 +427,42 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
         }
     }
 
-    // When creating a new apply worker slot, all tables must be in the `Init`
-    // state. If any table is not in Init state, it means the table was
-    // synchronized based on another apply worker lineage (different slot) which
-    // will break correctness.
-    if let GetOrCreateSlotResult::CreateSlot(_) = &slot
-        && let Err(err) = validate_tables_in_init_state(store).await
-    {
-        // Delete the slot before failing, otherwise the system will restart and skip
-        // validation since the slot will already exist.
-        replication_client.delete_slot_if_exists(&slot_name).await?;
-
-        return Err(err);
-    }
-
-    // A newly created slot is a new lineage. Any existing durable progress for
-    // the apply worker belongs to an older slot and must not influence startup.
+    // If the slot was created, we don't need to do any invalidation check and since
+    // durable progress should be gone before a new slot is created, we can
+    // immediately start replication from the start lsn determined by the new
+    // slot.
     if matches!(slot, GetOrCreateSlotResult::CreateSlot(_)) {
-        if let Err(err) = store.delete_replication_progress(worker_type).await {
-            warn!(
-                slot_name,
-                error = %err,
-                "failed to delete stale apply worker durable progress after creating a new slot"
-            );
-
-            replication_client.delete_slot_if_exists(&slot_name).await?;
-
-            return Err(err);
-        }
-
         return Ok(slot_start_lsn);
     }
 
+    // If there is durable replication progress, we also consider that to determine
+    // the start lsn, otherwise we return the slot start lsn directly.
     let durable_flush_lsn = store.get_replication_progress(worker_type).await?;
-    if let Some(durable_flush_lsn) = durable_flush_lsn {
-        // Durable progress and slot progress can legitimately differ. During idle
-        // periods we keep sending PostgreSQL feedback with the received LSN, but
-        // we do not persist those idle-only advances to the state database to
-        // avoid extra customer-database writes. Conversely, durable progress can
-        // be ahead if ETL flushed a batch but PostgreSQL did not confirm the
-        // feedback yet. Startup uses the latest boundary available from either
-        // source as a resume floor, which guarantees no event older than the
-        // chosen start LSN is emitted.
-        let start_lsn = durable_flush_lsn.max(slot_start_lsn);
+    let Some(durable_flush_lsn) = durable_flush_lsn else {
+        return Ok(slot_start_lsn);
+    };
 
+    // Durable progress and slot progress can legitimately differ. During idle
+    // periods we keep sending PostgreSQL feedback with the received LSN, but
+    // we do not persist those idle-only advances to the state database to
+    // avoid extra customer-database writes. Conversely, durable progress can
+    // be ahead if ETL flushed a batch but PostgreSQL did not confirm the
+    // feedback yet. Startup uses the latest boundary available from either
+    // source as a resume floor, which guarantees no event older than the
+    // chosen start LSN is emitted.
+    let start_lsn = durable_flush_lsn.max(slot_start_lsn);
+
+    if durable_flush_lsn > slot_start_lsn {
         info!(
             slot_name,
             %durable_flush_lsn,
             %slot_start_lsn,
             %start_lsn,
-            "apply worker resume position selected from durable replication progress and replication slot"
+            "apply worker replication position was overridden by the durable replication progress because it was ahead"
         );
-
-        Ok(start_lsn)
-    } else {
-        info!(
-            slot_name,
-            %slot_start_lsn,
-            "apply worker durable replication progress not found, using slot fallback"
-        );
-
-        Ok(slot_start_lsn)
     }
+
+    Ok(start_lsn)
 }
 
 /// Handles the case when the apply worker slot is found to be invalidated.
@@ -539,38 +526,37 @@ async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
     }
 }
 
-/// Validates that all tables are in the Init state.
-///
-/// This validation is required when creating a new apply worker slot to ensure
-/// replication correctness. If any table has progressed beyond Init state, it
-/// indicates the table was synchronized based on a different apply worker
-/// lineage.
-async fn validate_tables_in_init_state<S: StateStore>(store: &S) -> EtlResult<()> {
+/// Warns when a new apply slot may skip changes for tables that will not be
+/// recopied on restart.
+async fn warn_if_tables_may_have_missed_changes<S: StateStore>(store: &S) -> EtlResult<()> {
     let table_states = store.get_table_states().await?;
 
-    let non_init_tables: Vec<_> = table_states
+    let tables_at_risk: Vec<_> = table_states
         .iter()
-        .filter(|(_, state)| state.as_type() != TableStateType::Init)
+        .filter(|(_, state)| state.as_type().has_completed_table_sync())
         .map(|(table_id, state)| (*table_id, state.as_type()))
         .collect();
 
-    if non_init_tables.is_empty() {
+    if tables_at_risk.is_empty() {
         return Ok(());
     }
 
-    let table_details: Vec<String> =
-        non_init_tables.iter().map(|(id, state)| format!("table {id} in state {state}")).collect();
+    let table_ids =
+        tables_at_risk.iter().map(|(id, _)| id.to_string()).collect::<Vec<_>>().join(",");
+    let table_state_types = tables_at_risk
+        .iter()
+        .map(|(_, state)| <&'static str>::from(*state))
+        .collect::<Vec<_>>()
+        .join(",");
 
-    bail!(
-        ErrorKind::InvalidState,
-        "Cannot create apply worker slot when tables are not in Init state",
-        format!(
-            "Creating a new apply worker replication slot requires all tables to be in Init \
-             state, but found {} table(s) in non-Init states: {}. This indicates that tables were \
-             synchronized based on a different apply worker lineage. To fix this, either restore \
-             the original apply worker slot or reset all tables to Init state.",
-            non_init_tables.len(),
-            table_details.join(", ")
-        )
+    warn!(
+        table_count = tables_at_risk.len(),
+        %table_ids,
+        %table_state_types,
+        "creating a new apply worker replication slot for tables already in the apply phase; \
+         destination data may be inconsistent if replicated table data changed after the \
+         previous slot stopped and before the new slot was created"
     );
+
+    Ok(())
 }

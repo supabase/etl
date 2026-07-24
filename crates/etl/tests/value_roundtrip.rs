@@ -126,9 +126,9 @@ async fn shifted_lower_bound_arrays_roundtrip_through_text_codec() {
     let render = client.prepare("select (($1::text)::int8[])::text").await.unwrap();
 
     // Postgres renders arrays whose lower bound is not 1 with an explicit
-    // dimensions prefix, e.g. `[0:1]={7,8}`. Subscripts carry no value
-    // information for a one-dimensional array, so the codec must skip the
-    // prefix and preserve the elements.
+    // dimensions prefix, e.g. `[0:1]={7,8}`. `ArrayCell` represents these
+    // arrays as ordered elements without subscript bounds, so the codec
+    // intentionally discards the prefix while preserving the elements.
     let strategy = (-8i16..=8, proptest::collection::vec(option::of(any::<i64>()), 1..=8));
     run_property("shifted lower bound int8[] text roundtrip", &strategy, |(lower, values)| {
         let literal = shifted_bounds_literal(*lower, values);
@@ -620,6 +620,41 @@ async fn copy_single_row(client: &Client, query: &str) -> Result<Vec<u8>, tokio_
     }
 
     Ok(bytes)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn postgres_copy_chunks_are_exact_text_row_payloads() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    client
+        .execute("create table test.copy_payload (id int8, value text, optional text)", &[])
+        .await
+        .unwrap();
+    client
+        .execute(
+            "insert into test.copy_payload values (1, 'plain', null), (2, \
+             E'tab\\tline\\nslash\\\\é', 'x')",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let stream = client
+        .copy_out("copy (select * from test.copy_payload order by id) to stdout with (format text)")
+        .await
+        .unwrap();
+    futures::pin_mut!(stream);
+    let mut rows = Vec::new();
+    while let Some(row) = stream.next().await {
+        rows.push(row.unwrap().to_vec());
+    }
+
+    assert_eq!(
+        rows,
+        vec![b"1\tplain\t\\N\n".to_vec(), "2\ttab\\tline\\nslash\\\\é\tx\n".as_bytes().to_vec(),]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

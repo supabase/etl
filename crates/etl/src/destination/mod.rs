@@ -14,8 +14,7 @@ mod capabilities;
 mod metadata;
 
 pub(crate) use async_result::{
-    ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
-    PendingWriteEventsResult,
+    ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, PendingWriteEventsResult,
 };
 pub use async_result::{
     DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability, WriteEventsResult,

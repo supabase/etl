@@ -83,7 +83,6 @@ snowflake = [
     "dep:tracing",
     "dep:zstd",
 ]
-egress = ["etl/egress"]
 # We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only
 # put here the extra dependencies needed.
 test-utils = ["dep:uuid"]

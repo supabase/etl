@@ -12,4 +12,6 @@ pub(crate) mod codec;
 pub mod migrations;
 
 pub(crate) use source_pool::OutOfBandSourcePool;
-pub(crate) use stream::{EventsStream, StatusUpdateResult, StatusUpdateType, TableCopyStream};
+pub(crate) use stream::{
+    ReplicationMessageStream, StatusUpdateResult, StatusUpdateType, TableCopyRow, TableCopyStream,
+};

@@ -44,8 +44,7 @@ use crate::{
     data::SizeHint,
     destination::{
         ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DestinationWriteStatus,
-        DispatchMetrics, PendingWriteEventsResult, PipelineDestination, WriteEventsDurability,
-        WriteEventsResult,
+        PendingWriteEventsResult, PipelineDestination, WriteEventsDurability, WriteEventsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -54,16 +53,15 @@ use crate::{
         ACTION_LABEL, COMMAND_TAG_LABEL, ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
         ETL_APPLY_LOOP_END_TO_END_LAG_BYTES, ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
         ETL_APPLY_LOOP_RECEIVED_LAG_BYTES, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-        ETL_BYTES_PROCESSED_TOTAL, ETL_BYTES_RECEIVED_TOTAL, ETL_DDL_SCHEMA_CHANGE_COLUMNS,
-        ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL,
-        ETL_REPLICATION_MESSAGES_TOTAL, ETL_ROW_SIZE_BYTES, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+        ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL,
+        ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
         ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
-        ETL_TRANSACTIONS_TOTAL, EVENT_TYPE_LABEL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
+        ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
     },
     pipeline::PipelineId,
     postgres::{
-        EventsStream, OutOfBandSourcePool, StatusUpdateResult, StatusUpdateType,
+        OutOfBandSourcePool, ReplicationMessageStream, StatusUpdateResult, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
@@ -89,6 +87,7 @@ use crate::{
     schema::{
         IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
     },
+    source_payload_metadata::StreamingPayloadMetadata,
     store::{PipelineStore, SchemaStore, SharedStateStore, StateStore, TableSchemaRetention},
 };
 
@@ -371,6 +370,8 @@ impl ReplicationLagMetrics {
 struct HandleMessageResult {
     /// The event converted from the replication message.
     event: Option<Event>,
+    /// PostgreSQL source metadata represented by the returned event.
+    streaming_payload_metadata: StreamingPayloadMetadata,
     /// Set to a commit message's end_lsn value, [`None`] otherwise.
     end_lsn: Option<PgLsn>,
     /// Set when a batch should be ended earlier than the normal batching
@@ -387,6 +388,14 @@ impl HandleMessageResult {
     /// Creates a result that returns an event without affecting batch state.
     fn return_event(event: Event) -> Self {
         Self { event: Some(event), ..Default::default() }
+    }
+
+    /// Creates a result containing a row event and its source metadata.
+    fn return_row_event(
+        event: Event,
+        streaming_payload_metadata: StreamingPayloadMetadata,
+    ) -> Self {
+        Self { event: Some(event), streaming_payload_metadata, ..Default::default() }
     }
 }
 
@@ -619,6 +628,71 @@ impl ApplyLoopTasks {
     }
 }
 
+/// A buffered batch of events waiting to be sent to the destination.
+#[derive(Debug, Default)]
+struct EventBatch {
+    /// Events accumulated in the batch.
+    events: Vec<Event>,
+    /// Decoded in-memory size estimate used only to decide when to flush.
+    size_hint_bytes: usize,
+    /// PostgreSQL tuple bytes used for source metrics and usage accounting.
+    ///
+    /// These are independent from the decoded [`SizeHint`] used to determine
+    /// when the batch is dispatched.
+    streaming_payload_metadata: StreamingPayloadMetadata,
+}
+
+impl EventBatch {
+    /// Creates an empty event batch with the specified event capacity.
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            events: Vec::with_capacity(capacity),
+            size_hint_bytes: 0,
+            streaming_payload_metadata: StreamingPayloadMetadata::default(),
+        }
+    }
+
+    /// Adds an event and its source payload metadata to the batch.
+    fn push(&mut self, event: Event, streaming_payload_metadata: StreamingPayloadMetadata) {
+        self.size_hint_bytes = self.size_hint_bytes.saturating_add(event.size_hint());
+        self.streaming_payload_metadata.merge(streaming_payload_metadata);
+        self.events.push(event);
+    }
+
+    /// Returns the number of events in the batch.
+    fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Returns whether the batch contains no events.
+    fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// Returns the decoded in-memory size estimate for the batch.
+    fn size_hint_bytes(&self) -> usize {
+        self.size_hint_bytes
+    }
+
+    /// Takes the current batch and leaves one with the same event capacity.
+    fn take(&mut self) -> Self {
+        debug_assert!(!self.is_empty());
+
+        // Steady-state streaming usually produces similarly sized batches, so retain
+        // enough event capacity for the next batch.
+        let replacement_capacity = self.len();
+        std::mem::replace(self, Self::with_capacity(replacement_capacity))
+    }
+
+    /// Splits the batch into its events, event count, and source payload
+    /// metadata.
+    fn into_parts(self) -> (Vec<Event>, usize, StreamingPayloadMetadata) {
+        let event_count = self.events.len();
+
+        (self.events, event_count, self.streaming_payload_metadata)
+    }
+}
+
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
@@ -638,10 +712,8 @@ struct ApplyLoopState {
     replication_progress: ReplicationProgress,
     /// Shared replication lag metrics derived from apply-loop progress.
     replication_lag_metrics: ReplicationLagMetrics,
-    /// A batch of events to send to the destination.
-    events_batch: Vec<Event>,
-    /// Approximate total size in bytes of events currently in the batch.
-    events_batch_bytes: usize,
+    /// Events and associated batching information waiting for dispatch.
+    event_batch: EventBatch,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding
@@ -701,8 +773,7 @@ impl ApplyLoopState {
             remote_final_lsn: None,
             replication_progress,
             replication_lag_metrics,
-            events_batch: Vec::new(),
-            events_batch_bytes: 0,
+            event_batch: EventBatch::default(),
             current_tx_begin_ts: None,
             current_tx_events: 0,
             next_tx_ordinal: 0,
@@ -718,32 +789,6 @@ impl ApplyLoopState {
                 Instant::now() + SCHEMA_CLEANUP_INTERVAL,
             ))),
         }
-    }
-
-    /// Adds an event to the batch.
-    fn add_event_to_batch(&mut self, event: Event) {
-        // We track the current number of bytes in the batch.
-        self.events_batch_bytes = self.events_batch_bytes.saturating_add(event.size_hint());
-
-        // We add the element to the pending batch.
-        self.events_batch.push(event);
-    }
-
-    /// Takes the events batch for further processing and leaves behind a
-    /// replacement sized for the emitted batch.
-    fn take_events_batch(&mut self) -> (Vec<Event>, usize) {
-        debug_assert!(self.has_pending_batch());
-
-        // We replace the old vector with a new one of the same length, under the
-        // assumption that we do mostly steady-state streaming, so it's highly
-        // likely that the next batch will need the same memory footprint.
-        let replacement_capacity = self.events_batch.len();
-        let events_batch =
-            std::mem::replace(&mut self.events_batch, Vec::with_capacity(replacement_capacity));
-        let events_batch_bytes = self.events_batch_bytes;
-        self.events_batch_bytes = 0;
-
-        (events_batch, events_batch_bytes)
     }
 
     /// Returns the bootstrap snapshot used before a table has shared protocol
@@ -920,7 +965,7 @@ impl ApplyLoopState {
     /// Returns `true` if there is a pending batch of events waiting to be
     /// flushed.
     fn has_pending_batch(&self) -> bool {
-        !self.events_batch.is_empty()
+        !self.event_batch.is_empty()
     }
 
     /// Returns `true` if there is a batch flush in flight whose result has not
@@ -1153,25 +1198,25 @@ where
             )
             .await?;
 
-        let events_stream = EventsStream::wrap(logical_replication_stream);
-        let events_stream = BackpressureStream::wrap(
-            events_stream,
+        let replication_message_stream = ReplicationMessageStream::wrap(logical_replication_stream);
+        let replication_message_stream = BackpressureStream::wrap(
+            replication_message_stream,
             self.worker_context.apply_stream_id(),
             self.memory_monitor.subscribe(),
         );
-        pin!(events_stream);
+        pin!(replication_message_stream);
         let mut connection_updates_rx = replication_client.connection_updates_rx();
 
         loop {
             let iteration_result = if self.state.is_draining_for_shutdown() {
                 self.run_draining_shutdown_iteration(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     &mut connection_updates_rx,
                 )
                 .await
             } else {
                 self.run_active_iteration(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     replication_client,
                     &mut connection_updates_rx,
                 )
@@ -1217,7 +1262,7 @@ where
     /// return yet.
     async fn run_active_iteration(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         replication_client: &PgReplicationClient,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
@@ -1238,7 +1283,7 @@ where
             // PRIORITY 1: Handle shutdown signals.
             // Shutdown stops new intake first and then lets the loop drain or wait as needed.
             _ = self.shutdown_rx.changed() => {
-                self.handle_shutdown_signal(events_stream.as_mut()).await?;
+                self.handle_shutdown_signal(replication_message_stream.as_mut()).await?;
             }
 
             // PRIORITY 2: Handle PostgreSQL connection lifecycle updates.
@@ -1262,9 +1307,9 @@ where
 
             // PRIORITY 5: Process incoming replication messages from PostgreSQL.
             // New WAL messages are only accepted while the loop is still actively ingesting.
-            maybe_message = events_stream.next(), if self.state.can_process_messages() => {
+            maybe_message = replication_message_stream.next(), if self.state.can_process_messages() => {
                 self.handle_stream_message(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     maybe_message,
                     replication_client,
                 )
@@ -1279,7 +1324,7 @@ where
             // PostgreSQL primary keep alive messages during normal operation.
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     true,
                     StatusUpdateType::PeriodicKeepAlive,
                 )
@@ -1319,12 +1364,12 @@ where
     /// after restart.
     async fn run_draining_shutdown_iteration(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
         // If we are done with unresolved work, we can finish the shutdown.
         if !self.state.has_unresolved_batch_work() {
-            self.send_shutdown_flush_status_update(events_stream.as_mut()).await?;
+            self.send_shutdown_flush_status_update(replication_message_stream.as_mut()).await?;
 
             return Ok(Some(self.finish_shutdown()));
         }
@@ -1351,7 +1396,7 @@ where
             // PRIORITY 4: Emit a periodic status update while shutdown is draining.
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     true,
                     StatusUpdateType::PeriodicKeepAlive,
                 )
@@ -1364,7 +1409,7 @@ where
 
         // If we are done with unresolved work, we can finish the shutdown.
         if !self.state.has_unresolved_batch_work() {
-            self.send_shutdown_flush_status_update(events_stream.as_mut()).await?;
+            self.send_shutdown_flush_status_update(replication_message_stream.as_mut()).await?;
 
             return Ok(Some(self.finish_shutdown()));
         }
@@ -1467,7 +1512,7 @@ where
     /// does not complete within an acceptable timeframe.
     async fn handle_shutdown_signal(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
     ) -> EtlResult<()> {
         let worker_type = self.worker_context.worker_type();
 
@@ -1496,7 +1541,7 @@ where
             "shutdown signal received, no unresolved work left, sending final status update",
         );
 
-        self.send_shutdown_flush_status_update(events_stream.as_mut()).await
+        self.send_shutdown_flush_status_update(replication_message_stream.as_mut()).await
     }
 
     /// Sends the final shutdown status update to let Postgres advance its
@@ -1507,10 +1552,14 @@ where
     /// persisted as durable ETL progress.
     async fn send_shutdown_flush_status_update(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
     ) -> EtlResult<()> {
-        self.send_status_update(events_stream.as_mut(), true, StatusUpdateType::ShutdownFlush)
-            .await?;
+        self.send_status_update(
+            replication_message_stream.as_mut(),
+            true,
+            StatusUpdateType::ShutdownFlush,
+        )
+        .await?;
 
         Ok(())
     }
@@ -1525,11 +1574,11 @@ where
     /// stream and the final shutdown update still use this same helper.
     async fn send_status_update(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
-        let status_update_result = events_stream
+        let status_update_result = replication_message_stream
             .as_mut()
             .stream_mut()
             .send_status_update(
@@ -1744,14 +1793,16 @@ where
                 WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
                 ACTION_LABEL => "table_streaming",
             )
-            .increment(metadata.metrics.items_count as u64);
+            .increment(metadata.event_count as u64);
 
             histogram!(
                 ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
                 WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
                 ACTION_LABEL => "table_streaming",
             )
-            .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
+            .record(metadata.dispatched_at.elapsed().as_secs_f64());
+
+            metadata.streaming_payload_metadata.record_processed(D::name());
 
             match status {
                 DestinationWriteStatus::Accepted => {
@@ -1776,7 +1827,7 @@ where
             // once an exit is requested, and shutdown drain does not run that hook.
             // Complete the handoff here after the barrier has settled the carried
             // commit LSN and the loop is fully idle again.
-            if metadata.metrics.items_count == 0
+            if metadata.event_count == 0
                 && metadata.durability == WriteEventsDurability::RequireDurable
                 && status == DestinationWriteStatus::Durable
                 && matches!(self.state.exit_intent, Some(ExitIntent::Complete))
@@ -1810,7 +1861,7 @@ where
     /// Processes the message and manages batch timing.
     async fn handle_stream_message(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         maybe_message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<()> {
@@ -1824,7 +1875,8 @@ where
         // If the Postgres had an error, we want to raise it immediately.
         let message = message?;
 
-        self.handle_replication_message_and_flush(events_stream.as_mut(), message).await
+        self.handle_replication_message_and_flush(replication_message_stream.as_mut(), message)
+            .await
     }
 
     /// Creates an error for when the replication stream ends unexpectedly.
@@ -1857,33 +1909,34 @@ where
     /// Handles a replication message and flushes the batch if necessary.
     async fn handle_replication_message_and_flush(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<()> {
-        let result = self.handle_replication_message(events_stream.as_mut(), message).await?;
+        let result =
+            self.handle_replication_message(replication_message_stream.as_mut(), message).await?;
 
         if let Some(event) = result.event {
             // We add the element to the pending batch.
-            self.state.add_event_to_batch(event);
+            self.state.event_batch.push(event, result.streaming_payload_metadata);
 
             // We update the last end lsn of the commit that we encountered, if any.
             self.state.update_last_commit_end_lsn(result.end_lsn);
 
             // We start the batch timer for the flushing. This timer is needed to control
-            // force flushing of a batch if its size is not reached in time.
+            // force flushing if the batch-size hint threshold is not reached in time.
             self.state.set_flush_deadline_if_needed(self.max_batch_fill_duration);
         }
 
         // We check for the batch flushing conditions before deciding whether to flush
         // or not.
-        let batch_size_reached =
-            self.state.events_batch_bytes >= self.cached_batch_budget.current_batch_size_bytes();
+        let batch_size_hint_bytes_reached = self.state.event_batch.size_hint_bytes()
+            >= self.cached_batch_budget.current_batch_size_bytes();
         let early_flush_requested = result.end_batch;
-        let should_flush = batch_size_reached || early_flush_requested;
+        let should_flush = batch_size_hint_bytes_reached || early_flush_requested;
 
         if should_flush {
-            let reason = if batch_size_reached {
-                "max batch bytes reached"
+            let reason = if batch_size_hint_bytes_reached {
+                "max batch size hint reached"
             } else {
                 "early flush requested"
             };
@@ -1913,21 +1966,20 @@ where
             return Ok(());
         }
 
-        let (events_batch, events_batch_bytes) = self.state.take_events_batch();
+        let event_batch = self.state.event_batch.take();
 
-        self.dispatch_write_events(events_batch, events_batch_bytes, reason).await
+        self.dispatch_write_events(event_batch, reason).await
     }
 
     /// Dispatches one streaming write through the shared async-result path.
     async fn dispatch_write_events(
         &mut self,
-        events_batch: Vec<Event>,
-        events_batch_bytes: usize,
+        event_batch: EventBatch,
         reason: &str,
     ) -> EtlResult<()> {
         debug_assert!(!self.state.has_pending_flush_result());
 
-        let events_batch_size = events_batch.len();
+        let (events, event_count, streaming_payload_metadata) = event_batch.into_parts();
         // `Complete` is terminal, so no later write is guaranteed to settle an
         // `Accepted` result. Its final batch must confirm cumulative durability
         // before the apply loop can complete.
@@ -1937,8 +1989,7 @@ where
         };
         debug!(
             worker_type = %self.worker_context.worker_type(),
-            batch_size = events_batch_size,
-            batch_size_bytes = events_batch_bytes,
+            event_count,
             %reason,
             "flushing batch to destination",
         );
@@ -1948,17 +1999,16 @@ where
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: self.state.last_commit_end_lsn.take(),
             durability,
-            metrics: DispatchMetrics {
-                items_count: events_batch_size,
-                dispatched_at: Instant::now(),
-            },
+            event_count,
+            streaming_payload_metadata,
+            dispatched_at: Instant::now(),
         };
 
         // Create the flush result channel: the sender is handed to the destination and
         // the pending receiver is stored on the loop state until the
         // destination signals completion.
         let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
-        self.destination.write_events(events_batch, durability, flush_result).await?;
+        self.destination.write_events(events, durability, flush_result).await?;
         self.state.pending_flush_result = Some(pending_flush_result);
 
         // We reset the deadline for the batch, since we are now flushing a new batch.
@@ -1975,7 +2025,7 @@ where
     /// Dispatches replication protocol messages to appropriate handlers.
     async fn handle_replication_message(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
         counter!(
@@ -2011,7 +2061,7 @@ where
                 );
 
                 self.send_status_update(
-                    events_stream.as_mut(),
+                    replication_message_stream.as_mut(),
                     message.reply() == 1,
                     StatusUpdateType::KeepAlive,
                 )
@@ -2085,19 +2135,6 @@ where
         .increment(1);
     }
 
-    /// Records row payload bytes received from logical replication.
-    fn record_streaming_bytes_received(event_type: &'static str, payload_bytes: u64) {
-        counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => event_type).increment(payload_bytes);
-    }
-
-    /// Records row payload bytes processed after table ownership filtering.
-    fn record_streaming_bytes_processed(event_type: &'static str, payload_bytes: u64) {
-        counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => event_type)
-            .increment(payload_bytes);
-
-        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => event_type).record(payload_bytes as f64);
-    }
-
     /// Handles Postgres MESSAGE messages (pg_logical_emit_message).
     ///
     /// For `supabase_etl_ddl`, we persist the new table schema as soon as the
@@ -2164,7 +2201,7 @@ where
 
         let table_id = schema_change_message.table_id();
         let command_tag = schema_change_message.command_tag.clone();
-        let columns_count = schema_change_message.columns.len();
+        let column_count = schema_change_message.columns.len();
 
         // Exactly one worker owns protocol interpretation for a table at a time. If
         // this worker is not the owner, it must skip the DDL so the owning
@@ -2227,7 +2264,7 @@ where
             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
             COMMAND_TAG_LABEL => command_tag.clone(),
         )
-        .record(columns_count as f64);
+        .record(column_count as f64);
 
         info!(
             table_id = table_id_u32,
@@ -2419,9 +2456,11 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
-        let payload_bytes = insert_message_payload_bytes(message);
-
-        Self::record_streaming_bytes_received("insert", payload_bytes);
+        // Capture the source payload metadata and emit the initial metrics.
+        let streaming_payload_metadata =
+            StreamingPayloadMetadata::insert(insert_message_payload_bytes(message));
+        streaming_payload_metadata.record_received();
+        streaming_payload_metadata.record_row_size();
 
         // Exactly one worker owns protocol interpretation for a table at a time, so
         // non-owning workers skip row decoding and leave the shared table state
@@ -2429,8 +2468,6 @@ where
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
-
-        Self::record_streaming_bytes_processed("insert", payload_bytes);
 
         let replicated_table_schema =
             get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
@@ -2443,7 +2480,7 @@ where
             message,
         )?;
 
-        Ok(HandleMessageResult::return_event(Event::Insert(event)))
+        Ok(HandleMessageResult::return_row_event(Event::Insert(event), streaming_payload_metadata))
     }
 
     /// Handles Postgres UPDATE messages.
@@ -2463,9 +2500,11 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
-        let payload_bytes = update_message_payload_bytes(message);
-
-        Self::record_streaming_bytes_received("update", payload_bytes);
+        // Capture the source payload metadata and emit the initial metrics.
+        let streaming_payload_metadata =
+            StreamingPayloadMetadata::update(update_message_payload_bytes(message));
+        streaming_payload_metadata.record_received();
+        streaming_payload_metadata.record_row_size();
 
         // Exactly one worker owns protocol interpretation for a table at a time, so
         // non-owning workers skip row decoding and leave the shared table state
@@ -2473,8 +2512,6 @@ where
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
-
-        Self::record_streaming_bytes_processed("update", payload_bytes);
 
         let replicated_table_schema =
             get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
@@ -2487,7 +2524,7 @@ where
             message,
         )?;
 
-        Ok(HandleMessageResult::return_event(Event::Update(event)))
+        Ok(HandleMessageResult::return_row_event(Event::Update(event), streaming_payload_metadata))
     }
 
     /// Handles Postgres DELETE messages.
@@ -2507,9 +2544,11 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
-        let payload_bytes = delete_message_payload_bytes(message);
-
-        Self::record_streaming_bytes_received("delete", payload_bytes);
+        // Capture the source payload metadata and emit the initial metrics.
+        let streaming_payload_metadata =
+            StreamingPayloadMetadata::delete(delete_message_payload_bytes(message));
+        streaming_payload_metadata.record_received();
+        streaming_payload_metadata.record_row_size();
 
         // Exactly one worker owns protocol interpretation for a table at a time, so
         // non-owning workers skip row decoding and leave the shared table state
@@ -2517,8 +2556,6 @@ where
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
-
-        Self::record_streaming_bytes_processed("delete", payload_bytes);
 
         let replicated_table_schema =
             get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
@@ -2531,7 +2568,7 @@ where
             message,
         )?;
 
-        Ok(HandleMessageResult::return_event(Event::Delete(event)))
+        Ok(HandleMessageResult::return_row_event(Event::Delete(event), streaming_payload_metadata))
     }
 
     /// Handles Postgres TRUNCATE messages.
@@ -2713,8 +2750,7 @@ where
             // requires durability.
             self.state.record_exit_intent(Some(ExitIntent::Complete));
             self.dispatch_write_events(
-                Vec::new(),
-                0,
+                EventBatch::default(),
                 "table sync catchup reached without a terminal event batch",
             )
             .await?;
@@ -2774,7 +2810,7 @@ where
     let states = store.get_table_states().await?;
     Ok(states
         .iter()
-        .filter(|(_, state)| !state.as_type().is_done())
+        .filter(|(_, state)| state.as_type().is_syncing())
         .map(|(id, state)| (*id, state.clone()))
         .collect())
 }
@@ -2844,9 +2880,13 @@ mod apply_worker {
         D: PipelineDestination,
     {
         for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
-            let exit_intent =
-                process_single_syncing_table_after_commit(ctx, table_id, table_state, current_lsn)
-                    .await?;
+            let exit_intent = process_single_syncing_table_after_commit_event(
+                ctx,
+                table_id,
+                table_state,
+                current_lsn,
+            )
+            .await?;
 
             if exit_intent.is_some() {
                 return Ok(exit_intent);
@@ -2949,7 +2989,7 @@ mod apply_worker {
     /// Handles SyncWait → Catchup transitions, waits for workers already in
     /// Catchup, and spawns new workers.
     /// Does NOT handle SyncDone → Ready transitions.
-    async fn process_single_syncing_table_after_commit<S, D>(
+    async fn process_single_syncing_table_after_commit_event<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         table_id: TableId,
         table_state: TableState,
