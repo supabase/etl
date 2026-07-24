@@ -622,7 +622,7 @@ where
 
         let destination = self.clone();
         self.tasks
-            .spawn(async move {
+            .spawn_with(move || async move {
                 let result = destination.write_events(events).await;
                 async_result.send(result.map(|_| DestinationWriteStatus::Durable));
             })

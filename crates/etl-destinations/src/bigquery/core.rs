@@ -1205,7 +1205,7 @@ where
             let client = self.client.clone();
             let dataset_id = self.dataset_id.clone();
             self.tasks
-                .spawn(async move {
+                .spawn_with(move || async move {
                     if let Err(err) = client
                         .drop_table_if_exists(&dataset_id, &sequenced_bigquery_table_id.to_string())
                         .await
@@ -1378,7 +1378,7 @@ where
 
         let destination = self.clone();
         self.tasks
-            .spawn(async move {
+            .spawn_with(move || async move {
                 let result = destination.write_events(events).await;
                 async_result.send(result.map(|_| DestinationWriteStatus::Durable));
             })
