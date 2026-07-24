@@ -160,18 +160,12 @@ fn status_default_schema(
 async fn apply_relation_event(
     destination: &SnowflakeTestDestination,
     replicated_table_schema: ReplicatedTableSchema,
-    lsn: u64,
     context: &str,
 ) {
     invoke_write_events(
         destination,
         WriteEventsDurability::MayDefer,
-        vec![Event::Relation(RelationEvent {
-            start_lsn: PgLsn::from(lsn),
-            commit_lsn: PgLsn::from(lsn),
-            tx_ordinal: 0,
-            replicated_table_schema,
-        })],
+        vec![Event::Relation(RelationEvent { replicated_table_schema })],
     )
     .await
     .unwrap_or_else(|error| panic!("write_events ({context}) failed: {error}"));
@@ -380,14 +374,12 @@ async fn write_events_insert_update_delete() {
             WriteEventsDurability::MayDefer,
             vec![
                 Event::Insert(InsertEvent {
-                    start_lsn: PgLsn::from(1u64),
                     commit_lsn: PgLsn::from(1u64),
                     tx_ordinal: 0,
                     replicated_table_schema: schema.clone(),
                     table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())]),
                 }),
                 Event::Update(UpdateEvent {
-                    start_lsn: PgLsn::from(2u64),
                     commit_lsn: PgLsn::from(2u64),
                     tx_ordinal: 0,
                     replicated_table_schema: schema.clone(),
@@ -401,7 +393,6 @@ async fn write_events_insert_update_delete() {
                     ]))),
                 }),
                 Event::Delete(DeleteEvent {
-                    start_lsn: PgLsn::from(3u64),
                     commit_lsn: PgLsn::from(3u64),
                     tx_ordinal: 0,
                     replicated_table_schema: schema.clone(),
@@ -456,7 +447,6 @@ async fn write_events_delete_key_only() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Delete(DeleteEvent {
-                start_lsn: PgLsn::from(1u64),
                 commit_lsn: PgLsn::from(1u64),
                 tx_ordinal: 0,
                 replicated_table_schema: schema.clone(),
@@ -551,9 +541,6 @@ async fn schema_evolution_add_column_skips_stale_replay() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })],
         )
@@ -564,7 +551,6 @@ async fn schema_evolution_add_column_skips_stale_replay() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(101u64),
                 commit_lsn: PgLsn::from(101u64),
                 tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
@@ -601,26 +587,18 @@ async fn schema_evolution_add_column_skips_stale_replay() {
             WriteEventsDurability::MayDefer,
             vec![
                 Event::Relation(RelationEvent {
-                    start_lsn: PgLsn::from(0_u64),
-                    commit_lsn: PgLsn::from(0_u64),
-                    tx_ordinal: 0,
                     replicated_table_schema: initial_replicated.clone(),
                 }),
                 Event::Insert(InsertEvent {
-                    start_lsn: PgLsn::from(1_u64),
                     commit_lsn: PgLsn::from(1_u64),
                     tx_ordinal: 0,
                     replicated_table_schema: initial_replicated.clone(),
                     table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())]),
                 }),
                 Event::Relation(RelationEvent {
-                    start_lsn: PgLsn::from(100_u64),
-                    commit_lsn: PgLsn::from(100_u64),
-                    tx_ordinal: 0,
                     replicated_table_schema: evolved_replicated.clone(),
                 }),
                 Event::Insert(InsertEvent {
-                    start_lsn: PgLsn::from(101_u64),
                     commit_lsn: PgLsn::from(101_u64),
                     tx_ordinal: 0,
                     replicated_table_schema: evolved_replicated.clone(),
@@ -640,7 +618,6 @@ async fn schema_evolution_add_column_skips_stale_replay() {
             &restarted_destination,
             WriteEventsDurability::RequireDurable,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(102_u64),
                 commit_lsn: PgLsn::from(102_u64),
                 tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
@@ -765,9 +742,6 @@ async fn schema_evolution_add_column_defaults() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })],
         )
@@ -778,7 +752,6 @@ async fn schema_evolution_add_column_defaults() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(101u64),
                 commit_lsn: PgLsn::from(101u64),
                 tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
@@ -891,26 +864,22 @@ async fn schema_evolution_existing_column_default_changes() {
             harness.config.schema()
         );
 
-        apply_relation_event(&harness.destination, set_default_replicated, 100, "set default")
-            .await;
+        apply_relation_event(&harness.destination, set_default_replicated, "set default").await;
         assert_status_default_absent(&harness.sql, &fqn, "after skipped set default").await;
 
         apply_relation_event(
             &harness.destination,
             unsupported_default_replicated,
-            200,
             "unsupported default",
         )
         .await;
         assert_status_default_absent(&harness.sql, &fqn, "after unsupported default is skipped")
             .await;
 
-        apply_relation_event(&harness.destination, reset_default_replicated, 300, "reset default")
-            .await;
+        apply_relation_event(&harness.destination, reset_default_replicated, "reset default").await;
         assert_status_default_absent(&harness.sql, &fqn, "after skipped reset default").await;
 
-        apply_relation_event(&harness.destination, drop_default_replicated, 400, "drop default")
-            .await;
+        apply_relation_event(&harness.destination, drop_default_replicated, "drop default").await;
         assert_status_default_absent(&harness.sql, &fqn, "after skipped drop default").await;
     })
     .await;
@@ -982,9 +951,6 @@ async fn schema_evolution_rename_column() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })],
         )
@@ -995,7 +961,6 @@ async fn schema_evolution_rename_column() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(101u64),
                 commit_lsn: PgLsn::from(101u64),
                 tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
@@ -1111,9 +1076,6 @@ async fn schema_evolution_drop_column() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })],
         )
@@ -1124,7 +1086,6 @@ async fn schema_evolution_drop_column() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(101u64),
                 commit_lsn: PgLsn::from(101u64),
                 tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
@@ -1284,7 +1245,6 @@ async fn schema_evolution_interleaved_ddl_dml() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(1u64),
                 commit_lsn: PgLsn::from(1u64),
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_v1.clone(),
@@ -1298,12 +1258,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
         invoke_write_events(
             &harness.destination,
             WriteEventsDurability::MayDefer,
-            vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
-                replicated_table_schema: replicated_v2.clone(),
-            })],
+            vec![Event::Relation(RelationEvent { replicated_table_schema: replicated_v2.clone() })],
         )
         .await
         .expect("write_events (Relation v2) failed");
@@ -1313,7 +1268,6 @@ async fn schema_evolution_interleaved_ddl_dml() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(101u64),
                 commit_lsn: PgLsn::from(101u64),
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_v2.clone(),
@@ -1331,12 +1285,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
         invoke_write_events(
             &harness.destination,
             WriteEventsDurability::MayDefer,
-            vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(200u64),
-                commit_lsn: PgLsn::from(200u64),
-                tx_ordinal: 0,
-                replicated_table_schema: replicated_v3.clone(),
-            })],
+            vec![Event::Relation(RelationEvent { replicated_table_schema: replicated_v3.clone() })],
         )
         .await
         .expect("write_events (Relation v3) failed");
@@ -1346,7 +1295,6 @@ async fn schema_evolution_interleaved_ddl_dml() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(201u64),
                 commit_lsn: PgLsn::from(201u64),
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_v3.clone(),
@@ -1364,12 +1312,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
         invoke_write_events(
             &harness.destination,
             WriteEventsDurability::MayDefer,
-            vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(300u64),
-                commit_lsn: PgLsn::from(300u64),
-                tx_ordinal: 0,
-                replicated_table_schema: replicated_v4.clone(),
-            })],
+            vec![Event::Relation(RelationEvent { replicated_table_schema: replicated_v4.clone() })],
         )
         .await
         .expect("write_events (Relation v4) failed");
@@ -1379,7 +1322,6 @@ async fn schema_evolution_interleaved_ddl_dml() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(301u64),
                 commit_lsn: PgLsn::from(301u64),
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_v4.clone(),

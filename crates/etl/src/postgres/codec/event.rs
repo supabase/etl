@@ -29,8 +29,8 @@ pub(crate) const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
 
 /// Represents a schema change message emitted by Postgres event trigger.
 ///
-/// This message is emitted when ALTER TABLE commands are executed on tables
-/// that are part of a publication.
+/// This message is emitted when supported table or publication commands affect
+/// tables that are part of a publication.
 ///
 /// Unknown fields are ignored on purpose so the SQL payload can grow richer
 /// without forcing a synchronized rollout of every consumer.
@@ -65,7 +65,7 @@ impl SchemaChangeMessage {
     /// snapshot ID.
     ///
     /// This is used to update the stored table schema when a DDL change is
-    /// detected. The snapshot_id should be the start_lsn of the DDL
+    /// detected. The snapshot ID should be the LSN carried by the logical DDL
     /// message.
     pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
         build_table_schema(
@@ -90,6 +90,12 @@ impl FromStr for SchemaChangeMessage {
             )
         })
     }
+}
+
+/// Returns the durable schema snapshot identifier carried by a logical
+/// message.
+pub(crate) fn schema_snapshot_id_from_message(message: &protocol::MessageBody) -> SnapshotId {
+    PgLsn::from(message.message_lsn()).into()
 }
 
 /// The identity metadata emitted by Postgres.
@@ -301,18 +307,11 @@ pub(crate) fn delete_message_payload_bytes(delete_body: &protocol::DeleteBody) -
 /// This method parses the replication protocol begin message and extracts
 /// transaction metadata for use in the ETL pipeline.
 pub(crate) fn parse_event_from_begin_message(
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     begin_body: &protocol::BeginBody,
 ) -> BeginEvent {
-    BeginEvent {
-        start_lsn,
-        commit_lsn,
-        tx_ordinal,
-        timestamp: begin_body.timestamp(),
-        xid: begin_body.xid(),
-    }
+    BeginEvent { commit_lsn, tx_ordinal, timestamp: begin_body.timestamp(), xid: begin_body.xid() }
 }
 
 /// Creates a [`CommitEvent`] from Postgres protocol data.
@@ -320,13 +319,11 @@ pub(crate) fn parse_event_from_begin_message(
 /// This method parses the replication protocol commit message and extracts
 /// transaction completion metadata for use in the ETL pipeline.
 pub(crate) fn parse_event_from_commit_message(
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     commit_body: &protocol::CommitBody,
 ) -> CommitEvent {
     CommitEvent {
-        start_lsn,
         commit_lsn,
         tx_ordinal,
         flags: commit_body.flags(),
@@ -402,7 +399,6 @@ pub(crate) fn parse_replica_identity_column_names(
 /// processing.
 pub(crate) fn parse_event_from_insert_message(
     replicated_table_schema: ReplicatedTableSchema,
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     insert_body: &protocol::InsertBody,
@@ -410,7 +406,7 @@ pub(crate) fn parse_event_from_insert_message(
     let tuple_data = insert_body.tuple().tuple_data();
     let table_row = convert_tuple_to_row(replicated_table_schema.column_schemas(), tuple_data)?;
 
-    Ok(InsertEvent { start_lsn, commit_lsn, tx_ordinal, replicated_table_schema, table_row })
+    Ok(InsertEvent { commit_lsn, tx_ordinal, replicated_table_schema, table_row })
 }
 
 /// Converts a Postgres update message into an [`UpdateEvent`].
@@ -436,7 +432,6 @@ pub(crate) fn parse_event_from_insert_message(
 /// [`UpdatedTableRow::Partial`].
 pub(crate) fn parse_event_from_update_message(
     replicated_table_schema: ReplicatedTableSchema,
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     update_body: &protocol::UpdateBody,
@@ -474,7 +469,6 @@ pub(crate) fn parse_event_from_update_message(
     )?;
 
     Ok(UpdateEvent {
-        start_lsn,
         commit_lsn,
         tx_ordinal,
         replicated_table_schema,
@@ -500,7 +494,6 @@ pub(crate) fn parse_event_from_update_message(
 /// replica-identity rows in replicated table order.
 pub(crate) fn parse_event_from_delete_message(
     replicated_table_schema: ReplicatedTableSchema,
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     delete_body: &protocol::DeleteBody,
@@ -523,7 +516,7 @@ pub(crate) fn parse_event_from_delete_message(
         None => None,
     };
 
-    Ok(DeleteEvent { start_lsn, commit_lsn, tx_ordinal, replicated_table_schema, old_table_row })
+    Ok(DeleteEvent { commit_lsn, tx_ordinal, replicated_table_schema, old_table_row })
 }
 
 /// Creates a [`TruncateEvent`] from Postgres protocol data.
@@ -531,19 +524,12 @@ pub(crate) fn parse_event_from_delete_message(
 /// This method parses the replication protocol truncate message and extracts
 /// information about which tables were truncated and with what options.
 pub(crate) fn parse_event_from_truncate_message(
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     truncate_body: &protocol::TruncateBody,
     truncated_tables: Vec<ReplicatedTableSchema>,
 ) -> TruncateEvent {
-    TruncateEvent {
-        start_lsn,
-        commit_lsn,
-        tx_ordinal,
-        options: truncate_body.options(),
-        truncated_tables,
-    }
+    TruncateEvent { commit_lsn, tx_ordinal, options: truncate_body.options(), truncated_tables }
 }
 
 /// Converts a full tuple image into a dense [`TableRow`].
@@ -987,22 +973,25 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use postgres_replication::protocol::{LogicalReplicationMessage, TupleData};
+    use postgres_replication::protocol::{
+        LogicalReplicationMessage, ReplicationMessage, TupleData,
+    };
     use tokio_postgres::types::{PgLsn, Type};
 
     use super::{
-        IdentityMessage, calculate_tuple_bytes, convert_tuple_to_row,
+        DDL_MESSAGE_PREFIX, IdentityMessage, calculate_tuple_bytes, convert_tuple_to_row,
         convert_update_tuple_to_updated_table_row, delete_message_payload_bytes,
         insert_message_payload_bytes, normalize_key_tuple_to_row, parse_event_from_delete_message,
-        parse_event_from_update_message, update_message_payload_bytes,
+        parse_event_from_update_message, schema_snapshot_id_from_message,
+        update_message_payload_bytes,
     };
     use crate::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
         error::ErrorKind,
         event::{DeleteEvent, UpdateEvent},
         schema::{
-            ColumnSchema, IdentityType, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
-            TableSchema,
+            ColumnSchema, IdentityType, ReplicatedTableSchema, ReplicationMask, SnapshotId,
+            TableId, TableName, TableSchema,
         },
     };
 
@@ -1011,6 +1000,45 @@ mod tests {
         Null,
         UnchangedToast,
         Text(&'a str),
+    }
+
+    #[test]
+    fn schema_snapshot_uses_logical_message_lsn_not_xlogdata_wal_start() {
+        let wal_start = 100_u64;
+        let message_lsn = 140_u64;
+
+        let mut logical_message = vec![b'M', 1];
+        logical_message.extend_from_slice(&message_lsn.to_be_bytes());
+        logical_message.extend_from_slice(DDL_MESSAGE_PREFIX.as_bytes());
+        logical_message.push(0);
+        logical_message.extend_from_slice(&2_i32.to_be_bytes());
+        logical_message.extend_from_slice(b"{}");
+
+        let mut xlog_data = vec![b'w'];
+        xlog_data.extend_from_slice(&wal_start.to_be_bytes());
+        xlog_data.extend_from_slice(&200_u64.to_be_bytes());
+        xlog_data.extend_from_slice(&0_i64.to_be_bytes());
+        xlog_data.extend_from_slice(&logical_message);
+
+        let replication_message = ReplicationMessage::parse(&Bytes::from(xlog_data)).unwrap();
+        let ReplicationMessage::XLogData(xlog_data) = replication_message else {
+            panic!("encoded replication message should be XLogData");
+        };
+        assert_eq!(xlog_data.wal_start(), wal_start);
+
+        let logical_message = LogicalReplicationMessage::parse(xlog_data.data()).unwrap();
+        let LogicalReplicationMessage::Message(message) = logical_message else {
+            panic!("encoded logical message should be Message");
+        };
+
+        assert_eq!(
+            schema_snapshot_id_from_message(&message),
+            SnapshotId::new(PgLsn::from(message_lsn))
+        );
+        assert_ne!(
+            schema_snapshot_id_from_message(&message),
+            SnapshotId::new(PgLsn::from(wal_start))
+        );
     }
 
     fn event_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
@@ -1175,28 +1203,16 @@ mod tests {
         replicated_table_schema: ReplicatedTableSchema,
         update_body: &postgres_replication::protocol::UpdateBody,
     ) -> UpdateEvent {
-        parse_event_from_update_message(
-            replicated_table_schema,
-            PgLsn::from(10),
-            PgLsn::from(20),
-            0,
-            update_body,
-        )
-        .unwrap()
+        parse_event_from_update_message(replicated_table_schema, PgLsn::from(20), 0, update_body)
+            .unwrap()
     }
 
     fn parse_delete_event(
         replicated_table_schema: ReplicatedTableSchema,
         delete_body: &postgres_replication::protocol::DeleteBody,
     ) -> DeleteEvent {
-        parse_event_from_delete_message(
-            replicated_table_schema,
-            PgLsn::from(10),
-            PgLsn::from(20),
-            0,
-            delete_body,
-        )
-        .unwrap()
+        parse_event_from_delete_message(replicated_table_schema, PgLsn::from(20), 0, delete_body)
+            .unwrap()
     }
 
     #[test]

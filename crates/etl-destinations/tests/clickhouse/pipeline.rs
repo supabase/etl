@@ -2406,9 +2406,6 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
     let result = restarted_destination
         .write_events(vec![Event::Relation(RelationEvent {
-            start_lsn: PgLsn::from(0),
-            commit_lsn: PgLsn::from(0),
-            tx_ordinal: 0,
             replicated_table_schema: stale_schema,
         })])
         .await;

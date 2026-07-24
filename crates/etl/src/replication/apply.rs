@@ -69,7 +69,8 @@ use crate::{
             parse_event_from_commit_message, parse_event_from_delete_message,
             parse_event_from_insert_message, parse_event_from_truncate_message,
             parse_event_from_update_message, parse_replica_identity_column_names,
-            parse_replicated_column_names, update_message_payload_bytes,
+            parse_replicated_column_names, schema_snapshot_id_from_message,
+            update_message_payload_bytes,
         },
     },
     replication::{
@@ -2048,7 +2049,7 @@ where
                     "handling logical replication data message",
                 );
 
-                self.handle_logical_replication_message(start_lsn, message.into_data()).await
+                self.handle_logical_replication_message(message.into_data()).await
             }
             ReplicationMessage::PrimaryKeepAlive(message) => {
                 let end_lsn = PgLsn::from(message.wal_end());
@@ -2079,36 +2080,33 @@ where
     /// events.
     async fn handle_logical_replication_message(
         &mut self,
-        start_lsn: PgLsn,
         message: LogicalReplicationMessage,
     ) -> EtlResult<HandleMessageResult> {
         self.record_streaming_event_received();
 
         match &message {
-            LogicalReplicationMessage::Begin(begin_body) => {
-                self.handle_begin_message(start_lsn, begin_body)
-            }
+            LogicalReplicationMessage::Begin(begin_body) => self.handle_begin_message(begin_body),
             LogicalReplicationMessage::Commit(commit_body) => {
-                self.handle_commit_message(start_lsn, commit_body).await
+                self.handle_commit_message(commit_body).await
             }
             LogicalReplicationMessage::Relation(relation_body) => {
-                self.handle_relation_message(start_lsn, relation_body).await
+                self.handle_relation_message(relation_body).await
             }
             LogicalReplicationMessage::Insert(insert_body) => {
                 self.state.current_tx_events += 1;
-                self.handle_insert_message(start_lsn, insert_body).await
+                self.handle_insert_message(insert_body).await
             }
             LogicalReplicationMessage::Update(update_body) => {
                 self.state.current_tx_events += 1;
-                self.handle_update_message(start_lsn, update_body).await
+                self.handle_update_message(update_body).await
             }
             LogicalReplicationMessage::Delete(delete_body) => {
                 self.state.current_tx_events += 1;
-                self.handle_delete_message(start_lsn, delete_body).await
+                self.handle_delete_message(delete_body).await
             }
             LogicalReplicationMessage::Truncate(truncate_body) => {
                 self.state.current_tx_events += 1;
-                self.handle_truncate_message(start_lsn, truncate_body).await
+                self.handle_truncate_message(truncate_body).await
             }
             LogicalReplicationMessage::Origin(_) => {
                 debug!("received unsupported ORIGIN message");
@@ -2119,7 +2117,7 @@ where
                 Ok(HandleMessageResult::default())
             }
             LogicalReplicationMessage::Message(message_body) => {
-                self.handle_message(start_lsn, message_body).await
+                self.handle_message(message_body).await
             }
             _ => Ok(HandleMessageResult::default()),
         }
@@ -2159,7 +2157,6 @@ where
     /// snapshot.
     async fn handle_message(
         &mut self,
-        start_lsn: PgLsn,
         message: &protocol::MessageBody,
     ) -> EtlResult<HandleMessageResult> {
         // If the prefix is unknown, we don't want to process it.
@@ -2228,8 +2225,10 @@ where
             "received ddl schema change message"
         );
 
-        // Build table schema from DDL message with start_lsn as the snapshot_id.
-        let snapshot_id: SnapshotId = start_lsn.into();
+        // The logical message carries its own durable WAL position. The outer
+        // XLogData `wal_start` identifies the replication frame and is not the
+        // identity of this schema change.
+        let snapshot_id = schema_snapshot_id_from_message(message);
         let table_schema = schema_change_message.into_table_schema(snapshot_id);
 
         // Store the new schema version in the store.
@@ -2278,7 +2277,6 @@ where
     /// Handles Postgres BEGIN messages.
     fn handle_begin_message(
         &mut self,
-        start_lsn: PgLsn,
         message: &protocol::BeginBody,
     ) -> EtlResult<HandleMessageResult> {
         let final_lsn = PgLsn::from(message.final_lsn());
@@ -2289,7 +2287,7 @@ where
         self.state.reset_tx_ordinal();
 
         let tx_ordinal = self.state.next_tx_ordinal();
-        let event = parse_event_from_begin_message(start_lsn, final_lsn, tx_ordinal, message);
+        let event = parse_event_from_begin_message(final_lsn, tx_ordinal, message);
 
         Ok(HandleMessageResult::return_event(Event::Begin(event)))
     }
@@ -2297,7 +2295,6 @@ where
     /// Handles Postgres COMMIT messages.
     async fn handle_commit_message(
         &mut self,
-        start_lsn: PgLsn,
         message: &protocol::CommitBody,
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn.take() else {
@@ -2337,7 +2334,7 @@ where
         let should_end_batch = self.process_syncing_tables_after_commit_event(end_lsn).await?;
 
         let tx_ordinal = self.state.next_tx_ordinal();
-        let event = parse_event_from_commit_message(start_lsn, commit_lsn, tx_ordinal, message);
+        let event = parse_event_from_commit_message(commit_lsn, tx_ordinal, message);
 
         let mut result = HandleMessageResult {
             event: Some(Event::Commit(event)),
@@ -2362,7 +2359,6 @@ where
     /// use by DML handlers.
     async fn handle_relation_message(
         &mut self,
-        start_lsn: PgLsn,
         message: &protocol::RelationBody,
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
@@ -2374,7 +2370,6 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
-        let tx_ordinal = self.state.next_tx_ordinal();
 
         // Exactly one worker owns protocol interpretation for a table at a time.
         // Non-owning workers skip `RELATION` handling and rely on the owner to
@@ -2429,12 +2424,7 @@ where
 
         self.shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
 
-        let relation_event = RelationEvent {
-            start_lsn,
-            commit_lsn: remote_final_lsn,
-            tx_ordinal,
-            replicated_table_schema,
-        };
+        let relation_event = RelationEvent { replicated_table_schema };
 
         Ok(HandleMessageResult::return_event(Event::Relation(relation_event)))
     }
@@ -2442,7 +2432,6 @@ where
     /// Handles Postgres INSERT messages.
     async fn handle_insert_message(
         &mut self,
-        start_lsn: PgLsn,
         message: &protocol::InsertBody,
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
@@ -2474,7 +2463,6 @@ where
 
         let event = parse_event_from_insert_message(
             replicated_table_schema,
-            start_lsn,
             remote_final_lsn,
             tx_ordinal,
             message,
@@ -2486,7 +2474,6 @@ where
     /// Handles Postgres UPDATE messages.
     async fn handle_update_message(
         &mut self,
-        start_lsn: PgLsn,
         message: &protocol::UpdateBody,
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
@@ -2518,7 +2505,6 @@ where
 
         let event = parse_event_from_update_message(
             replicated_table_schema,
-            start_lsn,
             remote_final_lsn,
             tx_ordinal,
             message,
@@ -2530,7 +2516,6 @@ where
     /// Handles Postgres DELETE messages.
     async fn handle_delete_message(
         &mut self,
-        start_lsn: PgLsn,
         message: &protocol::DeleteBody,
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
@@ -2562,7 +2547,6 @@ where
 
         let event = parse_event_from_delete_message(
             replicated_table_schema,
-            start_lsn,
             remote_final_lsn,
             tx_ordinal,
             message,
@@ -2574,7 +2558,6 @@ where
     /// Handles Postgres TRUNCATE messages.
     async fn handle_truncate_message(
         &mut self,
-        start_lsn: PgLsn,
         message: &protocol::TruncateBody,
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
@@ -2606,7 +2589,6 @@ where
         }
 
         let event = parse_event_from_truncate_message(
-            start_lsn,
             remote_final_lsn,
             tx_ordinal,
             message,

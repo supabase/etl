@@ -2166,7 +2166,14 @@ async fn pipeline_respects_column_level_publication() {
     // Check that each insert event contains only the published columns (id, name,
     // age) and that the schema used is correct.
     for event in insert_events {
-        if let Event::Insert(InsertEvent { replicated_table_schema, table_row, .. }) = event {
+        if let Event::Insert(InsertEvent {
+            tx_ordinal, replicated_table_schema, table_row, ..
+        }) = event
+        {
+            // BEGIN consumes ordinal 0. The preceding connection-local RELATION
+            // message must not consume an ordinal, so this row remains ordinal 1.
+            assert_eq!(*tx_ordinal, 1);
+
             // Verify exactly 3 columns (id, name, age).
             assert_eq!(table_row.values().len(), 3);
 

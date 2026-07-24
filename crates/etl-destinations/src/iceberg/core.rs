@@ -12,7 +12,7 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    event::{Event, generate_sequence_number},
+    event::{Event, EventSequenceKey},
     schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, Type},
     store::SharedStateStore,
 };
@@ -278,7 +278,7 @@ where
         };
 
         for table_row in &mut table_rows {
-            let sequence_number = generate_sequence_number(0.into(), 0.into());
+            let sequence_number = EventSequenceKey::new(0.into(), 0).to_string();
             table_row.values_mut().push(IcebergOperationType::Insert.into());
             table_row.values_mut().push(Cell::String(sequence_number));
         }

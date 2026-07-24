@@ -1963,6 +1963,169 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn publication_column_filter_change_replays_schema_message_before_filtered_relation() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    let table_name = test_table_name("publication_filter_ddl_message");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("age", "integer not null"), ("email", "text not null")],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = "publication_filter_ddl_message_pub";
+    database
+        .run_sql(&format!(
+            "create publication {} for table {quoted_table_name} (id, name, age, email)",
+            quote_identifier(publication_name)
+        ))
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("publication_filter_ddl_message_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+
+    // Change only the publication column list. There is deliberately no DML
+    // before this change, so pgoutput has no reason to emit the initial
+    // all-column Relation message.
+    database
+        .run_sql(&format!(
+            "alter publication {} set table {quoted_table_name} (id, name, age)",
+            quote_identifier(publication_name)
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {quoted_table_name} (name, age, email) values ('alice', 30, \
+             'alice@example.com')"
+        ))
+        .await
+        .unwrap();
+
+    let expected = vec![
+        StreamMarker::Begin,
+        StreamMarker::DdlMessage(vec![
+            "id".to_owned(),
+            "name".to_owned(),
+            "age".to_owned(),
+            "email".to_owned(),
+        ]),
+        StreamMarker::Commit,
+        StreamMarker::Begin,
+        StreamMarker::Relation(vec!["id".to_owned(), "name".to_owned(), "age".to_owned()]),
+        StreamMarker::Insert,
+        StreamMarker::Commit,
+    ];
+
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+    let first_markers = collect_stream_markers(stream, expected.len()).await;
+    assert_eq!(first_markers, expected);
+
+    // The raw stream above sends no feedback. A fresh decoding session therefore
+    // replays the same schema message and filtered Relation in the same order.
+    let replay_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let replay_stream = replay_client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+    let replay_markers = collect_stream_markers(replay_stream, expected.len()).await;
+    assert_eq!(replay_markers, expected);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_column_filter_change_emits_one_schema_message_per_table() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    let users_table = test_table_name("publication_filter_users");
+    let users_table_id = database
+        .create_table(
+            users_table.clone(),
+            true,
+            &[("email", "text not null"), ("name", "text not null"), ("updated_at", "timestamp")],
+        )
+        .await
+        .unwrap();
+    let orders_table = test_table_name("publication_filter_orders");
+    let orders_table_id = database
+        .create_table(
+            orders_table.clone(),
+            true,
+            &[
+                ("user_id", "bigint not null"),
+                ("total", "numeric not null"),
+                ("status", "text not null"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = "publication_filter_multiple_tables_pub";
+    database
+        .run_sql(&format!(
+            "create publication {} for table {} (id, email, name, updated_at), {} (id, user_id, \
+             total, status)",
+            quote_identifier(publication_name),
+            users_table.as_quoted_identifier(),
+            orders_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("publication_filter_multiple_tables_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "alter publication {} set table {} (id, email, name), {} (id, user_id, total)",
+            quote_identifier(publication_name),
+            users_table.as_quoted_identifier(),
+            orders_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let messages = collect_ddl_messages(stream, 2).await;
+    let table_ids = messages
+        .iter()
+        .map(|message| {
+            assert_eq!(message["command_tag"], "ALTER PUBLICATION");
+            message["oid"].as_u64().expect("schema message should contain a table oid")
+        })
+        .collect::<HashSet<_>>();
+
+    assert_eq!(
+        table_ids,
+        HashSet::from([users_table_id.into_inner() as u64, orders_table_id.into_inner() as u64])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
     init_test_tracing();
     let database = spawn_source_database().await;

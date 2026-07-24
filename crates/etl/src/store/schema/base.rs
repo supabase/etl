@@ -10,9 +10,9 @@ use crate::{
 ///
 /// [`SchemaStore`] implementations are responsible for defining how the schema
 /// information is stored and retrieved. The store supports schema versioning
-/// where each schema version is identified by a snapshot_id (the start_lsn of
-/// the DDL message that created it). Stores may prune obsolete versions after
-/// replication progress has been acknowledged.
+/// where each schema version is identified by a snapshot ID (the LSN carried by
+/// the logical DDL message that created it). Stores may prune obsolete versions
+/// after replication progress has been acknowledged.
 ///
 /// Implementations should ensure thread-safety and handle concurrent access to
 /// the data.

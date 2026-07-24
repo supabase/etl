@@ -241,14 +241,16 @@ Format: 0/16B3748 (segment/offset)
 
 ### LSNs in Events
 
-ETL events include two LSN fields:
+Sequenced ETL events include a commit LSN and transaction-local ordinal:
 
 | Field | Meaning |
 |-------|---------|
-| `start_lsn` | Where this event was recorded in the WAL |
 | `commit_lsn` | LSN of the commit message in the WAL |
+| `tx_ordinal` | Zero-based event order within the transaction |
 
-Multiple events in the same transaction share the same `commit_lsn` but have different `start_lsn` values.
+Multiple events in the same transaction share the same `commit_lsn`; their
+`tx_ordinal` values distinguish their order. Relation events are connection-local
+metadata and do not have an event sequence key.
 
 ## Why Persist State?
 

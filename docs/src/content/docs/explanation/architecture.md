@@ -133,7 +133,10 @@ tables, persist a sequence key derived from `commit_lsn` and `tx_ordinal`. For
 current-state tables, upsert by the destination's chosen row key so replayed
 events converge to the same state.
 
-The `start_lsn` and `commit_lsn` fields on events are useful for **ordering and checkpointing**. For example, BigQuery destinations use these to maintain correct event order in destination tables. See [Event Types](/etl/explanation/events/#understanding-lsn-fields) for details on LSN semantics.
+The `commit_lsn` and `tx_ordinal` fields on sequenced events provide stable
+**ordering and checkpointing**. For example, BigQuery destinations use the pair
+to maintain correct event order in destination tables. See [Event
+Types](/etl/explanation/events/#understanding-event-sequence-keys) for details.
 
 ## Table States
 

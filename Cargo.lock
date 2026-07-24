@@ -4680,7 +4680,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.7"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38#31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38"
+source = "git+https://github.com/iambriccardo/rust-postgres?rev=fcaef5e53e7873fe79838a49af0fa116141f530f#fcaef5e53e7873fe79838a49af0fa116141f530f"
 dependencies = [
  "base64",
  "byteorder",
@@ -4697,7 +4697,7 @@ dependencies = [
 [[package]]
 name = "postgres-replication"
 version = "0.6.7"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38#31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38"
+source = "git+https://github.com/iambriccardo/rust-postgres?rev=fcaef5e53e7873fe79838a49af0fa116141f530f#fcaef5e53e7873fe79838a49af0fa116141f530f"
 dependencies = [
  "byteorder",
  "bytes",
@@ -4712,7 +4712,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.7"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38#31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38"
+source = "git+https://github.com/iambriccardo/rust-postgres?rev=fcaef5e53e7873fe79838a49af0fa116141f530f#fcaef5e53e7873fe79838a49af0fa116141f530f"
 dependencies = [
  "bytes",
  "chrono",
@@ -6722,7 +6722,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.11"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38#31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38"
+source = "git+https://github.com/iambriccardo/rust-postgres?rev=fcaef5e53e7873fe79838a49af0fa116141f530f#fcaef5e53e7873fe79838a49af0fa116141f530f"
 dependencies = [
  "async-trait",
  "byteorder",

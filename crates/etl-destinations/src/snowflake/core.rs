@@ -881,9 +881,6 @@ mod tests {
         let status = destination
             .writer
             .process_admitted_events(vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100_u64),
-                commit_lsn: PgLsn::from(100_u64),
-                tx_ordinal: 0,
                 replicated_table_schema: stale_schema,
             })])
             .await

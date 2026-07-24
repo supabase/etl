@@ -1832,9 +1832,7 @@ where
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();
                         let mutation = TrackedTableMutation::new(
-                            insert.start_lsn,
-                            insert.commit_lsn,
-                            insert.tx_ordinal,
+                            insert.event_sequence_key(),
                             TableMutation::Insert(insert.table_row),
                         );
                         push_table_mutation_segment(
@@ -1848,6 +1846,7 @@ where
                             &update.replicated_table_schema,
                             "update",
                         )?;
+                        let sequence_key = update.event_sequence_key();
                         let table_id = update.replicated_table_schema.id();
                         let replicated_table_schema = update.replicated_table_schema;
                         let table_row = update.updated_table_row;
@@ -1855,9 +1854,7 @@ where
                         let segments = table_id_to_mutations.entry(table_id).or_default();
                         if let Some(old_row) = old_table_row {
                             let mutation = TrackedTableMutation::new(
-                                update.start_lsn,
-                                update.commit_lsn,
-                                update.tx_ordinal,
+                                sequence_key,
                                 TableMutation::Update { delete_row: old_row, new_row: table_row },
                             );
                             push_table_mutation_segment(
@@ -1873,9 +1870,7 @@ where
                                          identity from new row"
                                     );
                                     let mutation = TrackedTableMutation::new(
-                                        update.start_lsn,
-                                        update.commit_lsn,
-                                        update.tx_ordinal,
+                                        sequence_key,
                                         TableMutation::Replace(table_row),
                                     );
                                     push_table_mutation_segment(
@@ -1894,9 +1889,7 @@ where
                                          partial new row"
                                     );
                                     let mutation = TrackedTableMutation::new(
-                                        update.start_lsn,
-                                        update.commit_lsn,
-                                        update.tx_ordinal,
+                                        sequence_key,
                                         TableMutation::Update {
                                             delete_row: OldTableRow::Key(key_row),
                                             new_row: UpdatedTableRow::Partial(partial_row),
@@ -1916,6 +1909,7 @@ where
                             &delete.replicated_table_schema,
                             "delete",
                         )?;
+                        let sequence_key = delete.event_sequence_key();
                         let Some(old_row) = delete.old_table_row else {
                             return Err(etl_error!(
                                 ErrorKind::SourceReplicaIdentityError,
@@ -1928,12 +1922,8 @@ where
                             ));
                         };
                         let table_id = delete.replicated_table_schema.id();
-                        let mutation = TrackedTableMutation::new(
-                            delete.start_lsn,
-                            delete.commit_lsn,
-                            delete.tx_ordinal,
-                            TableMutation::Delete(old_row),
-                        );
+                        let mutation =
+                            TrackedTableMutation::new(sequence_key, TableMutation::Delete(old_row));
                         push_table_mutation_segment(
                             table_id_to_mutations.entry(table_id).or_default(),
                             delete.replicated_table_schema,
@@ -2050,18 +2040,14 @@ where
             > = HashMap::new();
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate)) = event_iter.next() {
+                    let sequence_key = truncate.event_sequence_key();
                     for replicated_table_schema in truncate.truncated_tables {
                         let table_id = replicated_table_schema.id();
                         let entry = truncate_table_ids
                             .entry(table_id)
                             .or_insert_with(|| (replicated_table_schema.clone(), Vec::new()));
                         entry.0 = replicated_table_schema;
-                        entry.1.push(TrackedTruncateEvent::new(
-                            truncate.start_lsn,
-                            truncate.commit_lsn,
-                            truncate.tx_ordinal,
-                            truncate.options,
-                        ));
+                        entry.1.push(TrackedTruncateEvent::new(sequence_key, truncate.options));
                     }
                 }
             }

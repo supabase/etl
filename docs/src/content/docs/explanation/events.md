@@ -60,7 +60,6 @@ A new row was added to a table.
 
 ```rust
 pub struct InsertEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub replicated_table_schema: ReplicatedTableSchema,
@@ -74,7 +73,6 @@ An existing row was modified.
 
 ```rust
 pub struct UpdateEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub replicated_table_schema: ReplicatedTableSchema,
@@ -170,7 +168,6 @@ A row was removed from a table.
 
 ```rust
 pub struct DeleteEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub replicated_table_schema: ReplicatedTableSchema,
@@ -205,7 +202,6 @@ One or more tables were truncated (all rows deleted).
 
 ```rust
 pub struct TruncateEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub options: i8,
@@ -225,7 +221,6 @@ Marks the start of a transaction.
 
 ```rust
 pub struct BeginEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub timestamp: i64,
@@ -239,7 +234,6 @@ Marks successful transaction completion.
 
 ```rust
 pub struct CommitEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub flags: i8,
@@ -257,12 +251,14 @@ again after supported schema changes.
 
 ```rust
 pub struct RelationEvent {
-    pub start_lsn: PgLsn,
-    pub commit_lsn: PgLsn,
-    pub tx_ordinal: u64,
     pub replicated_table_schema: ReplicatedTableSchema,
 }
 ```
+
+Relation messages are connection-local protocol metadata. PostgreSQL can emit
+the same relation again after a reconnect even when the source schema did not
+change. A `RelationEvent` therefore has no durable event sequence key and does
+not consume a transaction ordinal.
 
 PostgreSQL pgoutput builds relation messages by walking the table descriptor in
 `pg_attribute.attnum` order and skipping columns that are not published. It
@@ -317,21 +313,21 @@ async fn write_events(
 }
 ```
 
-## Understanding LSN Fields
+## Understanding Event Sequence Keys
 
-Every event includes **LSN (Log Sequence Number)** fields plus a transaction-local
-ordinal that are critical for understanding event ordering, checkpointing, and
-idempotent destination writes.
+Transaction and data events include a commit **LSN (Log Sequence Number)** plus
+a transaction-local ordinal. Together, these fields provide stable ordering for
+idempotent destination writes. Relation events are not sequenced because they
+are connection-local protocol metadata.
 
 ### What is an LSN?
 
 An LSN is a pointer to a position in Postgres's **Write-Ahead Log (WAL)**. It's a monotonically increasing 64-bit integer that uniquely identifies a location in the transaction log. Format: `0/16B3748` (segment/offset).
 
-### start_lsn, commit_lsn, and tx_ordinal
+### commit_lsn and tx_ordinal
 
 | Field | Meaning | Use Case |
 |-------|---------|----------|
-| `start_lsn` | Position where this event was recorded in the WAL | Debugging and WAL-position context |
 | `commit_lsn` | Position where the transaction will commit | Transaction grouping, recovery checkpoints |
 | `tx_ordinal` | Zero-based order of the event within its transaction | Ordering and idempotency within a transaction |
 
@@ -345,8 +341,8 @@ Consider a transaction that inserts two rows:
 
 ```sql
 BEGIN;                    -- Transaction starts
-INSERT INTO users ...;    -- start_lsn: 0/16B3700, commit_lsn: 0/16B3800
-INSERT INTO users ...;    -- start_lsn: 0/16B3750, commit_lsn: 0/16B3800
+INSERT INTO users ...;    -- commit_lsn: 0/16B3800, tx_ordinal: 1
+INSERT INTO users ...;    -- commit_lsn: 0/16B3800, tx_ordinal: 2
 COMMIT;                   -- Transaction commits at 0/16B3800
 ```
 
