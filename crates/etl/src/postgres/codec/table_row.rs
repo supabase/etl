@@ -43,12 +43,22 @@ fn find_next_special(haystack: &[u8]) -> Option<usize> {
 /// Returns an error if the row data is not valid UTF-8, the column count
 /// doesn't match the schema, the row is not properly terminated, or a cell
 /// value cannot be parsed according to its column type.
+#[inline]
 pub(crate) fn parse_table_row_from_postgres_copy_bytes(
     row: &[u8],
     column_schemas: &[ColumnSchema],
 ) -> EtlResult<TableRow> {
+    let row_str = simdutf8::basic::from_utf8(row)?;
+    parse_table_row_from_postgres_copy_str(row_str, column_schemas)
+}
+
+/// Parses a Postgres COPY row whose UTF-8 validity has already been
+/// established.
+fn parse_table_row_from_postgres_copy_str(
+    row_str: &str,
+    column_schemas: &[ColumnSchema],
+) -> EtlResult<TableRow> {
     let expected_column_count = column_schemas.len();
-    let row_str = str::from_utf8(row)?;
     let bytes = row_str.as_bytes();
 
     // Parsed cells in schema order.
