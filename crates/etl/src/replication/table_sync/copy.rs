@@ -21,19 +21,19 @@ use tracing::{debug, info, warn};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
 use crate::{
-    data::TableRow,
     destination::{Destination, DestinationWriteStatus, WriteTableRowsResult},
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::{
-        ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_TABLE_COPY_DURATION_SECONDS,
+        ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
+        ETL_EVENTS_RECEIVED_TOTAL, ETL_TABLE_COPY_DURATION_SECONDS,
         ETL_TABLE_COPY_EFFECTIVE_PARTITIONS, ETL_TABLE_COPY_END_TO_END_LAG_BYTES,
         ETL_TABLE_COPY_PARTITION_BLOCKS, ETL_TABLE_COPY_PARTITION_DURATION_SECONDS,
         ETL_TABLE_COPY_PARTITION_ROWS, ETL_TABLE_COPY_PARTITIONS_TOTAL,
         ETL_TABLE_COPY_PLANNED_PARTITIONS, ETL_TABLE_COPY_ROWS_TOTAL, WORKER_TYPE_LABEL,
     },
     postgres::{
-        OutOfBandSourcePool, TableCopyStream,
+        OutOfBandSourcePool, TableCopyRow, TableCopyStream,
         client::{
             ChildPgReplicationClient, CtidPartition, PgChildReplicationTransaction,
             PgReplicationTransaction, PostgresConnectionUpdate,
@@ -47,6 +47,7 @@ use crate::{
         },
     },
     schema::{ReplicatedTableSchema, TableId},
+    source_payload_metadata::TableCopyPayloadMetadata,
 };
 
 /// Target number of CTID ranges per worker when copy is parallel.
@@ -703,7 +704,7 @@ async fn copy_table_rows_from_stream<D, S>(
 ) -> EtlResult<ShutdownResult<CopyProgress, CopyProgress>>
 where
     D: Destination + Clone + Send + 'static,
-    S: Stream<Item = EtlResult<Vec<TableRow>>>,
+    S: Stream<Item = EtlResult<Vec<TableCopyRow>>>,
 {
     let mut progress = CopyProgress::default();
 
@@ -747,8 +748,26 @@ where
                     return Ok(ShutdownResult::Ok(progress));
                 };
 
-                let table_rows = table_rows?;
-                let batch_size = table_rows.len() as u64;
+                let table_copy_rows = table_rows?;
+                let row_count = table_copy_rows.len() as u64;
+                let mut table_copy_batch_metadata = TableCopyPayloadMetadata::default();
+                let table_rows = table_copy_rows
+                    .into_iter()
+                    .map(|table_copy_row| {
+                        let (row, metadata) = table_copy_row.into_parts();
+                        metadata.record_row_size();
+                        table_copy_batch_metadata.merge(metadata);
+                        row
+                    })
+                    .collect();
+
+                table_copy_batch_metadata.record_received();
+                counter!(
+                    ETL_EVENTS_RECEIVED_TOTAL,
+                    WORKER_TYPE_LABEL => "table_sync",
+                    ACTION_LABEL => "table_copy",
+                )
+                .increment(row_count);
 
                 let before_sending = Instant::now();
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
@@ -764,7 +783,14 @@ where
                 };
                 let write_status = completed_flush_result.into_result()?;
 
-                progress.record_batch(batch_size, write_status);
+                table_copy_batch_metadata.record_processed(D::name());
+                counter!(
+                    ETL_EVENTS_PROCESSED_TOTAL,
+                    WORKER_TYPE_LABEL => "table_sync",
+                    ACTION_LABEL => "table_copy",
+                )
+                .increment(row_count);
+                progress.record_batch(row_count, write_status);
 
                 let send_duration_seconds = before_sending.elapsed().as_secs_f64();
                 histogram!(

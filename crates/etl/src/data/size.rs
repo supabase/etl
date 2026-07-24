@@ -1,6 +1,9 @@
-/// Reports an approximate in-memory size in bytes.
+/// Reports an approximate decoded in-memory size in bytes.
+///
+/// This estimate is used for batching and backpressure. It does not represent
+/// the PostgreSQL source payload and must not be used for usage accounting.
 pub trait SizeHint {
-    /// Returns the approximate size in bytes for this value.
+    /// Returns the approximate decoded in-memory size for this value.
     fn size_hint(&self) -> usize;
 }
 

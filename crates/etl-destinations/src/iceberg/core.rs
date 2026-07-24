@@ -19,8 +19,6 @@ use etl::{
 use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{debug, warn};
 
-#[cfg(feature = "egress")]
-use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use crate::{
     iceberg::{IcebergClient, error::iceberg_error_to_etl_error},
     table_name::try_stringify_table_name,
@@ -286,12 +284,7 @@ where
         }
 
         if !table_rows.is_empty() {
-            #[allow(unused_variables)]
-            let bytes_sent =
-                self.client.insert_rows(namespace, iceberg_table_name, table_rows).await?;
-
-            #[cfg(feature = "egress")]
-            log_processed_bytes(Self::name(), PROCESSING_TYPE_TABLE_COPY, bytes_sent, 0);
+            self.client.insert_rows(namespace, iceberg_table_name, table_rows).await?;
         }
 
         Ok(())
@@ -416,16 +409,10 @@ where
                     });
                 }
 
-                #[cfg_attr(not(feature = "egress"), allow(unused_mut, unused_variables))]
-                let mut bytes_sent = 0;
-                #[cfg_attr(not(feature = "egress"), allow(unused_assignments))]
                 while let Some(insert_result) = join_set.join_next().await {
-                    bytes_sent += insert_result
+                    insert_result
                         .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
                 }
-
-                #[cfg(feature = "egress")]
-                log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
             }
 
             // Collect and deduplicate schemas from all truncate events.

@@ -178,13 +178,15 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_BYTES_PROCESSED_TOTAL,
             Unit::Bytes,
-            "Total bytes processed by the pipeline, labeled by event_type."
+            "Total PostgreSQL COPY row-body or pgoutput tuple-value bytes acknowledged by \
+             successful destination writes, labeled by event_type."
         );
 
         describe_counter!(
             ETL_BYTES_RECEIVED_TOTAL,
             Unit::Bytes,
-            "Total bytes received from the source, labeled by event_type."
+            "Total PostgreSQL COPY row-body or pgoutput tuple-value bytes received from the \
+             source, labeled by event_type."
         );
 
         describe_counter!(
@@ -244,7 +246,8 @@ pub(crate) fn register_metrics() {
         describe_histogram!(
             ETL_ROW_SIZE_BYTES,
             Unit::Bytes,
-            "Distribution of individual row sizes in bytes, labeled by event_type"
+            "Distribution of individual PostgreSQL COPY row-body or pgoutput row-event \
+             tuple-value payload sizes in bytes, labeled by event_type."
         );
 
         describe_counter!(
