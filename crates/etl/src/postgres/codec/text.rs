@@ -155,9 +155,10 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
 /// Strips the explicit dimensions prefix from an array literal, if present.
 ///
 /// Postgres prefixes array output with dimensions whenever a lower bound is
-/// not 1, e.g. `[0:1]={7,8}`. Bounds carry no value information for a
-/// one-dimensional array, so the prefix is validated and skipped. More than
-/// one dimension group means a multidimensional value, which [`ArrayCell`]
+/// not 1, e.g. `[0:1]={7,8}`. [`ArrayCell`] stores one-dimensional arrays
+/// as ordered elements without subscript bounds, so the prefix syntax is
+/// validated and its bounds are intentionally discarded. More than one
+/// dimension group means a multidimensional value, which [`ArrayCell`]
 /// cannot represent and the codec rejects.
 fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
     // Skips an optionally negative ASCII integer, returning the index just

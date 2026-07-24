@@ -14,6 +14,10 @@ use crate::{
 ///
 /// Covers every dedicated codec branch, scalar and array, plus the generic
 /// array fallback (`varchar[]`) and the scalar text fallback.
+///
+/// Hand-written corpus seeds use in-range selector bytes as direct indices into
+/// this table. Preserve existing order and append new types so those seeds keep
+/// their meaning; arbitrary selectors continue to wrap modulo the table length.
 const TEXT_CELL_FUZZ_TYPES: &[Type] = &[
     Type::BOOL,
     Type::BOOL_ARRAY,
@@ -90,7 +94,7 @@ pub fn parse_copy_row(data: &[u8]) -> EtlResult<TableRow> {
                 format!("column_{index}"),
                 text_cell_fuzz_type(*selector).clone(),
                 -1,
-                i32::try_from(index).expect("column count is at most 8"),
+                i32::try_from(index + 1).expect("column count is at most 8"),
                 true,
             )
         })
