@@ -723,7 +723,7 @@ where
 
         let writer = self.writer.clone();
         self.tasks
-            .spawn(async move {
+            .spawn_with(move || async move {
                 let result = async {
                     let status = writer.process_admitted_events(events).await?;
                     if durability == WriteEventsDurability::RequireDurable

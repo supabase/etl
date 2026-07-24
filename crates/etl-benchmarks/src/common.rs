@@ -731,7 +731,7 @@ impl Destination for BenchDestination {
             }
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => {
-                Box::pin(destination.write_events(events, durability, async_result)).await
+                destination.write_events(events, durability, async_result).await
             }
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => {

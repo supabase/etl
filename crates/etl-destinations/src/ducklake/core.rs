@@ -352,7 +352,7 @@ where
 
         let destination = self.clone();
         self.tasks
-            .spawn(async move {
+            .spawn_with(move || async move {
                 let result = destination.write_events(events).await;
                 async_result.send(result.map(|_| DestinationWriteStatus::Durable));
             })
@@ -1228,7 +1228,7 @@ where
         let shutdown_signal_manager = Arc::clone(&manager);
         destination
             .tasks
-            .spawn(async move {
+            .spawn_with(move || async move {
                 interrupt_duckdb_connections_on_process_shutdown(shutdown_signal_manager).await;
             })
             .await;
@@ -1250,7 +1250,7 @@ where
                 let watcher_destination = destination.clone();
                 destination
                     .tasks
-                    .spawn(async move {
+                    .spawn_with(move || async move {
                         if let Err(error) =
                             run_kubernetes_external_maintenance_watcher(watcher_destination).await
                         {
@@ -1270,7 +1270,7 @@ where
                 let pipeline_id = external_maintenance.pipeline_id as i64;
                 destination
                     .tasks
-                    .spawn(async move {
+                    .spawn_with(move || async move {
                         if let Err(error) = run_postgres_external_maintenance_watcher(
                             watcher_destination,
                             pipeline_id,
