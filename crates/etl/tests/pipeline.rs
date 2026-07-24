@@ -7,10 +7,11 @@ use etl::{
         WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
+    etl_error,
     event::{Event, EventType, InsertEvent},
     pipeline::PipelineId,
     schema::{ColumnSchema, ReplicatedTableSchema, TableId},
-    store::{SchemaStore, StateStore, TableState, TableStateType},
+    store::{SchemaStore, StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
         database::{
             replication_slot_state, spawn_source_database, test_table_name, wait_for_new_walsender,
@@ -47,7 +48,7 @@ use tokio::{
     sync::{Mutex, Notify},
     time::sleep,
 };
-use tokio_postgres::types::Type;
+use tokio_postgres::types::{PgLsn, Type};
 
 /// Creates a test column schema with sensible defaults.
 fn test_column(
@@ -646,11 +647,13 @@ async fn reset_during_active_copy_is_overwritten_by_active_worker() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
+async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
     init_test_tracing();
 
-    let database = spawn_source_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=3).await;
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
@@ -677,7 +680,37 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
 
     table_ready_notify.notified().await;
 
+    // Add two tables while the original apply slot is still active. Publication
+    // membership is reconciled on restart, when one table will be initialized as
+    // `Init` and the other will already have a persisted `Errored` state.
+    let init_table_name = test_table_name("init_before_slot_loss");
+    let init_table_id = database
+        .create_table(init_table_name.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+    database.insert_values(init_table_name.clone(), &["value"], &[&1]).await.unwrap();
+
+    let errored_table_name = test_table_name("errored_before_slot_loss");
+    let errored_table_id = database
+        .create_table(errored_table_name.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+    database.insert_values(errored_table_name.clone(), &["value"], &[&1]).await.unwrap();
+
+    database
+        .run_sql(&format!(
+            "alter publication {} add table {}, {}",
+            quote_identifier(&database_schema.publication_name()),
+            init_table_name.as_quoted_identifier(),
+            errored_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_rows = destination.get_table_rows().await;
+    assert_eq!(table_rows[&database_schema.users_schema().id].len(), 3);
 
     // Verify that the replication slot for the apply worker exists and is inactive.
     database.wait_for_slot_inactive(&apply_slot_name).await;
@@ -685,7 +718,27 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     let slot_state = database.get_replication_slot_state(&apply_slot_name).await.unwrap();
     assert_eq!(slot_state, Some(ReplicationSlotState::Inactive));
 
-    // Delete the apply worker slot to simulate slot loss.
+    store
+        .update_table_state(
+            errored_table_id,
+            TableState::Errored {
+                reason: "Injected test error".to_owned(),
+                solution: None,
+                retry_policy: TableRetryPolicy::NoRetry,
+                source_err: etl_error!(ErrorKind::Unknown, "Injected test error"),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Simulate durable progress from an unrelated WAL lineage. The replacement
+    // slot must not use this position even when it is ahead of the new slot's
+    // consistent point.
+    let stale_durable_progress = PgLsn::from(u64::MAX);
+    store.upsert_replication_progress(WorkerType::Apply, stale_durable_progress).await.unwrap();
+
+    // Delete the apply worker slot after pausing the pipeline. No source changes
+    // occur between the pause and slot recreation.
     database
         .run_sql(&format!("select pg_drop_replication_slot({})", quote_literal(&apply_slot_name)))
         .await
@@ -693,7 +746,8 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     let slot_state = database.get_replication_slot_state(&apply_slot_name).await.unwrap();
     assert_eq!(slot_state, None);
 
-    // Restart the pipeline, it should fail because tables are not in Init state.
+    // The Init table should be copied, the Ready users table should continue
+    // from the new slot, and the Errored table should remain stopped.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -702,17 +756,57 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
         destination.clone(),
     );
 
+    let init_table_ready_notify =
+        store.notify_on_table_state_type(init_table_id, TableStateType::Ready).await;
+
     pipeline.start().await.unwrap();
 
-    // The error surfaces when we wait for the pipeline to complete.
-    let wait_result = pipeline.shutdown_and_wait().await;
-    assert!(wait_result.is_err());
-    let err = wait_result.unwrap_err();
-    assert!(err.kinds().contains(&ErrorKind::InvalidState));
+    init_table_ready_notify.notified().await;
 
-    // Verify that the slot was cleaned up (deleted) after the validation failure.
-    let slot_state = database.get_replication_slot_state(&apply_slot_name).await.unwrap();
-    assert_eq!(slot_state, None);
+    let users_insert_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Insert,
+            database_schema.users_schema().id,
+            1,
+        )])
+        .await;
+
+    // Put both changes in one transaction so observing the users event also
+    // proves the apply worker processed the errored-table change.
+    let mut transaction = database.begin_transaction().await;
+    transaction.insert_values(errored_table_name, &["value"], &[&2]).await.unwrap();
+    insert_users_data(&mut transaction, &database_schema.users_schema().name, 4..=4).await;
+    transaction.commit_transaction().await;
+
+    users_insert_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // The Ready table was not recopied, the Init table was copied, and the
+    // Errored table remained stopped.
+    let table_rows = destination.get_table_rows().await;
+    assert_eq!(table_rows[&database_schema.users_schema().id].len(), 3);
+    assert_eq!(table_rows[&init_table_id].len(), 1);
+    assert!(!table_rows.contains_key(&errored_table_id));
+
+    let errored_table_state =
+        store.get_table_state(errored_table_id).await.unwrap().expect("table state should exist");
+    assert!(matches!(
+        errored_table_state,
+        TableState::Errored { retry_policy: TableRetryPolicy::NoRetry, .. }
+    ));
+
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let users_inserts =
+        grouped_events.get(&(EventType::Insert, database_schema.users_schema().id)).unwrap();
+    let expected_users_inserts =
+        build_expected_users_inserts(4, &database_schema.users_schema(), vec![("user_4", 4)]);
+    assert_events_equal(users_inserts, &expected_users_inserts);
+    assert!(!grouped_events.contains_key(&(EventType::Insert, errored_table_id)));
+
+    let durable_progress = store.get_replication_progress(WorkerType::Apply).await.unwrap();
+    assert_ne!(durable_progress, Some(stale_durable_progress));
 }
 
 // Serialized via nextest test-group "shared-pg" (shares the source PG cluster).

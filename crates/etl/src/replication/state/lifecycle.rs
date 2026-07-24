@@ -228,22 +228,30 @@ impl TableStateType {
         }
     }
 
-    /// Returns `true` if a table with this state is done processing, `false`
-    /// otherwise.
+    /// Returns whether a table with this state is still synchronizing.
     ///
-    /// A table is done processing, when its events are being processed by the
-    /// apply worker instead of a table sync worker or when it has errored.
-    pub fn is_done(&self) -> bool {
-        match self {
-            Self::Init => false,
-            Self::DataSync => false,
-            Self::FinishedCopy => false,
-            Self::SyncWait => false,
-            Self::Catchup => false,
-            Self::SyncDone => false,
-            Self::Ready => true,
-            Self::Errored => true,
-        }
+    /// Synchronization includes the handoff to the apply worker, so
+    /// [`TableStateType::SyncDone`] remains a syncing state until it
+    /// transitions to [`TableStateType::Ready`]. Errored tables are not
+    /// actively syncing.
+    pub fn is_syncing(&self) -> bool {
+        !matches!(self, Self::Ready | Self::Errored)
+    }
+
+    /// Returns whether a table has completed its initial table sync.
+    ///
+    /// Tables in these states keep their existing destination data when the
+    /// pipeline restarts. Earlier non-error syncing states restart the table
+    /// copy from a fresh snapshot. Errored tables are neither completed nor
+    /// automatically recopied.
+    ///
+    /// [`TableStateType::FinishedCopy`] is deliberately excluded because the
+    /// bulk copy completed without a durable catchup handoff, so restart
+    /// repeats the copy. [`TableStateType::SyncDone`] is included because
+    /// catchup completed durably even though the final transition to
+    /// [`TableStateType::Ready`] remains.
+    pub fn has_completed_table_sync(&self) -> bool {
+        matches!(self, Self::SyncDone | Self::Ready)
     }
 
     /// Returns `true` if a table with this state is in error, `false`
@@ -408,6 +416,37 @@ mod tests {
             TableStateType::Ready.to_storage_type().unwrap();
 
         assert_eq!(state_type, table_state::StoredTableStateType::Ready);
+    }
+
+    #[test]
+    fn state_type_classifies_sync_lifecycle() {
+        let syncing_states = [
+            TableStateType::Init,
+            TableStateType::DataSync,
+            TableStateType::FinishedCopy,
+            TableStateType::SyncWait,
+            TableStateType::Catchup,
+            TableStateType::SyncDone,
+        ];
+        assert!(syncing_states.iter().all(TableStateType::is_syncing));
+
+        let non_syncing_states = [TableStateType::Ready, TableStateType::Errored];
+        assert!(non_syncing_states.iter().all(|state| !state.is_syncing()));
+
+        let states_without_completed_sync = [
+            TableStateType::Init,
+            TableStateType::DataSync,
+            TableStateType::FinishedCopy,
+            TableStateType::SyncWait,
+            TableStateType::Catchup,
+            TableStateType::Errored,
+        ];
+        assert!(
+            states_without_completed_sync.iter().all(|state| !state.has_completed_table_sync())
+        );
+
+        let completed_states = [TableStateType::SyncDone, TableStateType::Ready];
+        assert!(completed_states.iter().all(TableStateType::has_completed_table_sync));
     }
 
     #[test]
