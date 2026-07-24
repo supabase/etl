@@ -20,7 +20,7 @@ clickhouse = ["any-destination", "etl-destinations/clickhouse"]
 ducklake = ["any-destination", "etl-destinations/ducklake", "etl-maintenance/ducklake"]
 iceberg = ["any-destination", "etl-destinations/iceberg"]
 snowflake = ["any-destination", "etl-destinations/snowflake"]
-egress = ["etl/egress", "etl-destinations/egress"]
+egress = ["etl/egress"]
 
 [dependencies]
 

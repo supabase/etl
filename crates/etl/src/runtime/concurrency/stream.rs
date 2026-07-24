@@ -137,7 +137,7 @@ pub(crate) struct TryBatchBackpressureStream<B, E, S: Stream<Item = Result<B, E>
         #[pin]
         deadline: Option<tokio::time::Sleep>,
         items: Vec<B>,
-        current_batch_bytes: usize,
+        current_batch_size_hint_bytes: usize,
         cached_batch_budget: CachedBatchBudget,
         batch_config: BatchConfig,
         reset_timer: bool,
@@ -164,7 +164,7 @@ where
             stream_id: stream_id.into(),
             deadline: None,
             items: Vec::new(),
-            current_batch_bytes: 0,
+            current_batch_size_hint_bytes: 0,
             cached_batch_budget,
             batch_config,
             reset_timer: true,
@@ -256,11 +256,11 @@ where
                 info!(
                     stream_id = %this.stream_id,
                     buffered_items = this.items.len(),
-                    buffered_bytes = *this.current_batch_bytes,
+                    buffered_size_hint_bytes = *this.current_batch_size_hint_bytes,
                     "backpressure active, flushing buffered batch"
                 );
                 *this.reset_timer = true;
-                *this.current_batch_bytes = 0;
+                *this.current_batch_size_hint_bytes = 0;
 
                 // If we are paused for memory, we don't want to reallocate a batch of the same
                 // size as before, to avoid increasing memory usage even more.
@@ -289,8 +289,8 @@ where
                     }
 
                     // Add the new item to the batch and track its size.
-                    *this.current_batch_bytes =
-                        this.current_batch_bytes.saturating_add(item.size_hint());
+                    *this.current_batch_size_hint_bytes =
+                        this.current_batch_size_hint_bytes.saturating_add(item.size_hint());
                     this.items.push(item);
 
                     // Check if the memory backpressure was activated in the meanwhile, in such case
@@ -300,7 +300,7 @@ where
                     {
                         *this.paused_for_memory = true;
                         *this.reset_timer = true;
-                        *this.current_batch_bytes = 0;
+                        *this.current_batch_size_hint_bytes = 0;
 
                         // If we are paused for memory, we don't want to reallocate a batch of the
                         // same size as before, to avoid increasing memory
@@ -309,16 +309,16 @@ where
                     }
 
                     // If byte budget is reached we want to return the accumulated data.
-                    if *this.current_batch_bytes >= max_batch_size_bytes {
+                    if *this.current_batch_size_hint_bytes >= max_batch_size_bytes {
                         *this.reset_timer = true;
-                        *this.current_batch_bytes = 0;
+                        *this.current_batch_size_hint_bytes = 0;
 
                         return Poll::Ready(Some(Ok(take_and_replace_items(this.items))));
                     }
                 }
                 Poll::Ready(Some(Err(err))) => {
                     *this.inner_stream_ended = true;
-                    *this.current_batch_bytes = 0;
+                    *this.current_batch_size_hint_bytes = 0;
 
                     return Poll::Ready(Some(Err(err)));
                 }
@@ -327,7 +327,7 @@ where
                         None
                     } else {
                         *this.reset_timer = true;
-                        *this.current_batch_bytes = 0;
+                        *this.current_batch_size_hint_bytes = 0;
 
                         // The inner stream is ending, so no future batch can
                         // reuse retained capacity. `mem::take` replaces the
@@ -353,7 +353,7 @@ where
         {
             ready!(deadline.poll(cx));
             *this.reset_timer = true;
-            *this.current_batch_bytes = 0;
+            *this.current_batch_size_hint_bytes = 0;
 
             return Poll::Ready(Some(Ok(take_and_replace_items(this.items))));
         }

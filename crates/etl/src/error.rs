@@ -120,6 +120,8 @@ pub enum ErrorKind {
     DestinationNamespaceMissing,
     /// The destination table does not exist.
     DestinationTableMissing,
+    /// The destination schema is newer than a replayed schema snapshot.
+    DestinationSchemaRewind,
 
     // Data & Transformation Errors
     /// A value could not be converted between source and destination formats.
@@ -597,6 +599,20 @@ impl From<serde_json::Error> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<std::str::Utf8Error> for EtlError {
     fn from(err: std::str::Utf8Error) -> EtlError {
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::ConversionError,
+            Cow::Borrowed("UTF-8 conversion failed"),
+            None,
+            Some(source),
+        )
+    }
+}
+
+/// Converts [`simdutf8::basic::Utf8Error`] to [`EtlError`] with
+/// [`ErrorKind::ConversionError`].
+impl From<simdutf8::basic::Utf8Error> for EtlError {
+    fn from(err: simdutf8::basic::Utf8Error) -> EtlError {
         let source = Arc::new(err);
         EtlError::from_components(
             ErrorKind::ConversionError,

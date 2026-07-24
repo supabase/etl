@@ -29,8 +29,6 @@ use prost::Message;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-#[cfg(feature = "egress")]
-use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use crate::{
     bigquery::{
         BigQueryDatasetId, BigQueryTableId,
@@ -647,21 +645,8 @@ where
             }
         }
 
-        #[allow(unused_variables)]
-        let (bytes_sent, bytes_received) = if append_requests.is_empty() {
-            (0, 0)
-        } else {
-            self.client.append(append_requests).await?
-        };
-
-        if bytes_sent > 0 {
-            #[cfg(feature = "egress")]
-            log_processed_bytes(
-                Self::name(),
-                PROCESSING_TYPE_TABLE_COPY,
-                bytes_sent as u64,
-                bytes_received as u64,
-            );
+        if !append_requests.is_empty() {
+            self.client.append(append_requests).await?;
         }
 
         Ok(())
@@ -1077,21 +1062,8 @@ where
                     append_requests.push(append_request);
                 }
 
-                #[allow(unused_variables)]
-                let (bytes_sent, bytes_received) = if append_requests.is_empty() {
-                    (0, 0)
-                } else {
-                    self.client.append(append_requests).await?
-                };
-
-                if bytes_sent > 0 {
-                    #[cfg(feature = "egress")]
-                    log_processed_bytes(
-                        Self::name(),
-                        PROCESSING_TYPE_STREAMING,
-                        bytes_sent as u64,
-                        bytes_received as u64,
-                    );
+                if !append_requests.is_empty() {
+                    self.client.append(append_requests).await?;
                 }
             }
 

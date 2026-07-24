@@ -14,6 +14,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     runtime::concurrency::{ShutdownResult, ShutdownRx},
+    source_payload_metadata::StreamingPayloadMetadata,
 };
 
 /// Durability status reported by streaming and table-copy destination writes.
@@ -113,15 +114,6 @@ pub(crate) type PendingWriteEventsResult<T = DestinationWriteStatus> =
 pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 
-/// Dispatch-time metrics carried through an asynchronous completion result.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct DispatchMetrics {
-    /// Number of items in the dispatched batch.
-    pub items_count: usize,
-    /// Instant at which the batch was handed off to the destination.
-    pub dispatched_at: Instant,
-}
-
 /// Metadata carried by apply-loop event write completions.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ApplyLoopAsyncResultMetadata {
@@ -135,8 +127,12 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     pub commit_end_lsn: Option<PgLsn>,
     /// Durability requirement supplied with the dispatched write.
     pub durability: WriteEventsDurability,
-    /// Dispatch-time metrics for the batch.
-    pub metrics: DispatchMetrics,
+    /// Number of events in the dispatched batch.
+    pub event_count: usize,
+    /// PostgreSQL tuple bytes accumulated for the dispatched event batch.
+    pub streaming_payload_metadata: StreamingPayloadMetadata,
+    /// Instant at which the event batch was handed off to the destination.
+    pub dispatched_at: Instant,
 }
 
 /// Sender half of a typed asynchronous completion result.
@@ -252,7 +248,9 @@ mod tests {
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: Some(PgLsn::from(42)),
             durability: WriteEventsDurability::MayDefer,
-            metrics: DispatchMetrics { items_count: 1, dispatched_at: Instant::now() },
+            event_count: 1,
+            streaming_payload_metadata: StreamingPayloadMetadata::insert(7),
+            dispatched_at: Instant::now(),
         };
         let (result_tx, pending_result) = WriteEventsResult::new(metadata);
 

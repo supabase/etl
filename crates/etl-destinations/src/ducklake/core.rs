@@ -905,7 +905,7 @@ fn plan_ducklake_schema_ddl(
 
 /// Reconstructs the previous replicated projection from DuckLake's
 /// transactional old-or-target physical state.
-fn previous_replication_mask_for_recovery(
+fn previous_ducklake_replication_mask_for_recovery(
     previous_schema: &TableSchema,
     target_schema: &TableSchema,
     target_replication_mask: &ReplicationMask,
@@ -2400,7 +2400,7 @@ where
                     },
                 )
                 .await?;
-                let previous_replication_mask = previous_replication_mask_for_recovery(
+                let previous_replication_mask = previous_ducklake_replication_mask_for_recovery(
                     &previous_table_schema,
                     target_schema.inner(),
                     &metadata.replication_mask,
@@ -3516,7 +3516,7 @@ mod tests {
         );
         let target_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
 
-        let previous_mask = previous_replication_mask_for_recovery(
+        let previous_mask = previous_ducklake_replication_mask_for_recovery(
             &previous_schema,
             &target_schema,
             &target_mask,
@@ -3548,7 +3548,7 @@ mod tests {
         );
         let target_mask = ReplicationMask::from_bytes(vec![1, 1]);
 
-        let previous_mask = previous_replication_mask_for_recovery(
+        let previous_mask = previous_ducklake_replication_mask_for_recovery(
             &previous_schema,
             &target_schema,
             &target_mask,
@@ -3570,13 +3570,13 @@ mod tests {
         );
         let target_mask = ReplicationMask::from_bytes(vec![1, 0]);
 
-        let before_ddl = previous_replication_mask_for_recovery(
+        let before_ddl = previous_ducklake_replication_mask_for_recovery(
             &schema,
             &schema,
             &target_mask,
             &["id".to_owned(), "hidden".to_owned()],
         );
-        let after_ddl = previous_replication_mask_for_recovery(
+        let after_ddl = previous_ducklake_replication_mask_for_recovery(
             &schema,
             &schema,
             &target_mask,
