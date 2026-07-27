@@ -315,6 +315,13 @@ These behaviors are **not full destination DDL semantics** yet:
   confirmed replays the stream from before the change and triggers the
   same error. Replication mask changes carry no ordering, so a replayed
   stale mask cannot be detected the same way.
+- ClickHouse recovers interrupted schema changes from durable metadata. While
+  a change is applying, the previous `(snapshot, replication mask)` endpoint
+  is stored alongside the target, so a crash mid-DDL replays the interrupted
+  diff idempotently — including publication column-list changes that alter
+  the mask without a new schema snapshot. If the previous mask is missing
+  (metadata written before it was tracked), the pipeline fails closed instead
+  of guessing, and the table requires manual recovery.
 - Snowflake skips stale schema snapshots instead of rewinding. Before applying
   schema DDL, Snowflake waits for all preceding row batches to become durable.
   On restart, reopening the table's channel restores its committed offset, so

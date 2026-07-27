@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use etl::{
-    destination::DestinationTableMetadata,
+    destination::{DestinationTableMetadata, DestinationTableSchemaStatus},
     error::ErrorKind,
     etl_error,
     schema::{ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema},
@@ -1283,4 +1283,60 @@ async fn replication_mask_roundtrip() {
         original_mask.as_slice(),
         "Roundtrip should preserve replication mask exactly"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_metadata_previous_fields_roundtrip() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let table_id = TableId::new(54322);
+
+    // Store metadata for an in-flight schema change that only alters the
+    // replication mask (same snapshot, different mask).
+    let previous_mask = ReplicationMask::from_bytes(vec![1, 1, 0]);
+    let target_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
+    let applying_metadata = DestinationTableMetadata::new_applied(
+        "previous_fields_table".to_owned(),
+        SnapshotId::from(100u64),
+        previous_mask.clone(),
+    )
+    .with_schema_change(
+        SnapshotId::from(100u64),
+        target_mask.clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    store.store_destination_table_metadata(table_id, applying_metadata.clone()).await.unwrap();
+
+    // A fresh store must reload both previous fields exactly.
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    new_store.load_destination_tables_metadata().await.unwrap();
+
+    let loaded_metadata = new_store
+        .get_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("Metadata should exist after loading");
+    assert_eq!(loaded_metadata, applying_metadata);
+    assert_eq!(loaded_metadata.previous_snapshot_id, Some(SnapshotId::from(100u64)));
+    assert_eq!(loaded_metadata.previous_replication_mask, Some(previous_mask));
+
+    // Completing the change clears both previous fields durably.
+    store.store_destination_table_metadata(table_id, loaded_metadata.to_applied()).await.unwrap();
+
+    let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    reloaded_store.load_destination_tables_metadata().await.unwrap();
+
+    let applied_metadata = reloaded_store
+        .get_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("Metadata should exist after completion");
+    assert!(applied_metadata.is_applied());
+    assert_eq!(applied_metadata.previous_snapshot_id, None);
+    assert_eq!(applied_metadata.previous_replication_mask, None);
+    assert_eq!(applied_metadata.replication_mask, target_mask);
 }

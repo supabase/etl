@@ -28,10 +28,20 @@ pub struct DestinationTableMetadata {
     pub snapshot_id: SnapshotId,
     /// The schema version before the current change. None for initial schemas.
     ///
-    /// Destinations that support atomic DDL can use this for recovery: if
-    /// `schema_status` is `Applying` on startup, the destination knows the
-    /// DDL was rolled back and can reset to this snapshot to retry.
+    /// Together with [`DestinationTableMetadata::previous_replication_mask`],
+    /// this identifies the physical destination schema that was applied before
+    /// the in-flight change. If `schema_status` is `Applying` on startup,
+    /// destinations use this pair to reconstruct the previous endpoint and
+    /// recover the interrupted DDL.
     pub previous_snapshot_id: Option<SnapshotId>,
+    /// The replication mask before the current change. None for initial
+    /// schemas.
+    ///
+    /// The mask can change without a new schema snapshot (for example when
+    /// the publication's column list changes), so `previous_snapshot_id`
+    /// alone cannot identify the previously applied destination schema. Both
+    /// previous fields are set and cleared together.
+    pub previous_replication_mask: Option<ReplicationMask>,
     /// Status of the current schema change operation.
     ///
     /// If `Applying` is found on startup, the destination schema may be in
@@ -60,6 +70,7 @@ impl DestinationTableMetadata {
             destination_table_id,
             snapshot_id,
             previous_snapshot_id: None,
+            previous_replication_mask: None,
             schema_status: DestinationTableSchemaStatus::Applying,
             replication_mask,
         }
@@ -77,6 +88,7 @@ impl DestinationTableMetadata {
             destination_table_id,
             snapshot_id,
             previous_snapshot_id: None,
+            previous_replication_mask: None,
             schema_status: DestinationTableSchemaStatus::Applied,
             replication_mask,
         }
@@ -94,18 +106,19 @@ impl DestinationTableMetadata {
 
     /// Transitions this metadata to applied status.
     ///
-    /// Clears the previous_snapshot_id since the change completed successfully.
+    /// Clears both previous fields since the change completed successfully.
     pub fn to_applied(mut self) -> Self {
         self.schema_status = DestinationTableSchemaStatus::Applied;
         self.previous_snapshot_id = None;
+        self.previous_replication_mask = None;
         self
     }
 
     /// Updates the schema state for a new schema change.
     ///
-    /// Sets `previous_snapshot_id` to the current snapshot before updating,
-    /// enabling recovery if the change fails on destinations that support
-    /// atomic DDL.
+    /// Sets `previous_snapshot_id` and `previous_replication_mask` to the
+    /// current values before updating, enabling recovery of the interrupted
+    /// DDL if the change fails partway through.
     pub fn with_schema_change(
         mut self,
         snapshot_id: SnapshotId,
@@ -113,6 +126,7 @@ impl DestinationTableMetadata {
         status: DestinationTableSchemaStatus,
     ) -> Self {
         self.previous_snapshot_id = Some(self.snapshot_id);
+        self.previous_replication_mask = Some(self.replication_mask.clone());
         self.snapshot_id = snapshot_id;
         self.replication_mask = replication_mask;
         self.schema_status = status;
@@ -162,4 +176,65 @@ pub struct AppliedDestinationTableMetadata {
     pub snapshot_id: SnapshotId,
     /// The replication mask indicating which columns are replicated.
     pub replication_mask: ReplicationMask,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn applied_metadata() -> DestinationTableMetadata {
+        DestinationTableMetadata::new_applied(
+            "dest_table".to_owned(),
+            SnapshotId::from(100_u64),
+            ReplicationMask::from_bytes(vec![1, 1, 0]),
+        )
+    }
+
+    #[test]
+    fn with_schema_change_captures_previous_snapshot_and_mask() {
+        let metadata = applied_metadata().with_schema_change(
+            SnapshotId::from(100_u64),
+            ReplicationMask::from_bytes(vec![1, 0, 1]),
+            DestinationTableSchemaStatus::Applying,
+        );
+
+        assert!(metadata.is_applying());
+        assert_eq!(metadata.snapshot_id, SnapshotId::from(100_u64));
+        assert_eq!(metadata.replication_mask, ReplicationMask::from_bytes(vec![1, 0, 1]));
+        assert_eq!(metadata.previous_snapshot_id, Some(SnapshotId::from(100_u64)));
+        assert_eq!(
+            metadata.previous_replication_mask,
+            Some(ReplicationMask::from_bytes(vec![1, 1, 0]))
+        );
+    }
+
+    #[test]
+    fn to_applied_clears_both_previous_fields() {
+        let metadata = applied_metadata()
+            .with_schema_change(
+                SnapshotId::from(101_u64),
+                ReplicationMask::from_bytes(vec![1, 0, 1]),
+                DestinationTableSchemaStatus::Applying,
+            )
+            .to_applied();
+
+        assert!(metadata.is_applied());
+        assert_eq!(metadata.previous_snapshot_id, None);
+        assert_eq!(metadata.previous_replication_mask, None);
+    }
+
+    #[test]
+    fn new_metadata_has_no_previous_fields() {
+        let applying = DestinationTableMetadata::new_applying(
+            "dest_table".to_owned(),
+            SnapshotId::initial(),
+            ReplicationMask::from_bytes(vec![1]),
+        );
+        assert_eq!(applying.previous_snapshot_id, None);
+        assert_eq!(applying.previous_replication_mask, None);
+
+        let applied = applied_metadata();
+        assert_eq!(applied.previous_snapshot_id, None);
+        assert_eq!(applied.previous_replication_mask, None);
+    }
 }

@@ -1,3 +1,4 @@
+mod destination;
 mod pipeline;
 mod pipeline_large_rows;
 mod pipeline_merge_tree;

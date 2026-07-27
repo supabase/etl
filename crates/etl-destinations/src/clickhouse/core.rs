@@ -32,7 +32,6 @@ use crate::{
             supports_column_default, trailing_cdc_column_names,
         },
     },
-    recovery::previous_replication_mask_for_recovery,
     table_name::try_stringify_table_name,
 };
 
@@ -623,8 +622,9 @@ where
 
     /// Re-runs an interrupted DDL idempotently and transitions metadata to
     /// `Applied`. Distinguishes between an interrupted schema change (replays
-    /// the diff against the previous snapshot) and an interrupted initial
-    /// creation (re-issues `CREATE TABLE IF NOT EXISTS`).
+    /// the diff from the previous endpoint `(previous_snapshot_id,
+    /// previous_replication_mask)`) and an interrupted initial creation
+    /// (re-issues `CREATE TABLE IF NOT EXISTS`).
     async fn recover_applying_metadata(
         &self,
         table_id: TableId,
@@ -654,6 +654,23 @@ where
                     ));
                 }
 
+                // Fail closed instead of guessing: recovering with the target
+                // mask would reconstruct the wrong previous endpoint whenever
+                // the mask changed, silently mark the change Applied, and
+                // leave the physical table diverged from the metadata.
+                let Some(previous_replication_mask) = metadata.previous_replication_mask.clone()
+                else {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "Previous replication mask missing for ClickHouse schema recovery",
+                        format!(
+                            "Table {} has an interrupted schema change towards snapshot {}, but \
+                             the previous replication mask needed to recover the destination \
+                             table was not stored. Manual intervention may be required.",
+                            table_id, metadata.snapshot_id
+                        )
+                    ));
+                };
                 let old_table_schema =
                     self.store.get_table_schema(&table_id, prev_snapshot_id).await?.ok_or_else(
                         || {
@@ -668,15 +685,7 @@ where
                             )
                         },
                     )?;
-                // The metadata records the target mask, not the previous one,
-                // so project it back onto the previous schema; a raw copy has
-                // the wrong width whenever the change added or dropped
-                // columns.
-                let previous_replication_mask = previous_replication_mask_for_recovery(
-                    &old_table_schema,
-                    schema.inner(),
-                    &metadata.replication_mask,
-                );
+
                 let old_schema =
                     ReplicatedTableSchema::from_mask(old_table_schema, previous_replication_mask);
                 let diff = old_schema.diff(schema);
