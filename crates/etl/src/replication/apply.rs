@@ -709,9 +709,10 @@ struct ApplyLoopState {
     ///
     /// A durable write result confirms all earlier accepted writes in the same
     /// ordered apply-loop stream, so their durable write durations are
-    /// recorded once the next durable result arrives. The queue is bounded
-    /// because deferred destinations must bound their accepted-but-not-durable
-    /// work.
+    /// recorded once the next durable result arrives. The queue has no
+    /// explicit bound: the loop keeps at most one write in flight, so it
+    /// grows by at most one entry per completed write and drains at the
+    /// next durable result.
     pending_durable_dispatches: VecDeque<Instant>,
     /// The LSN of the commit WAL entry of the transaction that is currently
     /// being processed.
