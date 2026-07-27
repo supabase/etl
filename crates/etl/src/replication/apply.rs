@@ -37,7 +37,8 @@ use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{
-    FORCE_SCHEMA_CLEANUP_FP, STORE_REPLICATION_PROGRESS_FP, etl_fail_point_active,
+    FORCE_SCHEMA_CLEANUP_FP, STORE_APPLY_REPLICATION_PROGRESS_FP, STORE_REPLICATION_PROGRESS_FP,
+    etl_fail_point_active,
 };
 use crate::{
     bail,
@@ -74,8 +75,8 @@ use crate::{
         },
     },
     replication::{
-        SharedTableCache, SharedTableState, WorkerType,
-        state::{TableState, TableStateType},
+        TableDecodingState, WorkerType,
+        state::{TableState, TableStateType, TableSyncHandover},
     },
     runtime::{
         BatchBudgetController, CachedBatchBudget, MemoryMonitor, TableSyncWorker,
@@ -178,9 +179,6 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) store: S,
     /// Destination where replicated data is written.
     pub(crate) destination: D,
-    /// Shared per-table protocol state used to decode relation and row
-    /// messages.
-    pub(crate) shared_table_cache: SharedTableCache,
     /// Shared pool for out-of-band source database queries.
     pub(crate) out_of_band_source_pool: OutOfBandSourcePool,
     /// Shutdown signal receiver for graceful termination.
@@ -694,6 +692,37 @@ impl EventBatch {
     }
 }
 
+/// Schema lookup required to materialize a relation message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelationSchemaSelection {
+    /// Resolve the exact schema snapshot emitted by a preceding DDL message.
+    Exact(SnapshotId),
+    /// Resolve the newest stored schema at or before the worker bootstrap LSN.
+    AtOrBefore(SnapshotId),
+}
+
+/// Selects the schema lookup for a relation from connection-local state.
+fn select_relation_schema(
+    decoding_state: Option<TableDecodingState>,
+    bootstrap_snapshot_id: SnapshotId,
+) -> RelationSchemaSelection {
+    match decoding_state {
+        Some(TableDecodingState::WaitingForRelation { snapshot_id }) => {
+            RelationSchemaSelection::Exact(snapshot_id)
+        }
+        Some(TableDecodingState::WithSchema(schema)) => {
+            RelationSchemaSelection::Exact(schema.inner().snapshot_id)
+        }
+        // A fresh apply connection has no local relation state for a durable
+        // Ready table. This fallback does not make a post-DDL copy-time `0/0`
+        // schema historical: if replay starts before that copy, a
+        // subset-compatible older Relation can materialize against the newer
+        // schema and reach a destination with snapshot `0/0` but a different
+        // mask. That recovery case requires resynchronizing the table.
+        None => RelationSchemaSelection::AtOrBefore(bootstrap_snapshot_id),
+    }
+}
+
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
@@ -744,8 +773,8 @@ struct ApplyLoopState {
     /// and new message intake until the in-flight flush resolves and the
     /// queued batch can be retried.
     processing_paused: bool,
-    /// Fallback snapshot used before a table has established shared protocol
-    /// state.
+    /// Fallback snapshot used before a table establishes connection-local
+    /// protocol state or receives a durable handover.
     ///
     /// This is seeded from the worker start LSN so a first `RELATION` message
     /// can always resolve the latest schema version whose snapshot is less
@@ -792,7 +821,7 @@ impl ApplyLoopState {
         }
     }
 
-    /// Returns the bootstrap snapshot used before a table has shared protocol
+    /// Returns the bootstrap snapshot used before a table has local decoding
     /// state.
     fn bootstrap_snapshot_id(&self) -> SnapshotId {
         self.bootstrap_snapshot_id
@@ -1053,9 +1082,9 @@ pub(crate) struct ApplyLoop<S, D> {
     schema_store: S,
     /// Destination where replicated data is written.
     destination: D,
-    /// Shared per-table protocol state used to decode relation and row
-    /// messages.
-    shared_table_cache: SharedTableCache,
+    /// Connection-local per-table protocol state used to decode relation and
+    /// row messages.
+    table_decoding_states: HashMap<TableId, TableDecodingState>,
     /// Shutdown signal receiver.
     shutdown_rx: ShutdownRx,
     /// Worker-specific dependencies and coordination hooks.
@@ -1091,12 +1120,12 @@ where
         replication_client: &PgReplicationClient,
         schema_store: S,
         destination: D,
-        shared_table_cache: SharedTableCache,
         out_of_band_source_pool: OutOfBandSourcePool,
         worker_context: WorkerContext<S, D>,
         shutdown_rx: ShutdownRx,
         memory_monitor: MemoryMonitor,
         batch_budget: BatchBudgetController,
+        initial_replicated_table_schema: Option<ReplicatedTableSchema>,
     ) -> EtlResult<ApplyLoopResult> {
         info!(
             worker_type = %worker_context.worker_type(),
@@ -1152,11 +1181,19 @@ where
             slot_name,
         );
 
+        let mut table_decoding_states = HashMap::new();
+        if let Some(replicated_table_schema) = initial_replicated_table_schema {
+            table_decoding_states.insert(
+                replicated_table_schema.id(),
+                TableDecodingState::WithSchema(replicated_table_schema),
+            );
+        }
+
         let mut apply_loop = Self {
             config: Arc::clone(&config),
             schema_store,
             destination,
-            shared_table_cache,
+            table_decoding_states,
             shutdown_rx,
             worker_context,
             memory_monitor,
@@ -1694,8 +1731,10 @@ where
 
     /// Returns schema retention boundaries for tables this worker may clean up.
     ///
-    /// The shared cache is used only to find active tables, and the worker's
-    /// normal ownership check decides which of those tables can be considered.
+    /// The connection-local decoding map is used only to find active tables,
+    /// and the worker's normal ownership check decides which of those tables
+    /// can be considered.
+    ///
     /// A table's cleanup boundary is capped by durable ETL replication progress
     /// and by the earliest destination metadata snapshot that may still be
     /// needed.
@@ -1703,7 +1742,7 @@ where
         &self,
         durable_flush_lsn: PgLsn,
     ) -> EtlResult<HashMap<TableId, TableSchemaRetention>> {
-        let active_table_ids = self.shared_table_cache.active_table_ids().await;
+        let active_table_ids = self.table_decoding_states.keys().copied().collect::<Vec<_>>();
         let mut table_schema_retentions = HashMap::with_capacity(active_table_ids.len());
 
         for table_id in active_table_ids {
@@ -2152,9 +2191,9 @@ where
     /// In other words, the protocol variant this code relies on is:
     /// `... -> ddl Message -> Relation(new schema) -> Insert/Update/Delete
     /// ...`. Because the DDL message itself is not a DML event, we must
-    /// update the stored schema and drop the old mask here, so that the
-    /// very next `Relation` rebuilds the mask against the new schema
-    /// snapshot.
+    /// record the new schema cursor here so the next `Relation` rebuilds the
+    /// masks against that exact snapshot. A table-sync worker cannot hand over
+    /// this incomplete state until the relation provides both masks.
     async fn handle_message(
         &mut self,
         message: &protocol::MessageBody,
@@ -2200,10 +2239,29 @@ where
         let command_tag = schema_change_message.command_tag.clone();
         let column_count = schema_change_message.columns.len();
 
-        // Exactly one worker owns protocol interpretation for a table at a time. If
-        // this worker is not the owner, it must skip the DDL so the owning
-        // worker is solely responsible for advancing the shared per-table
-        // protocol state.
+        if !schema_change_message.applies_to_publication(&self.config.publication_name) {
+            debug!(
+                table_id = %table_id,
+                message_publication = %
+                    schema_change_message.publication_name.as_deref().unwrap_or("<missing>"),
+                configured_publication = %self.config.publication_name,
+                "skipping ddl schema change message for another publication"
+            );
+
+            counter!(
+                ETL_DDL_SCHEMA_CHANGES_TOTAL,
+                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                COMMAND_TAG_LABEL => command_tag,
+                OUTCOME_LABEL => "skipped_publication",
+            )
+            .increment(1);
+
+            return Ok(HandleMessageResult::no_event());
+        }
+
+        let table_name = schema_change_message.relname.clone();
+        let schema_name = schema_change_message.nspname.clone();
+
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             counter!(
                 ETL_DDL_SCHEMA_CHANGES_TOTAL,
@@ -2216,23 +2274,22 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
+        let snapshot_id = schema_snapshot_id_from_message(message);
+        let table_schema = Arc::new(schema_change_message.into_table_schema(snapshot_id));
+        self.table_decoding_states
+            .insert(table_id, TableDecodingState::WaitingForRelation { snapshot_id });
+
         info!(
-            table_id = schema_change_message.oid,
-            table_name = %schema_change_message.relname,
-            schema_name = %schema_change_message.nspname,
-            event = %schema_change_message.command_tag,
-            columns = schema_change_message.columns.len(),
+            table_id = %table_id,
+            table_name = %table_name,
+            schema_name = %schema_name,
+            event = %command_tag,
+            columns = column_count,
             "received ddl schema change message"
         );
 
-        // The logical message carries its own durable WAL position. The outer
-        // XLogData `wal_start` identifies the replication frame and is not the
-        // identity of this schema change.
-        let snapshot_id = schema_snapshot_id_from_message(message);
-        let table_schema = schema_change_message.into_table_schema(snapshot_id);
-
         // Store the new schema version in the store.
-        if let Err(err) = self.schema_store.store_table_schema(table_schema).await {
+        if let Err(err) = self.schema_store.store_table_schema((*table_schema).clone()).await {
             counter!(
                 ETL_DDL_SCHEMA_CHANGES_TOTAL,
                 WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
@@ -2243,11 +2300,6 @@ where
 
             return Err(err);
         }
-        // The next post-DDL DML will cause pgoutput to synthesize a fresh `RELATION`
-        // message for this table. Record the new snapshot and clear any cached
-        // mask now so relation handling rebuilds it from the schema version we
-        // just stored rather than reusing pre-DDL state.
-        self.shared_table_cache.note_waiting_for_relation(table_id, snapshot_id).await;
 
         let table_id_u32: u32 = table_id.into();
         counter!(
@@ -2370,10 +2422,6 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
-
-        // Exactly one worker owns protocol interpretation for a table at a time.
-        // Non-owning workers skip `RELATION` handling and rely on the owner to
-        // refresh shared table state.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
@@ -2396,6 +2444,16 @@ where
             column_names.join(",")
         }
 
+        let schema_selection = self.relation_schema_selection(table_id);
+        let replicated_table_schema = self
+            .materialize_relation_schema(
+                table_id,
+                schema_selection,
+                &replicated_columns,
+                &identity_columns,
+            )
+            .await?;
+
         info!(
             table_id = %table_id,
             replicated_columns = %format_column_names(&replicated_columns),
@@ -2403,30 +2461,79 @@ where
             "received relation message, building replication mask"
         );
 
-        // Build the replication mask by validating that all replicated columns exist in
-        // the schema.
-        let shared_table_state = self.shared_table_cache.get(&table_id).await;
-        let used_bootstrap_snapshot = shared_table_state.is_none();
-        let table_snapshot_id = shared_table_state
-            .map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id());
-        let table_schema = get_table_schema_for_relation(
-            &self.schema_store,
-            &table_id,
-            table_snapshot_id,
-            used_bootstrap_snapshot,
-        )
-        .await?;
-        let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
-        let identity_mask = IdentityMask::try_build(&table_schema, &identity_columns)?;
-
-        let replicated_table_schema =
-            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
-
-        self.shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
-
         let relation_event = RelationEvent { replicated_table_schema };
 
         Ok(HandleMessageResult::return_event(Event::Relation(relation_event)))
+    }
+
+    /// Returns the schema lookup selected for a table's next relation message.
+    fn relation_schema_selection(&self, table_id: TableId) -> RelationSchemaSelection {
+        select_relation_schema(
+            self.table_decoding_states.get(&table_id).cloned(),
+            self.state.bootstrap_snapshot_id(),
+        )
+    }
+
+    /// Materializes relation metadata against this attempt's selected table
+    /// schema.
+    async fn materialize_relation_schema(
+        &mut self,
+        table_id: TableId,
+        schema_selection: RelationSchemaSelection,
+        replicated_columns: &HashSet<String>,
+        identity_columns: &HashSet<String>,
+    ) -> EtlResult<ReplicatedTableSchema> {
+        let table_schema = match schema_selection {
+            RelationSchemaSelection::Exact(snapshot_id) => {
+                get_table_schema_for_relation(&self.schema_store, &table_id, snapshot_id, false)
+                    .await?
+            }
+            RelationSchemaSelection::AtOrBefore(bootstrap_snapshot_id) => {
+                get_table_schema_for_relation(
+                    &self.schema_store,
+                    &table_id,
+                    bootstrap_snapshot_id,
+                    true,
+                )
+                .await?
+            }
+        };
+
+        let replication_mask = ReplicationMask::try_build(&table_schema, replicated_columns)?;
+        let identity_mask = IdentityMask::try_build(&table_schema, identity_columns)?;
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+
+        self.table_decoding_states
+            .insert(table_id, TableDecodingState::WithSchema(replicated_table_schema.clone()));
+
+        Ok(replicated_table_schema)
+    }
+
+    /// Returns materialized row-decoding state for a row event.
+    fn replicated_table_schema(&mut self, table_id: TableId) -> EtlResult<ReplicatedTableSchema> {
+        let replicated_table_schema = match self.table_decoding_states.get(&table_id).cloned() {
+            Some(TableDecodingState::WithSchema(schema)) => schema,
+            Some(TableDecodingState::WaitingForRelation { snapshot_id }) => {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "Relation state is waiting for refresh",
+                    format!(
+                        "Table {} requires relation snapshot {} before row decoding",
+                        table_id, snapshot_id
+                    )
+                ));
+            }
+            None => {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "Relation state missing for row event",
+                    format!("Table {} has no materialized relation or handover state", table_id)
+                ));
+            }
+        };
+
+        Ok(replicated_table_schema)
     }
 
     /// Handles Postgres INSERT messages.
@@ -2452,14 +2559,13 @@ where
         streaming_payload_metadata.record_row_size();
 
         // Exactly one worker owns protocol interpretation for a table at a time, so
-        // non-owning workers skip row decoding and leave the shared table state
-        // untouched.
+        // Non-owning workers skip row decoding and leave their connection-local
+        // decoding state untouched.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
 
-        let replicated_table_schema =
-            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
+        let replicated_table_schema = self.replicated_table_schema(table_id)?;
 
         let event = parse_event_from_insert_message(
             replicated_table_schema,
@@ -2494,14 +2600,13 @@ where
         streaming_payload_metadata.record_row_size();
 
         // Exactly one worker owns protocol interpretation for a table at a time, so
-        // non-owning workers skip row decoding and leave the shared table state
-        // untouched.
+        // Non-owning workers skip row decoding and leave their connection-local
+        // decoding state untouched.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
 
-        let replicated_table_schema =
-            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
+        let replicated_table_schema = self.replicated_table_schema(table_id)?;
 
         let event = parse_event_from_update_message(
             replicated_table_schema,
@@ -2536,14 +2641,13 @@ where
         streaming_payload_metadata.record_row_size();
 
         // Exactly one worker owns protocol interpretation for a table at a time, so
-        // non-owning workers skip row decoding and leave the shared table state
-        // untouched.
+        // Non-owning workers skip row decoding and leave their connection-local
+        // decoding state untouched.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
 
-        let replicated_table_schema =
-            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
+        let replicated_table_schema = self.replicated_table_schema(table_id)?;
 
         let event = parse_event_from_delete_message(
             replicated_table_schema,
@@ -2577,8 +2681,7 @@ where
             // Exactly one worker owns protocol interpretation for a table at a time, so
             // non-owning workers skip truncation handling for that table as well.
             if self.should_apply_changes(table_id, remote_final_lsn).await? {
-                let replicated_table_schema =
-                    get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
+                let replicated_table_schema = self.replicated_table_schema(table_id)?;
                 truncated_tables.push(replicated_table_schema);
             }
         }
@@ -2603,8 +2706,7 @@ where
     ///
     /// Exactly one worker owns DDL, `RELATION`, and DML handling for a table at
     /// a time. When this returns `false`, the caller must skip the message
-    /// and leave the shared per-table protocol state untouched so the
-    /// owning worker remains the single writer for that table.
+    /// without changing its connection-local protocol state.
     async fn should_apply_changes(
         &self,
         table_id: TableId,
@@ -2625,9 +2727,15 @@ where
     /// Dispatches to worker-specific implementation based on the worker
     /// context.
     async fn process_syncing_tables_after_commit_event(&mut self, lsn: PgLsn) -> EtlResult<bool> {
+        let table_decoding_states = &mut self.table_decoding_states;
         let exit_intent = match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
-                apply_worker::process_syncing_tables_after_commit_event(ctx, lsn).await
+                apply_worker::process_syncing_tables_after_commit_event(
+                    ctx,
+                    lsn,
+                    table_decoding_states,
+                )
+                .await
             }
             WorkerContext::TableSync(ctx) => {
                 table_sync_worker::process_syncing_tables_after_commit_event(ctx, lsn).await
@@ -2648,22 +2756,15 @@ where
         &mut self,
         last_commit_end_lsn: PgLsn,
     ) -> EtlResult<()> {
-        // Store durable replication progress at commit boundaries after the
-        // destination acknowledges the batch. This gives restarts a durable
-        // lower-bound resume point: once startup chooses this point, no event
-        // older than it will be emitted. It is not meant to eliminate every
-        // duplicate, and idle keepalive-only progress is intentionally left out
-        // to avoid writing to the customer database on every quiet heartbeat.
-        let durable_flush_lsn =
-            self.upsert_durable_replication_progress(last_commit_end_lsn).await?;
-        self.state.update_last_flush_lsn(durable_flush_lsn);
+        let current_lsn = last_commit_end_lsn;
 
-        let current_lsn = self.state.replication_progress.last_flush_lsn();
         debug!(
             worker_type = %self.worker_context.worker_type(),
             %current_lsn,
-            "processing syncing tables after durable batch flush"
+            "processing syncing tables after destination batch flush"
         );
+
+        let table_sync_decoding_state = self.table_sync_decoding_state();
 
         let exit_intent = match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
@@ -2672,11 +2773,21 @@ where
                 None
             }
             WorkerContext::TableSync(ctx) => {
-                table_sync_worker::process_syncing_tables_after_flush(ctx, current_lsn).await?
+                table_sync_worker::process_syncing_tables_after_flush(
+                    ctx,
+                    current_lsn,
+                    table_sync_decoding_state.as_ref(),
+                )
+                .await?
             }
         };
 
         self.state.record_exit_intent(exit_intent);
+
+        // Persist progress only after worker-specific state processing succeeds.
+        let durable_flush_lsn =
+            self.upsert_durable_replication_progress(last_commit_end_lsn).await?;
+        self.state.update_last_flush_lsn(durable_flush_lsn);
 
         Ok(())
     }
@@ -2687,7 +2798,10 @@ where
         let worker_type = self.worker_context.worker_type();
 
         #[cfg(feature = "failpoints")]
-        if etl_fail_point_active(STORE_REPLICATION_PROGRESS_FP) {
+        if etl_fail_point_active(STORE_REPLICATION_PROGRESS_FP)
+            || worker_type == WorkerType::Apply
+                && etl_fail_point_active(STORE_APPLY_REPLICATION_PROGRESS_FP)
+        {
             warn!(
                 %worker_type,
                 %flush_lsn,
@@ -2769,19 +2883,122 @@ where
             "processing syncing tables outside transaction"
         );
 
+        let table_sync_decoding_state = self.table_sync_decoding_state();
+        let table_decoding_states = &mut self.table_decoding_states;
+
         let exit_intent = match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
-                apply_worker::process_syncing_tables_when_idle(ctx, current_lsn).await
+                apply_worker::process_syncing_tables_when_idle(
+                    ctx,
+                    current_lsn,
+                    table_decoding_states,
+                )
+                .await
             }
             WorkerContext::TableSync(ctx) => {
-                table_sync_worker::process_syncing_tables_when_idle(ctx, current_lsn).await
+                table_sync_worker::process_syncing_tables_when_idle(
+                    ctx,
+                    current_lsn,
+                    table_sync_decoding_state.as_ref(),
+                )
+                .await
             }
         }?;
 
         self.state.record_exit_intent(exit_intent);
 
+        // Persist progress only after worker-specific state processing succeeds.
+        let durable_flush_lsn = self.upsert_durable_replication_progress(current_lsn).await?;
+        self.state.update_last_flush_lsn(durable_flush_lsn);
+
         Ok(())
     }
+
+    /// Returns the table-sync worker's current row-decoding state.
+    fn table_sync_decoding_state(&self) -> Option<TableDecodingState> {
+        let WorkerContext::TableSync(ctx) = &self.worker_context else {
+            return None;
+        };
+
+        self.table_decoding_states.get(&ctx.table_id).cloned()
+    }
+}
+
+/// Loads the row-decoding state persisted at a table-sync handover.
+async fn install_sync_done_handover<S>(
+    store: &S,
+    table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
+    table_id: TableId,
+    sync_done_lsn: PgLsn,
+    handover: Option<&TableSyncHandover>,
+) -> EtlResult<()>
+where
+    S: SchemaStore,
+{
+    let Some(handover) = handover else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Table-sync handover state is missing",
+            format!(
+                "Table {} reached SyncDone at {}, but its durable row-decoding state is missing",
+                table_id, sync_done_lsn
+            )
+        );
+    };
+
+    let snapshot_id = handover.snapshot_id();
+    if snapshot_id.into_inner() > sync_done_lsn {
+        bail!(
+            ErrorKind::InvalidState,
+            "Table-sync handover snapshot is ahead of its LSN",
+            format!(
+                "Table {} handover snapshot {} exceeds SyncDone LSN {}",
+                table_id, snapshot_id, sync_done_lsn
+            )
+        );
+    }
+
+    let (replication_mask, identity_mask) = handover.masks();
+    let table_schema = get_table_schema_for_relation(store, &table_id, snapshot_id, false).await?;
+    let column_count = table_schema.column_schemas.len();
+
+    if replication_mask.len() != column_count || identity_mask.len() != column_count {
+        bail!(
+            ErrorKind::InvalidState,
+            "Table-sync handover mask width does not match its schema",
+            format!(
+                "Table {} snapshot {} has {} columns, replication mask width {}, and identity \
+                 mask width {}",
+                table_id,
+                snapshot_id,
+                column_count,
+                replication_mask.len(),
+                identity_mask.len()
+            )
+        );
+    }
+    if replication_mask.iter().chain(identity_mask).any(|value| *value > 1) {
+        bail!(ErrorKind::InvalidState, "Table-sync handover contains a non-binary mask");
+    }
+    if replication_mask
+        .iter()
+        .zip(identity_mask)
+        .any(|(replicated, identity)| *identity == 1 && *replicated == 0)
+    {
+        bail!(
+            ErrorKind::InvalidState,
+            "Table-sync handover identity mask is not a subset of its replication mask"
+        );
+    }
+
+    let replicated_table_schema = ReplicatedTableSchema::from_masks(
+        table_schema,
+        ReplicationMask::from_bytes(replication_mask.to_vec()),
+        IdentityMask::from_bytes(identity_mask.to_vec()),
+    );
+    table_decoding_states.insert(table_id, TableDecodingState::WithSchema(replicated_table_schema));
+
+    Ok(())
 }
 
 /// Returns tables that are still synchronizing.
@@ -2826,7 +3043,14 @@ mod apply_worker {
         fn is_state_ready_for_changes(state: TableState, remote_final_lsn: PgLsn) -> bool {
             match state {
                 TableState::Ready => true,
-                TableState::SyncDone { lsn } => lsn <= remote_final_lsn,
+                // Match PostgreSQL's table-sync boundary rule. SyncDone may
+                // point one byte past the initial slot's consistent-point WAL
+                // record, which is also the start of a COMMIT record whose
+                // transaction was excluded from the copied snapshot. BEGIN's
+                // final LSN can therefore equal SyncDone even though the apply
+                // worker, not the table-sync worker, must apply that
+                // transaction.
+                TableState::SyncDone { lsn, .. } => lsn <= remote_final_lsn,
                 _ => false,
             }
         }
@@ -2856,6 +3080,7 @@ mod apply_worker {
     pub(super) async fn process_syncing_tables_after_commit_event<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
+        table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: PipelineStore,
@@ -2867,6 +3092,7 @@ mod apply_worker {
                 table_id,
                 table_state,
                 current_lsn,
+                table_decoding_states,
             )
             .await?;
 
@@ -2885,7 +3111,11 @@ mod apply_worker {
         worker_state: &TableSyncWorkerState,
         catchup_lsn: PgLsn,
         wait_reason: CatchupWaitReason,
-    ) -> Option<ExitIntent> {
+        table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
+    ) -> EtlResult<Option<ExitIntent>>
+    where
+        S: SchemaStore,
+    {
         // `Catchup` and `SyncDone` define the table ownership boundary, not the
         // caller's current stream position. This matters after an apply-worker
         // retry. In this case, the restarted apply stream may resume before the
@@ -2894,16 +3124,15 @@ mod apply_worker {
         // which is guaranteed to be >= the original catchup target given how
         // the `Catchup` LSN is calculated.
         //
-        // In case we replay the WAL while we were waiting for the `Catchup`, we now
-        // that Postgres will resume from a position that is <= than the
+        // If we replay the WAL while waiting for `Catchup`, we know that
+        // Postgres will resume from a position that is <=
         // position at which the `Catchup` was originally triggered (the
         // position of reading the WAL, not the `Catchup` LSN), so there are two
         // cases:
-        // 1. We restart from an LSN that is <: in this case, the system will just wait
-        //    for the `SyncDone` and will skip all entries of that table with the usual
-        //    visibility rule for the handover.
-        // 2. We restart from an LSN that is =: in this case, the system will be in the
-        //    same position as before, so it acts as if there was never a restart.
+        // 1. We restart from an earlier LSN. The system waits for `SyncDone` and skips
+        //    table entries according to the normal handover visibility rule.
+        // 2. We restart from the same LSN. The system resumes from the same position as
+        //    before.
         //
         // What is important is that resumption happens at any LSN <= the LSN where the
         // `Catchup` was initially performed. If that's not the case, this will
@@ -2942,8 +3171,20 @@ mod apply_worker {
                         "apply worker unblocked: table sync worker errored, skipping table",
                     );
 
-                    return None;
+                    return Ok(None);
                 }
+
+                let TableState::SyncDone { lsn: sync_done_lsn, ref handover } = final_state else {
+                    unreachable!("waited table state should be SyncDone or Errored");
+                };
+                install_sync_done_handover(
+                    &ctx.store,
+                    table_decoding_states,
+                    table_id,
+                    sync_done_lsn,
+                    handover.as_ref(),
+                )
+                .await?;
 
                 info!(
                     worker_type = %WorkerType::Apply,
@@ -2952,7 +3193,7 @@ mod apply_worker {
                     "apply worker unblocked: table sync worker reached sync_done",
                 );
 
-                None
+                Ok(None)
             }
             ShutdownResult::Shutdown(_) => {
                 info!(
@@ -2961,7 +3202,7 @@ mod apply_worker {
                     "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                 );
 
-                Some(ExitIntent::Pause)
+                Ok(Some(ExitIntent::Pause))
             }
         }
     }
@@ -2976,6 +3217,7 @@ mod apply_worker {
         table_id: TableId,
         table_state: TableState,
         current_lsn: PgLsn,
+        table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: PipelineStore,
@@ -3024,13 +3266,14 @@ mod apply_worker {
                         &worker_state,
                         catchup_lsn,
                         CatchupWaitReason::EnteredCatchup,
+                        table_decoding_states,
                     )
-                    .await
+                    .await?
                     {
                         return Ok(Some(exit_intent));
                     }
                 }
-                TableState::SyncDone { lsn } => {
+                TableState::SyncDone { lsn, .. } => {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
@@ -3047,8 +3290,9 @@ mod apply_worker {
                         &worker_state,
                         catchup_lsn,
                         CatchupWaitReason::AlreadyInCatchup,
+                        table_decoding_states,
                     )
-                    .await
+                    .await?
                     {
                         return Ok(Some(exit_intent));
                     }
@@ -3072,7 +3316,7 @@ mod apply_worker {
 
             // No active worker exists, potentially start a new worker.
             match table_state {
-                TableState::SyncDone { lsn } => {
+                TableState::SyncDone { lsn, .. } => {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
@@ -3144,7 +3388,7 @@ mod apply_worker {
         // state. If there isn't an active worker, we just try to see if we can
         // switch the table to ready state or start a new worker for that table.
         if let Some(worker_state) = worker_state {
-            let worker_state_guard = worker_state.lock().await;
+            let mut worker_state_guard = worker_state.lock().await;
             let state = worker_state_guard.table_state();
 
             debug!(
@@ -3155,7 +3399,7 @@ mod apply_worker {
                 "checking table with active worker after batch flush",
             );
 
-            if let TableState::SyncDone { lsn: sync_done_lsn } = state {
+            if let TableState::SyncDone { lsn: sync_done_lsn, .. } = state {
                 if current_lsn >= sync_done_lsn {
                     info!(
                         worker_type = %WorkerType::Apply,
@@ -3165,7 +3409,7 @@ mod apply_worker {
                         "transitioning sync_done -> ready",
                     );
 
-                    ctx.store.update_table_state(table_id, TableState::Ready).await?;
+                    worker_state_guard.set_and_store(TableState::Ready, &ctx.store).await?;
                 } else {
                     debug!(
                         worker_type = %WorkerType::Apply,
@@ -3185,7 +3429,7 @@ mod apply_worker {
             );
 
             match table_state {
-                TableState::SyncDone { lsn: sync_done_lsn } => {
+                TableState::SyncDone { lsn: sync_done_lsn, .. } => {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
@@ -3241,15 +3485,21 @@ mod apply_worker {
     pub(super) async fn process_syncing_tables_when_idle<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
+        table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: PipelineStore,
         D: PipelineDestination,
     {
         for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
-            let exit_intent =
-                process_single_syncing_table_when_idle(ctx, table_id, table_state, current_lsn)
-                    .await?;
+            let exit_intent = process_single_syncing_table_when_idle(
+                ctx,
+                table_id,
+                table_state,
+                current_lsn,
+                table_decoding_states,
+            )
+            .await?;
 
             if exit_intent.is_some() {
                 return Ok(exit_intent);
@@ -3269,6 +3519,7 @@ mod apply_worker {
         table_id: TableId,
         table_state: TableState,
         current_lsn: PgLsn,
+        table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: PipelineStore,
@@ -3321,13 +3572,14 @@ mod apply_worker {
                         &worker_state,
                         catchup_lsn,
                         CatchupWaitReason::EnteredCatchup,
+                        table_decoding_states,
                     )
-                    .await
+                    .await?
                     {
                         return Ok(Some(exit_intent));
                     }
                 }
-                TableState::SyncDone { lsn: sync_done_lsn } => {
+                TableState::SyncDone { lsn: sync_done_lsn, .. } => {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
@@ -3337,16 +3589,18 @@ mod apply_worker {
                             "transitioning sync_done -> ready",
                         );
 
-                        ctx.store.update_table_state(table_id, TableState::Ready).await?;
-                    } else {
-                        debug!(
-                            worker_type = %WorkerType::Apply,
-                            table_id = table_id.0,
-                            %sync_done_lsn,
-                            %current_lsn,
-                            "table not yet ready, current lsn below sync done lsn",
-                        );
+                        worker_state_guard.set_and_store(TableState::Ready, &ctx.store).await?;
+
+                        return Ok(None);
                     }
+
+                    debug!(
+                        worker_type = %WorkerType::Apply,
+                        table_id = table_id.0,
+                        %sync_done_lsn,
+                        %current_lsn,
+                        "table not yet ready, current lsn below sync done lsn",
+                    );
                 }
                 TableState::Catchup { lsn: catchup_lsn } => {
                     drop(worker_state_guard);
@@ -3357,8 +3611,9 @@ mod apply_worker {
                         &worker_state,
                         catchup_lsn,
                         CatchupWaitReason::AlreadyInCatchup,
+                        table_decoding_states,
                     )
-                    .await
+                    .await?
                     {
                         return Ok(Some(exit_intent));
                     }
@@ -3381,7 +3636,7 @@ mod apply_worker {
             );
 
             match table_state {
-                TableState::SyncDone { lsn: sync_done_lsn } => {
+                TableState::SyncDone { lsn: sync_done_lsn, .. } => {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
@@ -3439,7 +3694,6 @@ mod apply_worker {
             table_id,
             ctx.store.clone(),
             ctx.destination.clone(),
-            ctx.shared_table_cache.clone(),
             ctx.out_of_band_source_pool.clone(),
             ctx.shutdown_rx.clone(),
             Arc::clone(&ctx.table_sync_worker_permits),
@@ -3545,11 +3799,12 @@ mod table_sync_worker {
     pub(super) async fn process_syncing_tables_after_flush<S>(
         ctx: &mut TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
+        table_decoding_state: Option<&TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: SharedStateStore,
     {
-        try_complete_catchup(ctx, current_lsn).await
+        try_complete_catchup(ctx, current_lsn, table_decoding_state).await
     }
 
     /// Processes syncing tables outside transaction.
@@ -3559,11 +3814,12 @@ mod table_sync_worker {
     pub(super) async fn process_syncing_tables_when_idle<S>(
         ctx: &mut TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
+        table_decoding_state: Option<&TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: SharedStateStore,
     {
-        try_complete_catchup(ctx, current_lsn).await
+        try_complete_catchup(ctx, current_lsn, table_decoding_state).await
     }
 
     /// Attempts to complete catchup and transition to SyncDone.
@@ -3573,6 +3829,7 @@ mod table_sync_worker {
     async fn try_complete_catchup<S>(
         ctx: &mut TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
+        table_decoding_state: Option<&TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: SharedStateStore,
@@ -3583,6 +3840,8 @@ mod table_sync_worker {
 
         if let TableState::Catchup { lsn: catchup_lsn } = state {
             if current_lsn >= catchup_lsn {
+                let handover = complete_handover(ctx.table_id, table_decoding_state)?;
+
                 info!(
                     %worker_type,
                     %catchup_lsn,
@@ -3591,7 +3850,10 @@ mod table_sync_worker {
                 );
 
                 inner
-                    .set_and_store(TableState::SyncDone { lsn: current_lsn }, &ctx.state_store)
+                    .set_and_store(
+                        TableState::SyncDone { lsn: current_lsn, handover: Some(handover) },
+                        &ctx.state_store,
+                    )
                     .await?;
 
                 info!(
@@ -3613,6 +3875,32 @@ mod table_sync_worker {
         }
 
         Ok(None)
+    }
+
+    /// Builds a complete handover from the table-sync decoder state.
+    fn complete_handover(
+        table_id: TableId,
+        table_decoding_state: Option<&TableDecodingState>,
+    ) -> EtlResult<TableSyncHandover> {
+        match table_decoding_state {
+            Some(TableDecodingState::WithSchema(replicated_table_schema)) => {
+                Ok(TableSyncHandover::from_replicated_table_schema(replicated_table_schema))
+            }
+            Some(TableDecodingState::WaitingForRelation { snapshot_id }) => Err(etl_error!(
+                ErrorKind::InvalidState,
+                "Table-sync handover relation state is incomplete",
+                format!(
+                    "Table {} loaded schema snapshot {}, but PostgreSQL did not emit the Relation \
+                     message required to build its publication and identity masks before SyncDone",
+                    table_id, snapshot_id
+                )
+            )),
+            None => Err(etl_error!(
+                ErrorKind::InvalidState,
+                "Table-sync handover state is missing",
+                format!("Table {} has no row-decoding state at SyncDone", table_id)
+            )),
+        }
     }
 }
 
@@ -3678,39 +3966,103 @@ where
     Ok(table_schema)
 }
 
-/// Retrieves a [`ReplicatedTableSchema`] for the given table from the shared
-/// table state.
-///
-/// Relation handling and table copy both materialize the same runtime schema
-/// shape into the shared cache, so row-event decoding can read that exact
-/// schema directly without reconstructing masks on demand.
-async fn get_replicated_table_schema(
-    table_id: &TableId,
-    shared_table_cache: &SharedTableCache,
-) -> EtlResult<ReplicatedTableSchema> {
-    let Some(shared_table_state) = shared_table_cache.get(table_id).await else {
-        bail!(
-            ErrorKind::InvalidState,
-            "Missing shared table state",
-            format!(
-                "No shared replicated table schema found for table {}, this event can't be \
-                 processed",
-                table_id
-            )
-        );
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio_postgres::types::Type;
+
+    use super::*;
+    use crate::{
+        schema::{ColumnSchema, TableName},
+        store::MemoryStore,
     };
 
-    match shared_table_state {
-        SharedTableState::Ready { replicated_table_schema } => Ok(replicated_table_schema),
-        SharedTableState::WaitingForRelation { .. } => {
-            bail!(
-                ErrorKind::InvalidState,
-                "Waiting for relation state cannot decode row event",
-                format!(
-                    "Table {} is waiting for a relation refresh before row events can be decoded",
-                    table_id
-                )
-            );
-        }
+    fn replicated_schema(snapshot_id: SnapshotId) -> ReplicatedTableSchema {
+        let table_schema = TableSchema::with_snapshot_id(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+            snapshot_id,
+        );
+
+        ReplicatedTableSchema::from_masks(
+            Arc::new(table_schema),
+            ReplicationMask::from_bytes(vec![1]),
+            IdentityMask::from_bytes(vec![1]),
+        )
+    }
+
+    #[test]
+    fn materialized_decoding_state_selects_its_exact_relation_snapshot() {
+        let bootstrap_snapshot_id = SnapshotId::new(10.into());
+        let handover_snapshot_id = SnapshotId::new(20.into());
+        let decoding_state =
+            TableDecodingState::WithSchema(replicated_schema(handover_snapshot_id));
+
+        assert_eq!(
+            select_relation_schema(Some(decoding_state), bootstrap_snapshot_id),
+            RelationSchemaSelection::Exact(handover_snapshot_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_done_handover_loads_its_decoding_state() {
+        let snapshot_id = SnapshotId::new(20.into());
+        let replicated_table_schema = replicated_schema(snapshot_id);
+        let handover = TableSyncHandover::from_replicated_table_schema(&replicated_table_schema);
+        let store = MemoryStore::new();
+        store.store_table_schema(replicated_table_schema.inner().clone()).await.unwrap();
+        let mut table_decoding_states = HashMap::new();
+
+        install_sync_done_handover(
+            &store,
+            &mut table_decoding_states,
+            replicated_table_schema.id(),
+            PgLsn::from(20),
+            Some(&handover),
+        )
+        .await
+        .unwrap();
+
+        let Some(TableDecodingState::WithSchema(loaded_schema)) =
+            table_decoding_states.get(&replicated_table_schema.id())
+        else {
+            panic!("SyncDone handover should load materialized decoding state");
+        };
+        assert_eq!(loaded_schema.inner().snapshot_id, snapshot_id);
+        assert_eq!(loaded_schema.replication_mask(), replicated_table_schema.replication_mask());
+        assert_eq!(loaded_schema.identity_mask(), replicated_table_schema.identity_mask());
+    }
+
+    #[tokio::test]
+    async fn sync_done_handover_replaces_existing_decoding_state() {
+        let snapshot_id = SnapshotId::new(20.into());
+        let replicated_table_schema = replicated_schema(snapshot_id);
+        let handover = TableSyncHandover::from_replicated_table_schema(&replicated_table_schema);
+        let table_id = replicated_table_schema.id();
+        let store = MemoryStore::new();
+        store.store_table_schema(replicated_table_schema.inner().clone()).await.unwrap();
+        let mut table_decoding_states = HashMap::from([(
+            table_id,
+            TableDecodingState::WaitingForRelation { snapshot_id: SnapshotId::new(10.into()) },
+        )]);
+
+        install_sync_done_handover(
+            &store,
+            &mut table_decoding_states,
+            table_id,
+            PgLsn::from(20),
+            Some(&handover),
+        )
+        .await
+        .unwrap();
+
+        let Some(TableDecodingState::WithSchema(loaded_schema)) =
+            table_decoding_states.get(&table_id)
+        else {
+            panic!("SyncDone handover should replace existing decoding state");
+        };
+        assert_eq!(loaded_schema.inner().snapshot_id, snapshot_id);
     }
 }
