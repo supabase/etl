@@ -2057,7 +2057,7 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_respects_column_level_publication() {
+async fn publication_column_filter_changes_update_masks_and_snapshot_ids() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -2325,6 +2325,16 @@ async fn pipeline_respects_column_level_publication() {
         &[1, 1, 0, 1, 0]
     );
     assert_eq!(relation_after_removing_age.replicated_table_schema.inner().column_schemas.len(), 5);
+    assert!(
+        initial_relation_event.replicated_table_schema.inner().snapshot_id
+            < relation_after_adding_email.replicated_table_schema.inner().snapshot_id,
+        "the first publication change must advance the schema snapshot id"
+    );
+    assert!(
+        relation_after_adding_email.replicated_table_schema.inner().snapshot_id
+            < relation_after_removing_age.replicated_table_schema.inner().snapshot_id,
+        "the second publication change must advance the schema snapshot id"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

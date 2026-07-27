@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use etl::{
+    data::{Cell, TableRow},
     destination::{DestinationTableMetadata, DestinationTableSchemaStatus},
     error::ErrorKind,
     event::{Event, EventType, RelationEvent},
@@ -2264,6 +2265,13 @@ struct StaleReplayRow {
     email: Option<String>,
 }
 
+/// Retained row shape for interrupted publication-mask recovery.
+#[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
+struct RecoveryMaskRow {
+    id: i64,
+    name: String,
+}
+
 /// Tests that a stale relation event replayed after a restart is rejected
 /// instead of rewinding the destination schema.
 ///
@@ -2500,9 +2508,60 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
         .await;
 
     let err = destination
-        .write_table_rows(&stale_schema, vec![])
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: stale_schema,
+        })])
         .await
         .expect_err("recovery with a stale schema snapshot should be rejected");
+    assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
+}
+
+/// Interrupted recovery rejects an equal snapshot with a different publication
+/// mask instead of applying DDL for schema state other than the recorded target.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let table_id = TableId::new(4245);
+    let table_schema = Arc::new(TableSchema::with_snapshot_id(
+        table_id,
+        TableName::new("public".to_owned(), "mask_recovery".to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+        ],
+        SnapshotId::new(PgLsn::from(200)),
+    ));
+    let target_mask = ReplicationMask::all(&table_schema);
+    let arriving_schema = ReplicatedTableSchema::from_mask(
+        table_schema,
+        ReplicationMask::from_bytes(vec![1, 0]),
+    );
+    let metadata = DestinationTableMetadata::new_applied(
+        "public_mask_recovery".to_owned(),
+        SnapshotId::new(PgLsn::from(100)),
+        target_mask.clone(),
+    )
+    .with_schema_change(
+        SnapshotId::new(PgLsn::from(200)),
+        target_mask,
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(table_id, metadata).await.unwrap();
+
+    let destination = clickhouse_db
+        .build_destination_with_engine(store, ClickHouseEngine::MergeTree)
+        .await;
+    let err = destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: arriving_schema,
+        })])
+        .await
+        .expect_err("Recovery with a mismatched replication mask should be rejected");
+
     assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
 }
 
@@ -2596,7 +2655,12 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     let restarted_destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;
-    restarted_destination.write_table_rows(&new_schema, vec![]).await.unwrap();
+    restarted_destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: new_schema,
+        })])
+        .await
+        .unwrap();
 
     let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
     assert_eq!(columns, vec!["id", "name", "email"], "recovery must add the interrupted column");
@@ -2610,5 +2674,112 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         recovered_metadata.snapshot_id,
         SnapshotId::new(PgLsn::from(200)),
         "recovery must mark the target snapshot applied"
+    );
+}
+
+/// Tests that recovery removes a column excluded by an interrupted
+/// publication-mask change.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+
+    let table_id = TableId::new(4244);
+    let table_name = TableName::new("public".to_owned(), "recovery_mask_contraction".to_owned());
+    let columns = vec![
+        ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+        ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+        ColumnSchema::new("hidden".to_owned(), Type::TEXT, -1, 3, true),
+    ];
+    let old_table_schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            table_id,
+            table_name.clone(),
+            columns.clone(),
+            SnapshotId::new(PgLsn::from(100)),
+        ))
+        .await
+        .unwrap();
+    let old_mask = ReplicationMask::all(&old_table_schema);
+    let old_schema = ReplicatedTableSchema::from_mask(old_table_schema, old_mask.clone());
+
+    let destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+    destination
+        .write_table_rows(
+            &old_schema,
+            vec![TableRow::new(vec![
+                Cell::I64(1),
+                Cell::String("Alice".to_owned()),
+                Cell::String("private".to_owned()),
+            ])],
+        )
+        .await
+        .unwrap();
+
+    let target_table_schema = Arc::new(TableSchema::with_snapshot_id(
+        table_id,
+        table_name,
+        columns,
+        SnapshotId::new(PgLsn::from(200)),
+    ));
+    let target_mask = ReplicationMask::from_bytes(vec![1, 1, 0]);
+    let target_schema =
+        ReplicatedTableSchema::from_mask(Arc::clone(&target_table_schema), target_mask.clone());
+
+    let applied_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation");
+    let clickhouse_table_name = applied_metadata.destination_table_id.clone();
+    let interrupted_metadata = DestinationTableMetadata::new_applied(
+        clickhouse_table_name.clone(),
+        SnapshotId::new(PgLsn::from(100)),
+        old_mask,
+    )
+    .with_schema_change(
+        target_table_schema.snapshot_id,
+        target_mask.clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
+
+    let restarted_destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+    restarted_destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: target_schema,
+        })])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        clickhouse_db.column_names(&clickhouse_table_name).await,
+        vec!["id", "name"],
+        "recovery must remove the column excluded by the target mask"
+    );
+    let recovered_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should be applied after recovery");
+    assert_eq!(recovered_metadata.snapshot_id, target_table_schema.snapshot_id);
+    assert_eq!(recovered_metadata.replication_mask, target_mask);
+
+    let rows: Vec<RecoveryMaskRow> = clickhouse_db
+        .query(&format!(
+            "SELECT id, name FROM \"{clickhouse_table_name}\" ORDER BY id"
+        ))
+        .await;
+    assert_eq!(
+        rows,
+        vec![RecoveryMaskRow { id: 1, name: "Alice".to_owned() }],
+        "Recovery must retain values from columns that remain published"
     );
 }

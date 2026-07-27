@@ -1,85 +1,82 @@
 //! Shared helpers for recovering interrupted destination schema changes.
 
+#[cfg(any(feature = "clickhouse", feature = "ducklake"))]
 use etl::schema::{ReplicationMask, TableSchema};
 
-/// Builds the best previous-schema replication mask available during recovery.
+/// Builds a conservative previous replication mask for interrupted DDL.
 ///
 /// [`etl::destination::DestinationTableMetadata`] stores the target mask, not
-/// the previous mask. For a source-schema change we project target bits back
-/// by ordinal position. Columns that no longer exist in the target schema are
-/// treated as previously replicated so the idempotent DDL planner can drop
-/// them if they exist.
-pub(crate) fn previous_replication_mask_for_recovery(
+/// the previous mask. Treat every previous-schema column as potentially
+/// present so an idempotent DDL planner removes target-excluded columns if they
+/// exist. Callers must separately reconcile target columns that may have been
+/// absent from the previous physical schema.
+#[cfg(any(feature = "clickhouse", feature = "ducklake"))]
+pub(crate) fn conservative_previous_replication_mask(
     previous_schema: &TableSchema,
-    target_schema: &TableSchema,
-    target_replication_mask: &ReplicationMask,
 ) -> ReplicationMask {
-    let mask = previous_schema
-        .column_schemas
-        .iter()
-        .map(|previous_column| {
-            target_schema
-                .column_schemas
-                .iter()
-                .position(|target_column| {
-                    target_column.ordinal_position == previous_column.ordinal_position
-                })
-                .and_then(|index| target_replication_mask.as_slice().get(index).copied())
-                .unwrap_or(1)
-        })
-        .collect();
-
-    ReplicationMask::from_bytes(mask)
+    ReplicationMask::all(previous_schema)
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(feature = "clickhouse", feature = "ducklake"))]
+    use std::sync::Arc;
+
+    #[cfg(any(feature = "clickhouse", feature = "ducklake"))]
     use etl::schema::{
-        ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema, Type,
+        ColumnSchema, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableName,
+        TableSchema, Type,
     };
 
-    use crate::recovery::previous_replication_mask_for_recovery;
+    #[cfg(any(feature = "clickhouse", feature = "ducklake"))]
+    use crate::recovery::conservative_previous_replication_mask;
 
+    #[cfg(any(feature = "clickhouse", feature = "ducklake"))]
     #[test]
-    fn previous_replication_mask_for_recovery_matches_previous_schema_width() {
-        let previous_schema = TableSchema::new(
-            TableId::new(4),
+    fn conservative_previous_mask_exposes_filter_contraction_to_diff() {
+        let previous_schema = Arc::new(TableSchema::new(
+            TableId::new(5),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
                 ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
                 ColumnSchema::new("hidden".to_owned(), Type::TEXT, -1, 2, true),
             ],
-        );
-        let target_schema = TableSchema::with_snapshot_id(
+        ));
+        let target_schema = Arc::new(TableSchema::with_snapshot_id(
             previous_schema.id,
             previous_schema.name.clone(),
-            vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("hidden".to_owned(), Type::TEXT, -1, 2, true),
-                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
-            ],
+            previous_schema.column_schemas.clone(),
             SnapshotId::from(42_u64),
+        ));
+        let previous_mask = conservative_previous_replication_mask(&previous_schema);
+        assert_eq!(previous_mask.as_slice(), &[1, 1]);
+        let previous = ReplicatedTableSchema::from_mask(previous_schema, previous_mask);
+        let target = ReplicatedTableSchema::from_mask(
+            target_schema,
+            ReplicationMask::from_bytes(vec![1, 0]),
         );
-        let target_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
 
-        let previous_mask =
-            previous_replication_mask_for_recovery(&previous_schema, &target_schema, &target_mask);
+        let diff = previous.diff(&target);
 
-        assert_eq!(previous_mask.to_bytes(), vec![1, 0]);
+        assert_eq!(
+            diff.columns_to_remove.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+            vec!["hidden"]
+        );
     }
 
+    #[cfg(any(feature = "clickhouse", feature = "ducklake"))]
     #[test]
-    fn previous_replication_mask_for_recovery_keeps_removed_columns_for_drop_diff() {
-        let previous_schema = TableSchema::new(
-            TableId::new(5),
+    fn conservative_previous_mask_exposes_removed_source_column_to_diff() {
+        let previous_schema = Arc::new(TableSchema::new(
+            TableId::new(6),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
                 ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
                 ColumnSchema::new("old_col".to_owned(), Type::TEXT, -1, 3, true),
             ],
-        );
-        let target_schema = TableSchema::with_snapshot_id(
+        ));
+        let target_schema = Arc::new(TableSchema::with_snapshot_id(
             previous_schema.id,
             previous_schema.name.clone(),
             vec![
@@ -87,12 +84,16 @@ mod tests {
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ],
             SnapshotId::from(43_u64),
+        ));
+        let previous_mask = conservative_previous_replication_mask(&previous_schema);
+        let previous = ReplicatedTableSchema::from_mask(previous_schema, previous_mask);
+        let target = ReplicatedTableSchema::all(target_schema);
+
+        let diff = previous.diff(&target);
+
+        assert_eq!(
+            diff.columns_to_remove.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+            vec!["old_col"]
         );
-        let target_mask = ReplicationMask::from_bytes(vec![1, 1]);
-
-        let previous_mask =
-            previous_replication_mask_for_recovery(&previous_schema, &target_schema, &target_mask);
-
-        assert_eq!(previous_mask.to_bytes(), vec![1, 1, 1]);
     }
 }

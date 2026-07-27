@@ -19,7 +19,7 @@ use crate::{
     etl_error,
     observability::register_metrics,
     postgres::{OutOfBandSourcePool, client::PgReplicationClient, migrations},
-    replication::{SharedTableCache, state::TableState},
+    replication::state::TableState,
     runtime::{
         ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool,
         concurrency::create_shutdown_channel,
@@ -201,11 +201,6 @@ where
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create the shared per-table protocol cache used by both the apply worker
-        // and table sync workers. It tracks the latest schema snapshot and
-        // replication mask for each table.
-        let shared_table_cache = SharedTableCache::new();
-
         // We create a shared lazy pool for low-frequency, out-of-band source
         // database queries that should not use the replication connection.
         let out_of_band_source_pool = OutOfBandSourcePool::new(
@@ -220,7 +215,6 @@ where
             Arc::clone(&pool),
             self.store.clone(),
             self.destination.clone(),
-            shared_table_cache,
             out_of_band_source_pool,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,

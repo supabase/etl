@@ -36,6 +36,7 @@ type TableStateTypeCondition = (TableId, TableStateType, Arc<Notify>);
 type TableStateCondition = (TableId, Arc<Notify>, Box<dyn Fn(&TableState) -> bool + Send + Sync>);
 type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
 type TableSchemaPruneCondition = Arc<Notify>;
+type ReplicationProgressCondition = (WorkerType, PgLsn, Arc<Notify>);
 
 struct Inner {
     table_states: TableStates,
@@ -47,7 +48,10 @@ struct Inner {
     table_state_conditions: Vec<TableStateCondition>,
     table_schema_count_conditions: Vec<TableSchemaCountCondition>,
     table_schema_prune_conditions: Vec<TableSchemaPruneCondition>,
+    replication_progress_conditions: Vec<ReplicationProgressCondition>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
+    fail_next_table_state_update: bool,
+    fail_next_table_state_update_to: Option<(TableStateType, Arc<Notify>)>,
 }
 
 impl Inner {
@@ -80,6 +84,17 @@ impl Inner {
         self.table_schema_count_conditions.retain(|(tid, expected_count, notify)| {
             let schemas_count = self.table_schemas.snapshots_count(*tid);
             let should_retain = schemas_count < *expected_count;
+            if !should_retain {
+                notify.notify_one();
+            }
+            should_retain
+        });
+
+        self.replication_progress_conditions.retain(|(worker_type, expected_lsn, notify)| {
+            let should_retain = self
+                .replication_progress
+                .get(worker_type)
+                .is_none_or(|stored_lsn| stored_lsn < expected_lsn);
             if !should_retain {
                 notify.notify_one();
             }
@@ -119,7 +134,10 @@ impl NotifyingStore {
             table_state_conditions: Vec::new(),
             table_schema_count_conditions: Vec::new(),
             table_schema_prune_conditions: Vec::new(),
+            replication_progress_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
+            fail_next_table_state_update: false,
+            fail_next_table_state_update_to: None,
         };
 
         Self { inner: Arc::new(RwLock::new(inner)) }
@@ -129,6 +147,29 @@ impl NotifyingStore {
     pub async fn get_table_states(&self) -> TableStates {
         let inner = self.inner.read().await;
         Arc::clone(&inner.table_states)
+    }
+
+    /// Returns the previously stored states for one table in update order.
+    pub async fn get_table_state_history(&self, table_id: TableId) -> Vec<TableState> {
+        let inner = self.inner.read().await;
+        inner.table_state_history.get(&table_id).cloned().unwrap_or_default()
+    }
+
+    /// Makes the next table-state update fail before modifying the store.
+    pub async fn fail_next_table_state_update(&self) {
+        self.inner.write().await.fail_next_table_state_update = true;
+    }
+
+    /// Makes the next table-state update to the expected type fail.
+    pub async fn fail_next_table_state_update_to(
+        &self,
+        expected_state: TableStateType,
+    ) -> TimedNotify {
+        let notify = Arc::new(Notify::new());
+        self.inner.write().await.fail_next_table_state_update_to =
+            Some((expected_state, Arc::clone(&notify)));
+
+        TimedNotify::new(notify)
     }
 
     /// Returns the latest schema snapshot stored for each table.
@@ -227,6 +268,24 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
+    /// Registers a notification that fires when a future progress write reaches
+    /// at least the expected LSN for a worker.
+    pub async fn notify_on_replication_progress(
+        &self,
+        worker_type: WorkerType,
+        expected_lsn: PgLsn,
+    ) -> TimedNotify {
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+        inner.replication_progress_conditions.push((
+            worker_type,
+            expected_lsn,
+            Arc::clone(&notify),
+        ));
+
+        TimedNotify::new(notify)
+    }
+
     /// Resets one table to [`TableState::Init`] and clears its state
     /// history.
     pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {
@@ -277,6 +336,25 @@ impl StateStore for NotifyingStore {
 
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
         let mut guard = self.inner.write().await;
+        if std::mem::take(&mut guard.fail_next_table_state_update) {
+            return Err(etl_error!(ErrorKind::InvalidState, "Injected table state update failure"));
+        }
+        if guard
+            .fail_next_table_state_update_to
+            .as_ref()
+            .is_some_and(|(expected_state, _)| {
+                updates.iter().any(|(_, state)| state.as_type() == *expected_state)
+            })
+        {
+            let (_, notify) = guard
+                .fail_next_table_state_update_to
+                .take()
+                .expect("matching table state failure should remain configured");
+            notify.notify_one();
+
+            return Err(etl_error!(ErrorKind::InvalidState, "Injected table state update failure"));
+        }
+
         let inner = &mut *guard;
 
         let states = Arc::make_mut(&mut inner.table_states);
@@ -332,7 +410,7 @@ impl StateStore for NotifyingStore {
         flush_lsn: PgLsn,
     ) -> EtlResult<PgLsn> {
         let mut inner = self.inner.write().await;
-        let stored_lsn = inner
+        let stored_lsn = *inner
             .replication_progress
             .entry(worker_type)
             .and_modify(|stored_lsn| {
@@ -341,8 +419,9 @@ impl StateStore for NotifyingStore {
                 }
             })
             .or_insert(flush_lsn);
+        inner.check_conditions();
 
-        Ok(*stored_lsn)
+        Ok(stored_lsn)
     }
 
     async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {

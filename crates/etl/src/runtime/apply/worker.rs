@@ -20,9 +20,7 @@ use crate::{
         OutOfBandSourcePool,
         client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
     },
-    replication::{
-        ApplyLoop, ApplyLoopResult, ApplyWorkerContext, SharedTableCache, WorkerContext, WorkerType,
-    },
+    replication::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext, WorkerType},
     runtime::{
         BatchBudgetController, MemoryMonitor, TableSyncWorkerPool,
         concurrency::ShutdownRx,
@@ -81,7 +79,6 @@ pub(crate) struct ApplyWorker<S, D> {
     pool: Arc<TableSyncWorkerPool>,
     store: S,
     destination: D,
-    shared_table_cache: SharedTableCache,
     out_of_band_source_pool: OutOfBandSourcePool,
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
@@ -103,7 +100,6 @@ impl<S, D> ApplyWorker<S, D> {
         pool: Arc<TableSyncWorkerPool>,
         store: S,
         destination: D,
-        shared_table_cache: SharedTableCache,
         out_of_band_source_pool: OutOfBandSourcePool,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
@@ -122,7 +118,6 @@ impl<S, D> ApplyWorker<S, D> {
             pool,
             store,
             destination,
-            shared_table_cache,
             out_of_band_source_pool,
             shutdown_rx,
             table_sync_worker_permits,
@@ -240,7 +235,6 @@ where
         let pool = Arc::clone(&self.pool);
         let store = self.store.clone();
         let destination = self.destination.clone();
-        let shared_table_cache = self.shared_table_cache.clone();
         let table_sync_worker_permits = Arc::clone(&self.table_sync_worker_permits);
         let mut shutdown_rx = self.shutdown_rx.clone();
         let mut retry_attempts: u32 = 0;
@@ -252,7 +246,6 @@ where
                 pool: Arc::clone(&pool),
                 store: store.clone(),
                 destination: destination.clone(),
-                shared_table_cache: shared_table_cache.clone(),
                 out_of_band_source_pool: self.out_of_band_source_pool.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 table_sync_worker_permits: Arc::clone(&table_sync_worker_permits),
@@ -302,7 +295,6 @@ where
             pool: self.pool,
             store: self.store.clone(),
             destination: self.destination.clone(),
-            shared_table_cache: self.shared_table_cache.clone(),
             out_of_band_source_pool: self.out_of_band_source_pool.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
             table_sync_worker_permits: self.table_sync_worker_permits,
@@ -318,12 +310,12 @@ where
             &replication_client,
             self.store,
             self.destination,
-            self.shared_table_cache,
             self.out_of_band_source_pool,
             worker_context,
             self.shutdown_rx,
             self.memory_monitor,
             self.batch_budget,
+            None,
         )
         .await?;
 

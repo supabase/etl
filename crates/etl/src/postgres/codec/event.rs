@@ -38,6 +38,12 @@ pub(crate) const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
 pub(crate) struct SchemaChangeMessage {
     /// The command tag from `pg_event_trigger_ddl_commands().command_tag`.
     pub(crate) command_tag: String,
+    /// The publication changed by an `ALTER PUBLICATION` command.
+    ///
+    /// This is absent for table DDL and payloads emitted before publication
+    /// schema change messages were introduced. Publication DDL without this
+    /// field is rejected by [`SchemaChangeMessage::applies_to_publication`].
+    pub(crate) publication_name: Option<String>,
     /// The schema name from `pg_namespace.nspname`.
     pub(crate) nspname: String,
     /// The table name from `pg_class.relname`.
@@ -59,6 +65,19 @@ impl SchemaChangeMessage {
     /// Returns the table identifier as [`TableId`].
     pub(crate) fn table_id(&self) -> TableId {
         TableId::new(self.oid as u32)
+    }
+
+    /// Returns whether this message applies to `publication_name`.
+    ///
+    /// Table DDL is global to every publication containing the table.
+    /// Publication DDL without an explicit publication is rejected so it
+    /// cannot mutate another pipeline's schema state.
+    pub(crate) fn applies_to_publication(&self, publication_name: &str) -> bool {
+        if self.command_tag == "ALTER PUBLICATION" {
+            return self.publication_name.as_deref() == Some(publication_name);
+        }
+
+        true
     }
 
     /// Converts a [`SchemaChangeMessage`] to a [`TableSchema`] with a specific
@@ -979,11 +998,11 @@ mod tests {
     use tokio_postgres::types::{PgLsn, Type};
 
     use super::{
-        DDL_MESSAGE_PREFIX, IdentityMessage, calculate_tuple_bytes, convert_tuple_to_row,
-        convert_update_tuple_to_updated_table_row, delete_message_payload_bytes,
-        insert_message_payload_bytes, normalize_key_tuple_to_row, parse_event_from_delete_message,
-        parse_event_from_update_message, schema_snapshot_id_from_message,
-        update_message_payload_bytes,
+        DDL_MESSAGE_PREFIX, IdentityMessage, SchemaChangeMessage, calculate_tuple_bytes,
+        convert_tuple_to_row, convert_update_tuple_to_updated_table_row,
+        delete_message_payload_bytes, insert_message_payload_bytes, normalize_key_tuple_to_row,
+        parse_event_from_delete_message, parse_event_from_update_message,
+        schema_snapshot_id_from_message, update_message_payload_bytes,
     };
     use crate::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
@@ -1039,6 +1058,91 @@ mod tests {
             schema_snapshot_id_from_message(&message),
             SnapshotId::new(PgLsn::from(wal_start))
         );
+    }
+
+    #[test]
+    fn schema_change_message_scopes_optional_publication() {
+        let unscoped = r#"{
+            "command_tag": "ALTER TABLE",
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [],
+                "relreplident": "d",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#
+        .parse::<SchemaChangeMessage>()
+        .unwrap();
+        assert!(unscoped.applies_to_publication("pipeline_publication"));
+
+        let null_scoped_table = r#"{
+            "command_tag": "ALTER TABLE",
+            "publication_name": null,
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [],
+                "relreplident": "d",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#
+        .parse::<SchemaChangeMessage>()
+        .unwrap();
+        assert!(null_scoped_table.applies_to_publication("pipeline_publication"));
+
+        let unscoped_publication = r#"{
+            "command_tag": "ALTER PUBLICATION",
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [],
+                "relreplident": "d",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#
+        .parse::<SchemaChangeMessage>()
+        .unwrap();
+        assert!(!unscoped_publication.applies_to_publication("pipeline_publication"));
+
+        let scoped = r#"{
+            "command_tag": "ALTER PUBLICATION",
+            "publication_name": "pipeline_publication",
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [],
+                "relreplident": "d",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#
+        .parse::<SchemaChangeMessage>()
+        .unwrap();
+        assert!(scoped.applies_to_publication("pipeline_publication"));
+        assert!(!scoped.applies_to_publication("other_publication"));
+
+        let malformed = r#"{
+            "command_tag": "ALTER PUBLICATION",
+            "publication_name": 42,
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [],
+                "relreplident": "d",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#;
+        assert!(malformed.parse::<SchemaChangeMessage>().is_err());
     }
 
     fn event_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {

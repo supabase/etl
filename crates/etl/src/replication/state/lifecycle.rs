@@ -9,7 +9,41 @@ use crate::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     replication::state::{TableError, TableRetryPolicy},
+    schema::{ReplicatedTableSchema, SnapshotId},
 };
+
+/// Complete durable row-decoding state transferred at table-sync handover.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableSyncHandover {
+    /// Schema snapshot used by the materialized masks.
+    #[serde(with = "lsn_serde")]
+    snapshot_lsn: PgLsn,
+    /// Publication-column membership in table-schema order.
+    replication_mask: Vec<u8>,
+    /// Replica-identity membership in table-schema order.
+    identity_mask: Vec<u8>,
+}
+
+impl TableSyncHandover {
+    /// Captures handover state from a materialized replicated schema.
+    pub(crate) fn from_replicated_table_schema(schema: &ReplicatedTableSchema) -> Self {
+        Self {
+            snapshot_lsn: schema.inner().snapshot_id.into_inner(),
+            replication_mask: schema.replication_mask().to_bytes(),
+            identity_mask: schema.identity_mask().to_bytes(),
+        }
+    }
+
+    /// Returns the schema snapshot selected at handover.
+    pub(crate) fn snapshot_id(&self) -> SnapshotId {
+        self.snapshot_lsn.into()
+    }
+
+    /// Returns the materialized publication and identity masks.
+    pub(crate) fn masks(&self) -> (&[u8], &[u8]) {
+        (&self.replication_mask, &self.identity_mask)
+    }
+}
 
 /// Replication lifecycle state for a source table.
 ///
@@ -70,11 +104,25 @@ pub enum TableState {
         /// This LSN is guaranteed to be >= `Catchup.lsn`.
         #[serde(with = "lsn_serde")]
         lsn: PgLsn,
+        /// Durable row-decoding state at the handover boundary.
+        ///
+        /// This is optional for compatibility with `SyncDone` rows written by
+        /// versions that predate durable handover state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handover: Option<TableSyncHandover>,
     },
     /// Set by apply worker when it has caught up with the table-sync worker's
     /// catch-up LSN position. Tables with this state have successfully run
     /// their initial table copy and catch-up work and any changes to them
     /// will now be applied by the apply worker only.
+    ///
+    /// Recovery limitation: this state no longer retains the durable
+    /// [`TableSyncHandover`]. If ETL crashes after storing `Ready` but before
+    /// storing apply-worker progress, restart can resume before the handover.
+    /// A copy-time `0/0` snapshot taken after a DDL may then be paired with an
+    /// older Relation while replaying rows from before that DDL. This is not
+    /// guaranteed to fail closed, so the affected table must be reset and
+    /// resynchronized.
     Ready,
     /// Set by either the table-sync worker or the apply worker when a table
     /// encounters an error during replication. Contains diagnostic information
@@ -172,7 +220,7 @@ impl fmt::Display for TableState {
             Self::FinishedCopy => write!(f, "finished_copy"),
             Self::SyncWait { lsn } => write!(f, "sync_wait({lsn})"),
             Self::Catchup { lsn } => write!(f, "catchup({lsn})"),
-            Self::SyncDone { lsn } => write!(f, "sync_done({lsn})"),
+            Self::SyncDone { lsn, .. } => write!(f, "sync_done({lsn})"),
             Self::Ready => write!(f, "ready"),
             Self::Errored { .. } => write!(f, "errored"),
         }
@@ -344,7 +392,7 @@ mod tests {
     use crate::{
         error::ErrorKind,
         etl_error,
-        replication::state::{TableRetryPolicy, TableState, TableStateType},
+        replication::state::{TableRetryPolicy, TableState, TableStateType, TableSyncHandover},
     };
 
     #[test]
@@ -356,15 +404,37 @@ mod tests {
         assert!(matches!(deserialized, TableState::Init));
 
         let lsn = "0/1000000".parse::<PgLsn>().unwrap();
-        let sync_done = TableState::SyncDone { lsn };
+        let sync_done = TableState::SyncDone { lsn, handover: None };
         let json = serde_json::to_value(&sync_done).unwrap();
         assert_eq!(json, serde_json::json!({"type": "sync_done", "lsn": "0/1000000"}));
         let deserialized: TableState = serde_json::from_value(json).unwrap();
-        if let TableState::SyncDone { lsn: got } = deserialized {
+        if let TableState::SyncDone { lsn: got, handover: None } = deserialized {
             assert_eq!(got, lsn);
         } else {
             panic!("Expected SyncDone variant");
         }
+
+        let materialized_handover = TableSyncHandover {
+            snapshot_lsn: "0/900000".parse::<PgLsn>().unwrap(),
+            replication_mask: vec![1, 0, 1],
+            identity_mask: vec![1, 0, 0],
+        };
+        let sync_done = TableState::SyncDone { lsn, handover: Some(materialized_handover) };
+        let json = serde_json::to_value(&sync_done).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "sync_done",
+                "lsn": "0/1000000",
+                "handover": {
+                    "snapshot_lsn": "0/900000",
+                    "replication_mask": [1, 0, 1],
+                    "identity_mask": [1, 0, 0]
+                }
+            })
+        );
+        let deserialized: TableState = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized, sync_done);
 
         let errored = TableState::Errored {
             reason: "Test error".to_owned(),
@@ -483,7 +553,7 @@ mod tests {
             TableState::Init,
             TableState::DataSync,
             TableState::FinishedCopy,
-            TableState::SyncDone { lsn: "0/1000000".parse::<PgLsn>().unwrap() },
+            TableState::SyncDone { lsn: "0/1000000".parse::<PgLsn>().unwrap(), handover: None },
             TableState::Ready,
             TableState::Errored {
                 reason: "broken".to_owned(),
@@ -508,8 +578,12 @@ mod tests {
 
             assert_eq!(state.as_type(), restored.as_type());
             match (&state, &restored) {
-                (TableState::SyncDone { lsn: a }, TableState::SyncDone { lsn: b }) => {
+                (
+                    TableState::SyncDone { lsn: a, handover: handover_a },
+                    TableState::SyncDone { lsn: b, handover: handover_b },
+                ) => {
                     assert_eq!(a, b);
+                    assert_eq!(handover_a, handover_b);
                 }
                 (
                     TableState::Errored { reason: r1, solution: s1, retry_policy: rp1, .. },

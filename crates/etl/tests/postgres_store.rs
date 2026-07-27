@@ -91,7 +91,7 @@ async fn state_store_operations() {
 
     // Test SyncDone state with LSN
     let lsn = "0/1000000".parse::<PgLsn>().unwrap();
-    let sync_done_state = TableState::SyncDone { lsn };
+    let sync_done_state = TableState::SyncDone { lsn, handover: None };
     store.update_table_state(table_id, sync_done_state.clone()).await.unwrap();
 
     let state = store.get_table_state(table_id).await.unwrap();
@@ -793,7 +793,7 @@ async fn state_transitions_and_history() {
     store.update_table_state(table_id, finished_copy_state.clone()).await.unwrap();
 
     let lsn = "0/2000000".parse::<PgLsn>().unwrap();
-    let sync_done_state = TableState::SyncDone { lsn };
+    let sync_done_state = TableState::SyncDone { lsn, handover: None };
     store.update_table_state(table_id, sync_done_state.clone()).await.unwrap();
 
     let ready_state = TableState::Ready;

@@ -22,8 +22,8 @@ use crate::{
     pipeline::PipelineId,
     postgres::{OutOfBandSourcePool, client::PgReplicationClient},
     replication::{
-        ApplyLoop, ApplyLoopResult, SharedTableCache, TableSyncResult, TableSyncWorkerContext,
-        WorkerContext, WorkerType, start_table_sync,
+        ApplyLoop, ApplyLoopResult, TableSyncResult, TableSyncWorkerContext, WorkerContext,
+        WorkerType, start_table_sync,
         state::{TableError, TableRetryPolicy, TableState, TableStateType},
     },
     runtime::{
@@ -119,28 +119,20 @@ impl TableSyncWorkerStateInner {
         self.retry_attempts = 0;
     }
 
-    /// Updates the table's table state with conditional persistence to
-    /// external storage.
+    /// Persists the table state when required, then updates it in memory.
     ///
-    /// This method extends the basic [`TableSyncWorkerStateInner::set()`]
-    /// method with durable persistence capabilities, ensuring that
-    /// important state transitions survive process restarts and failures.
-    ///
-    /// The persistence behavior is controlled by the state type's storage
-    /// requirements.
+    /// Persisted transitions are not visible to waiting workers until storage
+    /// succeeds. In-memory-only transitions are applied immediately.
     pub(crate) async fn set_and_store<S: StateStore>(
         &mut self,
         state: TableState,
         state_store: &S,
     ) -> EtlResult<()> {
-        // Apply in-memory state change first for immediate visibility
-        self.set(state.clone());
-
-        // Conditionally persist based on state type requirements
         if state.as_type().should_store() {
-            // Persist to external storage - this may fail without affecting in-memory state
-            state_store.update_table_state(self.table_id, state).await?;
+            state_store.update_table_state(self.table_id, state.clone()).await?;
         }
+
+        self.set(state);
 
         Ok(())
     }
@@ -329,7 +321,6 @@ pub(crate) struct TableSyncWorker<S, D> {
     table_id: TableId,
     store: S,
     destination: D,
-    shared_table_cache: SharedTableCache,
     out_of_band_source_pool: OutOfBandSourcePool,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
@@ -353,7 +344,6 @@ impl<S, D> TableSyncWorker<S, D> {
         table_id: TableId,
         store: S,
         destination: D,
-        shared_table_cache: SharedTableCache,
         out_of_band_source_pool: OutOfBandSourcePool,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
@@ -367,7 +357,6 @@ impl<S, D> TableSyncWorker<S, D> {
             table_id,
             store,
             destination,
-            shared_table_cache,
             out_of_band_source_pool,
             shutdown_rx,
             run_permit,
@@ -627,7 +616,6 @@ where
         let config = Arc::clone(&self.config);
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
-        let shared_table_cache = self.shared_table_cache.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let run_permit = Arc::clone(&self.run_permit);
 
@@ -639,7 +627,6 @@ where
                 table_id,
                 store: store.clone(),
                 destination: destination.clone(),
-                shared_table_cache: shared_table_cache.clone(),
                 out_of_band_source_pool: self.out_of_band_source_pool.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 run_permit: Arc::clone(&run_permit),
@@ -744,7 +731,6 @@ where
             state.clone(),
             self.store.clone(),
             self.destination.clone(),
-            &self.shared_table_cache,
             self.out_of_band_source_pool.clone(),
             self.shutdown_rx.clone(),
             self.memory_monitor.clone(),
@@ -752,8 +738,10 @@ where
         )
         .await;
 
-        let start_lsn = match table_sync_result {
-            Ok(TableSyncResult::Completed { start_lsn }) => start_lsn,
+        let (start_lsn, replicated_table_schema) = match table_sync_result {
+            Ok(TableSyncResult::Completed { start_lsn, replicated_table_schema }) => {
+                (start_lsn, replicated_table_schema)
+            }
             Ok(TableSyncResult::Stopped) => {
                 info!(table_id = self.table_id.0, "table sync was stopped");
 
@@ -788,12 +776,12 @@ where
             &replication_client,
             self.store.clone(),
             self.destination.clone(),
-            self.shared_table_cache.clone(),
             self.out_of_band_source_pool.clone(),
             worker_context,
             self.shutdown_rx.clone(),
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
+            Some(replicated_table_schema),
         )
         .await?;
 
@@ -805,14 +793,17 @@ where
                 // again at the cleanup boundary so a future ordering regression cannot delete
                 // the progress row and replication slot prematurely.
                 //
-                // The apply worker may already have persisted `Ready`, but while this worker
-                // is active it leaves this shared in-memory state at `SyncDone`.
+                // The apply worker may already have observed the durable handover and moved the
+                // shared state to `Ready` before this worker reaches cleanup.
                 let table_state = state.lock().await.table_state().as_type();
-                if table_state != TableStateType::SyncDone {
+                if !matches!(table_state, TableStateType::SyncDone | TableStateType::Ready) {
                     bail!(
                         ErrorKind::InvalidState,
-                        "Table sync apply loop completed before reaching SyncDone",
-                        format!("Expected SyncDone before resource cleanup, found {table_state}")
+                        "Table sync apply loop completed before reaching the expected state",
+                        format!(
+                            "Expected SyncDone or Ready before resource cleanup, found \
+                             {table_state}"
+                        )
                     );
                 }
 

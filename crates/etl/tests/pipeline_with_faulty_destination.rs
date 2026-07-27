@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use etl::{
+    data::Cell,
     error::ErrorKind,
     event::{Event, EventType},
     pipeline::PipelineId,
@@ -76,6 +77,125 @@ async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
     let err = result.unwrap_err();
     assert!(err.kinds().contains(&ErrorKind::DestinationQueryFailed));
     assert!(destination.shutdown_called().await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn apply_worker_retry_rebases_relation_schema_selection() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let apply_slot_name: String =
+        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    pipeline.start().await.unwrap();
+    users_ready_notify.notified().await;
+
+    // The inner destination applies the transaction, but the apply worker sees
+    // a timed-retriable failure and reconnects from its durable start LSN.
+    destination
+        .inject_fault(
+            FaultyOp::WriteEvents,
+            FaultAction::fail_after_write(
+                ErrorKind::DestinationTimeout,
+                "injected ambiguous streaming failure",
+            ),
+        )
+        .await;
+
+    let (_, active_pid) =
+        replication_slot_state(database.client.as_ref().unwrap(), &apply_slot_name).await;
+    let old_pid = active_pid.expect("apply walsender should be active");
+
+    let replayed_events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 2),
+            EventCondition::TableCount(EventType::Insert, table_id, 2),
+        ])
+        .await;
+
+    // Both schema versions occur in one transaction. On retry, the first
+    // Relation must resolve the pre-DDL schema instead of reusing the
+    // post-DDL runtime schema cached by the failed attempt.
+    let transaction = database.begin_transaction().await;
+    transaction
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before", &1])
+        .await
+        .unwrap();
+    transaction
+        .run_sql(&format!(
+            "alter table {} drop column age",
+            users_schema.name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction.insert_values(users_schema.name.clone(), &["name"], &[&"after"]).await.unwrap();
+    transaction.commit_transaction().await;
+
+    wait_for_new_walsender(database.client.as_ref().unwrap(), &apply_slot_name, old_pid).await;
+    replayed_events_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let relation_schemas = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) if relation.replicated_table_schema.id() == table_id => {
+                Some(&relation.replicated_table_schema)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(relation_schemas.len(), 2);
+    assert_eq!(
+        relation_schemas[0]
+            .column_schemas()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "name", "age"]
+    );
+    assert_eq!(
+        relation_schemas[1]
+            .column_schemas()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "name"]
+    );
+    assert!(relation_schemas[0].inner().snapshot_id < relation_schemas[1].inner().snapshot_id);
+
+    let insert_values = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
+                Some(insert.table_row.values().to_vec())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        insert_values,
+        vec![
+            vec![Cell::I64(1), Cell::String("before".to_owned()), Cell::I32(1)],
+            vec![Cell::I64(2), Cell::String("after".to_owned())],
+        ]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

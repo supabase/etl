@@ -223,6 +223,94 @@ async fn pipeline_start_runs_source_migrations_without_postgres_store_tables() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn source_schema_change_trigger_supports_table_and_publication_changes() {
+    init_test_tracing();
+
+    let database = spawn_unmigrated_database().await;
+    run_source_migrations(&database.config).await.unwrap();
+
+    let client = database.client.as_ref().expect("database client should be initialized");
+    let row = client
+        .query_one(
+            "select evtevent, evttags
+            from pg_catalog.pg_event_trigger
+            where evtname = 'supabase_etl_ddl_message_trigger'",
+            &[],
+        )
+        .await
+        .unwrap();
+    let event: String = row.get(0);
+    let tags: Vec<String> = row.get(1);
+
+    assert_eq!(event, "ddl_command_end");
+    assert_eq!(
+        tags.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from(["ALTER PUBLICATION".to_owned(), "ALTER TABLE".to_owned()])
+    );
+
+    client
+        .batch_execute(
+            "create table public.publication_trigger_first (
+                id bigint primary key,
+                payload text
+            );
+            create table public.publication_trigger_second (
+                id bigint primary key,
+                payload text
+            );
+            create publication publication_trigger_compatibility
+                for table public.publication_trigger_first;
+            alter publication publication_trigger_compatibility
+                set table
+                    public.publication_trigger_first,
+                    public.publication_trigger_second;
+            alter table public.publication_trigger_first
+                add column extra_payload text;
+            alter publication publication_trigger_compatibility
+                set (publish = 'insert');
+            alter publication publication_trigger_compatibility
+                drop table public.publication_trigger_second;
+            alter publication publication_trigger_compatibility
+                add table public.publication_trigger_second;",
+        )
+        .await
+        .unwrap();
+
+    let previous_version =
+        source_migration_versions().into_iter().rev().nth(1).expect("a previous migration exists");
+    let mut conn = migration_connection(&database.config).await;
+    source_migrator().undo(&mut conn, previous_version).await.unwrap();
+    drop(conn);
+
+    let row = client
+        .query_one(
+            "select evttags
+            from pg_catalog.pg_event_trigger
+            where evtname = 'supabase_etl_ddl_message_trigger'",
+            &[],
+        )
+        .await
+        .unwrap();
+    let tags: Vec<String> = row.get(0);
+    assert_eq!(tags, vec!["ALTER TABLE"]);
+
+    let function_definition: String = client
+        .query_one(
+            "select pg_catalog.pg_get_functiondef(
+                'etl.emit_schema_change_messages()'::pg_catalog.regprocedure
+            )",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        !function_definition.contains("publication_name"),
+        "rolling back must restore the ALTER TABLE-only trigger function"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn postgres_store_startup_runs_only_postgres_store_migrations() {
     init_test_tracing();
 
