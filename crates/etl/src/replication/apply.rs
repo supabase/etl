@@ -8,7 +8,7 @@
 //! cycle.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     pin::Pin,
     str::FromStr,
@@ -50,9 +50,10 @@ use crate::{
     etl_error,
     event::{Event, RelationEvent},
     observability::{
-        ACTION_LABEL, COMMAND_TAG_LABEL, ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
-        ETL_APPLY_LOOP_END_TO_END_LAG_BYTES, ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
-        ETL_APPLY_LOOP_RECEIVED_LAG_BYTES, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+        ACTION_LABEL, COMMAND_TAG_LABEL, CONFIRMATION_LABEL,
+        ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
+        ETL_APPLY_LOOP_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
+        ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
         ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL,
         ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
@@ -704,6 +705,14 @@ struct ApplyLoopState {
     /// commit end LSN is re-attached here so a later durable write can advance
     /// through it.
     last_commit_end_lsn: Option<PgLsn>,
+    /// Dispatch instants of accepted-but-not-durable destination writes.
+    ///
+    /// A durable write result confirms all earlier accepted writes in the same
+    /// ordered apply-loop stream, so their durable write durations are
+    /// recorded once the next durable result arrives. The queue is bounded
+    /// because deferred destinations must bound their accepted-but-not-durable
+    /// work.
+    pending_durable_dispatches: VecDeque<Instant>,
     /// The LSN of the commit WAL entry of the transaction that is currently
     /// being processed.
     remote_final_lsn: Option<PgLsn>,
@@ -770,6 +779,7 @@ impl ApplyLoopState {
     ) -> Self {
         Self {
             last_commit_end_lsn: None,
+            pending_durable_dispatches: VecDeque::new(),
             remote_final_lsn: None,
             replication_progress,
             replication_lag_metrics,
@@ -1806,9 +1816,43 @@ where
 
             match status {
                 DestinationWriteStatus::Accepted => {
+                    // Remember when this write was dispatched so its durable
+                    // write duration can be recorded once a later durable
+                    // result covers it.
+                    if metadata.event_count > 0 {
+                        self.state.pending_durable_dispatches.push_back(metadata.dispatched_at);
+                    }
+
                     self.state.update_last_commit_end_lsn(metadata.commit_end_lsn);
                 }
                 DestinationWriteStatus::Durable => {
+                    // A durable result also confirms every earlier accepted
+                    // write in the same ordered apply-loop stream.
+                    if !self.state.pending_durable_dispatches.is_empty() {
+                        let deferred_durable_histogram = histogram!(
+                            ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS,
+                            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                            ACTION_LABEL => "table_streaming",
+                            CONFIRMATION_LABEL => "deferred",
+                        );
+                        for dispatched_at in self.state.pending_durable_dispatches.drain(..) {
+                            deferred_durable_histogram
+                                .record(dispatched_at.elapsed().as_secs_f64());
+                        }
+                    }
+
+                    // Empty durability barriers carry no items, so only writes
+                    // with items are recorded for the current result.
+                    if metadata.event_count > 0 {
+                        histogram!(
+                            ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS,
+                            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                            ACTION_LABEL => "table_streaming",
+                            CONFIRMATION_LABEL => "direct",
+                        )
+                        .record(metadata.dispatched_at.elapsed().as_secs_f64());
+                    }
+
                     // We process the syncing tables with the last end lsn that the batch contains.
                     //
                     // Note that it could be that there is no end lsn for a specific batch, which
