@@ -91,7 +91,7 @@ async fn state_store_operations() {
 
     // Test SyncDone state with LSN
     let lsn = "0/1000000".parse::<PgLsn>().unwrap();
-    let sync_done_state = TableState::SyncDone { lsn, handover: None };
+    let sync_done_state = TableState::SyncDone { lsn, table_decoding_state: None };
     store.update_table_state(table_id, sync_done_state.clone()).await.unwrap();
 
     let state = store.get_table_state(table_id).await.unwrap();
@@ -207,7 +207,7 @@ async fn state_store_load_states() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn state_store_replication_progress_is_monotonic() {
+async fn state_store_replication_checkpoint_is_monotonic() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
@@ -218,40 +218,40 @@ async fn state_store_replication_progress_is_monotonic() {
     let apply_worker = WorkerType::Apply;
     let table_sync_worker = WorkerType::TableSync { table_id };
 
-    assert_eq!(store.get_replication_progress(apply_worker).await.unwrap(), None);
+    assert_eq!(store.get_replication_checkpoint(apply_worker).await.unwrap(), None);
 
     let first_lsn = PgLsn::from(100u64);
     let stale_lsn = PgLsn::from(90u64);
     let later_lsn = PgLsn::from(120u64);
 
     assert_eq!(
-        store.upsert_replication_progress(apply_worker, first_lsn).await.unwrap(),
+        store.upsert_replication_checkpoint(apply_worker, first_lsn).await.unwrap(),
         first_lsn
     );
     assert_eq!(
-        store.upsert_replication_progress(apply_worker, stale_lsn).await.unwrap(),
+        store.upsert_replication_checkpoint(apply_worker, stale_lsn).await.unwrap(),
         first_lsn
     );
     assert_eq!(
-        store.upsert_replication_progress(apply_worker, later_lsn).await.unwrap(),
+        store.upsert_replication_checkpoint(apply_worker, later_lsn).await.unwrap(),
         later_lsn
     );
-    assert_eq!(store.get_replication_progress(apply_worker).await.unwrap(), Some(later_lsn));
+    assert_eq!(store.get_replication_checkpoint(apply_worker).await.unwrap(), Some(later_lsn));
 
     let table_sync_lsn = PgLsn::from(75u64);
     assert_eq!(
-        store.upsert_replication_progress(table_sync_worker, table_sync_lsn).await.unwrap(),
+        store.upsert_replication_checkpoint(table_sync_worker, table_sync_lsn).await.unwrap(),
         table_sync_lsn
     );
     assert_eq!(
-        store.get_replication_progress(table_sync_worker).await.unwrap(),
+        store.get_replication_checkpoint(table_sync_worker).await.unwrap(),
         Some(table_sync_lsn)
     );
-    assert_eq!(store.get_replication_progress(apply_worker).await.unwrap(), Some(later_lsn));
+    assert_eq!(store.get_replication_checkpoint(apply_worker).await.unwrap(), Some(later_lsn));
 
-    store.delete_replication_progress(table_sync_worker).await.unwrap();
-    assert_eq!(store.get_replication_progress(table_sync_worker).await.unwrap(), None);
-    assert_eq!(store.get_replication_progress(apply_worker).await.unwrap(), Some(later_lsn));
+    store.delete_replication_checkpoint(table_sync_worker).await.unwrap();
+    assert_eq!(store.get_replication_checkpoint(table_sync_worker).await.unwrap(), None);
+    assert_eq!(store.get_replication_checkpoint(apply_worker).await.unwrap(), Some(later_lsn));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -793,7 +793,7 @@ async fn state_transitions_and_history() {
     store.update_table_state(table_id, finished_copy_state.clone()).await.unwrap();
 
     let lsn = "0/2000000".parse::<PgLsn>().unwrap();
-    let sync_done_state = TableState::SyncDone { lsn, handover: None };
+    let sync_done_state = TableState::SyncDone { lsn, table_decoding_state: None };
     store.update_table_state(table_id, sync_done_state.clone()).await.unwrap();
 
     let ready_state = TableState::Ready;
@@ -861,14 +861,14 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     store.store_destination_table_metadata(table_1_id, metadata1).await.unwrap();
     store.store_destination_table_metadata(table_2_id, metadata2).await.unwrap();
     store
-        .upsert_replication_progress(
+        .upsert_replication_checkpoint(
             WorkerType::TableSync { table_id: table_1_id },
             PgLsn::from(200u64),
         )
         .await
         .unwrap();
     store
-        .upsert_replication_progress(
+        .upsert_replication_checkpoint(
             WorkerType::TableSync { table_id: table_2_id },
             PgLsn::from(300u64),
         )
@@ -881,7 +881,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_some());
     assert!(
         store
-            .get_replication_progress(WorkerType::TableSync { table_id: table_1_id })
+            .get_replication_checkpoint(WorkerType::TableSync { table_id: table_1_id })
             .await
             .unwrap()
             .is_some()
@@ -896,7 +896,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_none());
     assert!(
         store
-            .get_replication_progress(WorkerType::TableSync { table_id: table_1_id })
+            .get_replication_checkpoint(WorkerType::TableSync { table_id: table_1_id })
             .await
             .unwrap()
             .is_none()
@@ -908,7 +908,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     assert!(store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
     assert!(
         store
-            .get_replication_progress(WorkerType::TableSync { table_id: table_2_id })
+            .get_replication_checkpoint(WorkerType::TableSync { table_id: table_2_id })
             .await
             .unwrap()
             .is_some()
@@ -926,7 +926,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     assert!(new_store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_none());
     assert!(
         new_store
-            .get_replication_progress(WorkerType::TableSync { table_id: table_1_id })
+            .get_replication_checkpoint(WorkerType::TableSync { table_id: table_1_id })
             .await
             .unwrap()
             .is_none()
@@ -938,7 +938,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     assert!(new_store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
     assert!(
         new_store
-            .get_replication_progress(WorkerType::TableSync { table_id: table_2_id })
+            .get_replication_checkpoint(WorkerType::TableSync { table_id: table_2_id })
             .await
             .unwrap()
             .is_some()
@@ -986,7 +986,7 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
     store.store_destination_table_metadata(table_id, metadata).await.unwrap();
     store.store_destination_table_metadata(other_table_id, other_metadata).await.unwrap();
     store
-        .upsert_replication_progress(WorkerType::TableSync { table_id }, PgLsn::from(200u64))
+        .upsert_replication_checkpoint(WorkerType::TableSync { table_id }, PgLsn::from(200u64))
         .await
         .unwrap();
 
@@ -996,7 +996,11 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
     assert!(store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().is_none());
     assert!(store.get_applied_destination_table_metadata(table_id).await.unwrap().is_none());
     assert!(
-        store.get_replication_progress(WorkerType::TableSync { table_id }).await.unwrap().is_none()
+        store
+            .get_replication_checkpoint(WorkerType::TableSync { table_id })
+            .await
+            .unwrap()
+            .is_none()
     );
 
     assert!(store.get_table_schema(&other_table_id, SnapshotId::max()).await.unwrap().is_some());
@@ -1012,7 +1016,7 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
     assert!(new_store.get_applied_destination_table_metadata(table_id).await.unwrap().is_none());
     assert!(
         new_store
-            .get_replication_progress(WorkerType::TableSync { table_id })
+            .get_replication_checkpoint(WorkerType::TableSync { table_id })
             .await
             .unwrap()
             .is_none()
@@ -1026,7 +1030,7 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reset_table_states_for_resync_resets_states_and_apply_progress_only() {
+async fn reset_table_states_for_resync_resets_states_and_apply_checkpoint_only() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
@@ -1056,16 +1060,16 @@ async fn reset_table_states_for_resync_resets_states_and_apply_progress_only() {
     );
     store.store_destination_table_metadata(table_1_id, metadata1).await.unwrap();
     store.store_destination_table_metadata(table_2_id, metadata2).await.unwrap();
-    store.upsert_replication_progress(WorkerType::Apply, PgLsn::from(500u64)).await.unwrap();
+    store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(500u64)).await.unwrap();
     store
-        .upsert_replication_progress(
+        .upsert_replication_checkpoint(
             WorkerType::TableSync { table_id: table_1_id },
             PgLsn::from(200u64),
         )
         .await
         .unwrap();
     store
-        .upsert_replication_progress(
+        .upsert_replication_checkpoint(
             WorkerType::TableSync { table_id: table_2_id },
             PgLsn::from(300u64),
         )
@@ -1081,17 +1085,17 @@ async fn reset_table_states_for_resync_resets_states_and_apply_progress_only() {
     assert!(store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
     assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_some());
     assert!(store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
-    assert!(store.get_replication_progress(WorkerType::Apply).await.unwrap().is_none());
+    assert!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap().is_none());
     assert!(
         store
-            .get_replication_progress(WorkerType::TableSync { table_id: table_1_id })
+            .get_replication_checkpoint(WorkerType::TableSync { table_id: table_1_id })
             .await
             .unwrap()
             .is_some()
     );
     assert!(
         store
-            .get_replication_progress(WorkerType::TableSync { table_id: table_2_id })
+            .get_replication_checkpoint(WorkerType::TableSync { table_id: table_2_id })
             .await
             .unwrap()
             .is_some()
@@ -1108,17 +1112,17 @@ async fn reset_table_states_for_resync_resets_states_and_apply_progress_only() {
     assert!(new_store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
     assert!(new_store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_some());
     assert!(new_store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
-    assert!(new_store.get_replication_progress(WorkerType::Apply).await.unwrap().is_none());
+    assert!(new_store.get_replication_checkpoint(WorkerType::Apply).await.unwrap().is_none());
     assert!(
         new_store
-            .get_replication_progress(WorkerType::TableSync { table_id: table_1_id })
+            .get_replication_checkpoint(WorkerType::TableSync { table_id: table_1_id })
             .await
             .unwrap()
             .is_some()
     );
     assert!(
         new_store
-            .get_replication_progress(WorkerType::TableSync { table_id: table_2_id })
+            .get_replication_checkpoint(WorkerType::TableSync { table_id: table_2_id })
             .await
             .unwrap()
             .is_some()

@@ -106,20 +106,23 @@ where
         self.inner.rollback_table_state(table_id).await
     }
 
-    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
-        self.inner.get_replication_progress(worker_type).await
-    }
-
-    async fn upsert_replication_progress(
+    async fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
-        flush_lsn: PgLsn,
-    ) -> EtlResult<PgLsn> {
-        self.inner.upsert_replication_progress(worker_type, flush_lsn).await
+    ) -> EtlResult<Option<PgLsn>> {
+        self.inner.get_replication_checkpoint(worker_type).await
     }
 
-    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
-        self.inner.delete_replication_progress(worker_type).await
+    async fn upsert_replication_checkpoint(
+        &self,
+        worker_type: WorkerType,
+        checkpoint_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
+        self.inner.upsert_replication_checkpoint(worker_type, checkpoint_lsn).await
+    }
+
+    async fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> EtlResult<()> {
+        self.inner.delete_replication_checkpoint(worker_type).await
     }
 
     async fn get_destination_table_metadata(

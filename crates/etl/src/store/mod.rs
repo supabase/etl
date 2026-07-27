@@ -2,11 +2,11 @@
 //!
 //! This module provides storage traits and implementations for maintaining ETL
 //! pipeline state across restarts. It includes state tracking for replication
-//! progress, versioned table schemas, destination table metadata, and
+//! checkpoints, versioned table schemas, destination table metadata, and
 //! synchronization status.
 //!
 //! Storage is divided into focused capability modules:
-//! - [`StateStore`] - Replication progress and table synchronization states
+//! - [`StateStore`] - Persisted checkpoints and table synchronization states
 //! - [`SchemaStore`] - Database schema information, versioned schema storage,
 //!   and obsolete schema pruning
 //! - [`SharedStateStore`], [`DestinationStore`], and [`PipelineStore`] - Named
@@ -33,5 +33,5 @@ pub use state::{StateStore, TableStates};
 
 pub use crate::replication::{
     WorkerType,
-    state::{TableRetryPolicy, TableState, TableStateType, TableSyncHandover},
+    state::{StoredTableDecodingState, TableRetryPolicy, TableState, TableStateType},
 };

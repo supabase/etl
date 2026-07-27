@@ -10,14 +10,14 @@ use crate::schema::{SnapshotId, TableId, TableSchema};
 /// Per-table schema cleanup retention boundary.
 ///
 /// Retention can be bounded by a stored schema snapshot that the destination
-/// still needs, or by ETL-owned durable replication progress. Both are LSN
+/// still needs, or by ETL's persisted replication checkpoint. Both are LSN
 /// values, but the variant records why that boundary was chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableSchemaRetention {
     /// Retain schemas according to a destination-useful schema snapshot.
     SnapshotId(SnapshotId),
-    /// Retain schemas according to ETL-owned durable replication progress.
-    DurableFlushLsn(PgLsn),
+    /// Retain schemas according to ETL's persisted replication checkpoint.
+    PersistedCheckpointLsn(PgLsn),
 }
 
 impl TableSchemaRetention {
@@ -25,7 +25,7 @@ impl TableSchemaRetention {
     pub fn to_lsn(self) -> PgLsn {
         match self {
             Self::SnapshotId(snapshot_id) => snapshot_id.into(),
-            Self::DurableFlushLsn(lsn) => lsn,
+            Self::PersistedCheckpointLsn(lsn) => lsn,
         }
     }
 }
@@ -244,7 +244,10 @@ mod tests {
 
         let removed = snapshots.prune(&HashMap::from([
             (table_id, TableSchemaRetention::SnapshotId(SnapshotId::from(250))),
-            (other_table_id, TableSchemaRetention::DurableFlushLsn(SnapshotId::from(150).into())),
+            (
+                other_table_id,
+                TableSchemaRetention::PersistedCheckpointLsn(SnapshotId::from(150).into()),
+            ),
         ]));
 
         assert_eq!(removed, 3);

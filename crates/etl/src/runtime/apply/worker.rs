@@ -350,7 +350,7 @@ where
 /// - [`InvalidatedSlotBehavior::Error`]: Returns an error requiring manual
 ///   intervention
 /// - [`InvalidatedSlotBehavior::Recreate`]: Deletes the slot, resets all tables
-///   to Init, clears stale apply progress, and creates a new slot
+///   to Init, clears the stale apply checkpoint, and creates a new slot
 ///
 /// When creating a new slot, this function warns if any tables already depend
 /// on the apply worker for replication. Those tables can miss changes between
@@ -364,15 +364,15 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
     let worker_type = WorkerType::Apply;
 
-    // Inspect the slot before creating it so stale progress from the previous
+    // Inspect the slot before creating it so a stale checkpoint from the previous
     // lineage can be deleted first. Creating the slot before cleanup would leave
     // a crash window where a later restart could pair the new slot with old
-    // durable progress.
+    // persisted checkpoint.
     let slot = match replication_client.get_slot(&slot_name).await {
         Ok(slot) => GetOrCreateSlotResult::GetSlot(slot),
         Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
             warn_if_tables_may_have_missed_changes(store).await?;
-            store.delete_replication_progress(worker_type).await?;
+            store.delete_replication_checkpoint(worker_type).await?;
 
             let slot = replication_client.create_slot(&slot_name).await?;
             GetOrCreateSlotResult::CreateSlot(slot)
@@ -419,38 +419,34 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
         }
     }
 
-    // If the slot was created, we don't need to do any invalidation check and since
-    // durable progress should be gone before a new slot is created, we can
-    // immediately start replication from the start lsn determined by the new
-    // slot.
+    // If the slot was created, we don't need an invalidation check. The previous
+    // lineage's persisted checkpoint was deleted before creation, so replication
+    // can start directly from the new slot's consistent point.
     if matches!(slot, GetOrCreateSlotResult::CreateSlot(_)) {
         return Ok(slot_start_lsn);
     }
 
-    // If there is durable replication progress, we also consider that to determine
-    // the start lsn, otherwise we return the slot start lsn directly.
-    let durable_flush_lsn = store.get_replication_progress(worker_type).await?;
-    let Some(durable_flush_lsn) = durable_flush_lsn else {
+    // A persisted checkpoint is an independent durable resume frontier. If none
+    // exists, the replication slot remains the only available frontier.
+    let persisted_checkpoint_lsn = store.get_replication_checkpoint(worker_type).await?;
+    let Some(persisted_checkpoint_lsn) = persisted_checkpoint_lsn else {
         return Ok(slot_start_lsn);
     };
 
-    // Durable progress and slot progress can legitimately differ. During idle
-    // periods we keep sending PostgreSQL feedback with the received LSN, but
-    // we do not persist those idle-only advances to the state database to
-    // avoid extra customer-database writes. Conversely, durable progress can
-    // be ahead if ETL flushed a batch but PostgreSQL did not confirm the
-    // feedback yet. Startup uses the latest boundary available from either
-    // source as a resume floor, which guarantees no event older than the
-    // chosen start LSN is emitted.
-    let start_lsn = durable_flush_lsn.max(slot_start_lsn);
+    // The two frontiers can legitimately differ because checkpoint persistence
+    // and PostgreSQL status feedback are separate operations. The checkpoint
+    // may be selected from a durably flushed commit boundary or, while the loop
+    // is fully idle, from the last received LSN. Each persisted value is safe
+    // for replay. Startup therefore chooses the later available frontier.
+    let start_lsn = persisted_checkpoint_lsn.max(slot_start_lsn);
 
-    if durable_flush_lsn > slot_start_lsn {
+    if persisted_checkpoint_lsn > slot_start_lsn {
         info!(
             slot_name,
-            %durable_flush_lsn,
+            %persisted_checkpoint_lsn,
             %slot_start_lsn,
             %start_lsn,
-            "apply worker replication position was overridden by the durable replication progress because it was ahead"
+            "apply worker replication position was overridden by the persisted checkpoint because it was ahead"
         );
     }
 
@@ -463,8 +459,8 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
 /// - [`InvalidatedSlotBehavior::Error`]: Returns an error with details about
 ///   the invalidation
 /// - [`InvalidatedSlotBehavior::Recreate`]: Deletes the slot, resets all table
-///   states to Init, deletes stale apply progress, and creates a new slot,
-///   returning its consistent point LSN
+///   states to Init, deletes the stale apply checkpoint, and creates a new
+///   slot, returning its consistent point LSN
 async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
@@ -499,7 +495,7 @@ async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
 
             info!(
                 reset_count,
-                "reset table states to init and deleted apply worker durable progress for \
+                "reset table states to init and deleted the apply worker checkpoint for \
                  invalidated slot recovery"
             );
 

@@ -165,17 +165,11 @@ async fn apply_worker_retry_rebases_relation_schema_selection() {
 
     assert_eq!(relation_schemas.len(), 2);
     assert_eq!(
-        relation_schemas[0]
-            .column_schemas()
-            .map(|column| column.name.as_str())
-            .collect::<Vec<_>>(),
+        relation_schemas[0].column_schemas().map(|column| column.name.as_str()).collect::<Vec<_>>(),
         vec!["id", "name", "age"]
     );
     assert_eq!(
-        relation_schemas[1]
-            .column_schemas()
-            .map(|column| column.name.as_str())
-            .collect::<Vec<_>>(),
+        relation_schemas[1].column_schemas().map(|column| column.name.as_str()).collect::<Vec<_>>(),
         vec!["id", "name"]
     );
     assert!(relation_schemas[0].inner().snapshot_id < relation_schemas[1].inner().snapshot_id);
@@ -463,7 +457,7 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
     assert_eq!(commit_lsns[0], commit_lsns[1]);
     let first_commit_lsn = commit_lsns[0];
 
-    // THEN: durable progress never advanced past the unacknowledged write
+    // THEN: the persisted checkpoint never advanced past the unacknowledged write
     assert!(flush_lsn_at_kill < first_commit_lsn);
 
     // THEN: streaming continues without loss after the replay

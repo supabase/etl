@@ -13,7 +13,7 @@ use etl::{
     failpoints::{
         FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
-        STORE_APPLY_REPLICATION_PROGRESS_FP, STORE_REPLICATION_PROGRESS_FP,
+        STORE_APPLY_REPLICATION_CHECKPOINT_FP, STORE_REPLICATION_CHECKPOINT_FP,
         TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
     },
     pipeline::PipelineId,
@@ -604,7 +604,7 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
     // The apply connection already saw and skipped the relation used by the
     // table-sync worker. PostgreSQL does not resend it merely because ETL
     // handed ownership over, so this row can only be decoded from the
-    // materialized SyncDone handover.
+    // materialized decoding state stored in SyncDone.
     let post_handover_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(
             EventType::Insert,
@@ -633,7 +633,7 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_sync_handover_rejects_ddl_without_relation() {
+async fn table_sync_rejects_incomplete_decoding_state() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
 
@@ -690,12 +690,12 @@ async fn table_sync_handover_rejects_ddl_without_relation() {
     };
     assert!(matches!(retry_policy, TableRetryPolicy::ManualRetry));
     assert_eq!(source_err.kind(), ErrorKind::InvalidState);
-    assert_eq!(source_err.description(), Some("Table-sync handover relation state is incomplete"));
+    assert_eq!(source_err.description(), Some("Table-sync decoding state is incomplete"));
 
     let state_history = store.get_table_state_history(table_id).await;
     assert!(
         state_history.iter().all(|state| !matches!(state, TableState::SyncDone { .. })),
-        "an incomplete handover must fail before SyncDone is persisted"
+        "incomplete decoding state must fail before SyncDone is persisted"
     );
 }
 
@@ -751,6 +751,8 @@ async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
     // target.
     wait_for_replication_slot_flush_lsn(client, &apply_slot_name, target_lsn).await;
 
+    let table_sync_done_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
     let table_ready_notify =
         store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
@@ -786,29 +788,34 @@ async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
         Some(TableStateType::FinishedCopy)
     );
 
-    // Pause the progress write to prove Ready is stored first. If progress
-    // moved ahead of the handover transition, the Ready notification would
-    // remain blocked behind this failpoint.
-    fail::cfg(STORE_APPLY_REPLICATION_PROGRESS_FP, "pause").unwrap();
+    // Pause apply checkpoint persistence so the table must remain in SyncDone
+    // with its stored decoding state available.
+    fail::cfg(STORE_APPLY_REPLICATION_CHECKPOINT_FP, "pause").unwrap();
     barrier_result.send(Ok(DestinationWriteStatus::Durable));
-    table_ready_notify.notified().await;
+    table_sync_done_notify.notified().await;
 
-    let apply_progress_before_unpause =
-        store.get_replication_progress(WorkerType::Apply).await.unwrap();
+    let checkpoint_before_unpause =
+        store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    let TableState::SyncDone { lsn: sync_done_lsn, .. } = table_state else {
+        panic!("table must remain in SyncDone while the persisted apply checkpoint is behind");
+    };
     assert!(
-        apply_progress_before_unpause.is_none_or(|progress| progress < target_lsn),
-        "apply progress must not reach the handover boundary before Ready"
+        checkpoint_before_unpause.is_none_or(|checkpoint| checkpoint < sync_done_lsn),
+        "persisted apply checkpoint must remain below SyncDone while its write is paused"
     );
 
-    let apply_progress_notify =
-        store.notify_on_replication_progress(WorkerType::Apply, target_lsn).await;
-    fail::remove(STORE_APPLY_REPLICATION_PROGRESS_FP);
+    let checkpoint_notify =
+        store.notify_on_replication_checkpoint(WorkerType::Apply, sync_done_lsn).await;
+    fail::remove(STORE_APPLY_REPLICATION_CHECKPOINT_FP);
 
-    apply_progress_notify.notified().await;
-    let apply_progress = store.get_replication_progress(WorkerType::Apply).await.unwrap().unwrap();
+    checkpoint_notify.notified().await;
+    table_ready_notify.notified().await;
+    let persisted_checkpoint_lsn =
+        store.get_replication_checkpoint(WorkerType::Apply).await.unwrap().unwrap();
     assert!(
-        apply_progress >= target_lsn,
-        "idle handover must persist apply progress after storing Ready"
+        persisted_checkpoint_lsn >= sync_done_lsn,
+        "idle SyncDone completion must persist an apply checkpoint before storing Ready"
     );
 
     pipeline.shutdown_and_wait().await.unwrap();
@@ -880,7 +887,7 @@ async fn table_sync_catchup_error_does_not_block_apply_worker() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stored_durable_progress_prevents_replay_when_status_updates_are_skipped() {
+async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
 
@@ -921,14 +928,13 @@ async fn stored_durable_progress_prevents_replay_when_status_updates_are_skipped
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We check that the durable flush is stricly greater than the last confirmed
-    // flush lsn on the Postgres side, which should be the case, since we
-    // artificially stopped status updates.
-    let durable_flush_lsn =
-        store.get_replication_progress(WorkerType::Apply).await.unwrap().unwrap();
+    // The persisted checkpoint is strictly greater than PostgreSQL's confirmed
+    // flush LSN because this test artificially stopped status updates.
+    let persisted_checkpoint_lsn =
+        store.get_replication_checkpoint(WorkerType::Apply).await.unwrap().unwrap();
     let (confirmed_flush_lsn, _) =
         replication_slot_state(database.client.as_ref().unwrap(), &apply_slot_name).await;
-    assert!(confirmed_flush_lsn < durable_flush_lsn);
+    assert!(confirmed_flush_lsn < persisted_checkpoint_lsn);
 
     // We check the expected events after the first two inserts.
     let events = destination.get_events().await;
@@ -981,7 +987,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
  {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -1143,7 +1149,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
  {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -1290,7 +1296,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
  {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -1439,7 +1445,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
  {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -1652,7 +1658,7 @@ async fn schema_snapshots_are_pruned_after_confirmed_progress() {
 async fn publication_column_filter_schema_messages_replay_before_first_relation_per_table() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -1882,7 +1888,7 @@ async fn publication_column_filter_schema_messages_replay_before_first_relation_
 async fn table_and_publication_schema_changes_replay_after_restart() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
     let database = spawn_source_database().await;

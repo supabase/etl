@@ -731,11 +731,11 @@ async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
         .await
         .unwrap();
 
-    // Simulate durable progress from an unrelated WAL lineage. The replacement
-    // slot must not use this position even when it is ahead of the new slot's
-    // consistent point.
-    let stale_durable_progress = PgLsn::from(u64::MAX);
-    store.upsert_replication_progress(WorkerType::Apply, stale_durable_progress).await.unwrap();
+    // Simulate a persisted checkpoint from an unrelated WAL lineage. The
+    // replacement slot must not use this position even when it is ahead of the
+    // new slot's consistent point.
+    let stale_checkpoint = PgLsn::from(u64::MAX);
+    store.upsert_replication_checkpoint(WorkerType::Apply, stale_checkpoint).await.unwrap();
 
     // Delete the apply worker slot after pausing the pipeline. No source changes
     // occur between the pause and slot recreation.
@@ -805,8 +805,9 @@ async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
     assert_events_equal(users_inserts, &expected_users_inserts);
     assert!(!grouped_events.contains_key(&(EventType::Insert, errored_table_id)));
 
-    let durable_progress = store.get_replication_progress(WorkerType::Apply).await.unwrap();
-    assert_ne!(durable_progress, Some(stale_durable_progress));
+    let persisted_checkpoint_lsn =
+        store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    assert_ne!(persisted_checkpoint_lsn, Some(stale_checkpoint));
 }
 
 // Serialized via nextest test-group "shared-pg" (shares the source PG cluster).

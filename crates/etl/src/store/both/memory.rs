@@ -34,8 +34,8 @@ struct Inner {
     table_schemas: Arc<TableSchemaSnapshots>,
     /// Cached destination table metadata indexed by table ID.
     destination_tables_metadata: DestinationTablesMetadata,
-    /// Durable replication progress indexed by worker type and optional table.
-    replication_progress: HashMap<WorkerType, PgLsn>,
+    /// Persisted replication checkpoints indexed by worker type.
+    replication_checkpoints: HashMap<WorkerType, PgLsn>,
 }
 
 /// In-memory storage for ETL pipeline state and schema information.
@@ -65,7 +65,7 @@ impl MemoryStore {
             table_state_history: HashMap::new(),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
             destination_tables_metadata: Arc::new(BTreeMap::new()),
-            replication_progress: HashMap::new(),
+            replication_checkpoints: HashMap::new(),
         };
 
         Self { inner: Arc::new(Mutex::new(inner)) }
@@ -138,34 +138,37 @@ impl StateStore for MemoryStore {
         Ok(previous_state)
     }
 
-    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.replication_progress.get(&worker_type).copied())
-    }
-
-    async fn upsert_replication_progress(
+    async fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
-        flush_lsn: PgLsn,
-    ) -> EtlResult<PgLsn> {
-        let mut inner = self.inner.lock().await;
-        let stored_lsn = inner
-            .replication_progress
-            .entry(worker_type)
-            .and_modify(|stored_lsn| {
-                if flush_lsn > *stored_lsn {
-                    *stored_lsn = flush_lsn;
-                }
-            })
-            .or_insert(flush_lsn);
+    ) -> EtlResult<Option<PgLsn>> {
+        let inner = self.inner.lock().await;
 
-        Ok(*stored_lsn)
+        Ok(inner.replication_checkpoints.get(&worker_type).copied())
     }
 
-    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
+    async fn upsert_replication_checkpoint(
+        &self,
+        worker_type: WorkerType,
+        checkpoint_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
         let mut inner = self.inner.lock().await;
-        inner.replication_progress.remove(&worker_type);
+        let persisted_checkpoint_lsn = inner
+            .replication_checkpoints
+            .entry(worker_type)
+            .and_modify(|persisted_checkpoint_lsn| {
+                if checkpoint_lsn > *persisted_checkpoint_lsn {
+                    *persisted_checkpoint_lsn = checkpoint_lsn;
+                }
+            })
+            .or_insert(checkpoint_lsn);
+
+        Ok(*persisted_checkpoint_lsn)
+    }
+
+    async fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        inner.replication_checkpoints.remove(&worker_type);
 
         Ok(())
     }
@@ -266,7 +269,7 @@ impl TableStateLifecycleStore for MemoryStore {
                 let mut inner = self.inner.lock().await;
                 Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-                inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+                inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
 
                 Ok(0)
             }
@@ -290,7 +293,7 @@ impl TableStateLifecycleStore for MemoryStore {
                     states.insert(table_id, TableState::Init);
                 }
 
-                inner.replication_progress.remove(&WorkerType::Apply);
+                inner.replication_checkpoints.remove(&WorkerType::Apply);
 
                 Ok(reset_count)
             }
@@ -302,7 +305,7 @@ impl TableStateLifecycleStore for MemoryStore {
                 inner.table_state_history.remove(&table_id);
                 Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-                inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+                inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
 
                 Ok(affected_table_count)
             }

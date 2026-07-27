@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use etl_postgres::store::table_state::{StoredTableStateRow, StoredTableStateType};
 use serde::{Deserialize, Serialize};
@@ -9,39 +9,101 @@ use crate::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     replication::state::{TableError, TableRetryPolicy},
-    schema::{ReplicatedTableSchema, SnapshotId},
+    schema::{IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableSchema},
 };
 
-/// Complete durable row-decoding state transferred at table-sync handover.
+/// Compact durable form of [`crate::replication::TableDecodingState`] stored at
+/// `SyncDone`.
+///
+/// The three fields are serialized together inside
+/// `SyncDone.table_decoding_state`. This stores the exact schema snapshot and
+/// masks needed to reconstruct `TableDecodingState::WithSchema`, but does not
+/// duplicate the full [`TableSchema`], which remains in the schema store. The
+/// masks use the same ordered raw bytes stored in destination table metadata;
+/// JSON represents those bytes as arrays of `0` and `1` values.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TableSyncHandover {
-    /// Schema snapshot used by the materialized masks.
-    #[serde(with = "lsn_serde")]
-    snapshot_lsn: PgLsn,
+pub struct StoredTableDecodingState {
+    /// Exact schema snapshot used by the table-sync decoder.
+    #[serde(with = "snapshot_id_serde")]
+    snapshot_id: SnapshotId,
     /// Publication-column membership in table-schema order.
     replication_mask: Vec<u8>,
     /// Replica-identity membership in table-schema order.
     identity_mask: Vec<u8>,
 }
 
-impl TableSyncHandover {
-    /// Captures handover state from a materialized replicated schema.
-    pub(crate) fn from_replicated_table_schema(schema: &ReplicatedTableSchema) -> Self {
+impl StoredTableDecodingState {
+    /// Captures decoding state from a materialized replicated schema.
+    fn from_replicated_table_schema(schema: &ReplicatedTableSchema) -> Self {
         Self {
-            snapshot_lsn: schema.inner().snapshot_id.into_inner(),
+            snapshot_id: schema.inner().snapshot_id,
             replication_mask: schema.replication_mask().to_bytes(),
             identity_mask: schema.identity_mask().to_bytes(),
         }
     }
 
-    /// Returns the schema snapshot selected at handover.
+    /// Returns the exact schema snapshot used by this decoding state.
     pub(crate) fn snapshot_id(&self) -> SnapshotId {
-        self.snapshot_lsn.into()
+        self.snapshot_id
     }
 
-    /// Returns the materialized publication and identity masks.
-    pub(crate) fn masks(&self) -> (&[u8], &[u8]) {
-        (&self.replication_mask, &self.identity_mask)
+    /// Materializes and validates this decoding state against its stored
+    /// schema.
+    pub(crate) fn materialize(
+        &self,
+        table_schema: Arc<TableSchema>,
+        sync_done_lsn: PgLsn,
+    ) -> EtlResult<ReplicatedTableSchema> {
+        if self.snapshot_id.into_inner() > sync_done_lsn {
+            bail!(
+                ErrorKind::InvalidState,
+                "Table-schema decoding snapshot is ahead of SyncDone",
+                format!(
+                    "Table {} decoding snapshot {} exceeds SyncDone LSN {}",
+                    table_schema.id, self.snapshot_id, sync_done_lsn
+                )
+            );
+        }
+
+        let column_count = table_schema.column_schemas.len();
+        if self.replication_mask.len() != column_count || self.identity_mask.len() != column_count {
+            bail!(
+                ErrorKind::InvalidState,
+                "Table-schema decoding mask width does not match its schema",
+                format!(
+                    "Table {} snapshot {} has {} columns, replication mask width {}, and identity \
+                     mask width {}",
+                    table_schema.id,
+                    self.snapshot_id,
+                    column_count,
+                    self.replication_mask.len(),
+                    self.identity_mask.len()
+                )
+            );
+        }
+        if self.replication_mask.iter().chain(&self.identity_mask).any(|value| *value > 1) {
+            bail!(
+                ErrorKind::InvalidState,
+                "Table-schema decoding state contains a non-binary mask"
+            );
+        }
+        if self
+            .replication_mask
+            .iter()
+            .zip(&self.identity_mask)
+            .any(|(replicated, identity)| *identity == 1 && *replicated == 0)
+        {
+            bail!(
+                ErrorKind::InvalidState,
+                "Table-schema decoding identity mask is not a subset of its replication mask"
+            );
+        }
+
+        Ok(ReplicatedTableSchema::from_masks(
+            table_schema,
+            ReplicationMask::from_bytes(self.replication_mask.clone()),
+            IdentityMask::from_bytes(self.identity_mask.clone()),
+        ))
     }
 }
 
@@ -104,25 +166,32 @@ pub enum TableState {
         /// This LSN is guaranteed to be >= `Catchup.lsn`.
         #[serde(with = "lsn_serde")]
         lsn: PgLsn,
-        /// Durable row-decoding state at the handover boundary.
+        /// Compact durable decoding state captured at `SyncDone`.
         ///
-        /// This is optional for compatibility with `SyncDone` rows written by
-        /// versions that predate durable handover state.
+        /// `None` is accepted only for compatibility with `SyncDone` rows
+        /// written before decoding state was persisted. New rows always store
+        /// `Some`, whose type guarantees that the snapshot ID and both masks
+        /// are present together.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        handover: Option<TableSyncHandover>,
+        table_decoding_state: Option<StoredTableDecodingState>,
     },
     /// Set by apply worker when it has caught up with the table-sync worker's
     /// catch-up LSN position. Tables with this state have successfully run
     /// their initial table copy and catch-up work and any changes to them
     /// will now be applied by the apply worker only.
     ///
-    /// Recovery limitation: this state no longer retains the durable
-    /// [`TableSyncHandover`]. If ETL crashes after storing `Ready` but before
-    /// storing apply-worker progress, restart can resume before the handover.
-    /// A copy-time `0/0` snapshot taken after a DDL may then be paired with an
-    /// older Relation while replaying rows from before that DDL. This is not
-    /// guaranteed to fail closed, so the affected table must be reset and
-    /// resynchronized.
+    /// `Ready` no longer retains the [`StoredTableDecodingState`] from
+    /// `SyncDone`. The apply worker therefore stores progress at or beyond
+    /// `SyncDone.lsn` before persisting `Ready`. On restart, that durable
+    /// progress prevents the apply stream from resuming before the discarded
+    /// boundary.
+    ///
+    /// This ordering proves restart position, not decoder initialization on the
+    /// current connection. That connection must already have installed the
+    /// decoding state while waiting for table sync, or must recover it from
+    /// `SyncDone` when a row first needs decoding. Current-connection safety
+    /// therefore assumes one of those installation paths runs before `Ready`
+    /// discards the state.
     Ready,
     /// Set by either the table-sync worker or the apply worker when a table
     /// encounters an error during replication. Contains diagnostic information
@@ -152,6 +221,19 @@ fn default_source_err() -> EtlError {
 }
 
 impl TableState {
+    /// Creates a durable `SyncDone` state from the table-sync decoder.
+    ///
+    /// The snapshot and both masks form one logical decoding state and are
+    /// always stored together for newly written rows.
+    pub(crate) fn sync_done(lsn: PgLsn, schema: &ReplicatedTableSchema) -> Self {
+        Self::SyncDone {
+            lsn,
+            table_decoding_state: Some(StoredTableDecodingState::from_replicated_table_schema(
+                schema,
+            )),
+        }
+    }
+
     /// Returns this state's type without associated data.
     pub fn as_type(&self) -> TableStateType {
         self.into()
@@ -384,6 +466,28 @@ mod lsn_serde {
     }
 }
 
+/// Serde helpers for schema snapshot identifiers.
+mod snapshot_id_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use crate::schema::SnapshotId;
+
+    pub(super) fn serialize<S>(snapshot_id: &SnapshotId, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        snapshot_id.to_pg_lsn_string().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<SnapshotId, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        SnapshotId::from_pg_lsn_string(&value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use etl_postgres::store::table_state;
@@ -392,7 +496,10 @@ mod tests {
     use crate::{
         error::ErrorKind,
         etl_error,
-        replication::state::{TableRetryPolicy, TableState, TableStateType, TableSyncHandover},
+        replication::state::{
+            StoredTableDecodingState, TableRetryPolicy, TableState, TableStateType,
+        },
+        schema::SnapshotId,
     };
 
     #[test]
@@ -404,30 +511,31 @@ mod tests {
         assert!(matches!(deserialized, TableState::Init));
 
         let lsn = "0/1000000".parse::<PgLsn>().unwrap();
-        let sync_done = TableState::SyncDone { lsn, handover: None };
+        let sync_done = TableState::SyncDone { lsn, table_decoding_state: None };
         let json = serde_json::to_value(&sync_done).unwrap();
         assert_eq!(json, serde_json::json!({"type": "sync_done", "lsn": "0/1000000"}));
         let deserialized: TableState = serde_json::from_value(json).unwrap();
-        if let TableState::SyncDone { lsn: got, handover: None } = deserialized {
+        if let TableState::SyncDone { lsn: got, table_decoding_state: None } = deserialized {
             assert_eq!(got, lsn);
         } else {
             panic!("Expected SyncDone variant");
         }
 
-        let materialized_handover = TableSyncHandover {
-            snapshot_lsn: "0/900000".parse::<PgLsn>().unwrap(),
+        let table_decoding_state = StoredTableDecodingState {
+            snapshot_id: SnapshotId::new("0/900000".parse::<PgLsn>().unwrap()),
             replication_mask: vec![1, 0, 1],
             identity_mask: vec![1, 0, 0],
         };
-        let sync_done = TableState::SyncDone { lsn, handover: Some(materialized_handover) };
+        let sync_done =
+            TableState::SyncDone { lsn, table_decoding_state: Some(table_decoding_state) };
         let json = serde_json::to_value(&sync_done).unwrap();
         assert_eq!(
             json,
             serde_json::json!({
                 "type": "sync_done",
                 "lsn": "0/1000000",
-                "handover": {
-                    "snapshot_lsn": "0/900000",
+                "table_decoding_state": {
+                    "snapshot_id": "0/900000",
                     "replication_mask": [1, 0, 1],
                     "identity_mask": [1, 0, 0]
                 }
@@ -435,6 +543,16 @@ mod tests {
         );
         let deserialized: TableState = serde_json::from_value(json).unwrap();
         assert_eq!(deserialized, sync_done);
+
+        let incomplete_decoding_state = serde_json::json!({
+            "type": "sync_done",
+            "lsn": "0/1000000",
+            "table_decoding_state": {
+                "snapshot_id": "0/900000",
+                "replication_mask": [1, 0, 1]
+            }
+        });
+        assert!(serde_json::from_value::<TableState>(incomplete_decoding_state).is_err());
 
         let errored = TableState::Errored {
             reason: "Test error".to_owned(),
@@ -553,7 +671,10 @@ mod tests {
             TableState::Init,
             TableState::DataSync,
             TableState::FinishedCopy,
-            TableState::SyncDone { lsn: "0/1000000".parse::<PgLsn>().unwrap(), handover: None },
+            TableState::SyncDone {
+                lsn: "0/1000000".parse::<PgLsn>().unwrap(),
+                table_decoding_state: None,
+            },
             TableState::Ready,
             TableState::Errored {
                 reason: "broken".to_owned(),
@@ -579,11 +700,11 @@ mod tests {
             assert_eq!(state.as_type(), restored.as_type());
             match (&state, &restored) {
                 (
-                    TableState::SyncDone { lsn: a, handover: handover_a },
-                    TableState::SyncDone { lsn: b, handover: handover_b },
+                    TableState::SyncDone { lsn: lsn_a, table_decoding_state: decoding_state_a },
+                    TableState::SyncDone { lsn: lsn_b, table_decoding_state: decoding_state_b },
                 ) => {
-                    assert_eq!(a, b);
-                    assert_eq!(handover_a, handover_b);
+                    assert_eq!(lsn_a, lsn_b);
+                    assert_eq!(decoding_state_a, decoding_state_b);
                 }
                 (
                     TableState::Errored { reason: r1, solution: s1, retry_policy: rp1, .. },

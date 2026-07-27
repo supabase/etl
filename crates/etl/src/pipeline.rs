@@ -87,10 +87,9 @@ where
     /// Creates a new pipeline with the given configuration.
     ///
     /// The pipeline is initially in the not-started state and must be
-    /// explicitly started using [`Pipeline::start`]. The store is
-    /// used for tracking replication progress, table schemas, destination
-    /// table metadata, and table lifecycle state, while the destination
-    /// receives replicated data.
+    /// explicitly started using [`Pipeline::start`]. The store tracks persisted
+    /// replication checkpoints, table schemas, destination table metadata, and
+    /// table lifecycle state, while the destination receives replicated data.
     /// The pipeline ID is extracted from the configuration, ensuring
     /// consistency between pipeline identity and configuration settings.
     pub fn new(config: PipelineConfig, store: S, destination: D) -> Self {

@@ -11,9 +11,11 @@
 //! snapshot and updates it whenever PostgreSQL emits a new `RELATION` message.
 //! A DDL message moves the table into `WaitingForRelation` with the exact
 //! snapshot that the next relation must materialize. Only a complete
-//! materialized schema can be persisted in `SyncDone`. Reaching the handover
-//! boundary while still waiting for a relation fails closed because the
-//! publication and replica-identity masks are not known.
+//! `WithSchema` state can be converted into the compact
+//! [`crate::replication::state::StoredTableDecodingState`] persisted in
+//! `SyncDone`. Reaching the ownership boundary while still waiting for a
+//! relation fails closed because the publication and replica-identity masks
+//! are not known.
 
 use crate::schema::{ReplicatedTableSchema, SnapshotId};
 
@@ -26,6 +28,7 @@ pub(crate) enum TableDecodingState {
         /// Exact schema snapshot that the next relation must materialize.
         snapshot_id: SnapshotId,
     },
-    /// Complete row-decoding state materialized from a relation or handover.
+    /// Complete row-decoding state materialized from a relation or restored
+    /// `SyncDone` decoding state.
     WithSchema(ReplicatedTableSchema),
 }

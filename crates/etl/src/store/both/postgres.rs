@@ -6,7 +6,7 @@ use std::{
 };
 
 use etl_postgres::store::{
-    destination_table_metadata as pg_destination_table_metadata, progress, schema,
+    checkpoint, destination_table_metadata as pg_destination_table_metadata, schema,
     table_state as pg_table_state,
 };
 use metrics::gauge;
@@ -323,57 +323,60 @@ impl StateStore for PostgresStore {
         Ok(restored_state)
     }
 
-    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
-        progress::get_replication_progress(
-            &self.pool,
-            self.pipeline_id as i64,
-            worker_type.as_str(),
-            worker_type.progress_table_id(),
-        )
-        .await
-        .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Replication progress loading failed",
-                source: err
-            )
-        })
-    }
-
-    async fn upsert_replication_progress(
+    async fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
-        flush_lsn: PgLsn,
-    ) -> EtlResult<PgLsn> {
-        progress::upsert_replication_progress(
+    ) -> EtlResult<Option<PgLsn>> {
+        checkpoint::get_replication_checkpoint(
             &self.pool,
             self.pipeline_id as i64,
             worker_type.as_str(),
-            worker_type.progress_table_id(),
-            flush_lsn,
+            worker_type.checkpoint_table_id(),
         )
         .await
         .map_err(|err| {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
-                "Replication progress storage failed",
+                "Replication checkpoint loading failed",
                 source: err
             )
         })
     }
 
-    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
-        progress::delete_replication_progress(
+    async fn upsert_replication_checkpoint(
+        &self,
+        worker_type: WorkerType,
+        checkpoint_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
+        checkpoint::upsert_replication_checkpoint(
             &self.pool,
             self.pipeline_id as i64,
             worker_type.as_str(),
-            worker_type.progress_table_id(),
+            worker_type.checkpoint_table_id(),
+            checkpoint_lsn,
         )
         .await
         .map_err(|err| {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
-                "Replication progress deletion failed",
+                "Replication checkpoint storage failed",
+                source: err
+            )
+        })
+    }
+
+    async fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> EtlResult<()> {
+        checkpoint::delete_replication_checkpoint(
+            &self.pool,
+            self.pipeline_id as i64,
+            worker_type.as_str(),
+            worker_type.checkpoint_table_id(),
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Replication checkpoint deletion failed",
                 source: err
             )
         })?;
@@ -676,7 +679,7 @@ impl TableStateLifecycleStore for PostgresStore {
                         )
                     })?;
 
-                progress::delete_replication_progress_for_table(
+                checkpoint::delete_replication_checkpoint_for_table(
                     &mut *tx,
                     self.pipeline_id as i64,
                     table_id,
@@ -685,7 +688,7 @@ impl TableStateLifecycleStore for PostgresStore {
                 .map_err(|err| {
                     etl_error!(
                         ErrorKind::SourceQueryFailed,
-                        "Replication progress deletion failed",
+                        "Replication checkpoint deletion failed",
                         source: err
                     )
                 })?;
@@ -715,17 +718,17 @@ impl TableStateLifecycleStore for PostgresStore {
                     .await?;
                 }
 
-                progress::delete_replication_progress(
+                checkpoint::delete_replication_checkpoint(
                     &mut *tx,
                     self.pipeline_id as i64,
                     WorkerType::Apply.as_str(),
-                    WorkerType::Apply.progress_table_id(),
+                    WorkerType::Apply.checkpoint_table_id(),
                 )
                 .await
                 .map_err(|err| {
                     etl_error!(
                         ErrorKind::SourceQueryFailed,
-                        "Replication progress deletion failed",
+                        "Replication checkpoint deletion failed",
                         source: err
                     )
                 })?;
@@ -771,7 +774,7 @@ impl TableStateLifecycleStore for PostgresStore {
                 pg_table_state::delete_table_state(&mut *tx, self.pipeline_id as i64, table_id)
                     .await?;
 
-                progress::delete_replication_progress_for_table(
+                checkpoint::delete_replication_checkpoint_for_table(
                     &mut *tx,
                     self.pipeline_id as i64,
                     table_id,
@@ -780,7 +783,7 @@ impl TableStateLifecycleStore for PostgresStore {
                 .map_err(|err| {
                     etl_error!(
                         ErrorKind::SourceQueryFailed,
-                        "Replication progress deletion failed",
+                        "Replication checkpoint deletion failed",
                         source: err
                     )
                 })?;

@@ -791,7 +791,7 @@ where
                 // finished. That intent must not become `ApplyLoopResult::Completed` until
                 // the write reports `Durable` and `SyncDone` has been stored. Check the state
                 // again at the cleanup boundary so a future ordering regression cannot delete
-                // the progress row and replication slot prematurely.
+                // its persisted checkpoint and replication slot prematurely.
                 //
                 // The apply worker may already have observed the durable handover and moved the
                 // shared state to `Ready` before this worker reaches cleanup.
@@ -836,20 +836,20 @@ where
 
     /// Cleans up resources owned by this table sync worker.
     ///
-    /// Once the table sync apply loop completes, its durable progress row is no
-    /// longer needed for resume and the replication slot should be removed so
+    /// Once the table sync apply loop completes, its persisted checkpoint is no
+    /// longer needed for resume and its replication slot should be removed so
     /// it stops retaining WAL.
     ///
-    /// Progress is deleted first so a slot deletion failure leaves only a stale
-    /// slot behind. That can retain WAL and may require manual cleanup, but it
-    /// does not leave stale progress for a completed table sync worker.
+    /// The checkpoint is deleted first so a slot deletion failure leaves only a
+    /// stale slot behind. That can retain WAL and may require manual cleanup,
+    /// but it does not leave a stale replay frontier for a completed worker.
     async fn cleanup_resources(
         &self,
         replication_client: &PgReplicationClient,
         store: S,
     ) -> EtlResult<()> {
         store
-            .delete_replication_progress(WorkerType::TableSync { table_id: self.table_id })
+            .delete_replication_checkpoint(WorkerType::TableSync { table_id: self.table_id })
             .await?;
 
         let slot_name: String =

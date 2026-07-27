@@ -12,7 +12,7 @@ use crate::{
 /// information is stored and retrieved. The store supports schema versioning
 /// where each schema version is identified by a snapshot ID (the LSN carried by
 /// the logical DDL message that created it). Stores may prune obsolete versions
-/// after replication progress has been acknowledged.
+/// behind a persisted replication checkpoint.
 ///
 /// Implementations should ensure thread-safety and handle concurrent access to
 /// the data.

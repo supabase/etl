@@ -29,11 +29,11 @@ pub enum DestinationWriteStatus {
     /// For streaming writes through
     /// [`crate::destination::Destination::write_events`], ETL does not advance
     /// the batch's commit end LSN. It carries that LSN into the next streaming
-    /// write and advances durable progress only when a later cumulative
+    /// write and advances the last flush LSN only when a later cumulative
     /// [`DestinationWriteStatus::Durable`] result covers it. If no later write
     /// is dispatched before shutdown, ETL normally leaves progress at the last
-    /// durable checkpoint so restart can replay the accepted write. A terminal
-    /// table-sync catchup may instead issue an empty
+    /// persisted checkpoint so restart can replay the accepted write. A
+    /// terminal table-sync catchup may instead issue an empty
     /// [`WriteEventsDurability::RequireDurable`] write to settle this debt.
     ///
     /// For table-copy writes through
@@ -119,9 +119,10 @@ pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
 pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Commit end LSN associated with the dispatched batch, if any.
     ///
-    /// For immediate destinations this becomes durable progress when the write
-    /// result returns [`DestinationWriteStatus::Durable`]. For deferred
-    /// destinations, the apply loop carries this LSN across
+    /// For immediate destinations this can advance the last flush LSN and
+    /// persisted checkpoint when the write returns
+    /// [`DestinationWriteStatus::Durable`]. For deferred destinations, the
+    /// apply loop carries this LSN across
     /// [`DestinationWriteStatus::Accepted`] results and advances only when a
     /// later cumulative durable result covers the carried LSN.
     pub commit_end_lsn: Option<PgLsn>,

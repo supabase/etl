@@ -36,19 +36,19 @@ type TableStateTypeCondition = (TableId, TableStateType, Arc<Notify>);
 type TableStateCondition = (TableId, Arc<Notify>, Box<dyn Fn(&TableState) -> bool + Send + Sync>);
 type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
 type TableSchemaPruneCondition = Arc<Notify>;
-type ReplicationProgressCondition = (WorkerType, PgLsn, Arc<Notify>);
+type ReplicationCheckpointCondition = (WorkerType, PgLsn, Arc<Notify>);
 
 struct Inner {
     table_states: TableStates,
     table_state_history: HashMap<TableId, Vec<TableState>>,
     table_schemas: Arc<TableSchemaSnapshots>,
     destination_tables_metadata: DestinationTablesMetadata,
-    replication_progress: HashMap<WorkerType, PgLsn>,
+    replication_checkpoints: HashMap<WorkerType, PgLsn>,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
     table_schema_count_conditions: Vec<TableSchemaCountCondition>,
     table_schema_prune_conditions: Vec<TableSchemaPruneCondition>,
-    replication_progress_conditions: Vec<ReplicationProgressCondition>,
+    replication_checkpoint_conditions: Vec<ReplicationCheckpointCondition>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
     fail_next_table_state_update: bool,
     fail_next_table_state_update_to: Option<(TableStateType, Arc<Notify>)>,
@@ -90,11 +90,11 @@ impl Inner {
             should_retain
         });
 
-        self.replication_progress_conditions.retain(|(worker_type, expected_lsn, notify)| {
+        self.replication_checkpoint_conditions.retain(|(worker_type, expected_lsn, notify)| {
             let should_retain = self
-                .replication_progress
+                .replication_checkpoints
                 .get(worker_type)
-                .is_none_or(|stored_lsn| stored_lsn < expected_lsn);
+                .is_none_or(|persisted_checkpoint_lsn| persisted_checkpoint_lsn < expected_lsn);
             if !should_retain {
                 notify.notify_one();
             }
@@ -129,12 +129,12 @@ impl NotifyingStore {
             table_state_history: HashMap::new(),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
             destination_tables_metadata: Arc::new(BTreeMap::new()),
-            replication_progress: HashMap::new(),
+            replication_checkpoints: HashMap::new(),
             table_state_type_conditions: Vec::new(),
             table_state_conditions: Vec::new(),
             table_schema_count_conditions: Vec::new(),
             table_schema_prune_conditions: Vec::new(),
-            replication_progress_conditions: Vec::new(),
+            replication_checkpoint_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
             fail_next_table_state_update: false,
             fail_next_table_state_update_to: None,
@@ -268,16 +268,16 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when a future progress write reaches
-    /// at least the expected LSN for a worker.
-    pub async fn notify_on_replication_progress(
+    /// Registers a notification that fires when a future checkpoint write
+    /// reaches at least the expected LSN for a worker.
+    pub async fn notify_on_replication_checkpoint(
         &self,
         worker_type: WorkerType,
         expected_lsn: PgLsn,
     ) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner.replication_progress_conditions.push((
+        inner.replication_checkpoint_conditions.push((
             worker_type,
             expected_lsn,
             Arc::clone(&notify),
@@ -339,13 +339,9 @@ impl StateStore for NotifyingStore {
         if std::mem::take(&mut guard.fail_next_table_state_update) {
             return Err(etl_error!(ErrorKind::InvalidState, "Injected table state update failure"));
         }
-        if guard
-            .fail_next_table_state_update_to
-            .as_ref()
-            .is_some_and(|(expected_state, _)| {
-                updates.iter().any(|(_, state)| state.as_type() == *expected_state)
-            })
-        {
+        if guard.fail_next_table_state_update_to.as_ref().is_some_and(|(expected_state, _)| {
+            updates.iter().any(|(_, state)| state.as_type() == *expected_state)
+        }) {
             let (_, notify) = guard
                 .fail_next_table_state_update_to
                 .take()
@@ -398,35 +394,38 @@ impl StateStore for NotifyingStore {
         Ok(previous_state)
     }
 
-    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
-        let inner = self.inner.read().await;
-
-        Ok(inner.replication_progress.get(&worker_type).copied())
-    }
-
-    async fn upsert_replication_progress(
+    async fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
-        flush_lsn: PgLsn,
-    ) -> EtlResult<PgLsn> {
-        let mut inner = self.inner.write().await;
-        let stored_lsn = *inner
-            .replication_progress
-            .entry(worker_type)
-            .and_modify(|stored_lsn| {
-                if flush_lsn > *stored_lsn {
-                    *stored_lsn = flush_lsn;
-                }
-            })
-            .or_insert(flush_lsn);
-        inner.check_conditions();
+    ) -> EtlResult<Option<PgLsn>> {
+        let inner = self.inner.read().await;
 
-        Ok(stored_lsn)
+        Ok(inner.replication_checkpoints.get(&worker_type).copied())
     }
 
-    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
+    async fn upsert_replication_checkpoint(
+        &self,
+        worker_type: WorkerType,
+        checkpoint_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
         let mut inner = self.inner.write().await;
-        inner.replication_progress.remove(&worker_type);
+        let persisted_checkpoint_lsn = *inner
+            .replication_checkpoints
+            .entry(worker_type)
+            .and_modify(|persisted_checkpoint_lsn| {
+                if checkpoint_lsn > *persisted_checkpoint_lsn {
+                    *persisted_checkpoint_lsn = checkpoint_lsn;
+                }
+            })
+            .or_insert(checkpoint_lsn);
+        inner.check_conditions();
+
+        Ok(persisted_checkpoint_lsn)
+    }
+
+    async fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+        inner.replication_checkpoints.remove(&worker_type);
 
         Ok(())
     }
@@ -529,7 +528,7 @@ impl TableStateLifecycleStore for NotifyingStore {
                 let mut inner = self.inner.write().await;
                 Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-                inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+                inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
                 inner.check_conditions();
 
                 Ok(0)
@@ -554,7 +553,7 @@ impl TableStateLifecycleStore for NotifyingStore {
                     states.insert(table_id, TableState::Init);
                 }
 
-                inner.replication_progress.remove(&WorkerType::Apply);
+                inner.replication_checkpoints.remove(&WorkerType::Apply);
                 inner.check_conditions();
 
                 Ok(reset_count)
@@ -567,7 +566,7 @@ impl TableStateLifecycleStore for NotifyingStore {
                 inner.table_state_history.remove(&table_id);
                 Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-                inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+                inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
                 inner.check_conditions();
 
                 Ok(affected_table_count)

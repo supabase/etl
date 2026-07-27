@@ -1,9 +1,9 @@
 //! Table state lifecycle store capability.
 //!
 //! Table state lifecycle operations are coordinated mutations over table state,
-//! durable progress, versioned schemas, destination metadata, and store caches.
-//! Each operation represents a supported lifecycle intent so callers do not
-//! need to compose ad hoc deletion steps.
+//! persisted replication checkpoints, versioned schemas, destination metadata,
+//! and store caches. Each operation represents a supported lifecycle intent so
+//! callers do not need to compose ad hoc deletion steps.
 
 use std::future::Future;
 

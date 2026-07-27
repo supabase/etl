@@ -150,12 +150,12 @@ pub trait Destination {
     ///
     /// [`crate::destination::DestinationWriteStatus::Durable`] means this write
     /// and all earlier accepted writes in the same ordered apply-loop stream
-    /// are durable according to the destination contract. ETL may advance
-    /// durable replication progress only after observing this status.
+    /// are durable according to the destination contract. ETL may persist a
+    /// checkpoint covering the write only after observing this status.
     ///
     /// [`crate::destination::DestinationWriteStatus::Accepted`] means the
     /// destination accepted ownership of the write, but ETL must not advance
-    /// durable progress for it yet.
+    /// its flushed progress or persisted checkpoint for it yet.
     ///
     /// [`WriteEventsDurability::MayDefer`] permits either status, while
     /// [`WriteEventsDurability::RequireDurable`] requires `Durable` and its
@@ -175,14 +175,14 @@ pub trait Destination {
     /// building the next batch. If a result completes as
     /// [`crate::destination::DestinationWriteStatus::Accepted`], ETL carries
     /// that write's commit end LSN into the next streaming write instead of
-    /// advancing durable progress. A later
+    /// advancing the last flush LSN or persisted checkpoint. A later
     /// [`crate::destination::DestinationWriteStatus::Durable`] result is
     /// cumulative: it must mean that later write and all earlier `Accepted`
     /// writes in the same apply-loop stream are durable.
     ///
     /// If no later streaming write is dispatched before shutdown, ETL normally
-    /// exits without acknowledging accepted-but-not-durable progress. Restart
-    /// then replays from the last durable checkpoint. A terminal table-sync
+    /// exits without checkpointing accepted-but-not-durable work. Restart then
+    /// replays from the last persisted checkpoint. A terminal table-sync
     /// catchup may issue the empty required-durability barrier described above
     /// instead.
     ///
