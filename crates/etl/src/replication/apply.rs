@@ -53,9 +53,10 @@ use crate::{
         ACTION_LABEL, COMMAND_TAG_LABEL, CONFIRMATION_LABEL,
         ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
         ETL_APPLY_LOOP_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
-        ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-        ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL,
-        ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+        ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS, ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS,
+        ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_DDL_SCHEMA_CHANGE_COLUMNS,
+        ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL,
+        ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
         ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
         ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
@@ -694,6 +695,15 @@ impl EventBatch {
     }
 }
 
+/// Timing anchors for one accepted-but-not-durable destination write.
+#[derive(Debug, Clone, Copy)]
+struct PendingDurableDispatch {
+    /// Instant at which the write was handed off to the destination.
+    dispatched_at: Instant,
+    /// Instant at which the apply loop processed the accepted result.
+    accepted_at: Instant,
+}
+
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
@@ -705,15 +715,14 @@ struct ApplyLoopState {
     /// commit end LSN is re-attached here so a later durable write can advance
     /// through it.
     last_commit_end_lsn: Option<PgLsn>,
-    /// Dispatch instants of accepted-but-not-durable destination writes.
+    /// Timing anchors of accepted-but-not-durable destination writes.
     ///
     /// A durable write result confirms all earlier accepted writes in the same
-    /// ordered apply-loop stream, so their durable write durations are
-    /// recorded once the next durable result arrives. The queue has no
-    /// explicit bound: the loop keeps at most one write in flight, so it
-    /// grows by at most one entry per completed write and drains at the
-    /// next durable result.
-    pending_durable_dispatches: VecDeque<Instant>,
+    /// ordered apply-loop stream, so their durable durations are recorded once
+    /// the next durable result arrives. The queue has no explicit bound: the
+    /// loop keeps at most one write in flight, so it grows by at most one
+    /// entry per completed write and drains at the next durable result.
+    pending_durable_dispatches: VecDeque<PendingDurableDispatch>,
     /// The LSN of the commit WAL entry of the transaction that is currently
     /// being processed.
     remote_final_lsn: Option<PgLsn>,
@@ -1817,11 +1826,14 @@ where
 
             match status {
                 DestinationWriteStatus::Accepted => {
-                    // Remember when this write was dispatched so its durable
-                    // write duration can be recorded once a later durable
-                    // result covers it.
+                    // Remember when this write was dispatched and accepted so
+                    // its durable durations can be recorded once a later
+                    // durable result covers it.
                     if metadata.event_count > 0 {
-                        self.state.pending_durable_dispatches.push_back(metadata.dispatched_at);
+                        self.state.pending_durable_dispatches.push_back(PendingDurableDispatch {
+                            dispatched_at: metadata.dispatched_at,
+                            accepted_at: Instant::now(),
+                        });
                     }
 
                     self.state.update_last_commit_end_lsn(metadata.commit_end_lsn);
@@ -1836,9 +1848,16 @@ where
                             ACTION_LABEL => "table_streaming",
                             CONFIRMATION_LABEL => "deferred",
                         );
-                        for dispatched_at in self.state.pending_durable_dispatches.drain(..) {
+                        let durable_wait_histogram = histogram!(
+                            ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS,
+                            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                            ACTION_LABEL => "table_streaming",
+                        );
+                        for dispatch in self.state.pending_durable_dispatches.drain(..) {
                             deferred_durable_histogram
-                                .record(dispatched_at.elapsed().as_secs_f64());
+                                .record(dispatch.dispatched_at.elapsed().as_secs_f64());
+                            durable_wait_histogram
+                                .record(dispatch.accepted_at.elapsed().as_secs_f64());
                         }
                     }
 

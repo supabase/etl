@@ -9,6 +9,8 @@ pub(crate) const ETL_BATCH_ITEMS_SEND_DURATION_SECONDS: &str =
     "etl_batch_items_send_duration_seconds";
 pub(crate) const ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS: &str =
     "etl_batch_items_durable_duration_seconds";
+pub(crate) const ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS: &str =
+    "etl_batch_items_durable_wait_duration_seconds";
 pub(crate) const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_seconds";
 pub(crate) const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
 pub(crate) const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
@@ -95,6 +97,14 @@ pub(crate) fn register_metrics() {
             "Time taken in seconds from dispatching a batch of items to the destination until the \
              destination confirms the batch durable, labeled by worker_type, action and \
              confirmation; covers streaming writes only"
+        );
+
+        describe_histogram!(
+            ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS,
+            Unit::Seconds,
+            "Time taken in seconds from the destination accepting a batch of items until a later \
+             durable result confirms the batch durable, labeled by worker_type and action; covers \
+             deferred streaming writes only"
         );
 
         describe_histogram!(
