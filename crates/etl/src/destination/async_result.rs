@@ -94,6 +94,10 @@ pub enum WriteEventsDurability {
     /// stream. ETL may use this with an empty event vector as a durability-only
     /// barrier. The destination may return `Durable` immediately only when no
     /// covered durability debt remains, returning `Accepted` is invalid.
+    ///
+    /// The apply loop may also require a subsequent nonempty write after its
+    /// bounded accepted-write timing queue fills. That write is a cumulative
+    /// durability barrier for all earlier accepted writes.
     RequireDurable,
 }
 
@@ -143,7 +147,7 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
 /// side immediately or later, depending on the method.
 #[derive(Debug)]
 pub struct AsyncResult<T> {
-    tx: Option<oneshot::Sender<EtlResult<T>>>,
+    tx: Option<oneshot::Sender<(Instant, EtlResult<T>)>>,
 }
 
 impl<T> AsyncResult<T> {
@@ -158,13 +162,14 @@ impl<T> AsyncResult<T> {
         (Self { tx: Some(tx) }, PendingAsyncResult { metadata: Some(metadata), rx })
     }
 
-    /// Sends the final result to the waiting receiver.
+    /// Sends the final result to the waiting receiver and records its completion instant.
     pub fn send(mut self, result: EtlResult<T>) {
         let Some(tx) = self.tx.take() else {
             return;
         };
 
-        if tx.send(result).is_err() {
+        let completed_at = Instant::now();
+        if tx.send((completed_at, result)).is_err() {
             debug!("async result receiver was already closed");
         }
     }
@@ -177,7 +182,7 @@ pin_project! {
     pub(crate) struct PendingAsyncResult<T, M> {
         metadata: Option<M>,
         #[pin]
-        rx: oneshot::Receiver<EtlResult<T>>,
+        rx: oneshot::Receiver<(Instant, EtlResult<T>)>,
     }
 }
 
@@ -188,11 +193,14 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
         let this = self.project();
 
         match this.rx.poll(cx) {
-            Poll::Ready(Ok(result)) => {
-                Poll::Ready(CompletedAsyncResult { metadata: this.metadata.take(), result })
-            }
+            Poll::Ready(Ok((completed_at, result))) => Poll::Ready(CompletedAsyncResult {
+                metadata: this.metadata.take(),
+                completed_at,
+                result,
+            }),
             Poll::Ready(Err(_)) => Poll::Ready(CompletedAsyncResult {
                 metadata: this.metadata.take(),
+                completed_at: Instant::now(),
                 result: Err(etl_error!(
                     ErrorKind::DestinationError,
                     "Async result channel closed before sending"
@@ -223,6 +231,9 @@ impl<T, M> PendingAsyncResult<T, M> {
 #[derive(Debug)]
 pub(crate) struct CompletedAsyncResult<T, M> {
     metadata: Option<M>,
+    /// Instant at which the sender reported completion.
+    completed_at: Instant,
+    /// Final operation result.
     result: EtlResult<T>,
 }
 
@@ -233,8 +244,14 @@ impl<T, M> CompletedAsyncResult<T, M> {
     }
 
     /// Returns the metadata and final result.
+    #[cfg(test)]
     pub(crate) fn into_parts(self) -> (Option<M>, EtlResult<T>) {
         (self.metadata, self.result)
+    }
+
+    /// Returns metadata, the completion instant, and the final result.
+    pub(crate) fn into_parts_with_completion(self) -> (Option<M>, Instant, EtlResult<T>) {
+        (self.metadata, self.completed_at, self.result)
     }
 }
 
@@ -281,7 +298,7 @@ mod tests {
         let mut pending_result =
             PendingAsyncResult::<u64, ApplyLoopAsyncResultMetadata> { metadata: None, rx };
 
-        result_tx.send(Ok(7)).unwrap();
+        result_tx.send((Instant::now(), Ok(7))).unwrap();
 
         let completed = std::future::poll_fn(|cx| Pin::new(&mut pending_result).poll(cx)).await;
         let (metadata, result) = completed.into_parts();

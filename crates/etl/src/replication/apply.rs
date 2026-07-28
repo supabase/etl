@@ -123,6 +123,8 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// progress points where durable ETL progress may have advanced. The next
 /// deadline is scheduled when the previous cleanup task finishes.
 const SCHEMA_CLEANUP_INTERVAL: Duration = Duration::from_hours(1);
+/// Maximum accepted-but-not-durable streaming writes tracked per apply loop.
+const MAX_PENDING_DURABLE_DISPATCHES: usize = 1024;
 
 /// Result type for the apply loop execution.
 ///
@@ -719,10 +721,12 @@ struct ApplyLoopState {
     ///
     /// A durable write result confirms all earlier accepted writes in the same
     /// ordered apply-loop stream, so their durable durations are recorded once
-    /// the next durable result arrives. The queue has no explicit bound: the
-    /// loop keeps at most one write in flight, so it grows by at most one
-    /// entry per completed write and drains at the next durable result.
+    /// the next durable result arrives. The queue is capped and the next
+    /// nonempty write becomes a cumulative durability barrier when the cap is
+    /// reached, so no timing entries are dropped.
     pending_durable_dispatches: VecDeque<PendingDurableDispatch>,
+    /// Whether the next nonempty streaming write must confirm cumulative durability.
+    require_durable_next_write: bool,
     /// The LSN of the commit WAL entry of the transaction that is currently
     /// being processed.
     remote_final_lsn: Option<PgLsn>,
@@ -790,6 +794,7 @@ impl ApplyLoopState {
         Self {
             last_commit_end_lsn: None,
             pending_durable_dispatches: VecDeque::new(),
+            require_durable_next_write: false,
             remote_final_lsn: None,
             replication_progress,
             replication_lag_metrics,
@@ -1793,7 +1798,7 @@ where
         let processing_paused = self.state.resume_processing();
 
         // Explode the result into parts which are used for handling the flush result.
-        let (metadata, result) = flush_result.into_parts();
+        let (metadata, completed_at, result) = flush_result.into_parts_with_completion();
 
         // If there was an error in the flushing, we return it immediately.
         let status = result?;
@@ -1830,10 +1835,25 @@ where
                     // its durable durations can be recorded once a later
                     // durable result covers it.
                     if metadata.event_count > 0 {
+                        if self.state.pending_durable_dispatches.len()
+                            >= MAX_PENDING_DURABLE_DISPATCHES
+                        {
+                            bail!(
+                                ErrorKind::DestinationError,
+                                "Destination exceeded the pending durability queue limit"
+                            );
+                        }
+
                         self.state.pending_durable_dispatches.push_back(PendingDurableDispatch {
                             dispatched_at: metadata.dispatched_at,
-                            accepted_at: Instant::now(),
+                            accepted_at: completed_at,
                         });
+
+                        if self.state.pending_durable_dispatches.len()
+                            == MAX_PENDING_DURABLE_DISPATCHES
+                        {
+                            self.state.require_durable_next_write = true;
+                        }
                     }
 
                     self.state.update_last_commit_end_lsn(metadata.commit_end_lsn);
@@ -1854,10 +1874,16 @@ where
                             ACTION_LABEL => "table_streaming",
                         );
                         for dispatch in self.state.pending_durable_dispatches.drain(..) {
-                            deferred_durable_histogram
-                                .record(dispatch.dispatched_at.elapsed().as_secs_f64());
-                            durable_wait_histogram
-                                .record(dispatch.accepted_at.elapsed().as_secs_f64());
+                            deferred_durable_histogram.record(
+                                completed_at
+                                    .saturating_duration_since(dispatch.dispatched_at)
+                                    .as_secs_f64(),
+                            );
+                            durable_wait_histogram.record(
+                                completed_at
+                                    .saturating_duration_since(dispatch.accepted_at)
+                                    .as_secs_f64(),
+                            );
                         }
                     }
 
@@ -1870,7 +1896,11 @@ where
                             ACTION_LABEL => "table_streaming",
                             CONFIRMATION_LABEL => "direct",
                         )
-                        .record(metadata.dispatched_at.elapsed().as_secs_f64());
+                        .record(
+                            completed_at
+                                .saturating_duration_since(metadata.dispatched_at)
+                                .as_secs_f64(),
+                        );
                     }
 
                     // We process the syncing tables with the last end lsn that the batch contains.
@@ -2046,10 +2076,17 @@ where
         let (events, event_count, streaming_payload_metadata) = event_batch.into_parts();
         // `Complete` is terminal, so no later write is guaranteed to settle an
         // `Accepted` result. Its final batch must confirm cumulative durability
-        // before the apply loop can complete.
-        let durability = match self.state.exit_intent {
-            Some(ExitIntent::Complete) => WriteEventsDurability::RequireDurable,
-            Some(ExitIntent::Pause) | None => WriteEventsDurability::MayDefer,
+        // before the apply loop can complete. The queue cap applies the same
+        // requirement to the next nonempty streaming write.
+        let require_durable_next_write =
+            event_count > 0 && std::mem::take(&mut self.state.require_durable_next_write);
+        let durability = if require_durable_next_write {
+            WriteEventsDurability::RequireDurable
+        } else {
+            match self.state.exit_intent {
+                Some(ExitIntent::Complete) => WriteEventsDurability::RequireDurable,
+                Some(ExitIntent::Pause) | None => WriteEventsDurability::MayDefer,
+            }
         };
         debug!(
             worker_type = %self.worker_context.worker_type(),

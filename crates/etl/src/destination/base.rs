@@ -180,6 +180,11 @@ pub trait Destination {
     /// cumulative: it must mean that later write and all earlier `Accepted`
     /// writes in the same apply-loop stream are durable.
     ///
+    /// Once ETL's bounded accepted-write timing queue fills, the next nonempty
+    /// streaming write is also required to be durable. That write is a
+    /// cumulative barrier for all earlier accepted writes and keeps timing
+    /// state bounded without dropping samples.
+    ///
     /// If no later streaming write is dispatched before shutdown, ETL normally
     /// exits without acknowledging accepted-but-not-durable progress. Restart
     /// then replays from the last durable checkpoint. A terminal table-sync
