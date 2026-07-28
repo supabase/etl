@@ -2517,7 +2517,8 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
 }
 
 /// Interrupted recovery rejects an equal snapshot with a different publication
-/// mask instead of applying DDL for schema state other than the recorded target.
+/// mask instead of applying DDL for schema state other than the recorded
+/// target.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
     init_test_tracing();
@@ -2536,10 +2537,8 @@ async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
         SnapshotId::new(PgLsn::from(200)),
     ));
     let target_mask = ReplicationMask::all(&table_schema);
-    let arriving_schema = ReplicatedTableSchema::from_mask(
-        table_schema,
-        ReplicationMask::from_bytes(vec![1, 0]),
-    );
+    let arriving_schema =
+        ReplicatedTableSchema::from_mask(table_schema, ReplicationMask::from_bytes(vec![1, 0]));
     let metadata = DestinationTableMetadata::new_applied(
         "public_mask_recovery".to_owned(),
         SnapshotId::new(PgLsn::from(100)),
@@ -2552,9 +2551,8 @@ async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
     );
     store.store_destination_table_metadata(table_id, metadata).await.unwrap();
 
-    let destination = clickhouse_db
-        .build_destination_with_engine(store, ClickHouseEngine::MergeTree)
-        .await;
+    let destination =
+        clickhouse_db.build_destination_with_engine(store, ClickHouseEngine::MergeTree).await;
     let err = destination
         .write_events(vec![Event::Relation(RelationEvent {
             replicated_table_schema: arriving_schema,
@@ -2656,9 +2654,7 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;
     restarted_destination
-        .write_events(vec![Event::Relation(RelationEvent {
-            replicated_table_schema: new_schema,
-        })])
+        .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: new_schema })])
         .await
         .unwrap();
 
@@ -2773,9 +2769,7 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
     assert_eq!(recovered_metadata.replication_mask, target_mask);
 
     let rows: Vec<RecoveryMaskRow> = clickhouse_db
-        .query(&format!(
-            "SELECT id, name FROM \"{clickhouse_table_name}\" ORDER BY id"
-        ))
+        .query(&format!("SELECT id, name FROM \"{clickhouse_table_name}\" ORDER BY id"))
         .await;
     assert_eq!(
         rows,

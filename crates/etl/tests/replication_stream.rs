@@ -109,8 +109,7 @@ async fn collect_stream_markers(
                         .as_u64()
                         .and_then(|oid| u32::try_from(oid).ok())
                         .expect("DDL message should contain a PostgreSQL table OID");
-                    let publication_name =
-                        json["publication_name"].as_str().map(ToOwned::to_owned);
+                    let publication_name = json["publication_name"].as_str().map(ToOwned::to_owned);
                     let column_names = json["columns"]
                         .as_array()
                         .expect("DDL message columns should be an array")
@@ -136,10 +135,7 @@ async fn collect_stream_markers(
                         .columns()
                         .iter()
                         .map(|column| {
-                            column
-                                .name()
-                                .expect("Relation column name should decode")
-                                .to_owned()
+                            column.name().expect("Relation column name should decode").to_owned()
                         })
                         .collect();
 
