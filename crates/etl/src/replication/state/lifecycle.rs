@@ -54,6 +54,10 @@ impl StoredTableDecodingState {
         table_schema: Arc<TableSchema>,
         sync_done_lsn: PgLsn,
     ) -> EtlResult<ReplicatedTableSchema> {
+        // New values come from a valid ReplicatedTableSchema, but durable JSON
+        // can outlive the writer version or be malformed independently. Check
+        // the complete stored representation before rebuilding unchecked mask
+        // types from its raw bytes.
         if self.snapshot_id.into_inner() > sync_done_lsn {
             bail!(
                 ErrorKind::InvalidState,
@@ -181,17 +185,19 @@ pub enum TableState {
     /// will now be applied by the apply worker only.
     ///
     /// `Ready` no longer retains the [`StoredTableDecodingState`] from
-    /// `SyncDone`. The apply worker therefore stores progress at or beyond
-    /// `SyncDone.lsn` before persisting `Ready`. On restart, that durable
-    /// progress prevents the apply stream from resuming before the discarded
-    /// boundary.
+    /// `SyncDone`. Before persisting `Ready`, the apply worker therefore
+    /// requires the current connection to have crossed `SyncDone.lsn`, a
+    /// durable apply checkpoint at or beyond that boundary, and a materialized
+    /// connection-local decoder.
     ///
-    /// This ordering proves restart position, not decoder initialization on the
-    /// current connection. That connection must already have installed the
-    /// decoding state while waiting for table sync, or must recover it from
-    /// `SyncDone` when a row first needs decoding. Current-connection safety
-    /// therefore assumes one of those installation paths runs before `Ready`
-    /// discards the state.
+    /// These conditions protect different attempts. The local decoder protects
+    /// only the current connection, which may not receive another relation
+    /// message after handover. Restart safety comes from the durable
+    /// checkpoint: the next apply worker starts at the later of its
+    /// replication-slot position and that checkpoint, so its bootstrap is at
+    /// or beyond `SyncDone.lsn`. A fresh pgoutput connection emits relation
+    /// metadata before its first row change, allowing it to resolve the newest
+    /// stored schema at or before the restart position.
     Ready,
     /// Set by either the table-sync worker or the apply worker when a table
     /// encounters an error during replication. Contains diagnostic information
@@ -667,13 +673,23 @@ mod tests {
 
     #[test]
     fn from_state_row_round_trip() {
-        let states = vec![
+        let sync_done_lsn = "0/1000000".parse::<PgLsn>().unwrap();
+        let table_decoding_state = StoredTableDecodingState {
+            snapshot_id: SnapshotId::new("0/900000".parse::<PgLsn>().unwrap()),
+            replication_mask: vec![1, 0, 1],
+            identity_mask: vec![1, 0, 0],
+        };
+        let states = [
             TableState::Init,
             TableState::DataSync,
             TableState::FinishedCopy,
+            // Keep the missing payload covered for rows written before durable
+            // table decoding state was added to SyncDone.
+            TableState::SyncDone { lsn: sync_done_lsn, table_decoding_state: None },
+            // New SyncDone rows must preserve the complete compact decoder.
             TableState::SyncDone {
-                lsn: "0/1000000".parse::<PgLsn>().unwrap(),
-                table_decoding_state: None,
+                lsn: sync_done_lsn,
+                table_decoding_state: Some(table_decoding_state),
             },
             TableState::Ready,
             TableState::Errored {
@@ -684,38 +700,23 @@ mod tests {
             },
         ];
 
-        for state in states {
-            let (state_type, metadata) = state.to_storage_format().unwrap();
+        for expected_state in states {
+            let expected_state_type = expected_state.as_type().to_storage_type().unwrap();
+            let (stored_state_type, metadata) = expected_state.to_storage_format().unwrap();
+            assert_eq!(stored_state_type, expected_state_type);
+
             let row = table_state::StoredTableStateRow {
                 id: 1,
                 pipeline_id: 1,
                 table_id: sqlx::postgres::types::Oid(42),
-                state: state_type,
+                state: stored_state_type,
                 metadata: Some(metadata),
                 prev: None,
                 is_current: true,
             };
-            let restored = TableState::from_state_row(row).unwrap();
+            let restored_state = TableState::from_state_row(row).unwrap();
 
-            assert_eq!(state.as_type(), restored.as_type());
-            match (&state, &restored) {
-                (
-                    TableState::SyncDone { lsn: lsn_a, table_decoding_state: decoding_state_a },
-                    TableState::SyncDone { lsn: lsn_b, table_decoding_state: decoding_state_b },
-                ) => {
-                    assert_eq!(lsn_a, lsn_b);
-                    assert_eq!(decoding_state_a, decoding_state_b);
-                }
-                (
-                    TableState::Errored { reason: r1, solution: s1, retry_policy: rp1, .. },
-                    TableState::Errored { reason: r2, solution: s2, retry_policy: rp2, .. },
-                ) => {
-                    assert_eq!(r1, r2);
-                    assert_eq!(s1, s2);
-                    assert_eq!(rp1, rp2);
-                }
-                _ => {}
-            }
+            assert_eq!(restored_state, expected_state);
         }
     }
 }

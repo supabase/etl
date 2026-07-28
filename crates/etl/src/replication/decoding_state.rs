@@ -16,6 +16,12 @@
 //! `SyncDone`. Reaching the ownership boundary while still waiting for a
 //! relation fails closed because the publication and replica-identity masks
 //! are not known.
+//!
+//! The apply worker clears its entry before starting table synchronization.
+//! After `SyncDone`, an owned relation materializes a new entry, while
+//! relation-less DML restores the compact durable state. Consequently,
+//! `WithSchema` also proves that the current apply connection can keep decoding
+//! after `SyncDone` is replaced by `Ready`.
 
 use crate::schema::{ReplicatedTableSchema, SnapshotId};
 
