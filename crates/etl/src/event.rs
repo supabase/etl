@@ -299,6 +299,9 @@ impl SizeHint for Event {
 }
 
 /// Pair used to build a CDC sequence key for destinations.
+///
+/// Destinations choose their own storage and wire representation instead of
+/// relying on a generic string encoding for this domain value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventSequenceKey {
     /// Commit LSN identifying transaction order across transactions.
@@ -320,13 +323,6 @@ impl EventSequenceKey {
     /// ClickHouse's `ReplacingMergeTree` version column).
     pub fn as_u128(self) -> u128 {
         (u128::from(u64::from(self.commit_lsn)) << 64) | u128::from(self.tx_ordinal)
-    }
-}
-
-impl fmt::Display for EventSequenceKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let commit_lsn = u64::from(self.commit_lsn);
-        write!(f, "{commit_lsn:016x}/{:016x}", self.tx_ordinal)
     }
 }
 

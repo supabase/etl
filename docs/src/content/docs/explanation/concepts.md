@@ -254,7 +254,8 @@ metadata and do not have an event sequence key.
 
 ## Why Persist State?
 
-ETL persists operational state - **table states, schemas, progress, and destination table metadata** - for recovery.
+ETL persists operational state - **table states, schemas, replication
+checkpoints, and destination table metadata** - for recovery.
 
 ### Without Persistence
 
@@ -271,7 +272,7 @@ ETL stores:
 | State | Purpose |
 |-------|---------|
 | Table state | Know whether to copy or stream for each table |
-| Durable replication progress | Resume workers from a safe flushed LSN |
+| Persisted replication checkpoint | Resume workers from a safe replay frontier |
 | Table schemas | Decode events against the correct versioned schema |
 | Destination table metadata | Track destination table IDs, applied schema snapshots, and replication masks |
 

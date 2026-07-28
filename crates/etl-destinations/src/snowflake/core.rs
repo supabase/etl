@@ -21,6 +21,7 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
+    recovery::ensure_relation_schema_transition,
     snowflake::{
         Client,
         auth::{AuthManager, HttpExchanger, TokenProvider},
@@ -472,24 +473,19 @@ where
         let current_replication_mask = metadata.replication_mask.clone();
         let new_replication_mask = new_schema.replication_mask().clone();
 
-        // Snowflake waits for all preceding row batches to become durable
-        // before applying schema DDL. On replay, those rows are at or below the
-        // channel's restored committed offset and will be skipped. The older
-        // relation event is therefore already reflected in the destination,
-        // diffing backwards could drop newer columns and delete their data.
-        if new_snapshot_id < current_snapshot_id {
-            info!(
-                table_id = %table_id,
-                received_snapshot_id = %new_snapshot_id,
-                applied_snapshot_id = %current_snapshot_id,
-                "skipping stale Snowflake relation event"
-            );
-            return Ok(false);
-        }
+        // A relation carries no channel offset proving replay coverage or
+        // ordering between masks. Reject older snapshots and equal-snapshot
+        // mask conflicts before relying on provider offsets or diffing DDL.
+        ensure_relation_schema_transition(
+            "Snowflake",
+            table_id,
+            current_snapshot_id,
+            &current_replication_mask,
+            new_snapshot_id,
+            &new_replication_mask,
+        )?;
 
-        if current_snapshot_id == new_snapshot_id
-            && current_replication_mask == new_replication_mask
-        {
+        if current_snapshot_id == new_snapshot_id {
             info!(table_id = ?table_id, "schema unchanged, skipping relation event");
             return Ok(false);
         }
@@ -844,9 +840,9 @@ mod tests {
         );
     }
 
-    /// A stale relation event must not drive reverse Snowflake DDL.
+    /// A stale relation event must fail before driving reverse Snowflake DDL.
     #[tokio::test]
-    async fn stale_relation_event_is_skipped() {
+    async fn stale_relation_event_is_rejected() {
         let (destination, store) = test_destination();
         let table_id = TableId::new(3);
         let table_name = TableName::new("public".to_owned(), "users".to_owned());
@@ -878,15 +874,15 @@ mod tests {
         );
         store.store_destination_table_metadata(table_id, metadata.clone()).await.unwrap();
 
-        let status = destination
+        let error = destination
             .writer
             .process_admitted_events(vec![Event::Relation(RelationEvent {
                 replicated_table_schema: stale_schema,
             })])
             .await
-            .expect("stale relation event should be skipped");
+            .expect_err("stale relation event should be rejected");
 
-        assert_eq!(status, DestinationWriteStatus::Durable);
+        assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
         assert_eq!(store.get_destination_table_metadata(table_id).await.unwrap(), Some(metadata));
     }
 

@@ -36,6 +36,7 @@ use crate::{
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
         schema::{column_schemas_to_table_descriptor, supports_column_default},
     },
+    recovery::ensure_relation_schema_transition,
     table_name::try_stringify_table_name,
 };
 
@@ -665,9 +666,9 @@ where
     /// [`StateStore::get_applied_destination_table_metadata`]. Missing metadata
     /// is treated as an invariant violation since the metadata should have
     /// been recorded during initial table synchronization in
-    /// [`Self::write_table_rows`]. If the snapshot ID or replication mask
-    /// differs from the incoming [`ReplicatedTableSchema`], the method
-    /// computes and applies the schema diff.
+    /// [`Self::write_table_rows`]. A newer incoming snapshot computes and
+    /// applies the schema diff. An older snapshot, or an equal snapshot with a
+    /// different replication mask, is rejected before DDL.
     async fn handle_relation_event(
         &self,
         new_replicated_table_schema: &ReplicatedTableSchema,
@@ -698,11 +699,22 @@ where
         let current_snapshot_id = metadata.snapshot_id;
         let current_replication_mask = metadata.replication_mask.clone();
         let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
-        // Check both snapshot_id and replication mask - the mask can change
-        // independently if columns are added/removed from the publication.
-        if current_snapshot_id == new_snapshot_id
-            && current_replication_mask == new_replication_mask
-        {
+
+        // BigQuery CDC sequence numbers order row mutations, but they do not
+        // make destructive or ambiguously ordered DDL safe. A relation has no
+        // DML sequence key of its own, so reject older snapshots and
+        // equal-snapshot mask conflicts before computing a diff.
+        ensure_relation_schema_transition(
+            "BigQuery",
+            table_id,
+            current_snapshot_id,
+            &current_replication_mask,
+            new_snapshot_id,
+            &new_replication_mask,
+        )?;
+
+        // The guard above proves that equal snapshots have equal masks.
+        if current_snapshot_id == new_snapshot_id {
             // Schema hasn't changed, nothing to do.
             info!(
                 "schema for table {} unchanged (snapshot_id: {}, replication_mask: {})",
@@ -1403,7 +1415,8 @@ where
 /// ordinal makes the ordering within generated rows explicit instead of relying
 /// on append order or BigQuery ingestion-time tie-breaking.
 fn bigquery_sequence_key(sequence_key: EventSequenceKey, internal_ordinal: u64) -> String {
-    format!("{sequence_key}/{internal_ordinal:016x}")
+    let commit_lsn = u64::from(sequence_key.commit_lsn);
+    format!("{commit_lsn:016x}/{:016x}/{internal_ordinal:016x}", sequence_key.tx_ordinal)
 }
 
 /// Builds a BigQuery CDC upsert row.
@@ -2497,6 +2510,16 @@ mod tests {
                 (4, Cell::String("DELETE".to_owned())),
                 (5, Cell::String("lsn:1".to_owned())),
             ])
+        );
+    }
+
+    #[test]
+    fn bigquery_sequence_key_uses_three_64_bit_hex_sections() {
+        let sequence_key = EventSequenceKey::new(PgLsn::from(u64::MAX), u64::MAX);
+
+        assert_eq!(
+            bigquery_sequence_key(sequence_key, u64::MAX),
+            "ffffffffffffffff/ffffffffffffffff/ffffffffffffffff"
         );
     }
 

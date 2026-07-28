@@ -80,7 +80,7 @@ async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn apply_worker_retry_rebases_relation_schema_selection() {
+async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
     init_test_tracing();
 
     let mut database = spawn_source_database().await;

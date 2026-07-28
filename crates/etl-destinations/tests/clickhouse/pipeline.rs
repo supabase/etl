@@ -2575,13 +2575,14 @@ async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
 ///
 /// # WHEN
 ///
-/// A write arrives carrying the target snapshot 200, as happens when the
-/// rows following the interrupted relation event replay after a restart.
+/// A relation event arrives carrying the target snapshot 200 and its exact
+/// replication mask.
 ///
 /// # THEN
 ///
 /// Recovery replays the interrupted diff (adds `email`), transitions the
-/// metadata to `Applied` at snapshot 200, and the write succeeds.
+/// metadata to `Applied` at snapshot 200, and the relation succeeds without a
+/// synthetic DML event sequence key.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     init_test_tracing();

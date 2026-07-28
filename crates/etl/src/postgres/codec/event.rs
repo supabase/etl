@@ -49,12 +49,7 @@ pub(crate) struct SchemaChangeMessage {
     /// The table name from `pg_class.relname`.
     pub(crate) relname: String,
     /// The table OID from `pg_class.oid`.
-    ///
-    /// PostgreSQL table OIDs are `u32` values, but JSON serialization from the
-    /// event trigger uses `bigint` (i64) for transmission. The cast back to
-    /// `u32` in [`into_table_schema`] is safe because PostgreSQL OIDs are
-    /// always within the `u32` range.
-    pub(crate) oid: i64,
+    pub(crate) oid: u32,
     /// The identity metadata emitted by Postgres for this table snapshot.
     pub(crate) identity: IdentityMessage,
     /// The columns of the table after the schema change.
@@ -64,7 +59,7 @@ pub(crate) struct SchemaChangeMessage {
 impl SchemaChangeMessage {
     /// Returns the table identifier as [`TableId`].
     pub(crate) fn table_id(&self) -> TableId {
-        TableId::new(self.oid as u32)
+        TableId::new(self.oid)
     }
 
     /// Returns whether this message applies to `publication_name`.
@@ -1061,8 +1056,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_change_message_scopes_optional_publication() {
-        let unscoped = r#"{
+    fn schema_change_message_validates_oid_and_publication_scope() {
+        let table_ddl = r#"{
             "command_tag": "ALTER TABLE",
             "nspname": "public",
             "relname": "items",
@@ -1073,10 +1068,15 @@ mod tests {
                 "replica_identity_index_attnums": []
             },
             "columns": []
-        }"#
-        .parse::<SchemaChangeMessage>()
-        .unwrap();
+        }"#;
+        let unscoped = table_ddl.parse::<SchemaChangeMessage>().unwrap();
         assert!(unscoped.applies_to_publication("pipeline_publication"));
+
+        for invalid_oid in ["-1", "4294967296"] {
+            let invalid_payload =
+                table_ddl.replace("\"oid\": 42", &format!("\"oid\": {invalid_oid}"));
+            assert!(invalid_payload.parse::<SchemaChangeMessage>().is_err());
+        }
 
         let null_scoped_table = r#"{
             "command_tag": "ALTER TABLE",

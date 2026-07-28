@@ -509,7 +509,7 @@ mod tests {
     };
 
     #[test]
-    fn table_state_serialization() {
+    fn table_state_json_round_trip() {
         let init = TableState::Init;
         let json = serde_json::to_value(&init).unwrap();
         assert_eq!(json, serde_json::json!({"type": "init"}));
@@ -550,16 +550,6 @@ mod tests {
         let deserialized: TableState = serde_json::from_value(json).unwrap();
         assert_eq!(deserialized, sync_done);
 
-        let incomplete_decoding_state = serde_json::json!({
-            "type": "sync_done",
-            "lsn": "0/1000000",
-            "table_decoding_state": {
-                "snapshot_id": "0/900000",
-                "replication_mask": [1, 0, 1]
-            }
-        });
-        assert!(serde_json::from_value::<TableState>(incomplete_decoding_state).is_err());
-
         let errored = TableState::Errored {
             reason: "Test error".to_owned(),
             solution: Some("Test solution".to_owned()),
@@ -586,6 +576,20 @@ mod tests {
         } else {
             panic!("Expected Errored variant");
         }
+    }
+
+    #[test]
+    fn sync_done_json_rejects_incomplete_decoding_state() {
+        let incomplete_decoding_state = serde_json::json!({
+            "type": "sync_done",
+            "lsn": "0/1000000",
+            "table_decoding_state": {
+                "snapshot_id": "0/900000",
+                "replication_mask": [1, 0, 1]
+            }
+        });
+
+        assert!(serde_json::from_value::<TableState>(incomplete_decoding_state).is_err());
     }
 
     #[test]

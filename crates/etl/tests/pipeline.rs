@@ -2004,17 +2004,19 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
+async fn table_sync_no_event_handover_waits_for_first_dml_before_ready() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Insert some data to test that the table copy is performed.
     let rows_inserted = 5;
-    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=rows_inserted).await;
+    insert_users_data(&mut database, &users_schema.name, 1..=rows_inserted).await;
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -2034,31 +2036,49 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
         batch_config,
     );
 
-    // Register notifications for initial table copy completion.
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
+    let sync_done_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    sync_done_notify.notified().await;
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    let TableState::SyncDone { table_decoding_state, .. } = table_state else {
+        panic!("an eventless handover should remain in SyncDone");
+    };
+    assert!(
+        table_decoding_state.is_some(),
+        "SyncDone must retain the complete decoder until apply materializes connection-local state"
+    );
 
+    let first_streamed_row_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+    insert_users_data(&mut database, &users_schema.name, rows_inserted + 1..=rows_inserted + 1)
+        .await;
+
+    first_streamed_row_notify.notified().await;
+    ready_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify initial table copy data.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    assert_eq!(grouped_events.get(&(EventType::Insert, table_id)).map_or(0, Vec::len), 1);
+
+    // Verify the initial-copy rows recorded by the wrapper.
     let table_rows = destination.get_table_rows().await;
-    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
+    let users_table_rows = table_rows.get(&table_id).unwrap();
     assert_eq!(users_table_rows.len(), rows_inserted);
 
     // Verify age sum calculation.
     let expected_age_sum = get_n_integers_sum(rows_inserted);
-    let age_sum =
-        get_users_age_sum_from_rows(&destination, database_schema.users_schema().id).await;
+    let age_sum = get_users_age_sum_from_rows(&destination, table_id).await;
     assert_eq!(age_sum, expected_age_sum);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn publication_column_filter_changes_update_masks_and_snapshot_ids() {
+async fn publication_column_filter_changes_update_snapshots_without_shifting_dml_ordinals() {
     init_test_tracing();
     let database = spawn_source_database().await;
 

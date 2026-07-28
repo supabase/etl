@@ -98,11 +98,11 @@ async fn schema_change_add_column_defaults() {
             store.clone(),
             destination.clone(),
         );
-        let table_ready_notify =
-            store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+        let table_sync_done_notify =
+            store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
 
         pipeline.start().await.unwrap();
-        table_ready_notify.notified().await;
+        table_sync_done_notify.notified().await;
 
         let copy_offset = OffsetToken::new(0_u64.into(), 1);
         let committed = poll_destination_offset(

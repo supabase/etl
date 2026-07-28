@@ -38,16 +38,16 @@ single logical column change.
 ## How It Works
 
 ETL installs a PostgreSQL `ddl_command_end` event trigger named
-`supabase_etl_ddl_message_trigger`. When an `ALTER TABLE` statement affects a
-published permanent table, the trigger emits a transactional logical message
-with prefix `supabase_etl_ddl`.
+`supabase_etl_ddl_message_trigger`. When an `ALTER TABLE` statement or supported
+`ALTER PUBLICATION` column-list change affects a published permanent table, the
+trigger emits a transactional logical message with prefix `supabase_etl_ddl`.
 
 That message is **internal plumbing**. Destinations do not receive it directly.
 Instead, ETL:
 
 1. Parses the schema-change message.
 2. Stores a new versioned table schema using the message LSN as the schema
-   snapshot id.
+   snapshot ID.
 3. Invalidates the in-memory relation state for that table.
 4. Waits for PostgreSQL pgoutput to emit a fresh `RELATION` message before the
    next row event for that table.
@@ -260,13 +260,19 @@ databases.
 
 These behaviors are **not full destination DDL semantics** yet:
 
-- Only `ALTER TABLE` is captured by the ETL DDL trigger today.
+- Only `ALTER TABLE` and supported `ALTER PUBLICATION` column-list changes are
+  captured by the ETL DDL trigger today.
 - Type changes, constraint changes, identity changes, and replica-identity
   changes may be visible in the emitted snapshot, but they are not yet
   interpreted as destination DDL operations.
 - Table create/drop/rename operations are outside the current schema-change
-  contract. Publication membership changes and table cleanup are handled by
-  other pipeline logic.
+  contract. Publication membership and table cleanup remain separate pipeline
+  lifecycle concerns.
+- If a table-sync worker decodes a DDL or publication-column change during
+  catch-up but receives no following relation before its handover boundary, it
+  cannot construct the complete decoder required by `SyncDone`. The table sync
+  fails closed and must be retried or resynchronized. See [Schema-Change
+  Handover Limitation](/etl/explanation/schema-change-handover-edge-cases/).
 - A drop and re-add is not treated as a rename. It becomes a drop plus an add
   because PostgreSQL assigns a new ordinal position to the new column.
 - Destination defaults are best-effort metadata translations. Unsupported
@@ -303,26 +309,14 @@ These behaviors are **not full destination DDL semantics** yet:
 - The trigger payload includes `current_query` for debugging only. It can
   contain literals and multiple statements, so it must not be treated as
   replayable DDL.
-- ClickHouse rejects stale schema snapshots instead of rewinding. When a
-  restart replays a relation event whose snapshot is older than the schema
-  already applied at the destination, executing the backwards diff would drop
-  newer columns and physically delete their data. ClickHouse has no ETL-owned
-  durable per-table watermark that would make replaying the following old
-  events safe, so the pipeline fails with a schema-rewind error and the
-  affected table must be resynchronized. This is not limited to exotic
-  replays: a single crash after a schema change was applied at the
-  destination but before the corresponding replication progress was
-  confirmed replays the stream from before the change and triggers the
-  same error. Replication mask changes carry no ordering, so a replayed
-  stale mask cannot be detected the same way.
-- Snowflake skips stale schema snapshots instead of rewinding. Before applying
-  schema DDL, Snowflake waits for all preceding row batches to become durable.
-  On restart, reopening the table's channel restores its committed offset, so
-  row events associated with an older relation snapshot are deduplicated. The
-  older relation is therefore already reflected in the destination, while
-  executing its backwards diff could drop newer columns and delete their data.
-  Replication mask changes carry no ordering, so a replayed stale mask cannot
-  be detected the same way.
+- BigQuery, ClickHouse, DuckLake, and Snowflake reject stale or ambiguously
+  ordered relation schemas instead of rewinding. An older snapshot could drive
+  reverse DDL that drops newer columns and their data. An equal snapshot with a
+  different replication mask is also rejected: supported publication
+  column-list changes always receive a new logical-message snapshot ID, so the
+  conflicting masks have no ordering with which to choose a safe winner. The
+  pipeline fails with a schema-rewind error and the affected table must be
+  resynchronized.
 - Sessions can set `supabase_etl.skip_ddl_log = 'true'` as an emergency
   opt-out while recovering a system. DDL executed with that setting enabled is
   not logged for ETL.

@@ -29,10 +29,17 @@ type IcebergTableName = String;
 /// Suffix for changelog tables
 const ICEBERG_CHANGELOG_TABLE_SUFFIX: &str = "changelog";
 
-/// CDC operation column name
+/// CDC operation column name.
 const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
-/// CDC operation column name
+/// CDC sequence-number column name.
 const SEQUENCE_NUMBER_COLUMN_NAME: &str = "sequence_number";
+
+/// Formats a sequence key using Iceberg's existing fixed-width hexadecimal
+/// representation.
+fn iceberg_sequence_key(sequence_key: EventSequenceKey) -> String {
+    let commit_lsn = u64::from(sequence_key.commit_lsn);
+    format!("{commit_lsn:016x}/{:016x}", sequence_key.tx_ordinal)
+}
 
 /// Converts a source table name to an Iceberg changelog table name.
 ///
@@ -278,7 +285,7 @@ where
         };
 
         for table_row in &mut table_rows {
-            let sequence_number = EventSequenceKey::new(0.into(), 0).to_string();
+            let sequence_number = iceberg_sequence_key(EventSequenceKey::new(0.into(), 0));
             table_row.values_mut().push(IcebergOperationType::Insert.into());
             table_row.values_mut().push(Cell::String(sequence_number));
         }
@@ -295,8 +302,8 @@ where
     /// Handles a stream of CDC events by batching non-truncate events by table
     /// ID and processing them concurrently. Truncate events are processed
     /// separately and deduplicated for efficiency. Each event is augmented
-    /// with CDC metadata including operation type and sequence number based
-    /// on LSN information.
+    /// with CDC metadata including its operation type and DML event sequence
+    /// key.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut events_iter = events.into_iter().peekable();
 
@@ -317,7 +324,7 @@ where
                 };
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_key = insert.event_sequence_key().to_string();
+                        let sequence_key = iceberg_sequence_key(insert.event_sequence_key());
                         insert.table_row.values_mut().push(IcebergOperationType::Insert.into());
                         insert.table_row.values_mut().push(Cell::String(sequence_key));
 
@@ -328,7 +335,7 @@ where
                         entry.1.push(insert.table_row);
                     }
                     Event::Update(update) => {
-                        let sequence_key = update.event_sequence_key().to_string();
+                        let sequence_key = iceberg_sequence_key(update.event_sequence_key());
                         let mut table_row = iceberg_update_row(
                             &update.replicated_table_schema,
                             update.updated_table_row,
@@ -343,7 +350,7 @@ where
                         entry.1.push(table_row);
                     }
                     Event::Delete(delete) => {
-                        let sequence_key = delete.event_sequence_key().to_string();
+                        let sequence_key = iceberg_sequence_key(delete.event_sequence_key());
                         let mut old_table_row = iceberg_delete_row(
                             &delete.replicated_table_schema,
                             delete.old_table_row,
@@ -747,16 +754,25 @@ mod tests {
     use etl::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
         error::ErrorKind,
+        event::EventSequenceKey,
         schema::{
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
             TableSchema, Type,
         },
     };
+    use tokio_postgres::types::PgLsn;
 
     use crate::iceberg::core::{
-        CDC_OPERATION_COLUMN_NAME, find_unique_column_name, iceberg_delete_row, iceberg_update_row,
-        schema_to_namespace,
+        CDC_OPERATION_COLUMN_NAME, find_unique_column_name, iceberg_delete_row,
+        iceberg_sequence_key, iceberg_update_row, schema_to_namespace,
     };
+
+    #[test]
+    fn sequence_key_format_preserves_fixed_width_hex_encoding() {
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 2);
+
+        assert_eq!(iceberg_sequence_key(sequence_key), "0000000000000001/0000000000000002");
+    }
 
     /// Creates a test column schema with common defaults.
     ///

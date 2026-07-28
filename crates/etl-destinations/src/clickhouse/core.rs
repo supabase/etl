@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
@@ -11,8 +15,8 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnModification, IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId, Type,
-        is_array_type,
+        ColumnModification, IdentityType, PgLsn, ReplicatedTableSchema, ReplicationMask,
+        SchemaDiff, TableId, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
 };
@@ -32,7 +36,7 @@ use crate::{
             supports_column_default, trailing_cdc_column_names,
         },
     },
-    recovery::previous_replication_mask_for_recovery,
+    recovery::ensure_relation_schema_transition,
     table_name::try_stringify_table_name,
 };
 
@@ -642,14 +646,22 @@ where
                 // must not drive DDL: diffing against it could execute
                 // reverse DDL or wrongly mark the interrupted change applied.
                 let arriving_snapshot_id = schema.inner().snapshot_id;
-                if arriving_snapshot_id != metadata.snapshot_id {
+                let arriving_replication_mask = schema.replication_mask();
+                if arriving_snapshot_id != metadata.snapshot_id
+                    || arriving_replication_mask != &metadata.replication_mask
+                {
                     return Err(etl_error!(
                         ErrorKind::DestinationSchemaRewind,
-                        "ClickHouse schema recovery received a mismatched schema snapshot",
+                        "ClickHouse schema recovery received mismatched schema state",
                         format!(
-                            "Table {} has an interrupted schema change targeting snapshot {}, but \
-                             received snapshot {}. Resynchronize the table to recover.",
-                            table_id, metadata.snapshot_id, arriving_snapshot_id
+                            "Table {} has an interrupted schema change targeting snapshot {} and \
+                             replication mask {}, but received snapshot {} and replication mask \
+                             {}. Resynchronize the table to recover.",
+                            table_id,
+                            metadata.snapshot_id,
+                            metadata.replication_mask,
+                            arriving_snapshot_id,
+                            arriving_replication_mask
                         )
                     ));
                 }
@@ -668,14 +680,21 @@ where
                             )
                         },
                     )?;
-                // The metadata records the target mask, not the previous one,
-                // so project it back onto the previous schema; a raw copy has
-                // the wrong width whenever the change added or dropped
-                // columns.
-                let previous_replication_mask = previous_replication_mask_for_recovery(
-                    &old_table_schema,
-                    schema.inner(),
-                    &metadata.replication_mask,
+                // Destination metadata does not retain the previous replication
+                // mask. Reconstruct the previous endpoint from physical columns
+                // instead of assuming that either the target mask or every
+                // previous-schema column was present before the interruption.
+                let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
+                let actual_column_names = actual_columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<HashSet<_>>();
+                let previous_replication_mask = ReplicationMask::from_bytes(
+                    old_table_schema
+                        .column_schemas
+                        .iter()
+                        .map(|column| u8::from(actual_column_names.contains(column.name.as_str())))
+                        .collect(),
                 );
                 let old_schema =
                     ReplicatedTableSchema::from_mask(old_table_schema, previous_replication_mask);
@@ -687,7 +706,17 @@ where
             }
         }
 
+        let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
+        let expected_column_names =
+            expected_clickhouse_column_names(schema, self.inserter_config.engine);
+        nullable_flags_from_clickhouse_columns(
+            clickhouse_table_name,
+            &expected_column_names,
+            &actual_columns,
+        )?;
+
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        self.table_cache.write().remove(clickhouse_table_name);
         Ok(())
     }
 
@@ -782,45 +811,44 @@ where
         let new_replication_mask = new_schema.replication_mask().clone();
 
         let metadata =
-            self.store.get_applied_destination_table_metadata(table_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::CorruptedTableSchema,
-                        "Destination metadata missing for ClickHouse schema change",
-                        format!(
-                            "Table {} received schema snapshot {}, but destination metadata from \
-                             initial synchronization was not found.",
-                            table_id, new_snapshot_id
-                        )
+            self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::CorruptedTableSchema,
+                    "Destination metadata missing for ClickHouse schema change",
+                    format!(
+                        "Table {} received schema snapshot {}, but destination metadata from \
+                         initial synchronization was not found.",
+                        table_id, new_snapshot_id
                     )
-                },
-            )?;
+                )
+            })?;
+
+        // A relation event identifies the exact target schema through its
+        // snapshot ID and replication mask. It can therefore resume an
+        // interrupted change without inventing a DML event sequence key.
+        if metadata.is_applying() {
+            let clickhouse_table_name = metadata.destination_table_id.clone();
+            self.recover_applying_metadata(table_id, &clickhouse_table_name, new_schema, metadata)
+                .await?;
+            return Ok(());
+        }
 
         let current_snapshot_id = metadata.snapshot_id;
         let current_replication_mask = metadata.replication_mask.clone();
 
-        // Reject stale schema snapshots replayed after a restart. At-least-once
-        // delivery can re-send a relation event whose snapshot predates the
-        // schema already applied at the destination. Diffing backwards would
-        // execute reverse DDL (e.g. DROP COLUMN) and physically delete newer
-        // column data, and ClickHouse has no ETL-owned durable per-table DML
-        // watermark that would make replaying the following old events safe.
-        if new_snapshot_id < current_snapshot_id {
-            return Err(etl_error!(
-                ErrorKind::DestinationSchemaRewind,
-                "ClickHouse destination schema is newer than the replayed schema snapshot",
-                format!(
-                    "Table {} received schema snapshot {}, but the destination already applied \
-                     snapshot {}. Reverse DDL is not executed because it could delete newer \
-                     column data; resynchronize the table to recover.",
-                    table_id, new_snapshot_id, current_snapshot_id
-                )
-            ));
-        }
+        // At-least-once delivery can replay an older relation or an
+        // equal-snapshot mask from a deployment that missed its logical schema
+        // message. Neither carries ordering sufficient to drive ClickHouse DDL.
+        ensure_relation_schema_transition(
+            "ClickHouse",
+            table_id,
+            current_snapshot_id,
+            &current_replication_mask,
+            new_snapshot_id,
+            &new_replication_mask,
+        )?;
 
-        if current_snapshot_id == new_snapshot_id
-            && current_replication_mask == new_replication_mask
-        {
+        if current_snapshot_id == new_snapshot_id {
             info!("schema for table {} unchanged (snapshot_id: {})", table_id, new_snapshot_id);
             return Ok(());
         }

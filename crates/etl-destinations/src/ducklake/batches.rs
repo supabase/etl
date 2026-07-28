@@ -94,9 +94,16 @@ fn format_optional_lsn(lsn: Option<PgLsn>) -> String {
     lsn.map_or_else(|| "none".to_owned(), |lsn| lsn.to_string())
 }
 
+/// Formats a sequence key using DuckLake's existing fixed-width hexadecimal
+/// representation.
+fn format_sequence_key(sequence_key: EventSequenceKey) -> String {
+    let commit_lsn = u64::from(sequence_key.commit_lsn);
+    format!("{commit_lsn:016x}/{:016x}", sequence_key.tx_ordinal)
+}
+
 /// Formats an optional sequence key without using debug output.
 fn format_optional_sequence_key(sequence_key: Option<EventSequenceKey>) -> String {
-    sequence_key.map_or_else(|| "none".to_owned(), |sequence_key| sequence_key.to_string())
+    sequence_key.map_or_else(|| "none".to_owned(), format_sequence_key)
 }
 
 /// Returns whether one DuckDB error is the standard interrupted query error.
@@ -985,9 +992,9 @@ fn streaming_replay_decision(
                 format!(
                     "table={}, progress={}, first={}, last={}",
                     batch.table_name,
-                    progress.last_sequence_key,
-                    first_sequence_key,
-                    last_sequence_key
+                    format_sequence_key(progress.last_sequence_key),
+                    format_sequence_key(first_sequence_key),
+                    format_sequence_key(last_sequence_key)
                 )
             ));
         }
@@ -2313,6 +2320,13 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn sequence_key_format_preserves_fixed_width_hex_encoding() {
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 2);
+
+        assert_eq!(format_sequence_key(sequence_key), "0000000000000001/0000000000000002");
+    }
 
     fn make_schema() -> TableSchema {
         TableSchema::new(

@@ -62,7 +62,7 @@ tracing-subscriber = "0.3"
 Create `src/custom_store.rs`. A store must implement **three traits** (see [Extension Points](/etl/explanation/traits/) for full details):
 
 - `SchemaStore` - Versioned table schema storage, retrieval, and pruning
-- `StateStore` - Table state, durable replication progress, and destination table metadata tracking
+- `StateStore` - Table state, persisted replication checkpoints, and destination table metadata tracking
 - `TableStateLifecycleStore` - Store lifecycle operations for table-copy preparation, resync resets, and publication changes
 
 `SharedStateStore`, `DestinationStore`, and `PipelineStore` are
@@ -95,7 +95,7 @@ struct TableEntry {
 #[derive(Debug, Clone)]
 pub struct CustomStore {
     tables: Arc<Mutex<HashMap<TableId, TableEntry>>>,
-    progress: Arc<Mutex<HashMap<WorkerType, PgLsn>>>,
+    checkpoints: Arc<Mutex<HashMap<WorkerType, PgLsn>>>,
 }
 
 impl CustomStore {
@@ -103,7 +103,7 @@ impl CustomStore {
         info!("creating custom store");
         Self {
             tables: Arc::new(Mutex::new(HashMap::new())),
-            progress: Arc::new(Mutex::new(HashMap::new())),
+            checkpoints: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -216,28 +216,28 @@ impl StateStore for CustomStore {
         todo!("Implement rollback if needed")
     }
 
-    async fn get_replication_progress(
+    async fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
     ) -> EtlResult<Option<PgLsn>> {
-        let progress = self.progress.lock().await;
-        Ok(progress.get(&worker_type).copied())
+        let checkpoints = self.checkpoints.lock().await;
+        Ok(checkpoints.get(&worker_type).copied())
     }
 
-    async fn upsert_replication_progress(
+    async fn upsert_replication_checkpoint(
         &self,
         worker_type: WorkerType,
-        flush_lsn: PgLsn,
+        checkpoint_lsn: PgLsn,
     ) -> EtlResult<PgLsn> {
-        let mut progress = self.progress.lock().await;
-        let stored_lsn = progress.entry(worker_type).or_insert(flush_lsn);
-        *stored_lsn = (*stored_lsn).max(flush_lsn);
+        let mut checkpoints = self.checkpoints.lock().await;
+        let stored_lsn = checkpoints.entry(worker_type).or_insert(checkpoint_lsn);
+        *stored_lsn = (*stored_lsn).max(checkpoint_lsn);
         Ok(*stored_lsn)
     }
 
-    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
-        let mut progress = self.progress.lock().await;
-        progress.remove(&worker_type);
+    async fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> EtlResult<()> {
+        let mut checkpoints = self.checkpoints.lock().await;
+        checkpoints.remove(&worker_type);
         Ok(())
     }
 

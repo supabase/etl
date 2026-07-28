@@ -108,8 +108,8 @@ Each write-like method receives an async result handle. The intent is different 
 
 Persists pipeline state so replication can resume after restarts. **Three traits work together**:
 
-- **StateStore**: Tracks table state, durable replication progress, and destination table metadata
-- **SchemaStore**: Stores versioned table schema information (columns, types, primary keys, snapshot IDs) and prunes obsolete schema versions after acknowledged progress while preserving the retained boundary schema and newer versions
+- **StateStore**: Tracks table state, persisted replication checkpoints, and destination table metadata
+- **SchemaStore**: Stores versioned table schema information (columns, types, primary keys, snapshot IDs) and prunes obsolete schema versions behind persisted checkpoints while preserving the retained boundary schema and newer versions
 - **TableStateLifecycleStore**: Prepares table-copy state, resets table states for resync, and deletes all ETL-owned state when a table leaves the publication
 
 `StateStore` and `SchemaStore` use a cache-first pattern: normal reads hit an in-memory cache, startup loaders hydrate that cache from persistent storage, and writes go to both the cache and persistent storage. `get_table_schema()` may load a missing version from persistent storage, while `get_table_schemas()` returns cached schemas only. Schema pruning follows the same rule for implementations with durable storage: obsolete versions are removed from both the cache and the persistent store.
@@ -149,7 +149,7 @@ Each table progresses through these states:
 | **FinishedCopy** | Table Sync Worker | Initial copy complete |
 | **SyncWait** | Table Sync Worker | Waiting for Apply Worker to pause (in-memory only) |
 | **Catchup** | Apply Worker | Apply Worker paused; Table Sync Worker catching up to its LSN (in-memory only) |
-| **SyncDone** | Table Sync Worker | Catch-up complete, ready for handoff |
+| **SyncDone** | Table Sync Worker | Catch-up complete; durable decoder retained until Apply materializes local state |
 | **Ready** | Apply Worker | Apply Worker now handles this table exclusively |
 | **Errored** | Either | Error occurred; contains reason, solution hint, and retry policy |
 

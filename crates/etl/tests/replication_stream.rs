@@ -1272,6 +1272,78 @@ async fn logical_replication_replays_schema_changes_before_first_dml() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_relation_xlogdata_positions_are_zero() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("relation_xlogdata_positions");
+    database
+        .create_table(table_name.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "relation_xlogdata_positions_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("relation_xlogdata_positions_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    database.insert_values(table_name, &["value"], &[&1]).await.unwrap();
+
+    let (begin_positions, relation_positions, insert_positions, commit_positions) =
+        timeout(Duration::from_secs(10), async {
+            let mut begin_positions = None;
+            let mut relation_positions = None;
+            let mut insert_positions = None;
+            let mut commit_positions = None;
+
+            pin!(stream);
+            while commit_positions.is_none() {
+                let message = stream
+                    .next()
+                    .await
+                    .expect("Logical replication stream ended unexpectedly")
+                    .expect("Failed to decode logical replication data");
+                let ReplicationMessage::XLogData(message) = message else {
+                    continue;
+                };
+                let positions = (PgLsn::from(message.wal_start()), PgLsn::from(message.wal_end()));
+
+                match message.data() {
+                    LogicalReplicationMessage::Begin(_) => begin_positions = Some(positions),
+                    LogicalReplicationMessage::Relation(_) => {
+                        relation_positions = Some(positions);
+                    }
+                    LogicalReplicationMessage::Insert(_) => insert_positions = Some(positions),
+                    LogicalReplicationMessage::Commit(_) => commit_positions = Some(positions),
+                    _ => {}
+                }
+            }
+
+            (
+                begin_positions.expect("BEGIN should be emitted"),
+                relation_positions.expect("RELATION should be emitted before the first row"),
+                insert_positions.expect("INSERT should be emitted"),
+                commit_positions.expect("COMMIT should be emitted"),
+            )
+        })
+        .await
+        .expect("Timed out while collecting XLogData positions");
+
+    let zero = PgLsn::from(0_u64);
+    assert_eq!(relation_positions, (zero, zero));
+    assert_eq!(begin_positions, insert_positions);
+    assert_ne!(insert_positions, (zero, zero));
+    assert_eq!(insert_positions.0, insert_positions.1);
+    assert!(commit_positions.0 > insert_positions.0);
+    assert_eq!(commit_positions.0, commit_positions.1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_replays_multi_table_publication_column_filter_change_order() {
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -1385,7 +1457,106 @@ async fn logical_replication_replays_multi_table_publication_column_filter_chang
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn logical_replication_replays_interleaved_table_schema_changes() {
+async fn logical_replication_replays_publication_add_drop_and_option_change_snapshots() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let first_table = test_table_name("publication_options_first");
+    let first_table_id = database
+        .create_table(first_table.clone(), true, &[("first_value", "integer not null")])
+        .await
+        .unwrap();
+    let second_table = test_table_name("publication_options_second");
+    let second_table_id = database
+        .create_table(second_table.clone(), true, &[("second_value", "integer not null")])
+        .await
+        .unwrap();
+    let added_table = test_table_name("publication_options_added");
+    let added_table_id = database
+        .create_table(added_table.clone(), true, &[("added_value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "publication_membership_and_options_pub";
+    database
+        .create_publication(publication_name, &[first_table.clone(), second_table.clone()])
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("publication_membership_and_options_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let initial_stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    let quoted_publication_name = quote_identifier(publication_name);
+    database
+        .run_sql(&format!(
+            "alter publication {quoted_publication_name} add table {}",
+            added_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter publication {quoted_publication_name} drop table {}",
+            added_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("alter publication {quoted_publication_name} set (publish = 'insert')"))
+        .await
+        .unwrap();
+    database.insert_values(first_table.clone(), &["first_value"], &[&1]).await.unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            added_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "added_value".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            first_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "first_value".to_owned()],
+        ),
+        ExpectedStreamMarker::DdlMessage(
+            second_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "second_value".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            first_table_id.into_inner(),
+            vec!["id".to_owned(), "first_value".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(first_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    // The absence of an added-table marker between the ADD and SET-option
+    // transactions proves that DROP TABLE emits no schema snapshot.
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        slot.consistent_point,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_interleaved_table_schema_changes_within_transaction() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
 
@@ -1470,7 +1641,7 @@ async fn logical_replication_replays_interleaved_table_schema_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn logical_replication_replays_dml_before_table_and_publication_schema_changes() {
+async fn logical_replication_replays_dml_before_table_and_publication_ddl_within_transaction() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
 

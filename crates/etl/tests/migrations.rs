@@ -223,7 +223,7 @@ async fn pipeline_start_runs_source_migrations_without_postgres_store_tables() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn source_schema_change_trigger_supports_table_and_publication_changes() {
+async fn source_schema_change_trigger_migration_restores_table_only_behavior_on_rollback() {
     init_test_tracing();
 
     let database = spawn_unmigrated_database().await;

@@ -543,7 +543,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
+async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
 
@@ -598,13 +598,12 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
 
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
-    ready_notify.notified().await;
     all_rows_notify.notified().await;
 
     // The apply connection already saw and skipped the relation used by the
     // table-sync worker. PostgreSQL does not resend it merely because ETL
     // handed ownership over, so this row can only be decoded from the
-    // materialized decoding state stored in SyncDone.
+    // complete decoding state stored in SyncDone.
     let post_handover_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(
             EventType::Insert,
@@ -619,6 +618,7 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
     )
     .await;
     post_handover_notify.notified().await;
+    ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -633,7 +633,7 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_sync_rejects_incomplete_decoding_state() {
+async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
 
@@ -664,6 +664,7 @@ async fn table_sync_rejects_incomplete_decoding_state() {
     // but emit no DML that would make pgoutput send a new Relation. Keep the
     // table-sync worker paused until the apply worker has passed this commit,
     // so its later catchup target must include the DDL.
+    let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
     let apply_ddl_commit_notify =
         destination.wait_for_events(vec![EventCondition::AnyCount(EventType::Commit, 1)]).await;
     database
@@ -675,7 +676,6 @@ async fn table_sync_rejects_incomplete_decoding_state() {
         .unwrap();
     apply_ddl_commit_notify.notified().await;
 
-    let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
     let errored_notify = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
@@ -700,7 +700,7 @@ async fn table_sync_rejects_incomplete_decoding_state() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
+async fn table_sync_idle_handover_waits_for_durability_and_persisted_apply_checkpoint() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
 
@@ -753,8 +753,6 @@ async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
 
     let table_sync_done_notify =
         store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
@@ -810,12 +808,15 @@ async fn table_sync_keepalive_completion_waits_for_durable_barrier() {
     fail::remove(STORE_APPLY_REPLICATION_CHECKPOINT_FP);
 
     checkpoint_notify.notified().await;
-    table_ready_notify.notified().await;
     let persisted_checkpoint_lsn =
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap().unwrap();
     assert!(
         persisted_checkpoint_lsn >= sync_done_lsn,
-        "idle SyncDone completion must persist an apply checkpoint before storing Ready"
+        "idle SyncDone completion must persist the apply checkpoint"
+    );
+    assert!(
+        matches!(store.get_table_state(table_id).await.unwrap(), Some(TableState::SyncDone { .. })),
+        "a persisted checkpoint alone must not mark the table Ready without a local decoder"
     );
 
     pipeline.shutdown_and_wait().await.unwrap();
@@ -983,11 +984,9 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_ddl_in_same_transaction()
- {
+async fn schema_replay_preserves_interleaved_dml_and_ddl_in_one_transaction() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -1005,6 +1004,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         &[("name", "text not null"), ("age", "integer not null")],
     )
     .await;
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1145,11 +1145,9 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_ddl_across_transactions()
- {
+async fn schema_replay_preserves_interleaved_dml_and_ddl_across_transactions() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -1159,6 +1157,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
             &[("name", "text not null"), ("age", "integer not null")],
         )
         .await;
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1292,11 +1291,9 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_starting_ddl_in_same_transaction()
- {
+async fn schema_replay_handles_ddl_before_dml_in_one_transaction() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -1314,6 +1311,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         &[("name", "text not null"), ("age", "integer not null")],
     )
     .await;
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     destination.clear_events().await;
 
@@ -1441,11 +1439,9 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_starting_ddl_across_transactions()
- {
+async fn schema_replay_handles_ddl_before_dml_across_transactions() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -1455,6 +1451,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
             &[("name", "text not null"), ("age", "integer not null")],
         )
         .await;
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1658,7 +1655,6 @@ async fn schema_snapshots_are_pruned_after_confirmed_progress() {
 async fn publication_column_filter_schema_messages_replay_before_first_relation_per_table() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -1730,6 +1726,7 @@ async fn publication_column_filter_schema_messages_replay_before_first_relation_
 
     first_ready_notify.notified().await;
     second_ready_notify.notified().await;
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     let first_schema_stored_notify = store.notify_on_table_schema_count(first_table_id, 3).await;
     let second_schema_stored_notify = store.notify_on_table_schema_count(second_table_id, 2).await;
@@ -1815,9 +1812,8 @@ async fn publication_column_filter_schema_messages_replay_before_first_relation_
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We clear events to just make it simpler to wait after the restart.
-    // We don't need to clean up the schemas from the store, since they are
-    // de-duplicated based on table and snapshot id.
+    // Isolate the replay phase without clearing stored schemas. Replayed
+    // snapshots are de-duplicated by table and snapshot ID.
     fail::remove(SEND_STATUS_UPDATE_FP);
     destination.clear_events().await;
 
@@ -1888,7 +1884,6 @@ async fn publication_column_filter_schema_messages_replay_before_first_relation_
 async fn table_and_publication_schema_changes_replay_after_restart() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -1937,6 +1932,7 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
     pipeline.start().await.unwrap();
 
     table_ready_notify.notified().await;
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     // We expect one relation and insert for the initial state, the physical
     // table change, and the publication-filter change.

@@ -1286,6 +1286,103 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
     );
 }
 
+/// `write_events` rejects a stale relation before it can reverse applied DDL.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_rejects_stale_relation_before_reverse_ddl() {
+    use etl::event::{InsertEvent, RelationEvent};
+
+    let lake = create_test_lake("write_events_rejects_stale_relation_before_reverse_ddl").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(56, "public", "stale_relation");
+    let new_schema = make_schema_with_email(&old_schema, 100);
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                replicated_table_schema: new_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(101_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Bob".to_owned()),
+                    Cell::String("bob@example.com".to_owned()),
+                ]),
+            }),
+        ])
+        .await
+        .expect("the newer schema and row should be applied");
+
+    let error = destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: old_replicated_table_schema,
+        })])
+        .await
+        .expect_err("a stale relation should be rejected");
+    assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
+
+    let metadata = store
+        .get_destination_table_metadata(old_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should remain available");
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, name, email from {} order by id",
+            qualified_lake_table_name(&table_name)
+        ))
+        .expect("failed to prepare stale-relation state query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })
+        .expect("failed to query stale-relation state")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read stale-relation rows");
+    assert_eq!(
+        rows,
+        vec![
+            (1, "Alice".to_owned(), None),
+            (2, "Bob".to_owned(), Some("bob@example.com".to_owned())),
+        ]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_applies_defaulted_schema_change() {
     use etl::event::{InsertEvent, RelationEvent};

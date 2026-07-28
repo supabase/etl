@@ -82,7 +82,7 @@ use crate::{
         },
         sql::qualified_lake_table_name,
     },
-    recovery::previous_replication_mask_for_recovery,
+    recovery::{conservative_previous_replication_mask, ensure_relation_schema_transition},
 };
 
 /// Shared Postgres metadata pool size for DuckLake background samplers.
@@ -1498,9 +1498,20 @@ where
 
         let current_snapshot_id = metadata.snapshot_id;
         let current_replication_mask = metadata.replication_mask.clone();
-        if current_snapshot_id == new_snapshot_id
-            && current_replication_mask == new_replication_mask
-        {
+
+        // A relation carries no durable DML sequence key. Reject both schema
+        // rewind and an equal-snapshot mask conflict before either can drive
+        // DuckLake DDL or run ahead of streaming replay-watermark checks.
+        ensure_relation_schema_transition(
+            "DuckLake",
+            table_id,
+            current_snapshot_id,
+            &current_replication_mask,
+            new_snapshot_id,
+            &new_replication_mask,
+        )?;
+
+        if current_snapshot_id == new_snapshot_id {
             self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema)
                 .await?;
             self.cleanup_tombstone_columns_after_applied(&table_name, new_replicated_table_schema)
@@ -2281,11 +2292,8 @@ where
                 let previous_table_schema = self
                     .load_previous_recovery_table_schema(table_id, previous_snapshot_id)
                     .await?;
-                let previous_replication_mask = previous_replication_mask_for_recovery(
-                    &previous_table_schema,
-                    target_schema.inner(),
-                    &metadata.replication_mask,
-                );
+                let previous_replication_mask =
+                    conservative_previous_replication_mask(&previous_table_schema);
                 let old_schema = ReplicatedTableSchema::from_mask(
                     previous_table_schema,
                     previous_replication_mask,
