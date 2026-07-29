@@ -3,17 +3,18 @@ name: Docker CI
 on:
   pull_request:
     types: [closed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
         description: "Git ref to build (branch, tag, or SHA)"
         type: string
-        required: false
+        required: true
       experimental:
-        description: "Build experimental image (main branch excluded)"
+        description: "Build experimental image (main excluded); disable only to publish stable/latest tags"
         type: boolean
         required: false
-        default: false
+        default: true
 
 permissions:
   contents: read
@@ -90,6 +91,7 @@ jobs:
     needs: [resolve-ref, validate-experimental]
     # Run only when the PR is merged and is NOT a release PR, or manual run.
     if: |
+      needs.resolve-ref.result == 'success' &&
       (success() || needs.validate-experimental.result == 'skipped') && (
         github.event_name == 'workflow_dispatch' || (
           github.event_name == 'pull_request' &&
@@ -110,7 +112,7 @@ jobs:
       push: true
       tag_with_version: false
       experimental: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental || false }}
-      # Build from the resolved ref: merge commit for PRs, or provided ref, fallback to current SHA.
+      # Build from the resolved merge commit or manual ref.
       checkout_ref: ${{ needs.resolve-ref.outputs.ref }}
       build_args: |
         ENABLE_EGRESS=true
