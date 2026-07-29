@@ -7,6 +7,13 @@ static REGISTER_METRICS: Once = Once::new();
 pub(super) const ETL_SNOWFLAKE_BATCH_SIZE: &str = "etl_snowflake_batch_size";
 pub(super) const ETL_SNOWFLAKE_BATCH_BYTES: &str = "etl_snowflake_batch_bytes";
 pub(super) const ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL: &str = "etl_snowflake_insert_errors_total";
+pub(super) const ETL_SNOWFLAKE_APPEND_DURATION_SECONDS: &str =
+    "etl_snowflake_append_duration_seconds";
+pub(super) const ETL_SNOWFLAKE_ACCEPTED_BATCHES_TOTAL: &str =
+    "etl_snowflake_accepted_batches_total";
+pub(super) const ETL_SNOWFLAKE_ACCEPTED_ROWS_TOTAL: &str = "etl_snowflake_accepted_rows_total";
+pub(super) const ETL_SNOWFLAKE_REJECTED_ROWS_TOTAL: &str = "etl_snowflake_rejected_rows_total";
+pub(super) const FAILURE_TYPE_LABEL: &str = "failure_type";
 pub(super) const ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL: &str =
     "etl_snowflake_channel_recoveries_total";
 pub(super) const ETL_SNOWFLAKE_STREAMING_PENDING_BYTES: &str =
@@ -33,7 +40,33 @@ pub(super) fn register_metrics() {
         describe_counter!(
             ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL,
             Unit::Count,
-            "Total insert_rows errors from Snowpipe Streaming"
+            "Total failed Snowpipe append operations, labeled by failure_type."
+        );
+
+        describe_histogram!(
+            ETL_SNOWFLAKE_APPEND_DURATION_SECONDS,
+            Unit::Seconds,
+            "Duration of one Snowpipe append operation, including authentication refresh, \
+             retries, and stale-channel recovery."
+        );
+
+        describe_counter!(
+            ETL_SNOWFLAKE_ACCEPTED_BATCHES_TOTAL,
+            Unit::Count,
+            "Total row batches newly accepted by Snowflake; acceptance does not prove durability."
+        );
+
+        describe_counter!(
+            ETL_SNOWFLAKE_ACCEPTED_ROWS_TOTAL,
+            Unit::Count,
+            "Total rows in batches newly accepted by Snowflake; acceptance does not prove \
+             durability."
+        );
+
+        describe_counter!(
+            ETL_SNOWFLAKE_REJECTED_ROWS_TOTAL,
+            Unit::Count,
+            "Total rows newly reported as rejected by Snowflake channel status."
         );
 
         describe_counter!(

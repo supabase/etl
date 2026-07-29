@@ -35,6 +35,65 @@ pub enum Error {
     SchemaNotFound { database: String, schema: String },
 }
 
+/// Stable, low-cardinality classification for a failed Snowpipe append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AppendFailureType {
+    /// Authentication or token refresh failed.
+    Authentication,
+    /// The HTTP request failed before Snowflake returned a response.
+    Transport,
+    /// Snowflake returned an unsuccessful HTTP or SQL response.
+    Provider,
+    /// Snowpipe returned a structured API failure.
+    SnowpipeApi,
+    /// Channel state or lifecycle validation failed.
+    Channel,
+    /// Request or response encoding failed.
+    Encoding,
+    /// Destination configuration is invalid or incomplete.
+    Configuration,
+}
+
+impl AppendFailureType {
+    /// Returns the stable metric label value for this failure type.
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authentication => "authentication",
+            Self::Transport => "transport",
+            Self::Provider => "provider",
+            Self::SnowpipeApi => "snowpipe_api",
+            Self::Channel => "channel",
+            Self::Encoding => "encoding",
+            Self::Configuration => "configuration",
+        }
+    }
+}
+
+impl Error {
+    /// Classifies this error for append-failure metrics.
+    pub(super) const fn append_failure_type(&self) -> AppendFailureType {
+        match self {
+            Self::HttpTransport(_) => AppendFailureType::Transport,
+            Self::HttpStatus { .. } | Self::Sql { .. } => AppendFailureType::Provider,
+            Self::Auth(_) | Self::Snowpipe(SnowpipeError::AuthenticationExpired) => {
+                AppendFailureType::Authentication
+            }
+            Self::Snowpipe(
+                SnowpipeError::StaleContinuation
+                | SnowpipeError::ChannelHasUncommittedRows
+                | SnowpipeError::ChannelNotFound,
+            )
+            | Self::Channel(_) => AppendFailureType::Channel,
+            Self::Snowpipe(SnowpipeError::ApiStatus { .. }) => AppendFailureType::SnowpipeApi,
+            Self::Snowpipe(SnowpipeError::HttpStatus { .. }) => AppendFailureType::Provider,
+            Self::Encoding(_) => AppendFailureType::Encoding,
+            Self::Config(_) | Self::DatabaseNotFound(_) | Self::SchemaNotFound { .. } => {
+                AppendFailureType::Configuration
+            }
+        }
+    }
+}
+
 impl From<Error> for EtlError {
     fn from(err: Error) -> Self {
         let (kind, description) = match &err {
