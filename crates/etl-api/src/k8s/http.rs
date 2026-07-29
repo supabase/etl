@@ -1746,8 +1746,8 @@ fn create_replicator_stateful_set_json(
               }
             },
             "volumes": volumes,
-            "tolerations": tolerations,
             "nodeSelector": node_selector,
+            "tolerations": tolerations,
             // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to the containers,
             // this way we let the system finish any in-flight transaction, if there are any.
             "terminationGracePeriodSeconds": 300,
