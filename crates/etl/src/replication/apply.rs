@@ -8,7 +8,7 @@
 //! cycle.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     pin::Pin,
     str::FromStr,
@@ -50,11 +50,13 @@ use crate::{
     etl_error,
     event::{Event, RelationEvent},
     observability::{
-        ACTION_LABEL, COMMAND_TAG_LABEL, ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
-        ETL_APPLY_LOOP_END_TO_END_LAG_BYTES, ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
-        ETL_APPLY_LOOP_RECEIVED_LAG_BYTES, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-        ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL,
-        ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+        ACTION_LABEL, COMMAND_TAG_LABEL, CONFIRMATION_LABEL,
+        ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
+        ETL_APPLY_LOOP_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
+        ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS, ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS,
+        ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_DDL_SCHEMA_CHANGE_COLUMNS,
+        ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL,
+        ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
         ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
         ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
@@ -121,6 +123,8 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// progress points where durable ETL progress may have advanced. The next
 /// deadline is scheduled when the previous cleanup task finishes.
 const SCHEMA_CLEANUP_INTERVAL: Duration = Duration::from_hours(1);
+/// Maximum accepted-but-not-durable streaming writes tracked per apply loop.
+const MAX_PENDING_DURABLE_DISPATCHES: usize = 1024;
 
 /// Result type for the apply loop execution.
 ///
@@ -693,6 +697,15 @@ impl EventBatch {
     }
 }
 
+/// Timing anchors for one accepted-but-not-durable destination write.
+#[derive(Debug, Clone, Copy)]
+struct PendingDurableDispatch {
+    /// Instant at which the write was handed off to the destination.
+    dispatched_at: Instant,
+    /// Instant at which the apply loop processed the accepted result.
+    accepted_at: Instant,
+}
+
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
@@ -704,6 +717,14 @@ struct ApplyLoopState {
     /// commit end LSN is re-attached here so a later durable write can advance
     /// through it.
     last_commit_end_lsn: Option<PgLsn>,
+    /// Timing anchors of accepted-but-not-durable destination writes.
+    ///
+    /// A durable write result confirms all earlier accepted writes in the same
+    /// ordered apply-loop stream, so their durable durations are recorded once
+    /// the next durable result arrives. The queue is capped at
+    /// [`MAX_PENDING_DURABLE_DISPATCHES`]. Timing entries are metric-only
+    /// state, so overflow skips new entries instead of affecting replication.
+    pending_durable_dispatches: VecDeque<PendingDurableDispatch>,
     /// The LSN of the commit WAL entry of the transaction that is currently
     /// being processed.
     remote_final_lsn: Option<PgLsn>,
@@ -770,6 +791,7 @@ impl ApplyLoopState {
     ) -> Self {
         Self {
             last_commit_end_lsn: None,
+            pending_durable_dispatches: VecDeque::new(),
             remote_final_lsn: None,
             replication_progress,
             replication_lag_metrics,
@@ -1773,7 +1795,7 @@ where
         let processing_paused = self.state.resume_processing();
 
         // Explode the result into parts which are used for handling the flush result.
-        let (metadata, result) = flush_result.into_parts();
+        let (metadata, completed_at, result) = flush_result.into_parts_with_completion();
 
         // If there was an error in the flushing, we return it immediately.
         let status = result?;
@@ -1806,9 +1828,77 @@ where
 
             match status {
                 DestinationWriteStatus::Accepted => {
+                    // Remember when this write was dispatched and accepted so
+                    // its durable durations can be recorded once a later
+                    // durable result covers it. The queue is metric-only
+                    // state, so overflow must never fail the apply loop; the
+                    // write's samples are skipped instead.
+                    if metadata.event_count > 0 {
+                        if self.state.pending_durable_dispatches.len()
+                            < MAX_PENDING_DURABLE_DISPATCHES
+                        {
+                            self.state.pending_durable_dispatches.push_back(
+                                PendingDurableDispatch {
+                                    dispatched_at: metadata.dispatched_at,
+                                    accepted_at: completed_at,
+                                },
+                            );
+                        } else {
+                            warn!(
+                                pending_durable_dispatches = MAX_PENDING_DURABLE_DISPATCHES,
+                                "pending durable dispatch queue is full, skipping durable \
+                                 duration samples for this write",
+                            );
+                        }
+                    }
+
                     self.state.update_last_commit_end_lsn(metadata.commit_end_lsn);
                 }
                 DestinationWriteStatus::Durable => {
+                    // A durable result also confirms every earlier accepted
+                    // write in the same ordered apply-loop stream.
+                    if !self.state.pending_durable_dispatches.is_empty() {
+                        let deferred_durable_histogram = histogram!(
+                            ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS,
+                            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                            ACTION_LABEL => "table_streaming",
+                            CONFIRMATION_LABEL => "deferred",
+                        );
+                        let durable_wait_histogram = histogram!(
+                            ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS,
+                            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                            ACTION_LABEL => "table_streaming",
+                        );
+                        for dispatch in self.state.pending_durable_dispatches.drain(..) {
+                            deferred_durable_histogram.record(
+                                completed_at
+                                    .saturating_duration_since(dispatch.dispatched_at)
+                                    .as_secs_f64(),
+                            );
+                            durable_wait_histogram.record(
+                                completed_at
+                                    .saturating_duration_since(dispatch.accepted_at)
+                                    .as_secs_f64(),
+                            );
+                        }
+                    }
+
+                    // Empty durability barriers carry no items, so only writes
+                    // with items are recorded for the current result.
+                    if metadata.event_count > 0 {
+                        histogram!(
+                            ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS,
+                            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                            ACTION_LABEL => "table_streaming",
+                            CONFIRMATION_LABEL => "direct",
+                        )
+                        .record(
+                            completed_at
+                                .saturating_duration_since(metadata.dispatched_at)
+                                .as_secs_f64(),
+                        );
+                    }
+
                     // We process the syncing tables with the last end lsn that the batch contains.
                     //
                     // Note that it could be that there is no end lsn for a specific batch, which
