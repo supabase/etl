@@ -62,13 +62,12 @@ async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
         destination.clone(),
     );
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     // WHEN: the pipeline shuts down
     let result = pipeline.shutdown_and_wait().await;
@@ -102,10 +101,11 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
         destination.clone(),
     );
 
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
     let users_ready_notify =
         store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     pipeline.start().await.unwrap();
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     // The inner destination applies the transaction, but the apply worker sees
     // a timed-retriable failure and reconnects from its durable start LSN.
@@ -148,6 +148,7 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
     transaction.insert_values(users_schema.name.clone(), &["name"], &[&"after"]).await.unwrap();
     transaction.commit_transaction().await;
 
+    users_ready_notify.notified().await;
     wait_for_new_walsender(database.client.as_ref().unwrap(), &apply_slot_name, old_pid).await;
     replayed_events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
@@ -174,17 +175,26 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
     );
     assert!(relation_schemas[0].inner().snapshot_id < relation_schemas[1].inner().snapshot_id);
 
-    let insert_values = events
+    let inserts = events
         .iter()
         .filter_map(|event| match event {
             Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
-                Some(insert.table_row.values().to_vec())
+                Some(insert)
             }
             _ => None,
         })
         .collect::<Vec<_>>();
+    assert_eq!(inserts.len(), 2);
     assert_eq!(
-        insert_values,
+        inserts[0].replicated_table_schema.inner().snapshot_id,
+        relation_schemas[0].inner().snapshot_id
+    );
+    assert_eq!(
+        inserts[1].replicated_table_schema.inner().snapshot_id,
+        relation_schemas[1].inner().snapshot_id
+    );
+    assert_eq!(
+        inserts.iter().map(|insert| insert.table_row.values().to_vec()).collect::<Vec<_>>(),
         vec![
             vec![Cell::I64(1), Cell::String("before".to_owned()), Cell::I32(1)],
             vec![Cell::I64(2), Cell::String("after".to_owned())],
@@ -196,7 +206,7 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
 async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
     init_test_tracing();
 
-    // GIVEN: a pipeline that has copied a table to Ready
+    // GIVEN: a pipeline whose table initial sync has completed.
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = database_schema.users_schema().id;
@@ -217,12 +227,11 @@ async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
         destination.clone(),
     );
 
-    let users_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     // WHEN: a resync starts and the destination rejects the drop
     destination
@@ -252,10 +261,9 @@ async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
     assert_eq!(memory_destination.table_rows().await.get(&table_id).unwrap().len(), initial_rows);
 
     // THEN: the timed retry drops and recopies the table cleanly
-    let users_ready_again_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_sync_complete_again_notify = store.notify_on_table_sync_complete(table_id).await;
 
-    users_ready_again_notify.notified().await;
+    users_sync_complete_again_notify.notified().await;
 
     assert!(destination.was_table_dropped_for_copy(table_id).await);
     let table_rows = destination.get_table_rows().await;
@@ -268,7 +276,7 @@ async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
 async fn drop_table_for_copy_failure_after_write_keeps_table_restartable_until_retry() {
     init_test_tracing();
 
-    // GIVEN: a pipeline that has copied a table to Ready
+    // GIVEN: a pipeline whose table initial sync has completed.
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = database_schema.users_schema().id;
@@ -289,12 +297,11 @@ async fn drop_table_for_copy_failure_after_write_keeps_table_restartable_until_r
         destination.clone(),
     );
 
-    let users_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     // WHEN: a resync starts and the drop fails after being applied
     destination
@@ -327,10 +334,9 @@ async fn drop_table_for_copy_failure_after_write_keeps_table_restartable_until_r
     assert!(!memory_destination.table_rows().await.contains_key(&table_id));
 
     // THEN: the timed retry replays the drop and recopies the table cleanly
-    let users_ready_again_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_sync_complete_again_notify = store.notify_on_table_sync_complete(table_id).await;
 
-    users_ready_again_notify.notified().await;
+    users_sync_complete_again_notify.notified().await;
 
     assert!(destination.was_table_dropped_for_copy(table_id).await);
     let table_rows = destination.get_table_rows().await;
@@ -361,12 +367,11 @@ async fn shutdown_drains_pending_write_events_before_destination_shutdown() {
         destination.clone(),
     );
 
-    let users_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     let hold = destination.hold_next(FaultyOp::WriteEvents).await;
 
@@ -419,12 +424,11 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
         destination.clone(),
     );
 
-    let users_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     let hold = destination.hold_next(FaultyOp::WriteEvents).await;
 
@@ -449,7 +453,7 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
     hold.release_ok();
 
     // THEN: the insert replays because the acknowledgement never reached the
-    // old apply loop
+    // old apply loop.
     replay_recorded_notify.notified().await;
 
     let commit_lsns = table_insert_commit_lsns(&destination.get_events().await, table_id);
@@ -457,10 +461,10 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
     assert_eq!(commit_lsns[0], commit_lsns[1]);
     let first_commit_lsn = commit_lsns[0];
 
-    // THEN: the persisted checkpoint never advanced past the unacknowledged write
+    // THEN: the persisted checkpoint never advanced past the unacknowledged write.
     assert!(flush_lsn_at_kill < first_commit_lsn);
 
-    // THEN: streaming continues without loss after the replay
+    // THEN: streaming continues without loss after the replay.
     let second_insert_notify = destination
         .notify_on_events(move |events| {
             table_insert_commit_lsns(events, table_id)
@@ -504,12 +508,11 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
         destination.clone(),
     );
 
-    let users_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     let hold = destination.hold_next(FaultyOp::WriteEvents).await;
 

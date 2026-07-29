@@ -5,14 +5,18 @@ description: How ETL handles DDL and evolving table schemas.
 
 **How ETL handles DDL and evolving table schemas**
 
-ETL supports schema changes, and this area is actively being improved. The
+Schema-change support is in public beta and is being expanded incrementally. The
 current implementation is intentionally conservative: the source-side event
 trigger captures a rich PostgreSQL-shaped snapshot, while ETL currently models
 well-understood column changes: **adds, drops, renames, and column default
-changes**. Built-in destination support varies by destination DDL
-capabilities. **BigQuery, ClickHouse, DuckLake, and Snowflake** apply supported
-schema changes automatically; Iceberg is deprecated for new deployments and does
-not support schema-change DDL.
+changes**. A few known edge cases remain, and we are evaluating the cleanest
+solutions as support evolves. Suggestions and sanitized minimal reproductions
+are welcome in GitHub issues.
+
+Built-in destination support varies by destination DDL capabilities.
+**BigQuery, ClickHouse, DuckLake, and Snowflake** apply supported schema changes
+automatically; Iceberg is deprecated for new deployments and does not support
+schema-change DDL.
 
 ## Short Version
 
@@ -71,13 +75,24 @@ for the same table.
 
 ETL has one shared schema-change signal, but **DDL behavior is implemented per destination**. A destination may choose to apply DDL automatically, reject a schema change, or require operator handling.
 
+For every built-in destination, a relation whose snapshot ID and replication
+mask exactly match the applied destination metadata is idempotent. BigQuery,
+ClickHouse, DuckLake, and Snowflake currently reject an older snapshot, or the
+same snapshot with a different replication mask, instead of attempting to infer
+schema ordering from later row events. A relation has no DML sequence key of its
+own, so destination row-replay deduplication does not prove that reverse or
+ambiguously ordered DDL is safe. Recovering from either rejection currently
+requires resynchronizing the table. This comparison applies only to metadata
+already marked `Applied`; it neither defines nor initiates recovery from an
+interrupted `Applying` state.
+
 | Destination | Current DDL behavior |
 |-------------|----------------------|
 | BigQuery | Supports add, drop, rename, `REQUIRED` to `NULLABLE` relaxation, and supported literal default metadata. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. PostgreSQL remains responsible for enforcing later `SET NOT NULL` changes because BigQuery cannot tighten an existing column in place. |
-| ClickHouse | Supports add, drop, rename, and supported literal defaults. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. Relation events whose schema snapshot is older than the applied destination snapshot are rejected instead of executing reverse DDL; recovering from that state requires resynchronizing the table. |
+| ClickHouse | Supports add, drop, rename, and supported literal defaults. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. |
 | DuckLake | Supports add, drop, rename, and supported literal defaults. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
-| Snowflake | Supports add, drop, rename, create-table literal defaults, and literal add-column defaults. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. Relation events whose schema snapshot is older than the applied destination snapshot are skipped because Snowflake's durable channel offset safely deduplicates their replayed row events. |
-| Iceberg | Deprecated for now. Schema-change DDL is not a supported path for new deployments. |
+| Snowflake | Supports add, drop, rename, create-table literal defaults, and literal add-column defaults. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. |
+| Iceberg | Deprecated for now. An identical relation is idempotent, but schema-change DDL is not supported and any newer schema is rejected. Older or ambiguously masked relations are rejected before row writes. |
 | Custom destinations | Destination authors decide which `Event::Relation` changes to apply, reject, or handle manually. |
 
 ## Default Backfills
@@ -230,8 +245,14 @@ A practical flow is:
 The built-in BigQuery, ClickHouse, DuckLake, and Snowflake destinations follow
 this shape: they mark destination schema metadata as `Applying`, apply the
 supported DDL operations, then mark the schema as `Applied`. Because destination
-DDL is not always transactional, a crash while metadata is `Applying` may require
-manual intervention.
+DDL is not always transactional, recovery is destination-specific. ClickHouse
+and DuckLake can retry an interrupted `Applying` operation. When an arriving
+relation drives that retry, it must exactly match the snapshot ID and
+replication mask recorded as the target; DuckLake startup recovery can instead
+reconstruct that exact target from durable schema state. BigQuery does not
+automatically repair `Applying` schema-change metadata, and Snowflake only
+automatically retries interrupted initial setup, not an interrupted schema
+change. Other interrupted states require resynchronization.
 
 Other destination modules may support a narrower schema-change surface. Treat
 `Event::Relation` as the stable ETL contract, then check the destination's
@@ -256,7 +277,7 @@ The trigger ignores temporary tables, unpublished tables, generated columns,
 dropped-column catalog tombstones, extension-owned DDL, and non-logical-WAL
 databases.
 
-## Current Limitations
+## Known Beta Limitations
 
 These behaviors are **not full destination DDL semantics** yet:
 
@@ -271,8 +292,9 @@ These behaviors are **not full destination DDL semantics** yet:
 - If a table-sync worker decodes a DDL or publication-column change during
   catch-up but receives no following relation before its handover boundary, it
   cannot construct the complete decoder required by `SyncDone`. The table sync
-  fails closed and must be retried or resynchronized. See [Schema-Change
-  Handover Limitation](/etl/explanation/schema-change-handover-edge-cases/).
+  fails closed and must be retried or resynchronized. See [Schema Changes
+  During Initial-Sync
+  Handover](/etl/explanation/schema-change-handover-edge-cases/).
 - A drop and re-add is not treated as a rename. It becomes a drop plus an add
   because PostgreSQL assigns a new ordinal position to the new column.
 - Destination defaults are best-effort metadata translations. Unsupported

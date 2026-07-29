@@ -27,7 +27,7 @@ use etl::{
         event::{EventCondition, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline},
+        pipeline::{create_database_and_sync_done_pipeline_with_table, create_pipeline},
         schema::{
             assert_columns_names_types, assert_replicated_schema_column_names_types,
             assert_schema_snapshots_ordering, assert_table_schema_column_names_types,
@@ -43,7 +43,7 @@ use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
     below_version,
     slots::EtlReplicationSlot,
-    tokio::test_utils::TableModification,
+    tokio::test_utils::{PgDatabase, TableModification},
     version::POSTGRES_15,
 };
 use etl_telemetry::tracing::init_test_tracing;
@@ -51,7 +51,10 @@ use fail::FailScenario;
 use pg_escape::quote_identifier;
 use rand::random;
 use tokio::sync::mpsc;
-use tokio_postgres::types::{PgLsn, Type};
+use tokio_postgres::{
+    Client,
+    types::{PgLsn, Type},
+};
 
 /// Relevant streaming write observed by [`DeferredEventsDestination`].
 enum DeferredEventsWrite {
@@ -162,6 +165,23 @@ impl Destination for DeferredEventsDestination {
     }
 }
 
+/// Waits until the apply worker has confirmed the source's current WAL flush
+/// position and returns that position.
+async fn wait_for_apply_worker_to_reach_current_wal(
+    database: &PgDatabase<Client>,
+    pipeline_id: PipelineId,
+) -> PgLsn {
+    let apply_slot_name: String =
+        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let client = database.client.as_ref().unwrap();
+    let target_lsn =
+        client.query_one("select pg_current_wal_flush_lsn()", &[]).await.unwrap().get(0);
+
+    wait_for_replication_slot_flush_lsn(client, &apply_slot_name, target_lsn).await;
+
+    target_lsn
+}
+
 enum ExpectedReplicatedEvent<'a> {
     Relation(&'a [(&'static str, Type)]),
     Insert(&'a [(&'static str, Type)]),
@@ -186,7 +206,6 @@ fn assert_table_event_sequence(
         .collect::<Vec<_>>();
 
     assert_eq!(table_events.iter().map(Event::event_type).collect::<Vec<_>>(), expected_types);
-    assert_eq!(table_events.len(), expected.len());
 
     for (actual_event, expected_event) in table_events.iter().zip(expected) {
         match (actual_event, expected_event) {
@@ -240,6 +259,66 @@ fn assert_filtered_table_events(
         assert_columns_names_types(replicated_table_schema.column_schemas(), expected_columns);
         assert_eq!(replicated_table_schema.replication_mask().as_slice(), expected_mask);
         assert_eq!(replicated_table_schema.inner().snapshot_id, expected_snapshot_id);
+    }
+}
+
+/// Asserts that each relation and its following insert use the same schema
+/// snapshot and masks.
+fn assert_relation_insert_schema_pairs(
+    events: &[Event],
+    table_id: TableId,
+    expected_snapshot_ids: &[SnapshotId],
+) {
+    let table_events = collect_table_events(events, table_id);
+    let relations = table_events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) => Some(&relation.replicated_table_schema),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let inserts = table_events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Insert(insert) => Some(&insert.replicated_table_schema),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        relations.len(),
+        inserts.len(),
+        "each relation must have one insert using the materialized schema"
+    );
+    assert_eq!(
+        relations.len(),
+        expected_snapshot_ids.len(),
+        "each expected schema snapshot must have one relation and insert"
+    );
+
+    for ((relation_schema, insert_schema), expected_snapshot_id) in
+        relations.into_iter().zip(inserts).zip(expected_snapshot_ids)
+    {
+        assert_eq!(
+            relation_schema.inner().snapshot_id,
+            *expected_snapshot_id,
+            "relation must use the expected stored schema snapshot"
+        );
+        assert_eq!(
+            relation_schema.inner().snapshot_id,
+            insert_schema.inner().snapshot_id,
+            "relation and insert must use the same schema snapshot"
+        );
+        assert_eq!(
+            relation_schema.replication_mask(),
+            insert_schema.replication_mask(),
+            "relation and insert must use the same replication mask"
+        );
+        assert_eq!(
+            relation_schema.identity_mask(),
+            insert_schema.identity_mask(),
+            "relation and insert must use the same identity mask"
+        );
     }
 }
 
@@ -457,14 +536,13 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
         destination.clone(),
     );
 
-    // We register the interest in waiting for both table syncs to have started.
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
+    // Wait for the retried table sync to complete.
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     // We expect no errors, since the same table sync worker task is retried.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -513,14 +591,13 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
         destination.clone(),
     );
 
-    // We register the interest in waiting for both table syncs to have started.
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
+    // Wait for the retried table sync to complete.
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     // We expect no errors, since the same table sync worker task is retried.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -585,6 +662,7 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
         copied_rows + 1..=copied_rows + catchup_rows,
     )
     .await;
+    wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
 
     let all_rows_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(
@@ -595,10 +673,13 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
         .await;
 
     let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let sync_done_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
 
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
     all_rows_notify.notified().await;
+    sync_done_notify.notified().await;
 
     // The apply connection already saw and skipped the relation used by the
     // table-sync worker. PostgreSQL does not resend it merely because ETL
@@ -628,8 +709,13 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
 
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
-    let catchup_events = grouped_events.get(&(EventType::Insert, table_id)).map_or(0, Vec::len);
-    assert_eq!(catchup_events, catchup_rows + 1);
+    let catchup_events = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
+    let expected_catchup_events = build_expected_users_inserts(
+        (copied_rows + 1) as i64,
+        &users_schema,
+        vec![("user_4", 4), ("user_5", 5), ("user_6", 6)],
+    );
+    assert_events_equal(catchup_events, &expected_catchup_events);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -665,8 +751,6 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     // table-sync worker paused until the apply worker has passed this commit,
     // so its later catchup target must include the DDL.
     let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
-    let apply_ddl_commit_notify =
-        destination.wait_for_events(vec![EventCondition::AnyCount(EventType::Commit, 1)]).await;
     database
         .run_sql(&format!(
             "alter table {} add column handover_value integer not null default 0",
@@ -674,7 +758,7 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
         ))
         .await
         .unwrap();
-    apply_ddl_commit_notify.notified().await;
+    wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
 
     let errored_notify = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
@@ -696,6 +780,20 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     assert!(
         state_history.iter().all(|state| !matches!(state, TableState::SyncDone { .. })),
         "incomplete decoding state must fail before SyncDone is persisted"
+    );
+
+    let table_schemas = store.get_table_schemas().await;
+    assert_table_schema_snapshots(
+        table_schemas.get(&table_id).unwrap(),
+        &[
+            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("handover_value", Type::INT4),
+            ],
+        ],
     );
 }
 
@@ -722,8 +820,6 @@ async fn table_sync_idle_handover_waits_for_durability_and_persisted_apply_check
     let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
 
     let pipeline_id: PipelineId = random();
-    let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -736,20 +832,26 @@ async fn table_sync_idle_handover_waits_for_durability_and_persisted_apply_check
         store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
 
     pipeline.start().await.unwrap();
+
     finished_copy_notify.notified().await;
+
+    // Drop apply checkpoint writes before generating the WAL that will become
+    // the handover boundary. The apply loop continues running, but the durable
+    // checkpoint cannot reach that future boundary.
+    fail::cfg(STORE_APPLY_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     // Commit one published row at A while the table-sync worker is paused, then
     // advance cluster WAL to T in another database. Logical decoding skips that
     // transaction entirely, so no event batch exists at T.
     insert_users_data(&mut database, &users_schema.name, 1..=1).await;
-    other_database.insert_values(other_database_table, &["value"], &[&1_i32]).await.unwrap();
-    let client = database.client.as_ref().unwrap();
-    let target_lsn: PgLsn =
-        client.query_one("select pg_current_wal_flush_lsn()", &[]).await.unwrap().get(0);
+    other_database
+        .insert_values(other_database_table.clone(), &["value"], &[&1_i32])
+        .await
+        .unwrap();
 
     // Ensure the apply worker observes T before choosing table sync's catchup
     // target.
-    wait_for_replication_slot_flush_lsn(client, &apply_slot_name, target_lsn).await;
+    let target_lsn = wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
 
     let table_sync_done_notify =
         store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
@@ -786,18 +888,17 @@ async fn table_sync_idle_handover_waits_for_durability_and_persisted_apply_check
         Some(TableStateType::FinishedCopy)
     );
 
-    // Pause apply checkpoint persistence so the table must remain in SyncDone
-    // with its stored decoding state available.
-    fail::cfg(STORE_APPLY_REPLICATION_CHECKPOINT_FP, "pause").unwrap();
     barrier_result.send(Ok(DestinationWriteStatus::Durable));
+
     table_sync_done_notify.notified().await;
 
+    let TableState::SyncDone { lsn: sync_done_lsn, table_decoding_state: Some(_) } =
+        store.get_table_state(table_id).await.unwrap().unwrap()
+    else {
+        panic!("a durable terminal barrier must persist SyncDone with its decoder");
+    };
     let checkpoint_before_unpause =
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
-    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
-    let TableState::SyncDone { lsn: sync_done_lsn, .. } = table_state else {
-        panic!("table must remain in SyncDone while the persisted apply checkpoint is behind");
-    };
     assert!(
         checkpoint_before_unpause.is_none_or(|checkpoint| checkpoint < sync_done_lsn),
         "persisted apply checkpoint must remain below SyncDone while its write is paused"
@@ -807,16 +908,17 @@ async fn table_sync_idle_handover_waits_for_durability_and_persisted_apply_check
         store.notify_on_replication_checkpoint(WorkerType::Apply, sync_done_lsn).await;
     fail::remove(STORE_APPLY_REPLICATION_CHECKPOINT_FP);
 
+    // Generate fresh unrelated WAL after restoring checkpoint writes so the
+    // apply loop receives a new idle progress opportunity.
+    other_database.insert_values(other_database_table, &["value"], &[&2_i32]).await.unwrap();
+
     checkpoint_notify.notified().await;
+
     let persisted_checkpoint_lsn =
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap().unwrap();
     assert!(
         persisted_checkpoint_lsn >= sync_done_lsn,
         "idle SyncDone completion must persist the apply checkpoint"
-    );
-    assert!(
-        matches!(store.get_table_state(table_id).await.unwrap(), Some(TableState::SyncDone { .. })),
-        "a persisted checkpoint alone must not mark the table Ready without a local decoder"
     );
 
     pipeline.shutdown_and_wait().await.unwrap();
@@ -856,6 +958,10 @@ async fn table_sync_catchup_error_does_not_block_apply_worker() {
         store.notify_on_table_state_type(users_table_id, TableStateType::Errored).await;
     let orders_errored_notify =
         store.notify_on_table_state_type(orders_table_id, TableStateType::Errored).await;
+    let users_sync_done_notify =
+        store.notify_on_table_state_type(users_table_id, TableStateType::SyncDone).await;
+    let orders_sync_done_notify =
+        store.notify_on_table_state_type(orders_table_id, TableStateType::SyncDone).await;
     let users_ready_notify =
         store.notify_on_table_state_type(users_table_id, TableStateType::Ready).await;
     let orders_ready_notify =
@@ -863,13 +969,38 @@ async fn table_sync_catchup_error_does_not_block_apply_worker() {
 
     pipeline.start().await.unwrap();
 
-    let (errored_table_id, ready_notify) = tokio::select! {
-        () = users_errored_notify.notified() => (users_table_id, orders_ready_notify),
-        () = orders_errored_notify.notified() => (orders_table_id, users_ready_notify),
+    let (errored_table_id, healthy_table_id, healthy_table_name, sync_done_notify, ready_notify) = tokio::select! {
+            () = users_errored_notify.notified() => (
+                users_table_id,
+                orders_table_id,
+                orders_schema.name.clone(),
+                orders_sync_done_notify,
+                orders_ready_notify,
+            ),
+            () = orders_errored_notify.notified() => (
+                orders_table_id,
+                users_table_id,
+                users_schema.name.clone(),
+                users_sync_done_notify,
+                users_ready_notify,
+            ),
     };
 
-    // Assert that apply worker made progress after the errored table before
-    // shutdown. Otherwise a shutdown signal could hide a stuck catchup wait.
+    sync_done_notify.notified().await;
+    let update_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, healthy_table_id, 1)])
+        .await;
+    database
+        .run_sql(&format!(
+            "update {} set id = id where id = 1",
+            healthy_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Prove the apply worker still processes the healthy table after the other
+    // table's catchup failure.
+    update_notify.notified().await;
     ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
@@ -912,12 +1043,13 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
         destination.clone(),
     );
 
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
     let table_ready_notify =
         store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let initial_inserts_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
@@ -926,6 +1058,7 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
     insert_users_data(&mut database, &database_schema.users_schema().name, 1..=2).await;
 
     initial_inserts_notify.notified().await;
+    table_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -983,8 +1116,25 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
     assert_events_equal(inserts, &expected_inserts);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn schema_replay_preserves_interleaved_dml_and_ddl_in_one_transaction() {
+/// Whether the first replicated row precedes the first schema change.
+#[derive(Clone, Copy)]
+enum SchemaReplayOrder {
+    DmlBeforeDdl,
+    DdlBeforeDml,
+}
+
+/// Whether the replay sequence is committed atomically or incrementally.
+#[derive(Clone, Copy)]
+enum SchemaReplayTransactionScope {
+    OneTransaction,
+    SeparateTransactions,
+}
+
+/// Exercises one cell of the schema-replay order and transaction matrix.
+async fn run_schema_replay_scenario(
+    order: SchemaReplayOrder,
+    transaction_scope: SchemaReplayTransactionScope,
+) {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
 
@@ -999,314 +1149,7 @@ async fn schema_replay_preserves_interleaved_dml_and_ddl_in_one_transaction() {
         pipeline,
         pipeline_id,
         publication,
-    ) = create_database_and_ready_pipeline_with_table(
-        "schema_add_column",
-        &[("name", "text not null"), ("age", "integer not null")],
-    )
-    .await;
-    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
-
-    let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 3),
-            EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ])
-        .await;
-
-    let transaction = database.begin_transaction().await;
-
-    transaction
-        .insert_values(table_name.clone(), &["name", "age"], &[&"first", &25])
-        .await
-        .unwrap();
-
-    transaction
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AddColumn {
-                name: "status",
-                data_type: "text not null default 'pending'",
-            }],
-        )
-        .await
-        .unwrap();
-
-    transaction
-        .insert_values(table_name.clone(), &["name", "age", "status"], &[&"second", &28, &"active"])
-        .await
-        .unwrap();
-
-    transaction
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
-        .await
-        .unwrap();
-
-    transaction
-        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
-        .await
-        .unwrap();
-
-    transaction.commit_transaction().await;
-
-    events_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let events = destination.get_events().await;
-    assert_table_event_sequence(
-        &events,
-        table_id,
-        &[
-            ExpectedReplicatedEvent::Relation(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-            ]),
-            ExpectedReplicatedEvent::Insert(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-            ]),
-            ExpectedReplicatedEvent::Relation(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Insert(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Relation(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Insert(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ]),
-        ],
-    );
-
-    let table_schemas = store.get_table_schemas().await;
-    let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
-    assert_table_schema_snapshots(
-        table_schemas_snapshots,
-        &[
-            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ],
-            &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
-        ],
-    );
-    let initial_events = collect_table_events(&events, table_id);
-    let initial_table_schema_snapshots = table_schemas_snapshots.clone();
-
-    fail::remove(SEND_STATUS_UPDATE_FP);
-    destination.clear_events().await;
-
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication,
-        store.clone(),
-        destination.clone(),
-    );
-
-    let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 3),
-            EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ])
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    events_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let restarted_events = destination.get_events().await;
-    assert_events_equal(&collect_table_events(&restarted_events, table_id), &initial_events);
-
-    let restarted_table_schemas = store.get_table_schemas().await;
-    assert_restarted_schema_snapshot_pairs(
-        restarted_table_schemas.get(&table_id).unwrap(),
-        &initial_table_schema_snapshots,
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn schema_replay_preserves_interleaved_dml_and_ddl_across_transactions() {
-    let _scenario = FailScenario::setup();
-    fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-
-    init_test_tracing();
-
-    let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
-        create_database_and_ready_pipeline_with_table(
-            "schema_add_column",
-            &[("name", "text not null"), ("age", "integer not null")],
-        )
-        .await;
-    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
-
-    let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 3),
-            EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ])
-        .await;
-
-    database.insert_values(table_name.clone(), &["name", "age"], &[&"first", &25]).await.unwrap();
-
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AddColumn {
-                name: "status",
-                data_type: "text not null default 'pending'",
-            }],
-        )
-        .await
-        .unwrap();
-
-    database
-        .insert_values(table_name.clone(), &["name", "age", "status"], &[&"second", &28, &"active"])
-        .await
-        .unwrap();
-
-    database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
-        .await
-        .unwrap();
-
-    database
-        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
-        .await
-        .unwrap();
-
-    events_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let events = destination.get_events().await;
-    assert_table_event_sequence(
-        &events,
-        table_id,
-        &[
-            ExpectedReplicatedEvent::Relation(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-            ]),
-            ExpectedReplicatedEvent::Insert(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-            ]),
-            ExpectedReplicatedEvent::Relation(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Insert(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Relation(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Insert(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ]),
-        ],
-    );
-
-    let table_schemas = store.get_table_schemas().await;
-    let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
-    assert_table_schema_snapshots(
-        table_schemas_snapshots,
-        &[
-            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ],
-            &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
-        ],
-    );
-    let initial_events = collect_table_events(&events, table_id);
-    let initial_table_schema_snapshots = table_schemas_snapshots.clone();
-
-    fail::remove(SEND_STATUS_UPDATE_FP);
-    destination.clear_events().await;
-
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication,
-        store.clone(),
-        destination.clone(),
-    );
-
-    let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 3),
-            EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ])
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    events_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let restarted_events = destination.get_events().await;
-    assert_events_equal(&collect_table_events(&restarted_events, table_id), &initial_events);
-
-    let restarted_table_schemas = store.get_table_schemas().await;
-    assert_restarted_schema_snapshot_pairs(
-        restarted_table_schemas.get(&table_id).unwrap(),
-        &initial_table_schema_snapshots,
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn schema_replay_handles_ddl_before_dml_in_one_transaction() {
-    let _scenario = FailScenario::setup();
-    fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-
-    init_test_tracing();
-
-    let (
-        mut database,
-        table_name,
-        table_id,
-        store,
-        destination,
-        pipeline,
-        pipeline_id,
-        publication,
-    ) = create_database_and_ready_pipeline_with_table(
+    ) = create_database_and_sync_done_pipeline_with_table(
         "schema_add_column",
         &[("name", "text not null"), ("age", "integer not null")],
     )
@@ -1315,92 +1158,134 @@ async fn schema_replay_handles_ddl_before_dml_in_one_transaction() {
 
     destination.clear_events().await;
 
+    let event_count = match order {
+        SchemaReplayOrder::DmlBeforeDdl => 3,
+        SchemaReplayOrder::DdlBeforeDml => 2,
+    };
     let events_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
+            EventCondition::TableCount(EventType::Relation, table_id, event_count),
+            EventCondition::TableCount(EventType::Insert, table_id, event_count),
         ])
         .await;
 
-    let transaction = database.begin_transaction().await;
+    match transaction_scope {
+        SchemaReplayTransactionScope::OneTransaction => {
+            let transaction = database.begin_transaction().await;
 
-    transaction
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AddColumn {
-                name: "status",
-                data_type: "text not null default 'pending'",
-            }],
-        )
-        .await
-        .unwrap();
-
-    transaction
-        .insert_values(table_name.clone(), &["name", "age", "status"], &[&"second", &28, &"active"])
-        .await
-        .unwrap();
-
-    transaction
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
-        .await
-        .unwrap();
-
-    transaction
-        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
-        .await
-        .unwrap();
-
-    transaction.commit_transaction().await;
+            if matches!(order, SchemaReplayOrder::DmlBeforeDdl) {
+                transaction
+                    .insert_values(table_name.clone(), &["name", "age"], &[&"first", &25])
+                    .await
+                    .unwrap();
+            }
+            transaction
+                .alter_table(
+                    table_name.clone(),
+                    &[TableModification::AddColumn {
+                        name: "status",
+                        data_type: "text not null default 'pending'",
+                    }],
+                )
+                .await
+                .unwrap();
+            transaction
+                .insert_values(
+                    table_name.clone(),
+                    &["name", "age", "status"],
+                    &[&"second", &28, &"active"],
+                )
+                .await
+                .unwrap();
+            transaction
+                .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
+                .await
+                .unwrap();
+            transaction
+                .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
+                .await
+                .unwrap();
+            transaction.commit_transaction().await;
+        }
+        SchemaReplayTransactionScope::SeparateTransactions => {
+            if matches!(order, SchemaReplayOrder::DmlBeforeDdl) {
+                database
+                    .insert_values(table_name.clone(), &["name", "age"], &[&"first", &25])
+                    .await
+                    .unwrap();
+            }
+            database
+                .alter_table(
+                    table_name.clone(),
+                    &[TableModification::AddColumn {
+                        name: "status",
+                        data_type: "text not null default 'pending'",
+                    }],
+                )
+                .await
+                .unwrap();
+            database
+                .insert_values(
+                    table_name.clone(),
+                    &["name", "age", "status"],
+                    &[&"second", &28, &"active"],
+                )
+                .await
+                .unwrap();
+            database
+                .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
+                .await
+                .unwrap();
+            database
+                .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
+                .await
+                .unwrap();
+        }
+    }
 
     events_notify.notified().await;
+    assert!(matches!(
+        store.get_table_state(table_id).await.unwrap(),
+        Some(TableState::SyncDone { .. })
+    ));
 
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
-    assert_table_event_sequence(
-        &events,
-        table_id,
-        &[
-            ExpectedReplicatedEvent::Relation(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Insert(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Relation(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Insert(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ]),
-        ],
-    );
+    let initial_columns = [("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)];
+    let added_columns =
+        [("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("status", Type::TEXT)];
+    let final_columns = [("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)];
+    let mut expected_events = Vec::new();
+    if matches!(order, SchemaReplayOrder::DmlBeforeDdl) {
+        expected_events.extend([
+            ExpectedReplicatedEvent::Relation(initial_columns.as_slice()),
+            ExpectedReplicatedEvent::Insert(initial_columns.as_slice()),
+        ]);
+    }
+    expected_events.extend([
+        ExpectedReplicatedEvent::Relation(added_columns.as_slice()),
+        ExpectedReplicatedEvent::Insert(added_columns.as_slice()),
+        ExpectedReplicatedEvent::Relation(final_columns.as_slice()),
+        ExpectedReplicatedEvent::Insert(final_columns.as_slice()),
+    ]);
+    assert_table_event_sequence(&events, table_id, &expected_events);
 
     let table_schemas = store.get_table_schemas().await;
     let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
     assert_table_schema_snapshots(
         table_schemas_snapshots,
-        &[
-            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ],
-            &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
-        ],
+        &[initial_columns.as_slice(), added_columns.as_slice(), final_columns.as_slice()],
     );
+    let expected_event_snapshot_ids = match order {
+        SchemaReplayOrder::DmlBeforeDdl => table_schemas_snapshots.as_slice(),
+        SchemaReplayOrder::DdlBeforeDml => &table_schemas_snapshots[1..],
+    }
+    .iter()
+    .map(|(snapshot_id, _)| *snapshot_id)
+    .collect::<Vec<_>>();
+    assert_relation_insert_schema_pairs(&events, table_id, &expected_event_snapshot_ids);
+
     let initial_events = collect_table_events(&events, table_id);
     let initial_table_schema_snapshots = table_schemas_snapshots.clone();
 
@@ -1417,8 +1302,8 @@ async fn schema_replay_handles_ddl_before_dml_in_one_transaction() {
 
     let events_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
+            EventCondition::TableCount(EventType::Relation, table_id, event_count),
+            EventCondition::TableCount(EventType::Insert, table_id, event_count),
         ])
         .await;
 
@@ -1439,137 +1324,39 @@ async fn schema_replay_handles_ddl_before_dml_in_one_transaction() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_replay_handles_ddl_before_dml_across_transactions() {
-    let _scenario = FailScenario::setup();
-    fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+async fn schema_replay_preserves_dml_before_ddl_in_one_transaction() {
+    run_schema_replay_scenario(
+        SchemaReplayOrder::DmlBeforeDdl,
+        SchemaReplayTransactionScope::OneTransaction,
+    )
+    .await;
+}
 
-    init_test_tracing();
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_replay_preserves_dml_before_ddl_across_transactions() {
+    run_schema_replay_scenario(
+        SchemaReplayOrder::DmlBeforeDdl,
+        SchemaReplayTransactionScope::SeparateTransactions,
+    )
+    .await;
+}
 
-    let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
-        create_database_and_ready_pipeline_with_table(
-            "schema_add_column",
-            &[("name", "text not null"), ("age", "integer not null")],
-        )
-        .await;
-    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_replay_preserves_ddl_before_dml_in_one_transaction() {
+    run_schema_replay_scenario(
+        SchemaReplayOrder::DdlBeforeDml,
+        SchemaReplayTransactionScope::OneTransaction,
+    )
+    .await;
+}
 
-    let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ])
-        .await;
-
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AddColumn {
-                name: "status",
-                data_type: "text not null default 'pending'",
-            }],
-        )
-        .await
-        .unwrap();
-
-    database
-        .insert_values(table_name.clone(), &["name", "age", "status"], &[&"second", &28, &"active"])
-        .await
-        .unwrap();
-
-    database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
-        .await
-        .unwrap();
-
-    database
-        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
-        .await
-        .unwrap();
-
-    events_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let events = destination.get_events().await;
-    assert_table_event_sequence(
-        &events,
-        table_id,
-        &[
-            ExpectedReplicatedEvent::Relation(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Insert(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Relation(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ]),
-            ExpectedReplicatedEvent::Insert(&[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ]),
-        ],
-    );
-
-    let table_schemas = store.get_table_schemas().await;
-    let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
-    assert_table_schema_snapshots(
-        table_schemas_snapshots,
-        &[
-            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("status", Type::TEXT),
-            ],
-            &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
-        ],
-    );
-    let initial_events = collect_table_events(&events, table_id);
-    let initial_table_schema_snapshots = table_schemas_snapshots.clone();
-
-    fail::remove(SEND_STATUS_UPDATE_FP);
-    destination.clear_events().await;
-
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication,
-        store.clone(),
-        destination.clone(),
-    );
-
-    let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ])
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    events_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let restarted_events = destination.get_events().await;
-    assert_events_equal(&collect_table_events(&restarted_events, table_id), &initial_events);
-
-    let restarted_table_schemas = store.get_table_schemas().await;
-    assert_restarted_schema_snapshot_pairs(
-        restarted_table_schemas.get(&table_id).unwrap(),
-        &initial_table_schema_snapshots,
-    );
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_replay_preserves_ddl_before_dml_across_transactions() {
+    run_schema_replay_scenario(
+        SchemaReplayOrder::DdlBeforeDml,
+        SchemaReplayTransactionScope::SeparateTransactions,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1579,12 +1366,13 @@ async fn schema_snapshots_are_pruned_after_confirmed_progress() {
     init_test_tracing();
 
     let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_ready_pipeline_with_table(
+        create_database_and_sync_done_pipeline_with_table(
             "schema_cleanup",
             &[("name", "text not null"), ("age", "integer not null")],
         )
         .await;
 
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 2),
@@ -1622,6 +1410,7 @@ async fn schema_snapshots_are_pruned_after_confirmed_progress() {
         .await
         .unwrap();
 
+    ready_notify.notified().await;
     events_notify.notified().await;
 
     let table_schemas = store.get_table_schemas().await;
@@ -1652,7 +1441,7 @@ async fn schema_snapshots_are_pruned_after_confirmed_progress() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn publication_column_filter_schema_messages_replay_before_first_relation_per_table() {
+async fn publication_schema_snapshots_replay_before_each_table_first_relation() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
 
@@ -1717,15 +1506,13 @@ async fn publication_column_filter_schema_messages_replay_before_first_relation_
         destination.clone(),
     );
 
-    let first_ready_notify =
-        store.notify_on_table_state_type(first_table_id, TableStateType::Ready).await;
-    let second_ready_notify =
-        store.notify_on_table_state_type(second_table_id, TableStateType::Ready).await;
+    let first_sync_complete_notify = store.notify_on_table_sync_complete(first_table_id).await;
+    let second_sync_complete_notify = store.notify_on_table_sync_complete(second_table_id).await;
 
     pipeline.start().await.unwrap();
 
-    first_ready_notify.notified().await;
-    second_ready_notify.notified().await;
+    first_sync_complete_notify.notified().await;
+    second_sync_complete_notify.notified().await;
     fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     let first_schema_stored_notify = store.notify_on_table_schema_count(first_table_id, 3).await;
@@ -1769,10 +1556,13 @@ async fn publication_column_filter_schema_messages_replay_before_first_relation_
     second_schema_stored_notify.notified().await;
     ddl_commits_notify.notified().await;
 
+    pipeline.shutdown_and_wait().await.unwrap();
+
     let first_run_events = destination.get_events().await;
     assert!(
-        first_run_events.iter().all(|event| !matches!(event, Event::Relation(_))),
-        "DDL-only transactions must not synthesize relation events"
+        collect_table_events(&first_run_events, first_table_id).is_empty()
+            && collect_table_events(&first_run_events, second_table_id).is_empty(),
+        "DDL-only transactions must not synthesize table events"
     );
 
     let first_run_schemas = store.get_table_schemas().await;
@@ -1810,8 +1600,6 @@ async fn publication_column_filter_schema_messages_replay_before_first_relation_
         "multi-table publication messages must receive ordered snapshot ids"
     );
 
-    pipeline.shutdown_and_wait().await.unwrap();
-
     // Isolate the replay phase without clearing stored schemas. Replayed
     // snapshots are de-duplicated by table and snapshot ID.
     fail::remove(SEND_STATUS_UPDATE_FP);
@@ -1825,8 +1613,6 @@ async fn publication_column_filter_schema_messages_replay_before_first_relation_
         destination.clone(),
     );
 
-    pipeline.start().await.unwrap();
-
     let row_events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, first_table_id, 1),
@@ -1835,6 +1621,8 @@ async fn publication_column_filter_schema_messages_replay_before_first_relation_
             EventCondition::TableCount(EventType::Insert, second_table_id, 1),
         ])
         .await;
+
+    pipeline.start().await.unwrap();
 
     database
         .run_sql(&format!(
@@ -1925,13 +1713,11 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
         destination.clone(),
     );
 
-    // Wait for the table to finish syncing.
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
     fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     // We expect one relation and insert for the initial state, the physical
@@ -2146,6 +1932,10 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
             ],
         ],
     );
+    let expected_snapshot_ids =
+        table_schemas_snapshots.iter().map(|(snapshot_id, _)| *snapshot_id).collect::<Vec<_>>();
+    assert_relation_insert_schema_pairs(&events, table_id, &expected_snapshot_ids);
+
     let initial_events = collect_table_events(&events, table_id);
     let initial_table_schema_snapshots = table_schemas_snapshots.clone();
 
@@ -2180,12 +1970,11 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
     pipeline.start().await.unwrap();
 
     restart_events_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify the same events are received after restart.
     let events_after_restart = destination.get_events().await;
     verify_events(&events_after_restart, table_id);
-
-    pipeline.shutdown_and_wait().await.unwrap();
 
     assert_events_equal(&collect_table_events(&events_after_restart, table_id), &initial_events);
     let restarted_table_schemas = store.get_table_schemas().await;
@@ -2193,6 +1982,7 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
         restarted_table_schemas.get(&table_id).unwrap(),
         &initial_table_schema_snapshots,
     );
+    assert_relation_insert_schema_pairs(&events_after_restart, table_id, &expected_snapshot_ids);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2265,11 +2055,11 @@ async fn worker_connections_are_tagged_with_per_worker_application_names() {
     .await
     .expect("timed out waiting for per-worker application names in pg_stat_activity");
 
-    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
-    ready_notify.notified().await;
+    sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 }

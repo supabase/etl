@@ -181,6 +181,11 @@ async fn assert_stream_markers_and_replay(
             StreamMarker::DdlMessage(message_lsn, ..) => {
                 let commit_lsn =
                     transaction_commit_lsn.expect("DDL message must be inside a transaction");
+                assert_ne!(
+                    *message_lsn,
+                    PgLsn::from(0_u64),
+                    "Schema snapshots must use their logical-message WAL position"
+                );
                 assert!(
                     *message_lsn <= commit_lsn,
                     "Schema snapshot LSN {message_lsn} must not exceed transaction commit LSN \
@@ -212,6 +217,7 @@ async fn assert_stream_markers_and_replay(
     );
 
     drop(initial_client);
+    database.wait_for_slot_inactive(slot_name).await;
 
     let replay_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let replay_stream = replay_client
@@ -223,6 +229,22 @@ async fn assert_stream_markers_and_replay(
         replay_markers, initial_markers,
         "Replay produced different protocol markers or message LSNs"
     );
+}
+
+/// Starts a logical replication stream whose slot can be replayed from its
+/// consistent point without sending feedback.
+async fn start_replayable_stream(
+    database: &PgDatabase<Client>,
+    publication_name: &str,
+    slot_suffix: &str,
+) -> (PgReplicationClient, LogicalReplicationStream, String, PgLsn) {
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name(slot_suffix);
+    let start_lsn = client.create_slot(&slot_name).await.unwrap().consistent_point;
+    let stream =
+        client.start_logical_replication(publication_name, &slot_name, start_lsn).await.unwrap();
+
+    (client, stream, slot_name, start_lsn)
 }
 
 struct UnsupportedParserCase {
@@ -1184,6 +1206,65 @@ async fn logical_replication_stream_rejects_known_unsupported_postgres_values() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_consecutive_ddl_only_transactions_without_relations() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("consecutive_ddl_only_transactions");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("a", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "consecutive_ddl_only_transactions_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "consecutive_ddl_only_transactions_slot",
+    )
+    .await;
+
+    // Each ALTER runs in its own transaction. With no DML, pgoutput carries
+    // the self-describing DDL messages but has no reason to emit Relation.
+    database
+        .run_sql(&format!("alter table {quoted_table_name} add column b integer"))
+        .await
+        .unwrap();
+    database.run_sql(&format!("alter table {quoted_table_name} add column c text")).await.unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_replays_schema_changes_before_first_dml() {
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -1207,13 +1288,12 @@ async fn logical_replication_replays_schema_changes_before_first_dml() {
     let publication_name = "schema_changes_before_first_dml_pub";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let slot_name = test_slot_name("schema_changes_before_first_dml_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
-    let initial_stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
-        .await
-        .unwrap();
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "schema_changes_before_first_dml_slot",
+    )
+    .await;
 
     // Both schema changes happen before any DML. Each emits a stable schema
     // snapshot, but neither synthesizes a Relation message.
@@ -1265,7 +1345,7 @@ async fn logical_replication_replays_schema_changes_before_first_dml() {
         &database,
         publication_name,
         &slot_name,
-        slot.consistent_point,
+        start_lsn,
         &expected,
     )
     .await;
@@ -1383,13 +1463,12 @@ async fn logical_replication_replays_multi_table_publication_column_filter_chang
         .await
         .unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let slot_name = test_slot_name("publication_filter_multiple_tables_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
-    let initial_stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
-        .await
-        .unwrap();
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "publication_filter_multiple_tables_slot",
+    )
+    .await;
 
     database
         .run_sql(&format!(
@@ -1450,14 +1529,89 @@ async fn logical_replication_replays_multi_table_publication_column_filter_chang
         &database,
         publication_name,
         &slot_name,
-        slot.consistent_point,
+        start_lsn,
         &expected,
     )
     .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn logical_replication_replays_publication_add_drop_and_option_change_snapshots() {
+async fn logical_replication_replays_publication_column_expansion_before_dml() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    let table_name = test_table_name("publication_column_expansion");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("a", "integer not null"), ("b", "integer not null")],
+        )
+        .await
+        .unwrap();
+    let quoted_table_name = table_name.as_quoted_identifier();
+
+    let publication_name = "publication_column_expansion_pub";
+    database
+        .run_sql(&format!(
+            "create publication {} for table {quoted_table_name} (id, a)",
+            quote_identifier(publication_name)
+        ))
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "publication_column_expansion_slot")
+            .await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} set table {quoted_table_name} (id, a, b)",
+            quote_identifier(publication_name)
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("insert into {quoted_table_name} (a, b) values (1, 2)"))
+        .await
+        .unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_publication_add_and_option_snapshots_but_not_drop() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1483,13 +1637,12 @@ async fn logical_replication_replays_publication_add_drop_and_option_change_snap
         .await
         .unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let slot_name = test_slot_name("publication_membership_and_options_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
-    let initial_stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
-        .await
-        .unwrap();
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "publication_membership_and_options_slot",
+    )
+    .await;
 
     let quoted_publication_name = quote_identifier(publication_name);
     database
@@ -1549,7 +1702,7 @@ async fn logical_replication_replays_publication_add_drop_and_option_change_snap
         &database,
         publication_name,
         &slot_name,
-        slot.consistent_point,
+        start_lsn,
         &expected,
     )
     .await;
@@ -1573,13 +1726,8 @@ async fn logical_replication_replays_interleaved_table_schema_changes_within_tra
     let publication_name = "ddl_message_ordering_pub";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let slot_name = test_slot_name("ddl_message_ordering_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
-    let initial_stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
-        .await
-        .unwrap();
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "ddl_message_ordering_slot").await;
 
     let transaction = database.begin_transaction().await;
     transaction
@@ -1634,7 +1782,7 @@ async fn logical_replication_replays_interleaved_table_schema_changes_within_tra
         &database,
         publication_name,
         &slot_name,
-        slot.consistent_point,
+        start_lsn,
         &expected,
     )
     .await;
@@ -1665,13 +1813,12 @@ async fn logical_replication_replays_dml_before_table_and_publication_ddl_within
     let quoted_publication_name = quote_identifier(publication_name);
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let slot_name = test_slot_name("interleaved_table_publication_ddl_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
-    let initial_stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
-        .await
-        .unwrap();
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "interleaved_table_publication_ddl_slot",
+    )
+    .await;
 
     let transaction = database.begin_transaction().await;
     transaction.insert_values(table_name.clone(), &["a", "b", "c"], &[&1, &2, &3]).await.unwrap();
@@ -1734,7 +1881,7 @@ async fn logical_replication_replays_dml_before_table_and_publication_ddl_within
         &database,
         publication_name,
         &slot_name,
-        slot.consistent_point,
+        start_lsn,
         &expected,
     )
     .await;

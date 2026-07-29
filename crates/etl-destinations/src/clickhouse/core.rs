@@ -638,34 +638,12 @@ where
     ) -> EtlResult<()> {
         warn!("table {} has Applying metadata, recovering interrupted operation", table_id);
 
+        ensure_clickhouse_recovery_schema_matches(table_id, schema, &metadata)?;
+
         match metadata.previous_snapshot_id {
             Some(prev_snapshot_id) => {
                 // Recovery replays the interrupted diff from the previous
-                // snapshot to the target snapshot recorded in the metadata. A
-                // schema arriving with any other snapshot, older or newer,
-                // must not drive DDL: diffing against it could execute
-                // reverse DDL or wrongly mark the interrupted change applied.
-                let arriving_snapshot_id = schema.inner().snapshot_id;
-                let arriving_replication_mask = schema.replication_mask();
-                if arriving_snapshot_id != metadata.snapshot_id
-                    || arriving_replication_mask != &metadata.replication_mask
-                {
-                    return Err(etl_error!(
-                        ErrorKind::DestinationSchemaRewind,
-                        "ClickHouse schema recovery received mismatched schema state",
-                        format!(
-                            "Table {} has an interrupted schema change targeting snapshot {} and \
-                             replication mask {}, but received snapshot {} and replication mask \
-                             {}. Resynchronize the table to recover.",
-                            table_id,
-                            metadata.snapshot_id,
-                            metadata.replication_mask,
-                            arriving_snapshot_id,
-                            arriving_replication_mask
-                        )
-                    ));
-                }
-
+                // snapshot to the target snapshot recorded in the metadata.
                 let old_table_schema =
                     self.store.get_table_schema(&table_id, prev_snapshot_id).await?.ok_or_else(
                         || {
@@ -1591,6 +1569,36 @@ where
     }
 }
 
+/// Requires interrupted ClickHouse DDL to use its recorded target schema.
+fn ensure_clickhouse_recovery_schema_matches(
+    table_id: TableId,
+    schema: &ReplicatedTableSchema,
+    metadata: &DestinationTableMetadata,
+) -> EtlResult<()> {
+    let arriving_snapshot_id = schema.inner().snapshot_id;
+    let arriving_replication_mask = schema.replication_mask();
+    if arriving_snapshot_id == metadata.snapshot_id
+        && arriving_replication_mask == &metadata.replication_mask
+    {
+        return Ok(());
+    }
+
+    Err(etl_error!(
+        ErrorKind::DestinationSchemaRewind,
+        "ClickHouse schema recovery received mismatched schema state",
+        format!(
+            "Table {} has an interrupted destination operation targeting snapshot {} and \
+             replication mask {}, but received snapshot {} and replication mask {}. Resynchronize \
+             the table to recover.",
+            table_id,
+            metadata.snapshot_id,
+            metadata.replication_mask,
+            arriving_snapshot_id,
+            arriving_replication_mask
+        )
+    ))
+}
+
 /// Strips ClickHouse Cloud's `Shared` storage-variant prefix so the shared and
 /// non-shared MergeTree-family engines compare equal (see
 /// `ensure_engine_matches`).
@@ -1608,7 +1616,7 @@ fn clickhouse_engine_matches(existing: &str, configured: &str) -> bool {
 mod tests {
     use etl::{
         data::{ArrayCell, PartialTableRow},
-        schema::{ColumnSchema, IdentityMask, ReplicationMask, TableName, TableSchema},
+        schema::{ColumnSchema, IdentityMask, ReplicationMask, SnapshotId, TableName, TableSchema},
     };
 
     use super::*;
@@ -1628,6 +1636,25 @@ mod tests {
         // Genuine engine mismatches still fail.
         assert!(!clickhouse_engine_matches("SharedReplacingMergeTree", "MergeTree"));
         assert!(!clickhouse_engine_matches("MergeTree", "ReplacingMergeTree"));
+    }
+
+    #[test]
+    fn initial_creation_recovery_rejects_a_different_schema_target() {
+        let arriving_schema = replicated_schema(IdentityType::PrimaryKey);
+        let metadata = DestinationTableMetadata::new_applying(
+            "public_users".to_owned(),
+            SnapshotId::from(1_u64),
+            arriving_schema.replication_mask().clone(),
+        );
+
+        let error = ensure_clickhouse_recovery_schema_matches(
+            arriving_schema.id(),
+            &arriving_schema,
+            &metadata,
+        )
+        .expect_err("initial creation recovery should require its recorded target");
+
+        assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {

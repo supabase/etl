@@ -140,8 +140,7 @@ async fn replacing_merge_tree_same_lsn_tx_insert_then_update_keeps_update() {
             .await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -152,7 +151,7 @@ async fn replacing_merge_tree_same_lsn_tx_insert_then_update_keeps_update() {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // --- WHEN: INSERT + UPDATE in the same transaction ---
     let events_notify = destination
@@ -244,8 +243,7 @@ async fn replacing_merge_tree_same_lsn_tx_delete_then_insert_keeps_insert() {
             .await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -256,7 +254,7 @@ async fn replacing_merge_tree_same_lsn_tx_delete_then_insert_keeps_insert() {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // --- WHEN: DELETE + INSERT of the same id in one transaction ---
     let events_notify = destination
@@ -336,8 +334,7 @@ async fn replacing_merge_tree_current_view_exposes_user_columns_and_current_stat
             .await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -348,7 +345,7 @@ async fn replacing_merge_tree_current_view_exposes_user_columns_and_current_stat
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
@@ -437,8 +434,7 @@ async fn composite_pk_pk_order_by_matches_pk_ordinal() {
         .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
         .await;
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -449,7 +445,7 @@ async fn composite_pk_pk_order_by_matches_pk_ordinal() {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- WHEN: query system.tables for the created ReplacingMergeTree ORDER BY
@@ -521,8 +517,7 @@ async fn replacing_merge_tree_streamed_update_wins_over_initial_copy_row() {
             .await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -533,7 +528,7 @@ async fn replacing_merge_tree_streamed_update_wins_over_initial_copy_row() {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // --- WHEN: stream an UPDATE for the copied row ---
     let events_notify = destination
@@ -611,8 +606,7 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
             .await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -623,7 +617,7 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
@@ -715,8 +709,7 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
         let store = NotifyingStore::new();
         let pipeline_id: PipelineId = random();
         let destination = clickhouse_db.build_destination_with_engine(store.clone(), first).await;
-        let table_ready_notify =
-            store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+        let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
         let mut pipeline = create_pipeline(
             &database.config,
             pipeline_id,
@@ -725,7 +718,7 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
             destination,
         );
         pipeline.start().await.unwrap();
-        table_ready_notify.notified().await;
+        table_sync_complete_notify.notified().await;
         pipeline.shutdown_and_wait().await.unwrap();
     }
 

@@ -1,7 +1,10 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use tokio::sync::{Notify, RwLock};
@@ -224,6 +227,40 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
+    /// Registers a notification that fires on the next transition to a state
+    /// that completes table synchronization.
+    ///
+    /// This matches both [`TableState::SyncDone`] for copied tables and
+    /// [`TableState::Ready`] for tables whose copy was skipped.
+    ///
+    /// If the table is already in either state, the notification first waits
+    /// for an incomplete state. This allows callers to wait for a resync
+    /// without an unrelated store update satisfying the previous completion.
+    pub async fn notify_on_table_sync_complete(&self, table_id: TableId) -> TimedNotify {
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+        let starts_incomplete = inner
+            .table_states
+            .get(&table_id)
+            .is_none_or(|state| !state.as_type().has_completed_table_sync());
+        let saw_incomplete = AtomicBool::new(starts_incomplete);
+
+        inner.table_state_conditions.push((
+            table_id,
+            Arc::clone(&notify),
+            Box::new(move |state| {
+                if state.as_type().has_completed_table_sync() {
+                    saw_incomplete.load(Ordering::Relaxed)
+                } else {
+                    saw_incomplete.store(true, Ordering::Relaxed);
+                    false
+                }
+            }),
+        ));
+
+        TimedNotify::new(notify)
+    }
+
     /// Registers a notification that fires when a future state update matches a
     /// custom condition.
     ///
@@ -295,6 +332,7 @@ impl NotifyingStore {
         let states = Arc::make_mut(&mut inner.table_states);
         states.remove(&table_id);
         states.insert(table_id, TableState::Init);
+        inner.check_conditions();
 
         Ok(())
     }
@@ -578,5 +616,35 @@ impl TableStateLifecycleStore for NotifyingStore {
 impl fmt::Debug for NotifyingStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NotifyingStore").finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn table_sync_completion_waits_for_resync_when_already_complete() {
+        let store = NotifyingStore::new();
+        let table_id = TableId::new(1);
+        store.update_table_state(table_id, TableState::Ready).await.unwrap();
+
+        let sync_complete = store.notify_on_table_sync_complete(table_id).await;
+
+        // Re-evaluating conditions while the existing state is Ready must not
+        // satisfy a wait for the next synchronization.
+        store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(1)).await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(50), sync_complete.inner().notified()).await.is_err()
+        );
+
+        store.reset_table_state(table_id).await.unwrap();
+        store.update_table_state(table_id, TableState::Ready).await.unwrap();
+
+        sync_complete.wait_for(Duration::from_secs(1)).notified().await;
     }
 }

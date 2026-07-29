@@ -1286,6 +1286,80 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
     );
 }
 
+/// Relation-driven `Applying` recovery requires the exact recorded target.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_rejects_mismatched_relation_before_applying_recovery() {
+    use etl::event::RelationEvent;
+
+    let lake =
+        create_test_lake("write_events_rejects_mismatched_relation_before_applying_recovery").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(57, "public", "mismatched_recovery_relation");
+    let target_schema = make_schema_with_email(&old_schema, 200);
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let target_replicated_table_schema = make_replicated_table_schema(&target_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(target_schema.clone()).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let applying_metadata = DestinationTableMetadata::new_applied(
+        table_name.to_metadata_id().unwrap(),
+        old_schema.snapshot_id,
+        old_replicated_table_schema.replication_mask().clone(),
+    )
+    .with_schema_change(
+        target_schema.snapshot_id,
+        target_replicated_table_schema.replication_mask().clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(old_schema.id, applying_metadata.clone()).await.unwrap();
+
+    let error = destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: old_replicated_table_schema,
+        })])
+        .await
+        .expect_err("a relation that does not match the recovery target should be rejected");
+    assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
+    assert_eq!(
+        store.get_destination_table_metadata(old_schema.id).await.unwrap(),
+        Some(applying_metadata),
+        "mismatched recovery must not advance destination metadata"
+    );
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(
+        table_column_names(&conn, &table_name),
+        vec!["id", "name"],
+        "mismatched recovery must not apply the recorded target DDL"
+    );
+}
+
 /// `write_events` rejects a stale relation before it can reverse applied DDL.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_rejects_stale_relation_before_reverse_ddl() {

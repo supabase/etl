@@ -175,7 +175,9 @@ pub enum TableState {
         /// `None` is accepted only for compatibility with `SyncDone` rows
         /// written before decoding state was persisted. New rows always store
         /// `Some`, whose type guarantees that the snapshot ID and both masks
-        /// are present together.
+        /// are present together. An eventless table may remain in this state
+        /// indefinitely so the first future row can restore this exact decoder
+        /// without adding another retained-decoder lifecycle state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         table_decoding_state: Option<StoredTableDecodingState>,
     },
@@ -187,8 +189,10 @@ pub enum TableState {
     /// `Ready` no longer retains the [`StoredTableDecodingState`] from
     /// `SyncDone`. Before persisting `Ready`, the apply worker therefore
     /// requires the current connection to have crossed `SyncDone.lsn`, a
-    /// durable apply checkpoint at or beyond that boundary, and a materialized
-    /// connection-local decoder.
+    /// durable apply checkpoint at or beyond that boundary, and decoding state
+    /// materialized as `WithSchema`. That local state proves this connection
+    /// either received a relation or restored the complete `SyncDone` decoder
+    /// while handling relation-less DML.
     ///
     /// These conditions protect different attempts. The local decoder protects
     /// only the current connection, which may not receive another relation
@@ -352,16 +356,7 @@ impl TableStateType {
     /// Returns `true` if the state should be saved into the state store,
     /// `false` otherwise.
     pub fn should_store(&self) -> bool {
-        match self {
-            Self::Init => true,
-            Self::DataSync => true,
-            Self::FinishedCopy => true,
-            Self::SyncWait => false,
-            Self::Catchup => false,
-            Self::SyncDone => true,
-            Self::Ready => true,
-            Self::Errored => true,
-        }
+        !matches!(self, Self::SyncWait | Self::Catchup)
     }
 
     /// Returns whether a table with this state is still synchronizing.

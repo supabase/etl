@@ -2251,11 +2251,29 @@ where
         metadata: &DestinationTableMetadata,
         provided_target_schema: Option<&ReplicatedTableSchema>,
     ) -> EtlResult<ReplicatedTableSchema> {
-        if let Some(schema) = provided_target_schema
-            && schema.inner().snapshot_id == metadata.snapshot_id
-            && schema.replication_mask() == &metadata.replication_mask
-        {
-            return Ok(schema.clone());
+        if let Some(schema) = provided_target_schema {
+            let arriving_snapshot_id = schema.inner().snapshot_id;
+            let arriving_replication_mask = schema.replication_mask();
+            if arriving_snapshot_id == metadata.snapshot_id
+                && arriving_replication_mask == &metadata.replication_mask
+            {
+                return Ok(schema.clone());
+            }
+
+            return Err(etl_error!(
+                ErrorKind::DestinationSchemaRewind,
+                "DuckLake schema recovery received mismatched schema state",
+                format!(
+                    "Table {} has an interrupted destination operation targeting snapshot {} and \
+                     replication mask {}, but received snapshot {} and replication mask {}. \
+                     Resynchronize the table to recover.",
+                    table_id,
+                    metadata.snapshot_id,
+                    metadata.replication_mask,
+                    arriving_snapshot_id,
+                    arriving_replication_mask
+                )
+            ));
         }
 
         let target_table_schema = self

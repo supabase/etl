@@ -12,7 +12,6 @@ use etl::{
     event::EventType,
     pipeline::PipelineId,
     schema::TableName,
-    store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -141,8 +140,7 @@ async fn large_row_inner(engine: ClickHouseEngine, field_chars: usize) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -153,7 +151,7 @@ async fn large_row_inner(engine: ClickHouseEngine, field_chars: usize) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])

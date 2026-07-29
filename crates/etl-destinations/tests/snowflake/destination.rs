@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Duration};
 use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{DestinationTableMetadata, DestinationWriteStatus, WriteEventsDurability},
+    error::ErrorKind,
     event::{DeleteEvent, Event, InsertEvent, RelationEvent, UpdateEvent},
     pipeline::PipelineId,
     schema::{
@@ -468,11 +469,11 @@ async fn write_events_delete_key_only() {
     .await;
 }
 
-/// A restart replay must skip an older relation snapshot and its committed
-/// rows without executing reverse DDL.
+/// A restart replay must reject an older relation snapshot before reverse DDL
+/// or replayed rows can be applied.
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
-async fn schema_evolution_add_column_skips_stale_replay() {
+async fn schema_evolution_add_column_rejects_stale_replay() {
     let harness = TestHarness::new();
     let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
     let sf_table = snowflake_table_name("public", &src_table);
@@ -576,13 +577,14 @@ async fn schema_evolution_add_column_skips_stale_replay() {
         assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
 
         // Recreate the destination to restore the channel's durable offset,
-        // then replay the stream from before the schema change. Both rows are
-        // already committed, and the stale relation must not remove `email`.
+        // then replay the stream from before the schema change. The relation
+        // has no offset of its own, so the destination must reject it before
+        // considering whether the following rows were already committed.
         let restarted_destination = Destination::new(
             Client::new(build_auth(), PipelineId::from(1_u64)),
             harness.store.clone(),
         );
-        let replay_status = invoke_write_events(
+        let replay_error = invoke_write_events(
             &restarted_destination,
             WriteEventsDurability::MayDefer,
             vec![
@@ -611,26 +613,8 @@ async fn schema_evolution_add_column_skips_stale_replay() {
             ],
         )
         .await
-        .expect("replayed events should be skipped");
-        assert_eq!(replay_status, DestinationWriteStatus::Durable);
-
-        let resumed_status = invoke_write_events(
-            &restarted_destination,
-            WriteEventsDurability::RequireDurable,
-            vec![Event::Insert(InsertEvent {
-                commit_lsn: PgLsn::from(102_u64),
-                tx_ordinal: 0,
-                replicated_table_schema: evolved_replicated.clone(),
-                table_row: TableRow::new(vec![
-                    Cell::I32(3),
-                    Cell::String("Charlie".into()),
-                    Cell::String("charlie@example.com".into()),
-                ]),
-            })],
-        )
-        .await
-        .expect("streaming should resume after stale replay");
-        assert_eq!(resumed_status, DestinationWriteStatus::Durable);
+        .expect_err("a stale relation should fail closed");
+        assert_eq!(replay_error.kind(), ErrorKind::DestinationSchemaRewind);
 
         let fqn = format!(
             "\"{}\".\"{}\".\"{sf_table}\"",
@@ -644,20 +628,14 @@ async fn schema_evolution_add_column_skips_stale_replay() {
         .await
         .expect("query_rows after stale replay failed");
 
-        assert_eq!(rows.len(), 3, "replay must not duplicate committed rows");
+        assert_eq!(rows.len(), 2, "stale replay must not write any rows");
         assert_eq!(rows[0][0], serde_json::Value::String("1".into()));
         assert_eq!(rows[0][1], serde_json::Value::Null);
         assert_eq!(rows[1][0], serde_json::Value::String("2".into()));
         assert_eq!(
             rows[1][1],
             serde_json::Value::String("bob@example.com".into()),
-            "newer column data must survive stale replay"
-        );
-        assert_eq!(rows[2][0], serde_json::Value::String("3".into()));
-        assert_eq!(
-            rows[2][1],
-            serde_json::Value::String("charlie@example.com".into()),
-            "streaming must resume with the applied schema"
+            "newer column data must survive the rejected stale replay"
         );
 
         let final_metadata = harness

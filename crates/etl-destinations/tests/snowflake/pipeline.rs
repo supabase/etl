@@ -4,7 +4,6 @@ use etl::{
     event::{Event, EventType},
     pipeline::PipelineId,
     schema::TableName,
-    store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -98,11 +97,10 @@ async fn schema_change_add_column_defaults() {
             store.clone(),
             destination.clone(),
         );
-        let table_sync_done_notify =
-            store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
+        let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
         pipeline.start().await.unwrap();
-        table_sync_done_notify.notified().await;
+        table_sync_complete_notify.notified().await;
 
         let copy_offset = OffsetToken::new(0_u64.into(), 1);
         let committed = poll_destination_offset(

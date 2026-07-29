@@ -7,8 +7,9 @@ use std::{
 use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
-        TaskSet, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        AppliedDestinationTableMetadata, Destination, DestinationTableMetadata,
+        DestinationWriteStatus, DropTableForCopyResult, TaskSet, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -21,6 +22,7 @@ use tracing::{debug, warn};
 
 use crate::{
     iceberg::{IcebergClient, error::iceberg_error_to_etl_error},
+    recovery::ensure_relation_schema_transition,
     table_name::try_stringify_table_name,
 };
 
@@ -365,28 +367,25 @@ where
                         entry.1.push(old_table_row);
                     }
                     Event::Relation(relation) => {
-                        // Check if schema has changed - if so, error since Iceberg doesn't
-                        // support schema changes yet.
                         let table_id = relation.replicated_table_schema.id();
-                        let new_snapshot_id = relation.replicated_table_schema.inner().snapshot_id;
-                        let new_replication_mask =
-                            relation.replicated_table_schema.replication_mask();
-
-                        if let Some(metadata) =
+                        let Some(metadata) =
                             self.store.get_applied_destination_table_metadata(table_id).await?
-                            && (metadata.snapshot_id != new_snapshot_id
-                                || &metadata.replication_mask != new_replication_mask)
-                        {
+                        else {
                             return Err(etl_error!(
                                 ErrorKind::CorruptedTableSchema,
-                                "Schema changes not supported",
+                                "Destination metadata missing for Iceberg relation event",
                                 format!(
-                                    "Iceberg destination does not support schema changes. Table \
-                                     {} schema changed from snapshot_id {} to {}.",
-                                    table_id, metadata.snapshot_id, new_snapshot_id
+                                    "Table {} received schema snapshot {}, but destination \
+                                     metadata from initial synchronization was not found.",
+                                    table_id,
+                                    relation.replicated_table_schema.inner().snapshot_id
                                 )
                             ));
-                        }
+                        };
+                        ensure_iceberg_relation_is_unchanged(
+                            &metadata,
+                            &relation.replicated_table_schema,
+                        )?;
                     }
                     event => {
                         // Every other event type is currently not supported.
@@ -639,6 +638,39 @@ where
     }
 }
 
+/// Accepts an idempotent Iceberg relation and rejects every schema transition.
+fn ensure_iceberg_relation_is_unchanged(
+    metadata: &AppliedDestinationTableMetadata,
+    new_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    let table_id = new_schema.id();
+    let new_snapshot_id = new_schema.inner().snapshot_id;
+    let new_replication_mask = new_schema.replication_mask();
+
+    ensure_relation_schema_transition(
+        "Iceberg",
+        table_id,
+        metadata.snapshot_id,
+        &metadata.replication_mask,
+        new_snapshot_id,
+        new_replication_mask,
+    )?;
+
+    if metadata.snapshot_id != new_snapshot_id {
+        return Err(etl_error!(
+            ErrorKind::CorruptedTableSchema,
+            "Schema changes not supported",
+            format!(
+                "Iceberg destination does not support schema changes. Table {} schema changed \
+                 from snapshot {} to {}.",
+                table_id, metadata.snapshot_id, new_snapshot_id
+            )
+        ));
+    }
+
+    Ok(())
+}
+
 /// Returns the full new row required for an Iceberg update changelog row.
 fn iceberg_update_row(
     replicated_table_schema: &ReplicatedTableSchema,
@@ -753,18 +785,19 @@ mod tests {
 
     use etl::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
+        destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
         error::ErrorKind,
         event::EventSequenceKey,
         schema::{
-            ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
-            TableSchema, Type,
+            ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId,
+            TableId, TableName, TableSchema, Type,
         },
     };
     use tokio_postgres::types::PgLsn;
 
     use crate::iceberg::core::{
-        CDC_OPERATION_COLUMN_NAME, find_unique_column_name, iceberg_delete_row,
-        iceberg_sequence_key, iceberg_update_row, schema_to_namespace,
+        CDC_OPERATION_COLUMN_NAME, ensure_iceberg_relation_is_unchanged, find_unique_column_name,
+        iceberg_delete_row, iceberg_sequence_key, iceberg_update_row, schema_to_namespace,
     };
 
     #[test]
@@ -804,6 +837,44 @@ mod tests {
         let identity_mask = IdentityMask::from_bytes(vec![1, 0]);
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    #[test]
+    fn iceberg_relation_accepts_only_identical_applied_schema() {
+        let schema = replicated_schema();
+        let metadata = DestinationTableMetadata::new_applied(
+            "public_users_changelog".to_owned(),
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        )
+        .into_applied()
+        .unwrap();
+
+        ensure_iceberg_relation_is_unchanged(&metadata, &schema)
+            .expect("an identical relation should be idempotent");
+
+        let newer_table_schema = Arc::new(TableSchema::with_snapshot_id(
+            schema.id(),
+            schema.name().clone(),
+            schema.inner().column_schemas.clone(),
+            SnapshotId::from(1_u64),
+        ));
+        let newer_schema = ReplicatedTableSchema::all(newer_table_schema);
+        let newer_error = ensure_iceberg_relation_is_unchanged(&metadata, &newer_schema)
+            .expect_err("Iceberg should reject a newer schema");
+        assert_eq!(newer_error.kind(), ErrorKind::CorruptedTableSchema);
+
+        let newer_metadata: AppliedDestinationTableMetadata =
+            DestinationTableMetadata::new_applied(
+                "public_users_changelog".to_owned(),
+                SnapshotId::from(2_u64),
+                schema.replication_mask().clone(),
+            )
+            .into_applied()
+            .unwrap();
+        let stale_error = ensure_iceberg_relation_is_unchanged(&newer_metadata, &schema)
+            .expect_err("Iceberg should reject a stale schema");
+        assert_eq!(stale_error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 
     #[test]
