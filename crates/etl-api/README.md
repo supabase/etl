@@ -35,6 +35,15 @@ Before running the API, you must have:
 
 - A running Postgres instance reachable via `DATABASE_URL`.
 - The `etl-api` database schema applied (SQLx migrations).
+- An active Kubernetes cluster accessible through the runtime's default
+  Kubernetes client configuration. Local development uses the `orbstack`
+  context.
+- The configured replicator namespace and ServiceAccount already created in
+  that cluster.
+
+ETL API validates its Kubernetes connection and shared prerequisites during
+startup. It exits instead of serving requests when Kubernetes initialization or
+preflight validation fails.
 
 For the full local development stack, use the setup script to start Postgres,
 run migrations, and apply the local Kubernetes resources.
@@ -85,6 +94,8 @@ replicator and Vector containers:
 
 ```yaml
 k8s:
+  replicator_namespace: etl-data-plane
+  replicator_service_account_name: etl-replicator
   replicator_node_selectors:
     - key: example.com/node-pool
       value: data
@@ -99,10 +110,16 @@ k8s:
       ducklake:
         cpu_request_millicores: 1000
         memory_request_mib: 4000
+  vector_image: timberio/vector:0.55.0-distroless-libc
   vector_resources:
     cpu_request_millicores: 75
     memory_request_mib: 192
 ```
+
+`replicator_namespace` controls where all generated replicator StatefulSets,
+ConfigMaps, Secrets, and DuckLake maintenance resources are created.
+`replicator_service_account_name` is assigned to generated replicator Pods, and
+`vector_image` selects the Vector sidecar image.
 
 `replicator_node_selectors` and `replicator_tolerations` are optional and passed
 through independently to generated replicator Pods. When omitted, replicators

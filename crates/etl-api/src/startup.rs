@@ -16,7 +16,7 @@ use kube::config::KubeConfigOptions;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -117,53 +117,16 @@ impl Application {
 
         let encryption_keyring = build_encryption_keyring(&config)?;
 
-        // Try to create Kubernetes client, but continue without it if unavailable
-        let kube_client_result = match Environment::load() {
-            Ok(Environment::Staging | Environment::Prod) => kube::Client::try_default().await.ok(),
-            Ok(Environment::Dev) => {
-                async {
-                    let options = KubeConfigOptions {
-                        context: Some("orbstack".to_owned()),
-                        cluster: Some("orbstack".to_owned()),
-                        user: Some("orbstack".to_owned()),
-                    };
-                    let kube_config = kube::config::Config::from_kubeconfig(&options).await.ok()?;
-                    let kube_client: kube::Client = kube_config.try_into().ok()?;
-                    test_orbstack_connection(&kube_client).await.ok()?;
-                    Some(kube_client)
-                }
-                .await
-            }
-            Err(_) => None,
-        };
-
         let feature_flags_client = init_feature_flags(config.configcat_sdk_key.as_deref())?;
 
-        let k8s_client = match kube_client_result {
-            Some(client) => match HttpK8sClient::new(client, config.k8s.clone()) {
-                Ok(client) => {
-                    client.preflight().await.context("Checking Kubernetes prerequisites")?;
-                    Some(Arc::new(client) as Arc<dyn K8sClient>)
-                }
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "failed to create kubernetes client; etl-api is running in degraded mode \
-                        without full kubernetes capabilities and will skip kubernetes resource \
-                        creation, updates, deletion, status checks, and pod restarts"
-                    );
-                    None
-                }
-            },
-            None => {
-                warn!(
-                    "kubernetes client unavailable; etl-api is running in degraded mode without \
-                     full kubernetes capabilities and will skip kubernetes resource creation, \
-                     updates, deletion, status checks, and pod restarts"
-                );
-                None
-            }
-        };
+        let kube_client = create_kubernetes_client().await.context(
+            "Failed to initialize Kubernetes client. ETL API requires access to an active \
+             Kubernetes cluster",
+        )?;
+        let k8s_client = HttpK8sClient::new(kube_client, config.k8s.clone())
+            .context("Failed to configure Kubernetes resource client")?;
+        k8s_client.preflight().await.context("Kubernetes prerequisite validation failed")?;
+        let k8s_client = Arc::new(k8s_client) as Arc<dyn K8sClient>;
 
         let source_tls_config = SourceTlsConfig::new(config.source.tls.clone())
             .context("Resolving source TLS configuration")?;
@@ -200,6 +163,24 @@ impl Application {
     /// Runs the server until it receives a shutdown signal.
     pub async fn run_until_stopped(self) -> io::Result<()> {
         self.server.await.map_err(io::Error::other)?
+    }
+}
+
+async fn create_kubernetes_client() -> anyhow::Result<kube::Client> {
+    match Environment::load().context("Failed to load application environment")? {
+        Environment::Staging | Environment::Prod => Ok(kube::Client::try_default().await?),
+        Environment::Dev => {
+            let options = KubeConfigOptions {
+                context: Some("orbstack".to_owned()),
+                cluster: Some("orbstack".to_owned()),
+                user: Some("orbstack".to_owned()),
+            };
+            let kube_config = kube::config::Config::from_kubeconfig(&options).await?;
+            let kube_client = kube::Client::try_from(kube_config)?;
+            test_orbstack_connection(&kube_client).await?;
+
+            Ok(kube_client)
+        }
     }
 }
 
@@ -270,14 +251,14 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 /// Creates and configures the HTTP server with all routes and middleware.
 ///
 /// Sets up authentication, tracing, Swagger UI, and all API endpoints. The
-/// Kubernetes client is optional to support testing scenarios; the source TLS
-/// configuration is always resolved (it does not depend on Kubernetes).
+/// The Kubernetes client and source TLS configuration are fully initialized
+/// before the server starts accepting requests.
 pub fn run(
     config: ApiConfig,
     listener: TcpListener,
     connection_pool: PgPool,
     encryption_keyring: encryption::EncryptionKeyring,
-    k8s_client: Option<Arc<dyn K8sClient>>,
+    k8s_client: Arc<dyn K8sClient>,
     source_tls_config: SourceTlsConfig,
     feature_flags_client: Option<FeatureFlagsClient>,
 ) -> Result<Server, anyhow::Error> {
