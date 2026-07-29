@@ -249,6 +249,8 @@ fn test_k8s_config(environment: &Environment) -> K8sConfig {
         _ => (250, 125),
     };
     K8sConfig {
+        replicator_node_selectors: Default::default(),
+        replicator_tolerations: Default::default(),
         replicator_resources: DefaultReplicatorResourcesConfig {
             memory_request_mib,
             cpu_request_millicores,
@@ -759,7 +761,8 @@ impl K8sClient for HttpK8sClient {
             request.log_level,
         );
 
-        let node_selector = create_node_selector_json(&environment);
+        let node_selector = node_selector_json(&self.k8s_config.replicator_node_selectors);
+        let tolerations = tolerations_json(&self.k8s_config.replicator_tolerations);
         let init_containers =
             create_init_containers_json(prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(prefix, &environment);
@@ -773,6 +776,7 @@ impl K8sClient for HttpK8sClient {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -1399,14 +1403,39 @@ fn create_container_environment_json(
     container_environment
 }
 
+#[cfg(test)]
 fn create_node_selector_json(environment: &Environment) -> serde_json::Value {
-    // In staging and prod, pin pods to workload pods.
-    match environment {
-        Environment::Dev => json!({}),
-        Environment::Staging | Environment::Prod => json!({
-            "etl.supabase.com/node-role": "workloads"
-        }),
-    }
+    node_selector_json(&test_k8s_config(environment).replicator_node_selectors)
+}
+
+fn node_selector_json(selectors: &[crate::config::NodeSelectorConfig]) -> serde_json::Value {
+    json!(
+        selectors
+            .iter()
+            .map(|selector| (selector.key.clone(), selector.value.clone()))
+            .collect::<BTreeMap<_, _>>()
+    )
+}
+
+#[cfg(test)]
+fn create_tolerations_json(environment: &Environment) -> serde_json::Value {
+    tolerations_json(&test_k8s_config(environment).replicator_tolerations)
+}
+
+fn tolerations_json(tolerations: &[crate::config::TolerationConfig]) -> serde_json::Value {
+    serde_json::Value::Array(
+        tolerations
+            .iter()
+            .map(|toleration| {
+                json!({
+                    "key": toleration.key,
+                    "operator": "Equal",
+                    "value": toleration.value,
+                    "effect": toleration.effect,
+                })
+            })
+            .collect(),
+    )
 }
 
 fn create_init_containers_json(
@@ -1667,6 +1696,7 @@ fn create_replicator_stateful_set_json(
     replicator_image: &str,
     container_environment: Vec<serde_json::Value>,
     node_selector: serde_json::Value,
+    tolerations: serde_json::Value,
     init_containers: serde_json::Value,
     volumes: Vec<serde_json::Value>,
     volume_mounts: Vec<serde_json::Value>,
@@ -1716,15 +1746,7 @@ fn create_replicator_stateful_set_json(
               }
             },
             "volumes": volumes,
-            // Allow scheduling onto nodes tainted with the right node role.
-            "tolerations": [
-              {
-                "key": "etl.supabase.com/node-role",
-                "operator": "Equal",
-                "value": "workloads",
-                "effect": "NoSchedule"
-              }
-            ],
+            "tolerations": tolerations,
             "nodeSelector": node_selector,
             // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to the containers,
             // this way we let the system finish any in-flight transaction, if there are any.
@@ -1989,6 +2011,8 @@ mod tests {
             memory_limit_mib: Some(-1),
         };
         let k8s_config = K8sConfig {
+            replicator_node_selectors: Default::default(),
+            replicator_tolerations: Default::default(),
             replicator_resources: DefaultReplicatorResourcesConfig {
                 cpu_request_millicores: -10,
                 memory_request_mib: 0,
@@ -2047,6 +2071,8 @@ mod tests {
     #[test]
     fn test_replicator_resource_config_uses_api_vector_resources() {
         let k8s_config = K8sConfig {
+            replicator_node_selectors: Default::default(),
+            replicator_tolerations: Default::default(),
             replicator_resources: DefaultReplicatorResourcesConfig {
                 cpu_request_millicores: 500,
                 memory_request_mib: 500,
@@ -2109,6 +2135,7 @@ mod tests {
             LogLevel::Info,
         );
         let node_selector = create_node_selector_json(&environment);
+        let tolerations = create_tolerations_json(&environment);
         let init_containers =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
@@ -2200,6 +2227,7 @@ mod tests {
                     replicator_image,
                     container_environment,
                     node_selector,
+                    tolerations,
                     init_containers,
                     volumes,
                     volume_mounts,
@@ -2249,6 +2277,8 @@ mod tests {
             },
         )]);
         let k8s_config = K8sConfig {
+            replicator_node_selectors: Default::default(),
+            replicator_tolerations: Default::default(),
             replicator_resources: DefaultReplicatorResourcesConfig {
                 cpu_request_millicores: 300,
                 memory_request_mib: 400,
@@ -2772,6 +2802,74 @@ mod tests {
     }
 
     #[test]
+    fn replicator_stateful_set_applies_optional_scheduling_constraints() {
+        let resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Dev).unwrap();
+        let create_stateful_set = |node_selector, tolerations| {
+            create_replicator_stateful_set_json(
+                "tenant-1-42",
+                "tenant-1",
+                42,
+                "tenant-1-42-replicator",
+                "example.com/replicator:latest",
+                Vec::new(),
+                node_selector,
+                tolerations,
+                json!([]),
+                Vec::new(),
+                Vec::new(),
+                &resources,
+            )
+        };
+
+        let unpinned = create_stateful_set(json!({}), json!([]));
+        assert_eq!(unpinned.pointer("/spec/template/spec/nodeSelector"), Some(&json!({})));
+        assert_eq!(unpinned.pointer("/spec/template/spec/tolerations"), Some(&json!([])));
+
+        let configured = create_stateful_set(
+            node_selector_json(&[
+                crate::config::NodeSelectorConfig {
+                    key: "example.com/node-pool".to_owned(),
+                    value: "data".to_owned(),
+                },
+                crate::config::NodeSelectorConfig {
+                    key: "kubernetes.io/arch".to_owned(),
+                    value: "arm64".to_owned(),
+                },
+            ]),
+            tolerations_json(&[crate::config::TolerationConfig {
+                key: "example.com/dedicated".to_owned(),
+                value: "analytics".to_owned(),
+                effect: "CustomEffect".to_owned(),
+            }]),
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/nodeSelector/example.com~1node-pool"),
+            Some(&json!("data"))
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/nodeSelector/kubernetes.io~1arch"),
+            Some(&json!("arm64"))
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/tolerations/0/key"),
+            Some(&json!("example.com/dedicated"))
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/tolerations/0/operator"),
+            Some(&json!("Equal"))
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/tolerations/0/value"),
+            Some(&json!("analytics"))
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/tolerations/0/effect"),
+            Some(&json!("CustomEffect"))
+        );
+    }
+
+    #[test]
     fn test_create_init_containers() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
 
@@ -2850,6 +2948,7 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let tolerations = create_tolerations_json(&environment);
         let init_containers =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
@@ -2863,6 +2962,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -2892,6 +2992,7 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let tolerations = create_tolerations_json(&environment);
         let init_containers =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
@@ -2905,6 +3006,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -2934,6 +3036,7 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let tolerations = create_tolerations_json(&environment);
         let init_containers =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
@@ -2947,6 +3050,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -2983,6 +3087,7 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let tolerations = create_tolerations_json(&environment);
         let init_containers =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
@@ -2996,6 +3101,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -3025,6 +3131,7 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let tolerations = create_tolerations_json(&environment);
         let init_containers =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
@@ -3038,6 +3145,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -3067,6 +3175,7 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let tolerations = create_tolerations_json(&environment);
         let init_containers =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
@@ -3080,6 +3189,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -3116,6 +3226,7 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let tolerations = create_tolerations_json(&environment);
         let init_containers =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
@@ -3129,6 +3240,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -3158,6 +3270,7 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let tolerations = create_tolerations_json(&environment);
         let init_containers =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
@@ -3171,6 +3284,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -3200,6 +3314,7 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let tolerations = create_tolerations_json(&environment);
         let init_containers =
             create_init_containers_json(&prefix, &environment, &stateful_set_resources);
         let volumes = create_volumes_json(&prefix, &environment);
@@ -3213,6 +3328,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,

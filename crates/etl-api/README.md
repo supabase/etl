@@ -85,6 +85,13 @@ replicator and Vector containers:
 
 ```yaml
 k8s:
+  replicator_node_selectors:
+    - key: example.com/node-pool
+      value: data
+  replicator_tolerations:
+    - key: example.com/node-pool
+      value: data
+      effect: NoSchedule
   replicator_resources:
     cpu_request_millicores: 500
     memory_request_mib: 2000
@@ -96,6 +103,14 @@ k8s:
     cpu_request_millicores: 75
     memory_request_mib: 192
 ```
+
+`replicator_node_selectors` and `replicator_tolerations` are optional and passed
+through independently to generated replicator Pods. When omitted, replicators
+do not receive scheduling constraints from the ETL API. The ETL API does not
+validate that selectors and tolerations correspond to one another or to
+available cluster nodes. Replicator tolerations always use Kubernetes'
+`Equal` operator; selector `key` and `value` and toleration `key`, `value`, and
+`effect` are passed through unchanged.
 
 The global replicator and Vector defaults are mandatory and request-only.
 Destination defaults are optional and may override either request field for

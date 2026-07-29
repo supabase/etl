@@ -633,6 +633,8 @@ async fn spawn_test_app_with_services(
         database: database_config,
         application: ApplicationSettings { host: base_address.to_owned(), port },
         k8s: K8sConfig {
+            replicator_node_selectors: Default::default(),
+            replicator_tolerations: Default::default(),
             replicator_resources: DefaultReplicatorResourcesConfig {
                 memory_request_mib: 250,
                 cpu_request_millicores: 125,
