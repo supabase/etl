@@ -94,10 +94,6 @@ pub enum WriteEventsDurability {
     /// stream. ETL may use this with an empty event vector as a durability-only
     /// barrier. The destination may return `Durable` immediately only when no
     /// covered durability debt remains, returning `Accepted` is invalid.
-    ///
-    /// The apply loop may also require a subsequent nonempty write after its
-    /// bounded accepted-write timing queue fills. That write is a cumulative
-    /// durability barrier for all earlier accepted writes.
     RequireDurable,
 }
 
@@ -162,7 +158,8 @@ impl<T> AsyncResult<T> {
         (Self { tx: Some(tx) }, PendingAsyncResult { metadata: Some(metadata), rx })
     }
 
-    /// Sends the final result to the waiting receiver and records its completion instant.
+    /// Sends the final result to the waiting receiver and records its
+    /// completion instant.
     pub fn send(mut self, result: EtlResult<T>) {
         let Some(tx) = self.tx.take() else {
             return;

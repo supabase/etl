@@ -721,12 +721,10 @@ struct ApplyLoopState {
     ///
     /// A durable write result confirms all earlier accepted writes in the same
     /// ordered apply-loop stream, so their durable durations are recorded once
-    /// the next durable result arrives. The queue is capped and the next
-    /// nonempty write becomes a cumulative durability barrier when the cap is
-    /// reached, so no timing entries are dropped.
+    /// the next durable result arrives. The queue is capped at
+    /// [`MAX_PENDING_DURABLE_DISPATCHES`]. Timing entries are metric-only
+    /// state, so overflow skips new entries instead of affecting replication.
     pending_durable_dispatches: VecDeque<PendingDurableDispatch>,
-    /// Whether the next nonempty streaming write must confirm cumulative durability.
-    require_durable_next_write: bool,
     /// The LSN of the commit WAL entry of the transaction that is currently
     /// being processed.
     remote_final_lsn: Option<PgLsn>,
@@ -794,7 +792,6 @@ impl ApplyLoopState {
         Self {
             last_commit_end_lsn: None,
             pending_durable_dispatches: VecDeque::new(),
-            require_durable_next_write: false,
             remote_final_lsn: None,
             replication_progress,
             replication_lag_metrics,
@@ -1833,26 +1830,25 @@ where
                 DestinationWriteStatus::Accepted => {
                     // Remember when this write was dispatched and accepted so
                     // its durable durations can be recorded once a later
-                    // durable result covers it.
+                    // durable result covers it. The queue is metric-only
+                    // state, so overflow must never fail the apply loop; the
+                    // write's samples are skipped instead.
                     if metadata.event_count > 0 {
                         if self.state.pending_durable_dispatches.len()
-                            >= MAX_PENDING_DURABLE_DISPATCHES
+                            < MAX_PENDING_DURABLE_DISPATCHES
                         {
-                            bail!(
-                                ErrorKind::DestinationError,
-                                "Destination exceeded the pending durability queue limit"
+                            self.state.pending_durable_dispatches.push_back(
+                                PendingDurableDispatch {
+                                    dispatched_at: metadata.dispatched_at,
+                                    accepted_at: completed_at,
+                                },
                             );
-                        }
-
-                        self.state.pending_durable_dispatches.push_back(PendingDurableDispatch {
-                            dispatched_at: metadata.dispatched_at,
-                            accepted_at: completed_at,
-                        });
-
-                        if self.state.pending_durable_dispatches.len()
-                            == MAX_PENDING_DURABLE_DISPATCHES
-                        {
-                            self.state.require_durable_next_write = true;
+                        } else {
+                            warn!(
+                                pending_durable_dispatches = MAX_PENDING_DURABLE_DISPATCHES,
+                                "pending durable dispatch queue is full, skipping durable \
+                                 duration samples for this write",
+                            );
                         }
                     }
 
@@ -2076,17 +2072,10 @@ where
         let (events, event_count, streaming_payload_metadata) = event_batch.into_parts();
         // `Complete` is terminal, so no later write is guaranteed to settle an
         // `Accepted` result. Its final batch must confirm cumulative durability
-        // before the apply loop can complete. The queue cap applies the same
-        // requirement to the next nonempty streaming write.
-        let require_durable_next_write =
-            event_count > 0 && std::mem::take(&mut self.state.require_durable_next_write);
-        let durability = if require_durable_next_write {
-            WriteEventsDurability::RequireDurable
-        } else {
-            match self.state.exit_intent {
-                Some(ExitIntent::Complete) => WriteEventsDurability::RequireDurable,
-                Some(ExitIntent::Pause) | None => WriteEventsDurability::MayDefer,
-            }
+        // before the apply loop can complete.
+        let durability = match self.state.exit_intent {
+            Some(ExitIntent::Complete) => WriteEventsDurability::RequireDurable,
+            Some(ExitIntent::Pause) | None => WriteEventsDurability::MayDefer,
         };
         debug!(
             worker_type = %self.worker_context.worker_type(),
