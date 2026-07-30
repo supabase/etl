@@ -337,82 +337,93 @@ async fn run_walsender_roulette_case(case: WalsenderRouletteCase) -> Result<(), 
         .start()
         .await
         .map_err(|error| TestCaseError::fail(format!("pipeline failed to start: {error}")))?;
-    wait_for_notification(&users_ready, "users table to become ready").await?;
+    let case_result: Result<(), TestCaseError> = async {
+        wait_for_notification(&users_ready, "users table to become ready").await?;
 
-    for user_number in 1..case.disconnect_after {
-        insert_user_and_wait(
-            &mut database,
-            &users_schema.name,
-            &destination,
-            table_id,
-            user_number,
-        )
-        .await?;
-    }
-
-    match case.response_timing {
-        WriteResponseTiming::Unheld => {
+        for user_number in 1..case.disconnect_after {
             insert_user_and_wait(
                 &mut database,
                 &users_schema.name,
                 &destination,
                 table_id,
-                case.disconnect_after,
+                user_number,
             )
             .await?;
-
-            let client = database.client.as_ref().unwrap();
-            let old_pid = terminate_apply_walsender(client, &apply_slot_name).await?;
-            wait_for_apply_reconnect(client, &apply_slot_name, old_pid).await?;
         }
-        timing => {
-            let user_id = i64::try_from(case.disconnect_after)
-                .expect("roulette user number should fit in i64");
-            let delivered = notify_on_user_insert(&destination, table_id, user_id).await;
-            let hold = destination.hold_next(FaultyOp::WriteEvents).await;
 
-            insert_users_data(
-                &mut database,
-                &users_schema.name,
-                case.disconnect_after..=case.disconnect_after,
-            )
-            .await;
-            tokio::time::timeout(ROULETTE_TIMEOUT, hold.wait_reached())
-                .await
-                .map_err(|_| TestCaseError::fail("timed out waiting for held write response"))?;
+        match case.response_timing {
+            WriteResponseTiming::Unheld => {
+                insert_user_and_wait(
+                    &mut database,
+                    &users_schema.name,
+                    &destination,
+                    table_id,
+                    case.disconnect_after,
+                )
+                .await?;
 
-            let client = database.client.as_ref().unwrap();
-            let old_pid = terminate_apply_walsender(client, &apply_slot_name).await?;
-
-            if matches!(timing, WriteResponseTiming::ReleaseThenWaitForReconnect) {
-                hold.release_ok();
-                wait_for_notification(&delivered, format!("delivery of held user {user_id}"))
-                    .await?;
+                let client = database.client.as_ref().unwrap();
+                let old_pid = terminate_apply_walsender(client, &apply_slot_name).await?;
                 wait_for_apply_reconnect(client, &apply_slot_name, old_pid).await?;
-            } else {
-                wait_for_apply_reconnect(client, &apply_slot_name, old_pid).await?;
-                hold.release_ok();
-                wait_for_notification(&delivered, format!("delivery of held user {user_id}"))
-                    .await?;
+            }
+            timing => {
+                let user_id = i64::try_from(case.disconnect_after)
+                    .expect("roulette user number should fit in i64");
+                let delivered = notify_on_user_insert(&destination, table_id, user_id).await;
+                let hold = destination.hold_next(FaultyOp::WriteEvents).await;
+
+                insert_users_data(
+                    &mut database,
+                    &users_schema.name,
+                    case.disconnect_after..=case.disconnect_after,
+                )
+                .await;
+                tokio::time::timeout(ROULETTE_TIMEOUT, hold.wait_reached()).await.map_err(
+                    |_| TestCaseError::fail("timed out waiting for held write response"),
+                )?;
+
+                let client = database.client.as_ref().unwrap();
+                let old_pid = terminate_apply_walsender(client, &apply_slot_name).await?;
+
+                if matches!(timing, WriteResponseTiming::ReleaseThenWaitForReconnect) {
+                    hold.release_ok();
+                    wait_for_notification(&delivered, format!("delivery of held user {user_id}"))
+                        .await?;
+                    wait_for_apply_reconnect(client, &apply_slot_name, old_pid).await?;
+                } else {
+                    wait_for_apply_reconnect(client, &apply_slot_name, old_pid).await?;
+                    hold.release_ok();
+                    wait_for_notification(&delivered, format!("delivery of held user {user_id}"))
+                        .await?;
+                }
             }
         }
-    }
 
-    for user_number in (case.disconnect_after + 1)..=case.transaction_count {
-        insert_user_and_wait(
-            &mut database,
-            &users_schema.name,
-            &destination,
-            table_id,
-            user_number,
-        )
-        .await?;
-    }
+        for user_number in (case.disconnect_after + 1)..=case.transaction_count {
+            insert_user_and_wait(
+                &mut database,
+                &users_schema.name,
+                &destination,
+                table_id,
+                user_number,
+            )
+            .await?;
+        }
 
-    tokio::time::timeout(ROULETTE_TIMEOUT, pipeline.shutdown_and_wait())
+        Ok(())
+    }
+    .await;
+
+    let shutdown_result = tokio::time::timeout(ROULETTE_TIMEOUT, pipeline.shutdown_and_wait())
         .await
-        .map_err(|_| TestCaseError::fail("timed out waiting for pipeline shutdown"))?
-        .map_err(|error| TestCaseError::fail(format!("pipeline shutdown failed: {error}")))?;
+        .map_err(|_| TestCaseError::fail("timed out waiting for pipeline shutdown"))
+        .and_then(|result| {
+            result
+                .map_err(|error| TestCaseError::fail(format!("pipeline shutdown failed: {error}")))
+        });
+
+    case_result?;
+    shutdown_result?;
 
     let source_users =
         read_source_users(database.client.as_ref().unwrap(), &users_schema.name).await?;
