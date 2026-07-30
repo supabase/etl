@@ -53,28 +53,9 @@ impl ExampleArgs {
         inject(&mut extra, "--db-name", &Some("etl_testdata".to_owned()), &self.args);
         inject(&mut extra, "--publication", &Some("seed_pub".to_owned()), &self.args);
 
-        match name.as_str() {
-            "bigquery" => {
-                inject_env(&mut extra, "--bq-project-id", "TESTS_BIGQUERY_PROJECT_ID", &self.args);
-                inject_env(
-                    &mut extra,
-                    "--bq-sa-key-file",
-                    "TESTS_BIGQUERY_SA_KEY_PATH",
-                    &self.args,
-                );
-            }
-            "clickhouse" => {
-                inject_env(&mut extra, "--clickhouse-url", "TESTS_CLICKHOUSE_URL", &self.args);
-                inject_env(&mut extra, "--clickhouse-user", "TESTS_CLICKHOUSE_USER", &self.args);
-                inject_env(
-                    &mut extra,
-                    "--clickhouse-password",
-                    "TESTS_CLICKHOUSE_PASSWORD",
-                    &self.args,
-                );
-            }
-            "snowflake" => {}
-            _ => {}
+        if name == "bigquery" {
+            inject_env(&mut extra, "--bq-project-id", "TESTS_BIGQUERY_PROJECT_ID", &self.args);
+            inject_env(&mut extra, "--bq-sa-key-file", "TESTS_BIGQUERY_SA_KEY_PATH", &self.args);
         }
 
         extra.extend(self.args.iter().cloned());

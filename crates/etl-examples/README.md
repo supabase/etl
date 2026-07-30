@@ -11,12 +11,12 @@ if you want to embed the `etl` crate instead.
 
 ## Available Examples
 
-| Example                     | Binary       | Feature      | Destination                            | Status      |
-| --------------------------- | ------------ | ------------ | -------------------------------------- | ----------- |
-| [ClickHouse](#clickhouse)   | `clickhouse` | `clickhouse` | ClickHouse                             | In progress |
-| [BigQuery](#bigquery)       | `bigquery`   | `bigquery`   | Google BigQuery                        | Stable      |
-| [DuckLake](#ducklake)       | `ducklake`   | `ducklake`   | DuckLake                               | In progress |
-| [Snowflake](#snowflake)     | `snowflake`  | `snowflake`  | Snowflake                              | In progress |
+| Example                     | Binary       | Feature      | Destination                            | Status        |
+| --------------------------- | ------------ | ------------ | -------------------------------------- | ------------- |
+| [ClickHouse](#clickhouse)   | `clickhouse` | `clickhouse` | ClickHouse                             | Private alpha |
+| [BigQuery](#bigquery)       | `bigquery`   | `bigquery`   | Google BigQuery                        | Stable        |
+| [DuckLake](#ducklake)       | `ducklake`   | `ducklake`   | DuckLake                               | In progress   |
+| [Snowflake](#snowflake)     | `snowflake`  | `snowflake`  | Snowflake                              | In progress   |
 
 Iceberg is deprecated and is not recommended for new deployments. It has no
 example here.
@@ -168,25 +168,32 @@ cargo run --bin bigquery -p etl-examples --features bigquery -- \
 
 ## ClickHouse
 
+**Status: Private alpha.** ClickHouse is a private alpha destination. Access is
+limited while the integration stabilizes.
+
 Replicates a Postgres publication to ClickHouse over HTTP(S). ClickHouse **23.5
-or newer** is required for the default `ReplacingMergeTree` engine.
+or newer** is required for the default `ReplacingMergeTree` engine. See the
+[ClickHouse destination guide][clickhouse-guide] for table layouts, read
+patterns, and operator guidance.
+
+[clickhouse-guide]: ../etl-destinations/src/clickhouse/README.md
 
 `cargo x init` starts a local ClickHouse on `http://localhost:8123` with user
 `etl` / password `etl`.
 
 ### Run
 
+The example reads `TESTS_DATABASE_PASSWORD` and the `TESTS_CLICKHOUSE_*`
+variables from the environment, so neither password appears in process
+arguments. Load `.env` first:
+
 ```bash
+source .env
 cargo run --bin clickhouse -p etl-examples --features clickhouse -- \
-    --db-host localhost \
-    --db-port 5430 \
+    --db-host "$TESTS_DATABASE_HOST" \
+    --db-port "$TESTS_DATABASE_PORT" \
     --db-name etl_testdata \
-    --db-username postgres \
-    --db-password postgres \
-    --clickhouse-url http://localhost:8123 \
-    --clickhouse-user etl \
-    --clickhouse-password etl \
-    --clickhouse-database default \
+    --db-username "$TESTS_DATABASE_USERNAME" \
     --publication seed_pub
 ```
 
@@ -194,21 +201,21 @@ For HTTPS, pass an `https://` URL. TLS uses webpki root certificates.
 
 ### All Flags
 
-| Flag                           | Default                 | Description                                              |
-| ------------------------------ | ----------------------- | -------------------------------------------------------- |
-| `--db-host`                    | _(required)_            | Postgres host                                            |
-| `--db-port`                    | _(required)_            | Postgres port                                            |
-| `--db-name`                    | _(required)_            | Postgres database name                                   |
-| `--db-username`                | _(required)_            | Postgres user                                            |
-| `--db-password`                | —                       | Postgres password                                        |
-| `--clickhouse-url`             | _(required)_            | ClickHouse HTTP(S) URL                                   |
-| `--clickhouse-user`            | _(required)_            | ClickHouse user                                          |
-| `--clickhouse-password`        | —                       | ClickHouse password                                      |
-| `--clickhouse-database`        | _(required)_            | ClickHouse database                                      |
-| `--clickhouse-engine`          | `replacing_merge_tree`  | `replacing_merge_tree` or `merge_tree`                   |
-| `--max-batch-fill-duration-ms` | `5000`                  | Max time to wait before flushing a batch                 |
-| `--max-table-sync-workers`     | `4`                     | Concurrent workers during initial copy                   |
-| `--publication`                | _(required)_            | Postgres publication name                                |
+| Flag                           | Default                | Description                                          |
+| ------------------------------ | ---------------------- | ---------------------------------------------------- |
+| `--db-host`                    | _(required)_           | Postgres host                                        |
+| `--db-port`                    | _(required)_           | Postgres port                                        |
+| `--db-name`                    | _(required)_           | Postgres database name                               |
+| `--db-username`                | _(required)_           | Postgres user                                        |
+| `--db-password`                | —                      | Postgres password; env: `TESTS_DATABASE_PASSWORD`    |
+| `--clickhouse-url`             | _(required)_           | ClickHouse HTTP(S) URL; env: `TESTS_CLICKHOUSE_URL`  |
+| `--clickhouse-user`            | _(required)_           | ClickHouse user; env: `TESTS_CLICKHOUSE_USER`        |
+| `--clickhouse-password`        | —                      | ClickHouse password; env: `TESTS_CLICKHOUSE_PASSWORD` |
+| `--clickhouse-database`        | `default`              | ClickHouse database; env: `TESTS_CLICKHOUSE_DATABASE` |
+| `--clickhouse-engine`          | `replacing_merge_tree` | `replacing_merge_tree` or `merge_tree`               |
+| `--max-batch-fill-duration-ms` | `5000`                 | Max time to wait before flushing a batch             |
+| `--max-table-sync-workers`     | `4`                    | Concurrent workers during initial copy               |
+| `--publication`                | _(required)_           | Postgres publication name                            |
 
 ### Table Engines
 
@@ -219,110 +226,10 @@ Choose the layout per pipeline with `--clickhouse-engine`:
 | `replacing_merge_tree` (default) | `ReplacingMergeTree` | Current-state replicas. Source must have a primary key. |
 | `merge_tree`                     | `MergeTree`          | Append-only event log. Works for PK-less source tables. |
 
-Table names are derived from the Postgres schema and table name using
-double-underscore escaping (`public.orders` → `public_orders`,
-`my_schema.t` → `my__schema_t`).
-
-#### ReplacingMergeTree (default)
-
-Each replicated table is created as `ReplacingMergeTree(_etl_version, _etl_deleted)`
-keyed on the source primary key:
-
-- `_etl_version UInt128` — packed `(commit_lsn << 64) | tx_ordinal`. Higher
-  values win during a `FINAL` merge.
-- `_etl_deleted UInt8` — `1` for DELETE events, `0` otherwise.
-
-A companion `<table>__current` view hides those internals:
-
-```sql
-CREATE VIEW IF NOT EXISTS "public_orders__current" AS
-SELECT <user columns>
-FROM "public_orders" FINAL
-WHERE _etl_deleted = 0
-```
-
-Prefer the `__current` view for current-state queries. The replicator never
-runs `OPTIMIZE ... FINAL CLEANUP`; run that yourself when you want to reclaim
-deleted rows on disk.
-
-#### MergeTree
-
-Each replicated table is created as `MergeTree() ORDER BY tuple()` with:
-
-- `cdc_operation`: `INSERT`, `UPDATE`, or `DELETE`
-- `cdc_lsn`: the Postgres commit LSN
-- `cdc_tx_ordinal`: the zero-based event position within the Postgres transaction
-
-Current state per primary key: take the latest event by `cdc_lsn` and
-`cdc_tx_ordinal` with `LIMIT 1 BY`, then filter out tombstones:
-
-```sql
-select <user columns> from (
-    select * from "public_orders"
-    order by cdc_lsn desc, cdc_tx_ordinal desc
-    limit 1 by (id)
-)
-where cdc_operation != 'DELETE'
-```
-
-### Update Requirements
-
-An update that changes a primary key writes a delete marker (tombstone) for the
-old key, followed by the row under the new key. For example, changing `id` from
-`1` to `2` must remove `1` from current-state queries rather than leave both rows
-visible.
-
-Postgres's replica identity controls which old values it sends. Use one of:
-
-- `REPLICA IDENTITY DEFAULT` with a primary key: sends the old primary-key values
-  when the key changes.
-- `REPLICA IDENTITY FULL`: sends the old row, including its primary key.
-
-An alternative identity, such as an index on `email`, may not provide the old
-primary key. ETL rejects updates it cannot apply safely.
-
-The new row must contain a value for every replicated column, not just the
-changed columns. Postgres can omit unchanged large (TOASTed) values from updates.
-If ETL cannot reconstruct those values, it rejects the update rather than
-replacing them with `NULL`.
-
-### Upgrading Existing ClickHouse Tables
-
-Adding `cdc_tx_ordinal` is a breaking layout change for existing `MergeTree`
-tables (only those created during the closed beta). ETL does not add the column
-automatically: the next write from a restarted destination fails before
-inserting rows. `ReplacingMergeTree` keeps
-its `_etl_version UInt128` / `_etl_deleted UInt8` layout and does not require
-this ALTER.
-
-For a non-destructive MergeTree upgrade:
-
-1. Stop all writers to every affected destination table.
-2. Verify the physical table has the expected user columns followed by
-   `cdc_operation String` and `cdc_lsn UInt64`, with no source column named
-   `cdc_tx_ordinal`. Resolve other schema drift separately.
-3. Append the new column to each physical table, using its actual ClickHouse
-   database and escaped table name. For example:
-
-   ```sql
-   alter table default.public_orders
-       add column cdc_tx_ordinal UInt64 default 0 after cdc_lsn;
-   ```
-
-4. Keep the existing ETL metadata, schema snapshots, and replication
-   checkpoints. Start only the upgraded writer, and update current-state
-   queries to order by both `cdc_lsn` and `cdc_tx_ordinal`.
-
-Existing events receive ordinal `0`. This cannot reconstruct their ordering
-within an old transaction. Neither this ALTER nor the new writer removes stale
-old-key rows left by earlier primary-key-changing updates, including stale rows
-in `ReplacingMergeTree`.
-
-If an accurate current-state baseline is required, use ETL's table reset/re-copy
-path instead. It drops and recreates the destination table and copies the current
-source contents; **the previous append-only event history is lost**. Preserve
-that history separately if needed. `TRUNCATE` alone is not a layout migration
-and does not reset ETL checkpoints.
+Column layouts, the `<table>__current` view, current-state queries, replica
+identity requirements, `OPTIMIZE` guidance, and the upgrade procedure for
+tables created before `cdc_tx_ordinal` are documented in the
+[ClickHouse destination guide][clickhouse-guide].
 
 ---
 
@@ -447,6 +354,7 @@ RUST_LOG=debug cargo run --bin ducklake -p etl-examples --features ducklake -- [
 ```
 
 ---
+
 
 ## Snowflake
 

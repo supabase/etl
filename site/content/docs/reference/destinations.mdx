@@ -11,18 +11,21 @@ easiest destination to start with locally:** `cargo x init` starts it, and
 `cargo x setup replicator` configures it by default. **BigQuery is the most
 mature cloud destination.**
 
-| Feature      | Destination     | Status      | Guidance                                  |
-| ------------ | --------------- | ----------- | ----------------------------------------- |
-| `clickhouse` | ClickHouse      | In progress | Recommended local getting-started path    |
-| `bigquery`   | Google BigQuery | Stable      | Most mature cloud destination             |
-| `ducklake`   | DuckLake        | In progress | Evaluate for your workload                |
-| `snowflake`  | Snowflake       | In progress | Evaluate for your workload                |
-| `iceberg`    | Apache Iceberg  | Deprecated  | Do not use for new deployments            |
+| Feature      | Destination     | Status        | Guidance                                  |
+| ------------ | --------------- | ------------- | ----------------------------------------- |
+| `clickhouse` | ClickHouse      | Private alpha | Recommended local getting-started path    |
+| `bigquery`   | Google BigQuery | Stable        | Most mature cloud destination             |
+| `ducklake`   | DuckLake        | In progress   | Evaluate for your workload                |
+| `snowflake`  | Snowflake       | In progress   | Evaluate for your workload                |
+| `iceberg`    | Apache Iceberg  | Deprecated    | Do not use for new deployments            |
 
 ## Status definitions
 
 - **Stable:** The most mature built-in destination. Review its limitations and
   validate it against your production workload.
+- **Private alpha:** Functional and under active hardening with a limited set of
+  users. Access is limited while the integration stabilizes; behavior and
+  operational requirements may still change.
 - **In progress:** Functional, but behavior, configuration, schema support, and
   operational requirements may still change. Test recovery and schema changes
   before production use.
@@ -179,7 +182,7 @@ the table DDL is rejected instead of ETL silently merging the two columns.
 
 ## ClickHouse
 
-<DestinationStatus status="in-progress" />
+<DestinationStatus status="private-alpha" />
 
 ClickHouse is the local default destination. `cargo x init` starts ClickHouse
 on `http://localhost:8123` (`etl` / `etl`), and `cargo x setup replicator`
@@ -203,6 +206,11 @@ applying the new setting. Drop and resynchronize the table, or revert
 - The default `ReplacingMergeTree` layout requires a source primary key with
   every primary-key column included in the publication, and requires
   ClickHouse 23.5 or newer.
+- Tables with a primary key need `REPLICA IDENTITY DEFAULT` or `REPLICA
+  IDENTITY FULL` for updates and deletes. With `USING INDEX` or `NOTHING`, ETL
+  rejects the affected updates and deletes instead of leaving stale
+  primary-key rows. A primary-key-changing update writes a tombstone for the
+  old key followed by the new row.
 - `MergeTree` preserves an append-only event log; it does not expose a
   current-state replica by itself.
 - Source type changes are warned about, but physical type DDL is not currently

@@ -1463,6 +1463,11 @@ button {
   background: color-mix(in srgb, var(--etl-green) 10%, transparent);
 }
 
+.prose .etl-destination-status[data-status='private-alpha'] {
+  color: light-dark(#3b5fa1, #8fb0ef);
+  background: light-dark(rgb(59 95 161 / 8%), rgb(143 176 239 / 9%));
+}
+
 .prose .etl-destination-status[data-status='in-progress'] {
   color: light-dark(#9a5b00, #f4b74f);
   background: light-dark(rgb(154 91 0 / 8%), rgb(244 183 79 / 9%));
