@@ -208,7 +208,7 @@ where
     /// LSN, creating coordination signals, and launching the main apply
     /// loop. The worker runs asynchronously and can be monitored through
     /// the returned handle.
-    pub(crate) fn spawn(self) -> EtlResult<ApplyWorkerHandle> {
+    pub(crate) fn spawn(self) -> ApplyWorkerHandle {
         info!("starting apply worker");
 
         let apply_worker_span = tracing::info_span!(
@@ -221,7 +221,7 @@ where
 
         let handle = tokio::spawn(apply_worker);
 
-        Ok(ApplyWorkerHandle { handle })
+        ApplyWorkerHandle { handle }
     }
 
     /// Runs the apply worker with retry handling for timed-retriable errors.
