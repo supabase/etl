@@ -9,9 +9,7 @@ Schema-change support is in public beta and is being expanded incrementally. The
 current implementation is intentionally conservative: the source-side event
 trigger captures a rich PostgreSQL-shaped snapshot, while ETL currently models
 well-understood column changes: **adds, drops, renames, and column default
-changes**. A few known edge cases remain, and we are evaluating the cleanest
-solutions as support evolves. Suggestions and sanitized minimal reproductions
-are welcome in GitHub issues.
+and nullability changes**. A few known edge cases remain.
 
 Built-in destination support varies by destination DDL capabilities.
 **BigQuery, ClickHouse, DuckLake, and Snowflake** apply supported schema changes
@@ -43,8 +41,27 @@ single logical column change.
 
 ETL installs a PostgreSQL `ddl_command_end` event trigger named
 `supabase_etl_ddl_message_trigger`. When an `ALTER TABLE` statement or supported
-`ALTER PUBLICATION` column-list change affects a published permanent table, the
-trigger emits a transactional logical message with prefix `supabase_etl_ddl`.
+`ALTER PUBLICATION` change affects a published permanent table, the trigger
+emits a transactional logical message with prefix `supabase_etl_ddl`.
+
+PostgreSQL does not pass user-defined arguments to an event-trigger function.
+The function reads `TG_TAG` and the object addresses returned by
+`pg_event_trigger_ddl_commands()`, then resolves the post-DDL catalogs:
+
+- For `ALTER TABLE`, the object address identifies the table. The message has
+  no publication name because a physical table change applies to every
+  publication containing that table.
+- For per-table `ALTER PUBLICATION` changes, the object address identifies a
+  `pg_publication_rel` row, which links the table to its publication.
+- For publication-wide option changes, the object address identifies a
+  `pg_publication` row, and the trigger expands its current effective table set
+  through `pg_publication_tables`.
+
+The publication name is therefore optional in the payload for table DDL but
+required for publication DDL. Logical decoding exposes custom messages to a
+slot independently of pgoutput's table filtering, so ETL accepts an
+`ALTER PUBLICATION` message only when its resolved name exactly matches the
+pipeline's configured publication. A missing name fails closed.
 
 That message is **internal plumbing**. Destinations do not receive it directly.
 Instead, ETL:
@@ -57,6 +74,23 @@ Instead, ETL:
    next row event for that table.
 5. Sends destinations a public `Event::Relation` with the new
    `ReplicatedTableSchema`.
+
+`ALTER PUBLICATION ... DROP TABLE` intentionally emits no schema snapshot for
+the removed table because it is no longer part of the publication. PostgreSQL
+14 may still send an empty `BEGIN`/`COMMIT` pair for that transaction;
+PostgreSQL 15 and later suppress empty logical-replication transactions. The
+empty pair contains no schema or row event and does not affect snapshot
+ordering. See the [PostgreSQL 15 release
+notes](https://www.postgresql.org/docs/15/release-15.html) and the [upstream
+change](https://github.com/postgres/postgres/commit/d5a9d86d8ffcadc52ff3729cd00fbd83bc38643c).
+
+For a table already known to the pipeline, a supported publication change
+creates a new snapshot ID even when the full physical table schema is unchanged.
+The following `RELATION` message supplies the current publication and identity
+masks. This gives successive mask changes distinct snapshot IDs and preserves
+their ordering. A newly published table that the running pipeline does not know
+is ignored until startup publication reconciliation creates its table state and
+initial copy.
 
 The important public boundary is:
 
@@ -126,10 +160,7 @@ This does **not** mean future replicated tuples lose their default values:
 PostgreSQL sends evaluated column values in row data after the relation change,
 and ETL writes those values normally. The limitation is only that unsupported
 defaults are not installed as destination schema default metadata, and existing
-destination rows are not rewritten by ETL. A physical destination backfill mode
-may be added in the future, but it needs explicit controls for batching,
-throttling, observability, and how long the pipeline can safely pause or run
-behind while the destination rewrite happens.
+destination rows are not rewritten by ETL.
 
 ## Supported Column Defaults
 
@@ -281,8 +312,8 @@ databases.
 
 These behaviors are **not full destination DDL semantics** yet:
 
-- Only `ALTER TABLE` and supported `ALTER PUBLICATION` column-list changes are
-  captured by the ETL DDL trigger today.
+- Only `ALTER TABLE` and supported `ALTER PUBLICATION` changes are captured by
+  the ETL DDL trigger today.
 - Type changes, constraint changes, identity changes, and replica-identity
   changes may be visible in the emitted snapshot, but they are not yet
   interpreted as destination DDL operations.
@@ -342,10 +373,6 @@ These behaviors are **not full destination DDL semantics** yet:
 - Sessions can set `supabase_etl.skip_ddl_log = 'true'` as an emergency
   opt-out while recovering a system. DDL executed with that setting enabled is
   not logged for ETL.
-
-Future work will implement broader behavior on top of the richer trigger
-payload, but the current contract is deliberately limited to safe column-level
-schema changes.
 
 ## Event Ordering
 

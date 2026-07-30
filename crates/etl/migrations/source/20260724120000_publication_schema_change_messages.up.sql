@@ -1,4 +1,4 @@
--- Schema snapshots for publication column-list changes.
+-- Schema snapshots for supported table and publication changes.
 
 drop event trigger if exists supabase_etl_ddl_message_trigger;
 
@@ -54,6 +54,11 @@ begin
               and not coalesce(d.in_extension, false)
         ),
         base as (
+            -- ALTER TABLE identifies the relation directly and is intentionally
+            -- unscoped: a table change applies to every publication containing
+            -- that table. Per-table ALTER PUBLICATION commands instead identify
+            -- a pg_publication_rel row, from which both relation and publication
+            -- are resolved.
             select
                 coalesce(pr.prrelid, d.objid) as table_oid,
                 d.classid,
@@ -78,6 +83,9 @@ begin
                   or pr.prrelid is not null
               )
             union all
+            -- Publication-wide option changes identify pg_publication itself.
+            -- Expand the publication's post-DDL effective table set so each
+            -- currently published table receives its own scoped snapshot.
             select
                 c.oid as table_oid,
                 d.classid,

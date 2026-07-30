@@ -15,6 +15,7 @@ use etl::{
     test_utils::{
         database::{
             replication_slot_state, spawn_source_database, test_table_name, wait_for_new_walsender,
+            wait_for_replication_slot_flush_lsn,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::{FaultAction, FaultyOp},
@@ -198,7 +199,7 @@ where
     }
 }
 
-/// Destination operation stalled by [`StalledCopyDestination`].
+/// Destination copy operation whose async result is stalled.
 #[derive(Clone, Copy)]
 enum StallTarget {
     /// A destination drop before a fresh table copy.
@@ -207,7 +208,7 @@ enum StallTarget {
     WriteTableRows,
 }
 
-/// Behavior used by [`StalledCopyDestination`] for the selected operation.
+/// Behavior applied to the selected async result.
 #[derive(Clone, Copy)]
 enum StallMode {
     /// Drops the result without completing it.
@@ -216,25 +217,29 @@ enum StallMode {
     HoldResult,
 }
 
-/// Destination test double that drops or indefinitely holds a copy result.
+/// Destination test double that stalls a copy result after dispatch succeeds.
+///
+/// This differs intentionally from [`FaultAction::HoldResponse`], which holds
+/// the destination method itself. These tests need the method to return `Ok`
+/// while ETL waits separately for the async completion handle.
 #[derive(Clone)]
-struct StalledCopyDestination<D> {
-    /// Destination used for operations other than the selected stall target.
+struct StalledCopyResultDestination<D> {
+    /// Destination used for operations other than the selected target.
     inner: D,
-    /// Destination operation to stall.
+    /// Destination operation whose result is stalled.
     target: StallTarget,
-    /// Behavior applied to the selected operation.
+    /// Behavior applied to the selected result.
     mode: StallMode,
-    /// Held result that keeps a destination drop pending.
+    /// Held destination-drop result.
     pending_drop_result: Arc<Mutex<Option<DropTableForCopyResult<()>>>>,
-    /// Held result that keeps a table-copy write pending.
+    /// Held table-copy-write result.
     pending_write_result: Arc<Mutex<Option<WriteTableRowsResult>>>,
     /// Notification emitted after the result is dropped or held.
     stall_reached_notify: Arc<Notify>,
 }
 
-impl<D> StalledCopyDestination<D> {
-    /// Wraps a destination with the selected stall behavior.
+impl<D> StalledCopyResultDestination<D> {
+    /// Wraps a destination with the selected result behavior.
     fn wrap(inner: D, target: StallTarget, mode: StallMode) -> Self {
         Self {
             inner,
@@ -246,13 +251,13 @@ impl<D> StalledCopyDestination<D> {
         }
     }
 
-    /// Returns a notification for the next stalled operation.
+    /// Returns a notification for the next stalled result.
     fn notify_on_stall(&self) -> TimedNotify {
         TimedNotify::new(Arc::clone(&self.stall_reached_notify))
     }
 }
 
-impl<D> Destination for StalledCopyDestination<D>
+impl<D> Destination for StalledCopyResultDestination<D>
 where
     D: PipelineDestination,
 {
@@ -285,7 +290,6 @@ where
                 *pending_result = Some(async_result);
             }
         }
-
         self.stall_reached_notify.notify_one();
 
         Ok(())
@@ -312,7 +316,6 @@ where
                 *pending_result = Some(async_result);
             }
         }
-
         self.stall_reached_notify.notify_one();
 
         Ok(())
@@ -416,7 +419,7 @@ async fn table_copy_errors_when_async_result_is_dropped() {
 
     let store = NotifyingStore::new();
     let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let destination = StalledCopyDestination::wrap(
+    let destination = StalledCopyResultDestination::wrap(
         immediate_destination,
         StallTarget::WriteTableRows,
         StallMode::DropResult,
@@ -458,7 +461,7 @@ async fn table_copy_shutdown_interrupts_pending_result_wait() {
 
     let store = NotifyingStore::new();
     let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let destination = StalledCopyDestination::wrap(
+    let destination = StalledCopyResultDestination::wrap(
         immediate_destination,
         StallTarget::WriteTableRows,
         StallMode::HoldResult,
@@ -496,11 +499,6 @@ async fn drop_table_for_copy_errors_when_async_result_is_dropped() {
 
     let store = NotifyingStore::new();
     let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let destination = StalledCopyDestination::wrap(
-        immediate_destination,
-        StallTarget::DropTableForCopy,
-        StallMode::DropResult,
-    );
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -508,7 +506,7 @@ async fn drop_table_for_copy_errors_when_async_result_is_dropped() {
         pipeline_id,
         database_schema.publication_name(),
         store.clone(),
-        destination.clone(),
+        immediate_destination.clone(),
     );
 
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
@@ -521,6 +519,11 @@ async fn drop_table_for_copy_errors_when_async_result_is_dropped() {
 
     store.reset_table_state(table_id).await.unwrap();
 
+    let destination = StalledCopyResultDestination::wrap(
+        immediate_destination,
+        StallTarget::DropTableForCopy,
+        StallMode::DropResult,
+    );
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -557,11 +560,6 @@ async fn drop_table_for_copy_shutdown_interrupts_pending_result_wait() {
 
     let store = NotifyingStore::new();
     let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let destination = StalledCopyDestination::wrap(
-        immediate_destination,
-        StallTarget::DropTableForCopy,
-        StallMode::HoldResult,
-    );
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -569,16 +567,31 @@ async fn drop_table_for_copy_shutdown_interrupts_pending_result_wait() {
         pipeline_id,
         database_schema.publication_name(),
         store.clone(),
-        destination.clone(),
+        immediate_destination.clone(),
     );
 
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
     pipeline.start().await.unwrap();
     table_sync_complete_notify.notified().await;
 
-    let drop_reached_notify = destination.notify_on_stall();
-
     store.reset_table_state(table_id).await.unwrap();
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let destination = StalledCopyResultDestination::wrap(
+        immediate_destination,
+        StallTarget::DropTableForCopy,
+        StallMode::HoldResult,
+    );
+    let drop_reached_notify = destination.notify_on_stall();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+    pipeline.start().await.unwrap();
 
     drop_reached_notify.notified().await;
 
@@ -717,10 +730,23 @@ async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
         .await
         .unwrap();
 
+    // Wait for feedback beyond the ADD TABLE transaction before shutting down.
+    // This proves the apply worker observed the messages and skipped the
+    // unknown tables rather than simply stopping before reaching them.
+    let client = database.client.as_ref().unwrap();
+    let publication_change_lsn: PgLsn =
+        client.query_one("select pg_current_wal_flush_lsn()", &[]).await.unwrap().get(0);
+    wait_for_replication_slot_flush_lsn(client, &apply_slot_name, publication_change_lsn).await;
+
     pipeline.shutdown_and_wait().await.unwrap();
 
     let table_rows = destination.get_table_rows().await;
     assert_eq!(table_rows[&database_schema.users_schema().id].len(), 3);
+    assert_eq!(store.get_table_state(init_table_id).await.unwrap(), None);
+    assert_eq!(store.get_table_state(errored_table_id).await.unwrap(), None);
+    let table_schemas = store.get_table_schemas().await;
+    assert!(!table_schemas.contains_key(&init_table_id));
+    assert!(!table_schemas.contains_key(&errored_table_id));
 
     // Verify that the replication slot for the apply worker exists and is inactive.
     database.wait_for_slot_inactive(&apply_slot_name).await;
@@ -2576,6 +2602,7 @@ async fn table_sync_drops_destination_table_after_state_reset() {
     // the resync.
     let users_sync_complete_notify =
         store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let users_drop_held = destination.hold_next(FaultyOp::DropTableForCopy).await;
     let all_users_events_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(
             EventType::Insert,
@@ -2586,6 +2613,8 @@ async fn table_sync_drops_destination_table_after_state_reset() {
 
     // Reset users table state to Init, triggering a fresh table sync.
     store.reset_table_state(database_schema.users_schema().id).await.unwrap();
+    users_drop_held.wait_reached().await;
+    users_drop_held.release_ok();
 
     // Insert new users (ids 100-102) after reset.
     for id in 100i64..103i64 {

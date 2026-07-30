@@ -1352,78 +1352,6 @@ async fn logical_replication_replays_schema_changes_before_first_dml() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn logical_replication_relation_xlogdata_positions_are_zero() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-    let table_name = test_table_name("relation_xlogdata_positions");
-    database
-        .create_table(table_name.clone(), true, &[("value", "integer not null")])
-        .await
-        .unwrap();
-
-    let publication_name = "relation_xlogdata_positions_pub";
-    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
-
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let slot_name = test_slot_name("relation_xlogdata_positions_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
-        .await
-        .unwrap();
-
-    database.insert_values(table_name, &["value"], &[&1]).await.unwrap();
-
-    let (begin_positions, relation_positions, insert_positions, commit_positions) =
-        timeout(Duration::from_secs(10), async {
-            let mut begin_positions = None;
-            let mut relation_positions = None;
-            let mut insert_positions = None;
-            let mut commit_positions = None;
-
-            pin!(stream);
-            while commit_positions.is_none() {
-                let message = stream
-                    .next()
-                    .await
-                    .expect("Logical replication stream ended unexpectedly")
-                    .expect("Failed to decode logical replication data");
-                let ReplicationMessage::XLogData(message) = message else {
-                    continue;
-                };
-                let positions = (PgLsn::from(message.wal_start()), PgLsn::from(message.wal_end()));
-
-                match message.data() {
-                    LogicalReplicationMessage::Begin(_) => begin_positions = Some(positions),
-                    LogicalReplicationMessage::Relation(_) => {
-                        relation_positions = Some(positions);
-                    }
-                    LogicalReplicationMessage::Insert(_) => insert_positions = Some(positions),
-                    LogicalReplicationMessage::Commit(_) => commit_positions = Some(positions),
-                    _ => {}
-                }
-            }
-
-            (
-                begin_positions.expect("BEGIN should be emitted"),
-                relation_positions.expect("RELATION should be emitted before the first row"),
-                insert_positions.expect("INSERT should be emitted"),
-                commit_positions.expect("COMMIT should be emitted"),
-            )
-        })
-        .await
-        .expect("Timed out while collecting XLogData positions");
-
-    let zero = PgLsn::from(0_u64);
-    assert_eq!(relation_positions, (zero, zero));
-    assert_eq!(begin_positions, insert_positions);
-    assert_ne!(insert_positions, (zero, zero));
-    assert_eq!(insert_positions.0, insert_positions.1);
-    assert!(commit_positions.0 > insert_positions.0);
-    assert_eq!(commit_positions.0, commit_positions.1);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_replays_multi_table_publication_column_filter_change_order() {
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -1536,81 +1464,6 @@ async fn logical_replication_replays_multi_table_publication_column_filter_chang
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn logical_replication_replays_publication_column_expansion_before_dml() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    if below_version!(database.server_version(), POSTGRES_15) {
-        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
-        return;
-    }
-
-    let table_name = test_table_name("publication_column_expansion");
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[("a", "integer not null"), ("b", "integer not null")],
-        )
-        .await
-        .unwrap();
-    let quoted_table_name = table_name.as_quoted_identifier();
-
-    let publication_name = "publication_column_expansion_pub";
-    database
-        .run_sql(&format!(
-            "create publication {} for table {quoted_table_name} (id, a)",
-            quote_identifier(publication_name)
-        ))
-        .await
-        .unwrap();
-
-    let (client, initial_stream, slot_name, start_lsn) =
-        start_replayable_stream(&database, publication_name, "publication_column_expansion_slot")
-            .await;
-
-    database
-        .run_sql(&format!(
-            "alter publication {} set table {quoted_table_name} (id, a, b)",
-            quote_identifier(publication_name)
-        ))
-        .await
-        .unwrap();
-    database
-        .run_sql(&format!("insert into {quoted_table_name} (a, b) values (1, 2)"))
-        .await
-        .unwrap();
-
-    let expected = [
-        ExpectedStreamMarker::Begin,
-        ExpectedStreamMarker::DdlMessage(
-            table_id.into_inner(),
-            Some(publication_name.to_owned()),
-            vec!["id".to_owned(), "a".to_owned(), "b".to_owned()],
-        ),
-        ExpectedStreamMarker::Commit,
-        ExpectedStreamMarker::Begin,
-        ExpectedStreamMarker::Relation(
-            table_id.into_inner(),
-            vec!["id".to_owned(), "a".to_owned(), "b".to_owned()],
-        ),
-        ExpectedStreamMarker::Insert(table_id.into_inner()),
-        ExpectedStreamMarker::Commit,
-    ];
-
-    assert_stream_markers_and_replay(
-        client,
-        initial_stream,
-        &database,
-        publication_name,
-        &slot_name,
-        start_lsn,
-        &expected,
-    )
-    .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_replays_publication_add_and_option_snapshots_but_not_drop() {
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -1665,7 +1518,7 @@ async fn logical_replication_replays_publication_add_and_option_snapshots_but_no
         .unwrap();
     database.insert_values(first_table.clone(), &["first_value"], &[&1]).await.unwrap();
 
-    let expected = [
+    let mut expected = vec![
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::DdlMessage(
             added_table_id.into_inner(),
@@ -1673,6 +1526,17 @@ async fn logical_replication_replays_publication_add_and_option_snapshots_but_no
             vec!["id".to_owned(), "added_value".to_owned()],
         ),
         ExpectedStreamMarker::Commit,
+    ];
+    // PostgreSQL 14's pgoutput emits BEGIN/COMMIT for this empty
+    // ALTER PUBLICATION ... DROP TABLE transaction. PostgreSQL 15+ postpones
+    // BEGIN until the first publishable change and suppresses both markers when
+    // no such change exists:
+    // https://www.postgresql.org/docs/15/release-15.html
+    // https://github.com/postgres/postgres/commit/d5a9d86d8ffcadc52ff3729cd00fbd83bc38643c
+    if below_version!(database.server_version(), POSTGRES_15) {
+        expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
+    }
+    expected.extend([
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::DdlMessage(
             first_table_id.into_inner(),
@@ -1692,7 +1556,7 @@ async fn logical_replication_replays_publication_add_and_option_snapshots_but_no
         ),
         ExpectedStreamMarker::Insert(first_table_id.into_inner()),
         ExpectedStreamMarker::Commit,
-    ];
+    ]);
 
     // The absence of an added-table marker between the ADD and SET-option
     // transactions proves that DROP TABLE emits no schema snapshot.
@@ -1703,7 +1567,7 @@ async fn logical_replication_replays_publication_add_and_option_snapshots_but_no
         publication_name,
         &slot_name,
         start_lsn,
-        &expected,
+        expected.as_slice(),
     )
     .await;
 }

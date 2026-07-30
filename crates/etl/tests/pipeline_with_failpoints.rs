@@ -1137,6 +1137,7 @@ async fn run_schema_replay_scenario(
 ) {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+    fail::cfg(STORE_APPLY_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -1154,7 +1155,6 @@ async fn run_schema_replay_scenario(
         &[("name", "text not null"), ("age", "integer not null")],
     )
     .await;
-    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
     destination.clear_events().await;
 
@@ -1244,10 +1244,12 @@ async fn run_schema_replay_scenario(
     }
 
     events_notify.notified().await;
-    assert!(matches!(
-        store.get_table_state(table_id).await.unwrap(),
-        Some(TableState::SyncDone { .. })
-    ));
+    let table_state = store.get_table_state(table_id).await.unwrap();
+    assert!(
+        matches!(&table_state, Some(TableState::SyncDone { .. })),
+        "expected table to remain in sync_done while apply checkpoint persistence is disabled, \
+         got {table_state:?}"
+    );
 
     pipeline.shutdown_and_wait().await.unwrap();
 

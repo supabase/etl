@@ -2175,19 +2175,22 @@ where
             }
             ReplicationMessage::PrimaryKeepAlive(message) => {
                 // A primary keepalive has only `wal_end`, not `wal_start`.
-                // PostgreSQL normally fills it with the logical walsender's
-                // `sentPtr`, the end of the last WAL record passed through
-                // decoding, or with an explicit write pointer for a skipped
-                // empty transaction. This is a decoded-WAL frontier, not
-                // necessarily an emitted-event frontier: it may advance through
-                // an uncommitted transaction whose changes remain in the
-                // server's reorder buffer. The slot retains the earlier
-                // `restart_lsn` needed to rebuild such transactions after a
-                // reconnect. ETL uses this position only while the apply loop
-                // is idle; while emitted work is unresolved, `checkpoint_lsn()`
-                // remains at the completed destination flush frontier. This
-                // relies on the current non-streaming pgoutput session and must
-                // be re-audited if transaction streaming is enabled.
+                // This field predates PostgreSQL 15 and normally contains the
+                // logical walsender's `sentPtr`. PostgreSQL 15 added the
+                // empty-transaction optimization: in synchronous replication,
+                // a skipped transaction can send a keepalive with its decoded
+                // write location before `sentPtr` has been updated:
+                // https://github.com/postgres/postgres/commit/d5a9d86d8ffcadc52ff3729cd00fbd83bc38643c
+                // In either case this is a decoded-WAL frontier, not necessarily
+                // an emitted-event frontier: it may advance through an
+                // uncommitted transaction whose changes remain in the server's
+                // reorder buffer. The slot retains the earlier `restart_lsn`
+                // needed to rebuild such transactions after a reconnect.
+                // ETL uses this position only while the apply loop is idle;
+                // while emitted work is unresolved, `checkpoint_lsn()` remains
+                // at the completed destination flush frontier. This relies on
+                // the current non-streaming pgoutput session and must be
+                // re-audited if transaction streaming is enabled.
                 let end_lsn = PgLsn::from(message.wal_end());
                 self.state.update_last_received_lsn(end_lsn);
 
