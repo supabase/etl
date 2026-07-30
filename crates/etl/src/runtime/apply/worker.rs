@@ -47,25 +47,21 @@ impl ApplyWorkerHandle {
     /// This method blocks until the apply worker finishes processing, either
     /// due to successful completion, shutdown signal, or error. It properly
     /// handles panics that might occur within the worker task.
-    pub(crate) async fn wait(self) -> EtlResult<()> {
-        self.handle.await.map_err(|err| {
+    pub(crate) async fn wait(mut self) -> EtlResult<()> {
+        (&mut self.handle).await.map_err(|err| {
             if err.is_cancelled() {
                 etl_error!(ErrorKind::ApplyWorkerCancelled, "Apply worker was cancelled", source: err)
             } else {
                 etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", source: err)
             }
-        })??;
-
-        Ok(())
+        })?
     }
 }
 
 /// Aborts the apply worker when its owner disappears without waiting.
 impl Drop for ApplyWorkerHandle {
     fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
+        self.handle.abort();
     }
 }
 
@@ -564,4 +560,44 @@ async fn warn_if_tables_may_have_missed_changes<S: StateStore>(store: &S) -> Etl
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        future::{Future, pending, poll_fn},
+        task::Poll,
+        time::Duration,
+    };
+
+    use tokio::sync::oneshot;
+
+    use crate::{error::EtlResult, runtime::apply::worker::ApplyWorkerHandle};
+
+    #[tokio::test]
+    async fn dropping_pending_wait_aborts_apply_worker() {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel::<()>();
+        let worker = tokio::spawn(async move {
+            let _dropped_tx = dropped_tx;
+            started_tx.send(()).expect("worker start receiver should remain open");
+            pending::<EtlResult<()>>().await
+        });
+        started_rx.await.expect("worker should start");
+
+        let worker = ApplyWorkerHandle { handle: worker };
+        let mut wait = Box::pin(worker.wait());
+        poll_fn(|context| {
+            assert!(wait.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        drop(wait);
+
+        let dropped_result = tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("apply worker should stop when its pending wait is dropped");
+        assert!(dropped_result.is_err(), "apply worker drop signal should close without a value");
+    }
 }
