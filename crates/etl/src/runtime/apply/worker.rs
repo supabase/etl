@@ -36,7 +36,7 @@ use crate::{
 /// handle enables waiting for worker completion and checking final results.
 #[derive(Debug)]
 pub(crate) struct ApplyWorkerHandle {
-    handle: Option<JoinHandle<EtlResult<()>>>,
+    handle: JoinHandle<EtlResult<()>>,
 }
 
 impl ApplyWorkerHandle {
@@ -45,12 +45,8 @@ impl ApplyWorkerHandle {
     /// This method blocks until the apply worker finishes processing, either
     /// due to successful completion, shutdown signal, or error. It properly
     /// handles panics that might occur within the worker task.
-    pub(crate) async fn wait(mut self) -> EtlResult<()> {
-        let Some(handle) = self.handle.take() else {
-            return Ok(());
-        };
-
-        handle.await.map_err(|err| {
+    pub(crate) async fn wait(self) -> EtlResult<()> {
+        self.handle.await.map_err(|err| {
             if err.is_cancelled() {
                 etl_error!(ErrorKind::ApplyWorkerCancelled, "Apply worker was cancelled", source: err)
             } else {
@@ -207,7 +203,7 @@ where
     /// LSN, creating coordination signals, and launching the main apply
     /// loop. The worker runs asynchronously and can be monitored through
     /// the returned handle.
-    pub(crate) fn spawn(self) -> EtlResult<ApplyWorkerHandle> {
+    pub(crate) fn spawn(self) -> ApplyWorkerHandle {
         info!("starting apply worker");
 
         let apply_worker_span = tracing::info_span!(
@@ -220,7 +216,7 @@ where
 
         let handle = tokio::spawn(apply_worker);
 
-        Ok(ApplyWorkerHandle { handle: Some(handle) })
+        ApplyWorkerHandle { handle }
     }
 
     /// Runs the apply worker with retry handling for timed-retriable errors.

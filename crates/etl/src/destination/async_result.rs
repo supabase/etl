@@ -144,7 +144,7 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
 /// side immediately or later, depending on the method.
 #[derive(Debug)]
 pub struct AsyncResult<T> {
-    tx: Option<oneshot::Sender<(Instant, EtlResult<T>)>>,
+    tx: oneshot::Sender<(Instant, EtlResult<T>)>,
 }
 
 impl<T> AsyncResult<T> {
@@ -156,18 +156,14 @@ impl<T> AsyncResult<T> {
     pub(crate) fn new<M>(metadata: M) -> (Self, PendingAsyncResult<T, M>) {
         let (tx, rx) = oneshot::channel();
 
-        (Self { tx: Some(tx) }, PendingAsyncResult { metadata: Some(metadata), rx })
+        (Self { tx }, PendingAsyncResult { metadata: Some(metadata), rx })
     }
 
     /// Sends the final result to the waiting receiver and records its
     /// completion instant.
-    pub fn send(mut self, result: EtlResult<T>) {
-        let Some(tx) = self.tx.take() else {
-            return;
-        };
-
+    pub fn send(self, result: EtlResult<T>) {
         let completed_at = Instant::now();
-        if tx.send((completed_at, result)).is_err() {
+        if self.tx.send((completed_at, result)).is_err() {
             debug!("async result receiver was already closed");
         }
     }
