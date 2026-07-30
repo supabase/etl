@@ -361,7 +361,7 @@ pub(crate) async fn update_destination_and_pipeline(
     Extension(pool): Extension<PgPool>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     destination_and_pipeline: Json<UpdateDestinationPipelineRequest>,
@@ -425,7 +425,7 @@ pub(crate) async fn update_destination_and_pipeline(
         tenant_id,
         pipeline_id,
         &encryption_key,
-        k8s_client.as_deref(),
+        k8s_client.as_ref(),
         source_tls_config.as_ref(),
         api_config.as_ref(),
     )
@@ -462,7 +462,7 @@ pub(crate) async fn delete_destination_and_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
 ) -> Result<impl IntoResponse, DestinationPipelineError> {
@@ -480,7 +480,7 @@ pub(crate) async fn delete_destination_and_pipeline(
         ));
     }
 
-    if is_replicator_active(k8s_client.as_deref(), tenant_id, pipeline.replicator_id).await? {
+    if is_replicator_active(k8s_client.as_ref(), tenant_id, pipeline.replicator_id).await? {
         return Err(DestinationPipelineError::ActivePipeline(pipeline.id));
     }
 

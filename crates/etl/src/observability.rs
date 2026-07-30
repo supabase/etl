@@ -7,6 +7,10 @@ static REGISTER_METRICS: Once = Once::new();
 pub(crate) const ETL_TABLES_TOTAL: &str = "etl_tables_total";
 pub(crate) const ETL_BATCH_ITEMS_SEND_DURATION_SECONDS: &str =
     "etl_batch_items_send_duration_seconds";
+pub(crate) const ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS: &str =
+    "etl_batch_items_durable_duration_seconds";
+pub(crate) const ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS: &str =
+    "etl_batch_items_durable_wait_duration_seconds";
 pub(crate) const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_seconds";
 pub(crate) const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
 pub(crate) const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
@@ -71,6 +75,8 @@ pub(crate) const OUTCOME_LABEL: &str = "outcome";
 pub(crate) const ERROR_TYPE_LABEL: &str = "error_type";
 /// Label key for transition direction ("activate" or "resume").
 pub(crate) const DIRECTION_LABEL: &str = "direction";
+/// Label key for how durability was confirmed ("direct" or "deferred").
+pub(crate) const CONFIRMATION_LABEL: &str = "confirmation";
 
 /// Register metrics emitted by etl. This should be called before starting a
 /// pipeline. It is safe to call this method multiple times. It is guaranteed to
@@ -84,6 +90,22 @@ pub(crate) fn register_metrics() {
             Unit::Seconds,
             "Time taken in seconds to send a batch of items to the destination, labeled by \
              worker_type and action"
+        );
+
+        describe_histogram!(
+            ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS,
+            Unit::Seconds,
+            "Time taken in seconds from dispatching a batch of items to the destination until the \
+             destination confirms the batch durable, labeled by worker_type, action and \
+             confirmation; covers streaming writes only"
+        );
+
+        describe_histogram!(
+            ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS,
+            Unit::Seconds,
+            "Time taken in seconds from the destination accepting a batch of items until a later \
+             durable result confirms the batch durable, labeled by worker_type and action; covers \
+             deferred streaming writes only"
         );
 
         describe_histogram!(
