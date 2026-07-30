@@ -997,13 +997,13 @@ async fn partitioned_table_schema_change_updates_relation_message() {
 
     let parent_sync_complete_notify =
         state_store.notify_on_table_sync_complete(parent_table_id).await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     parent_sync_complete_notify.notified().await;
 
-    let parent_ready_notify =
-        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
     // Wait for the Relation event (schema change) and Insert event.
     let events_notify = destination
         .wait_for_events(vec![

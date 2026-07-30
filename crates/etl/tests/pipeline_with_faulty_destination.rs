@@ -206,7 +206,7 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
 async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
     init_test_tracing();
 
-    // GIVEN: a pipeline whose table initial sync has completed.
+    // GIVEN: a pipeline whose table is Ready.
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = database_schema.users_schema().id;
@@ -228,10 +228,20 @@ async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
     );
 
     let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    let users_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     users_sync_complete_notify.notified().await;
+    database
+        .run_sql(&format!(
+            "update {} set age = age where id = 1",
+            database_schema.users_schema().name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    users_ready_notify.notified().await;
 
     // WHEN: a resync starts and the destination rejects the drop
     destination
@@ -276,7 +286,7 @@ async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
 async fn drop_table_for_copy_failure_after_write_keeps_table_restartable_until_retry() {
     init_test_tracing();
 
-    // GIVEN: a pipeline whose table initial sync has completed.
+    // GIVEN: a pipeline whose table is Ready.
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = database_schema.users_schema().id;
@@ -298,10 +308,20 @@ async fn drop_table_for_copy_failure_after_write_keeps_table_restartable_until_r
     );
 
     let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    let users_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     users_sync_complete_notify.notified().await;
+    database
+        .run_sql(&format!(
+            "update {} set age = age where id = 1",
+            database_schema.users_schema().name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    users_ready_notify.notified().await;
 
     // WHEN: a resync starts and the drop fails after being applied
     destination

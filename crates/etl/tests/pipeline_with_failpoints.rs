@@ -649,13 +649,12 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
 
     let sync_done_notify =
         store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
     all_rows_notify.notified().await;
     sync_done_notify.notified().await;
-
-    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     // The apply connection already saw and skipped the relation used by the
     // table-sync worker. PostgreSQL does not resend it merely because ETL
@@ -929,26 +928,30 @@ async fn table_sync_catchup_error_does_not_block_apply_worker() {
         store.notify_on_table_state_type(users_table_id, TableStateType::SyncDone).await;
     let orders_sync_done_notify =
         store.notify_on_table_state_type(orders_table_id, TableStateType::SyncDone).await;
+    let users_ready_notify =
+        store.notify_on_table_state_type(users_table_id, TableStateType::Ready).await;
+    let orders_ready_notify =
+        store.notify_on_table_state_type(orders_table_id, TableStateType::Ready).await;
     pipeline.start().await.unwrap();
 
-    let (errored_table_id, healthy_table_id, healthy_table_name, sync_done_notify) = tokio::select! {
+    let (errored_table_id, healthy_table_id, healthy_table_name, sync_done_notify, ready_notify) = tokio::select! {
             () = users_errored_notify.notified() => (
                 users_table_id,
                 orders_table_id,
                 orders_schema.name.clone(),
                 orders_sync_done_notify,
+                orders_ready_notify,
             ),
             () = orders_errored_notify.notified() => (
                 orders_table_id,
                 users_table_id,
                 users_schema.name.clone(),
                 users_sync_done_notify,
+                users_ready_notify,
             ),
     };
 
     sync_done_notify.notified().await;
-    let ready_notify =
-        store.notify_on_table_state_type(healthy_table_id, TableStateType::Ready).await;
     let update_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, healthy_table_id, 1)])
         .await;
@@ -1006,12 +1009,12 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
     );
 
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     table_sync_complete_notify.notified().await;
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let initial_inserts_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])

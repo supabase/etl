@@ -574,9 +574,9 @@ async fn drop_table_for_copy_shutdown_interrupts_pending_result_wait() {
     pipeline.start().await.unwrap();
     table_sync_complete_notify.notified().await;
 
-    store.reset_table_state(table_id).await.unwrap();
-
     pipeline.shutdown_and_wait().await.unwrap();
+
+    store.reset_table_state(table_id).await.unwrap();
 
     let destination = StalledCopyResultDestination::wrap(
         immediate_destination,
@@ -687,13 +687,13 @@ async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
     // before testing slot recreation with mixed table states.
     let table_sync_complete_notify =
         store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let table_ready_notify = store
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .await;
 
     pipeline.start().await.unwrap();
 
     table_sync_complete_notify.notified().await;
-    let table_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
     database
         .run_sql(&format!(
             "update {} set age = age where id = 1",
@@ -1448,13 +1448,13 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
 
     let users_sync_complete_notify =
         store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let users_ready_notify = store
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .await;
 
     pipeline.start().await.unwrap();
     users_sync_complete_notify.notified().await;
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
     let first_insert_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(
             EventType::Insert,
@@ -1569,13 +1569,13 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     );
 
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_1_id).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_1_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     table_sync_complete_notify.notified().await;
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_1_id, TableStateType::Ready).await;
     // Wait for an insert event in table 1.
     let insert_events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_1_id, 1)])
@@ -1623,13 +1623,13 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     );
 
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_2_id).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_2_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     table_sync_complete_notify.notified().await;
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_2_id, TableStateType::Ready).await;
     // Wait for an insert event in table 2.
     let insert_events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_2_id, 1)])
@@ -1695,16 +1695,16 @@ async fn run_table_sync_copy_case<F>(
 
     let users_sync_complete_notify = store.notify_on_table_sync_complete(users_table_id).await;
     let orders_sync_complete_notify = store.notify_on_table_sync_complete(orders_table_id).await;
+    let users_table_ready_notify =
+        store.notify_on_table_state_type(users_table_id, TableStateType::Ready).await;
+    let orders_table_ready_notify =
+        store.notify_on_table_state_type(orders_table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     users_sync_complete_notify.notified().await;
     orders_sync_complete_notify.notified().await;
 
-    let users_table_ready_notify =
-        store.notify_on_table_state_type(users_table_id, TableStateType::Ready).await;
-    let orders_table_ready_notify =
-        store.notify_on_table_state_type(orders_table_id, TableStateType::Ready).await;
     // We wait for the two inserts.
     let events_notify = destination
         .wait_for_events(vec![
@@ -1878,18 +1878,18 @@ async fn table_copy_and_sync_streams_new_data() {
         store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
     let orders_sync_complete_notify =
         store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
-
-    pipeline.start().await.unwrap();
-
-    users_sync_complete_notify.notified().await;
-    orders_sync_complete_notify.notified().await;
-
     let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_ready_notify = store
         .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
+
+    pipeline.start().await.unwrap();
+
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
+
     // Insert additional data to test streaming.
     insert_mock_data(
         &mut database,
@@ -2007,14 +2007,14 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     // Register copy-completion and steady-state notifications before startup.
     let users_sync_complete_notify =
         store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let users_ready_notify = store
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .await;
 
     pipeline.start().await.unwrap();
 
     users_sync_complete_notify.notified().await;
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
     let rows_inserted = 5;
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(
@@ -2080,6 +2080,7 @@ async fn table_sync_no_event_handover_waits_for_first_dml_before_ready() {
 
     let sync_done_notify =
         store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -2090,7 +2091,6 @@ async fn table_sync_no_event_handover_waits_for_first_dml_before_ready() {
     };
     assert!(table_decoding_state.is_some());
 
-    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     let first_streamed_row_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
@@ -2167,13 +2167,13 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
     );
 
     let table_sync_complete_notify = state_store.notify_on_table_sync_complete(table_id).await;
+    let table_ready_notify =
+        state_store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     table_sync_complete_notify.notified().await;
 
-    let table_ready_notify =
-        state_store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     // Wait for an insert event to be processed.
     let insert_events_notify = destination
         .wait_for_events(vec![
@@ -2528,7 +2528,12 @@ async fn table_sync_drops_destination_table_after_state_reset() {
         destination.clone(),
     );
 
-    // Wait for initial table sync to complete.
+    // Register readiness before startup because initial sync may stop at
+    // SyncDone. Reset only after the apply worker owns the table so the
+    // finishing table-sync worker cannot overwrite the new Init state.
+    let users_ready_notify = store
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .await;
     let users_sync_complete_notify =
         store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
     let orders_sync_complete_notify =
@@ -2565,6 +2570,7 @@ async fn table_sync_drops_destination_table_after_state_reset() {
     .await;
 
     cdc_events_notify.notified().await;
+    users_ready_notify.notified().await;
 
     // Verify state before reset: table_rows has initial data, events has CDC data.
     let table_rows_before = destination.get_table_rows().await;
