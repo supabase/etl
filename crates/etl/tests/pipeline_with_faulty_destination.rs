@@ -46,15 +46,15 @@ const ROULETTE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Destination wrapper used by the walsender roulette.
 type RouletteDestination = TestDestinationWrapper<MemoryDestination<NotifyingStore>>;
 
-/// Controls the write response state when the walsender disconnects.
+/// Controls write-response handling around the walsender disconnect.
 #[derive(Clone, Copy, Debug)]
 enum WriteResponseTiming {
     /// Disconnect after the prefix is acknowledged.
     Unheld,
-    /// Release the in-flight response before observing the reconnect.
-    ReleasedBeforeReconnect,
-    /// Release the in-flight response after observing the reconnect.
-    ReleasedAfterReconnect,
+    /// Release the in-flight response, then wait for the reconnect.
+    ReleaseThenWaitForReconnect,
+    /// Wait for the reconnect, then release the in-flight response.
+    WaitForReconnectThenRelease,
 }
 
 /// One generated walsender roulette schedule.
@@ -64,7 +64,7 @@ struct WalsenderRouletteCase {
     transaction_count: usize,
     /// Non-empty proper prefix after which the walsender disconnects.
     disconnect_after: usize,
-    /// Write response state at disconnect time.
+    /// Write-response schedule around the disconnect.
     response_timing: WriteResponseTiming,
 }
 
@@ -72,8 +72,8 @@ struct WalsenderRouletteCase {
 fn walsender_roulette_cases() -> impl Strategy<Value = WalsenderRouletteCase> {
     let response_timing = prop_oneof![
         Just(WriteResponseTiming::Unheld),
-        Just(WriteResponseTiming::ReleasedBeforeReconnect),
-        Just(WriteResponseTiming::ReleasedAfterReconnect),
+        Just(WriteResponseTiming::ReleaseThenWaitForReconnect),
+        Just(WriteResponseTiming::WaitForReconnectThenRelease),
     ];
 
     (2usize..=8, response_timing)
@@ -384,7 +384,7 @@ async fn run_walsender_roulette_case(case: WalsenderRouletteCase) -> Result<(), 
             let client = database.client.as_ref().unwrap();
             let old_pid = terminate_apply_walsender(client, &apply_slot_name).await?;
 
-            if matches!(timing, WriteResponseTiming::ReleasedBeforeReconnect) {
+            if matches!(timing, WriteResponseTiming::ReleaseThenWaitForReconnect) {
                 hold.release_ok();
                 wait_for_notification(&delivered, format!("delivery of held user {user_id}"))
                     .await?;
