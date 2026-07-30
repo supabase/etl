@@ -60,6 +60,15 @@ impl ApplyWorkerHandle {
     }
 }
 
+/// Aborts the apply worker when its owner disappears without waiting.
+impl Drop for ApplyWorkerHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Worker that applies replication stream events to destinations.
 ///
 /// [`ApplyWorker`] is the core worker responsible for processing Postgres
