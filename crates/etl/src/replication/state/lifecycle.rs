@@ -54,10 +54,10 @@ impl StoredTableDecodingState {
         table_schema: Arc<TableSchema>,
         sync_done_lsn: PgLsn,
     ) -> EtlResult<ReplicatedTableSchema> {
-        // New values come from a valid ReplicatedTableSchema, but durable JSON
-        // can outlive the writer version or be malformed independently. Check
-        // the complete stored representation before rebuilding unchecked mask
-        // types from its raw bytes.
+        // Exact lookup proves that the snapshot exists, but not that it was
+        // reachable by this handover. Durable JSON can also outlive the writer
+        // version or be malformed independently, so validate the complete
+        // stored representation before rebuilding unchecked mask types.
         if self.snapshot_id.into_inner() > sync_done_lsn {
             bail!(
                 ErrorKind::InvalidState,

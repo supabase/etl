@@ -37,8 +37,8 @@ use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{
-    FORCE_SCHEMA_CLEANUP_FP, STORE_APPLY_REPLICATION_CHECKPOINT_FP,
-    STORE_REPLICATION_CHECKPOINT_FP, etl_fail_point_active,
+    FORCE_SCHEMA_CLEANUP_FP, STORE_REPLICATION_CHECKPOINT_FP, etl_fail_point_active,
+    etl_fail_point_active_for_parameter,
 };
 use crate::{
     bail,
@@ -300,7 +300,10 @@ struct ReplicationLagMetricsInner {
     last_received_lsn: AtomicU64,
     /// The highest LSN whose destination write completed durably.
     last_flush_lsn: AtomicU64,
-    /// The highest checkpoint LSN selected for PostgreSQL feedback.
+    /// The highest safe frontier selected from received-or-flushed progress.
+    ///
+    /// PostgreSQL feedback and ETL durable checkpoint candidates use this same
+    /// idle-or-flushed selection rule.
     last_checkpoint_lsn: AtomicU64,
 }
 
@@ -1184,6 +1187,9 @@ where
 
         let mut table_decoding_states = HashMap::new();
         if let Some(replicated_table_schema) = initial_replicated_table_schema {
+            // Only the table-sync worker supplies this schema. It seeds catchup
+            // with the same snapshot `0/0` and publication/identity masks used
+            // by the initial copy before later relation messages replace it.
             table_decoding_states.insert(
                 replicated_table_schema.id(),
                 TableDecodingState::WithSchema(replicated_table_schema),
@@ -2774,22 +2780,33 @@ where
     /// PostgreSQL may have sent the relevant relation while table sync still
     /// owned the table.
     ///
-    /// Existing local state is authoritative. In particular, a post-boundary
-    /// DDL may already have installed
-    /// [`TableDecodingState::WaitingForRelation`], which must not be replaced
-    /// by the older `SyncDone` decoder.
+    /// Existing local state is authoritative. A materialized schema needs no
+    /// recovery. [`TableDecodingState::WaitingForRelation`] means a DDL message
+    /// invalidated the decoder but PostgreSQL did not send the required
+    /// relation before DML, which is an invalid protocol sequence.
     ///
-    /// A legacy `SyncDone` row can omit the stored decoder. It remains
-    /// unmaterialized so a later relation can rebuild it; relation-less DML
-    /// still fails closed because it cannot be decoded without the missing
-    /// masks.
+    /// `SyncDone` rows written before durable decoders were introduced
+    /// deserialize without a stored snapshot or masks. ETL cannot safely infer
+    /// that historical decoder from the physical schema, so it waits for a
+    /// later relation and rejects relation-less DML.
     async fn install_sync_done_decoding_state_if_missing(
         &mut self,
         table_id: TableId,
         current_lsn: PgLsn,
     ) -> EtlResult<()> {
-        if self.table_decoding_states.contains_key(&table_id) {
-            return Ok(());
+        match self.table_decoding_states.get(&table_id) {
+            Some(TableDecodingState::WithSchema(_)) => return Ok(()),
+            Some(TableDecodingState::WaitingForRelation { snapshot_id }) => {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "Relation message missing after schema change",
+                    format!(
+                        "Table {} received a row event while waiting for relation snapshot {}",
+                        table_id, snapshot_id
+                    )
+                ));
+            }
+            None => {}
         }
 
         let Some(table_state) = self.get_table_state_for_decoding(table_id).await? else {
@@ -3108,6 +3125,11 @@ where
             "processing syncing tables after destination batch flush"
         );
 
+        // The caller invokes this only after the destination reports the
+        // batch durable, so record completed write progress before performing
+        // worker-specific table-state bookkeeping.
+        self.state.update_last_flush_lsn(current_lsn);
+
         let table_sync_decoding_state = self.table_sync_decoding_state();
         let table_decoding_states = &mut self.table_decoding_states;
 
@@ -3147,11 +3169,6 @@ where
         let persisted_checkpoint_lsn = self.persist_replication_checkpoint(current_lsn).await?;
         debug_assert!(persisted_checkpoint_lsn >= current_lsn);
 
-        // `last_flush_lsn` describes this loop's completed destination writes,
-        // not the monotonic value that may already exist in the checkpoint
-        // store.
-        self.state.update_last_flush_lsn(current_lsn);
-
         Ok(())
     }
 
@@ -3168,10 +3185,10 @@ where
         let worker_type = self.worker_context.worker_type();
 
         #[cfg(feature = "failpoints")]
-        if etl_fail_point_active(STORE_REPLICATION_CHECKPOINT_FP)
-            || worker_type == WorkerType::Apply
-                && etl_fail_point_active(STORE_APPLY_REPLICATION_CHECKPOINT_FP)
-        {
+        if etl_fail_point_active_for_parameter(
+            STORE_REPLICATION_CHECKPOINT_FP,
+            worker_type.as_str(),
+        ) {
             warn!(
                 %worker_type,
                 %checkpoint_lsn,
@@ -3484,10 +3501,6 @@ mod apply_worker {
                     return Ok(None);
                 }
 
-                let TableState::SyncDone { .. } = &final_state else {
-                    unreachable!("waited table state should be SyncDone or Errored");
-                };
-
                 info!(
                     worker_type = %WorkerType::Apply,
                     table_id = table_id.0,
@@ -3680,6 +3693,9 @@ mod apply_worker {
             return Ok(());
         }
 
+        // This apply loop serializes checkpoint persistence. No apply
+        // checkpoint write can race this read before the caller finishes this
+        // state evaluation and persists its next candidate.
         let persisted_checkpoint_lsn =
             ctx.store.get_replication_checkpoint(WorkerType::Apply).await?;
         for (table_id, table_state) in syncing_tables {
@@ -3860,6 +3876,9 @@ mod apply_worker {
             return Ok(None);
         }
 
+        // This apply loop serializes checkpoint persistence. No apply
+        // checkpoint write can race this read before the caller finishes this
+        // state evaluation and persists its next candidate.
         let persisted_checkpoint_lsn =
             ctx.store.get_replication_checkpoint(WorkerType::Apply).await?;
         for (table_id, table_state) in syncing_tables {
@@ -4342,8 +4361,8 @@ mod table_sync_worker {
                 Ok(TableState::sync_done(sync_done_lsn, replicated_table_schema))
             }
             // TODO: Make this handover recoverable when catch-up observes a
-            // schema or publication change without a following relation,
-            // without guessing the historical publication and identity masks.
+            //  schema or publication change without a following relation,
+            //  without guessing the historical publication and identity masks.
             Some(TableDecodingState::WaitingForRelation { snapshot_id }) => Err(etl_error!(
                 ErrorKind::InvalidState,
                 "Table-sync decoding state is incomplete",

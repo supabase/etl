@@ -73,15 +73,10 @@ struct PendingRow {
     /// CDC op kind. Drives both the MergeTree `cdc_operation` string and the
     /// ReplacingMergeTree `_etl_deleted` tombstone flag.
     operation: CdcOperation,
-    /// Transaction commit LSN. Written to the MergeTree `cdc_lsn` column,
-    /// and forms the high 64 bits of the ReplacingMergeTree `_etl_version`
-    /// column.
-    commit_lsn: PgLsn,
-    /// Zero-based ordinal of this event within its transaction. Forms the
-    /// low 64 bits of the ReplacingMergeTree `_etl_version` column so
-    /// multi-event same-commit transactions tie-break correctly under
-    /// `FINAL`.
-    tx_ordinal: u64,
+    /// Source ordering for this DML event. MergeTree exposes its commit LSN in
+    /// `cdc_lsn`; ReplacingMergeTree stores the complete packed key in
+    /// `_etl_version`.
+    sequence_key: EventSequenceKey,
     /// User column values in source schema order. The trailing CDC columns
     /// are appended at encode time and are not present here.
     cells: Vec<Cell>,
@@ -100,17 +95,16 @@ fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
 fn append_cdc_columns(
     values: &mut Vec<ClickHouseValue>,
     operation: CdcOperation,
-    commit_lsn: PgLsn,
-    tx_ordinal: u64,
+    sequence_key: EventSequenceKey,
     engine: ClickHouseEngine,
 ) {
     match engine {
         ClickHouseEngine::MergeTree => {
             values.push(ClickHouseValue::String(operation.to_string()));
-            values.push(cdc_lsn_to_clickhouse_value(commit_lsn));
+            values.push(cdc_lsn_to_clickhouse_value(sequence_key.commit_lsn));
         }
         ClickHouseEngine::ReplacingMergeTree => {
-            let version = EventSequenceKey::new(commit_lsn, tx_ordinal).as_u128();
+            let version = sequence_key.as_u128();
             values.push(ClickHouseValue::UInt128(version));
             values.push(ClickHouseValue::UInt8(matches!(operation, CdcOperation::Delete) as u8));
         }
@@ -763,7 +757,12 @@ where
                 // (sentinel meaning "this row pre-dates the streaming cursor"). For
                 // ReplacingMergeTree, any streaming event then wins on FINAL because its packed
                 // `_etl_version` is non-zero.
-                append_cdc_columns(&mut values, CdcOperation::Insert, PgLsn::from(0), 0, engine);
+                append_cdc_columns(
+                    &mut values,
+                    CdcOperation::Insert,
+                    EventSequenceKey::new(PgLsn::from(0), 0),
+                    engine,
+                );
                 Ok(values)
             })
             .collect::<EtlResult<_>>()?;
@@ -1082,18 +1081,19 @@ where
                 let event = event_iter.next().expect("peeked event must be present; qed");
                 match event {
                     Event::Insert(insert) => {
+                        let sequence_key = insert.event_sequence_key();
                         let table_id = insert.replicated_table_schema.id();
                         let entry = pending
                             .entry(table_id)
                             .or_insert_with(|| (insert.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Insert,
-                            commit_lsn: insert.commit_lsn,
-                            tx_ordinal: insert.tx_ordinal,
+                            sequence_key,
                             cells: insert.table_row.into_values(),
                         });
                     }
                     Event::Update(update) => {
+                        let sequence_key = update.event_sequence_key();
                         let table_row = clickhouse_update_row(
                             &update.replicated_table_schema,
                             update.updated_table_row,
@@ -1105,12 +1105,12 @@ where
                             .or_insert_with(|| (update.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Update,
-                            commit_lsn: update.commit_lsn,
-                            tx_ordinal: update.tx_ordinal,
+                            sequence_key,
                             cells: table_row.into_values(),
                         });
                     }
                     Event::Delete(delete) => {
+                        let sequence_key = delete.event_sequence_key();
                         let old_table_row = clickhouse_delete_old_row(
                             &delete.replicated_table_schema,
                             delete.old_table_row,
@@ -1127,8 +1127,7 @@ where
                             .or_insert_with(|| (delete.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Delete,
-                            commit_lsn: delete.commit_lsn,
-                            tx_ordinal: delete.tx_ordinal,
+                            sequence_key,
                             cells: old_row.into_values(),
                         });
                     }
@@ -1199,12 +1198,12 @@ where
             join_set.spawn(async move {
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
-                    .map(|PendingRow { operation, commit_lsn, tx_ordinal, cells }| {
+                    .map(|PendingRow { operation, sequence_key, cells }| {
                         let mut values: Vec<ClickHouseValue> = cells
                             .into_iter()
                             .map(cell_to_clickhouse_value)
                             .collect::<EtlResult<_>>()?;
-                        append_cdc_columns(&mut values, operation, commit_lsn, tx_ordinal, engine);
+                        append_cdc_columns(&mut values, operation, sequence_key, engine);
                         Ok(values)
                     })
                     .collect::<EtlResult<_>>()?;

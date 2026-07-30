@@ -322,10 +322,12 @@ These behaviors are **not full destination DDL semantics** yet:
   lifecycle concerns.
 - If a table-sync worker decodes a DDL or publication-column change during
   catch-up but receives no following relation before its handover boundary, it
-  cannot construct the complete decoder required by `SyncDone`. The table sync
-  fails closed and must be retried or resynchronized. See [Schema Changes
-  During Initial-Sync
-  Handover](/etl/explanation/schema-change-handover-edge-cases/).
+  cannot construct the complete decoder required by `SyncDone`. The DDL
+  message supplies the physical schema, but only the relation supplies the
+  exact publication and replica-identity masks for that WAL position. ETL
+  cannot safely reuse older masks or read newer catalog state, so this
+  correctness edge case fails the table sync closed. Retry or resynchronize
+  the table after schema activity has settled.
 - A drop and re-add is not treated as a rename. It becomes a drop plus an add
   because PostgreSQL assigns a new ordinal position to the new column.
 - Destination defaults are best-effort metadata translations. Unsupported

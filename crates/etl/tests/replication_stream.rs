@@ -3,7 +3,7 @@ use etl::{
     data::{ArrayCell, Cell, PgNumeric, PgTimeTz, TableRow},
     error::EtlResult,
     postgres::client::PgReplicationClient,
-    schema::ColumnSchema,
+    schema::{ColumnSchema, TableId, TableName},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         pipeline::test_slot_name,
@@ -167,42 +167,27 @@ async fn assert_stream_markers_and_replay(
 ) {
     let initial_markers = collect_stream_markers(initial_stream, expected.len()).await;
     let initial_shapes = initial_markers.iter().map(StreamMarker::expected).collect::<Vec<_>>();
-    assert_eq!(initial_shapes, expected, "Initial decoding produced different protocol markers");
+    assert_eq!(initial_shapes, expected);
 
     let mut transaction_commit_lsn = None;
     for marker in &initial_markers {
         match marker {
             StreamMarker::Begin(commit_lsn) => {
-                assert!(
-                    transaction_commit_lsn.replace(*commit_lsn).is_none(),
-                    "Encountered nested transactions in pgoutput stream"
-                );
+                assert!(transaction_commit_lsn.replace(*commit_lsn).is_none());
             }
             StreamMarker::DdlMessage(message_lsn, ..) => {
                 let commit_lsn =
                     transaction_commit_lsn.expect("DDL message must be inside a transaction");
-                assert_ne!(
-                    *message_lsn,
-                    PgLsn::from(0_u64),
-                    "Schema snapshots must use their logical-message WAL position"
-                );
-                assert!(
-                    *message_lsn <= commit_lsn,
-                    "Schema snapshot LSN {message_lsn} must not exceed transaction commit LSN \
-                     {commit_lsn}"
-                );
+                assert_ne!(*message_lsn, PgLsn::from(0_u64));
+                assert!(*message_lsn <= commit_lsn);
             }
             StreamMarker::Commit(commit_lsn) => {
-                assert_eq!(
-                    transaction_commit_lsn.take(),
-                    Some(*commit_lsn),
-                    "BEGIN and COMMIT must identify the same transaction"
-                );
+                assert_eq!(transaction_commit_lsn.take(), Some(*commit_lsn));
             }
             _ => {}
         }
     }
-    assert!(transaction_commit_lsn.is_none(), "Pgoutput stream ended inside a transaction");
+    assert!(transaction_commit_lsn.is_none());
 
     let ddl_lsns = initial_markers
         .iter()
@@ -211,10 +196,7 @@ async fn assert_stream_markers_and_replay(
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(
-        ddl_lsns.windows(2).all(|window| window[0] < window[1]),
-        "DDL message LSNs must be strictly increasing: {ddl_lsns:?}"
-    );
+    assert!(ddl_lsns.windows(2).all(|window| window[0] < window[1]));
 
     drop(initial_client);
     database.wait_for_slot_inactive(slot_name).await;
@@ -225,10 +207,7 @@ async fn assert_stream_markers_and_replay(
         .await
         .unwrap();
     let replay_markers = collect_stream_markers(replay_stream, expected.len()).await;
-    assert_eq!(
-        replay_markers, initial_markers,
-        "Replay produced different protocol markers or message LSNs"
-    );
+    assert_eq!(replay_markers, initial_markers);
 }
 
 /// Starts a logical replication stream whose slot can be replayed from its
@@ -407,9 +386,9 @@ fn unsupported_parser_cases() -> &'static [UnsupportedParserCase] {
 }
 
 async fn create_type_matrix_table_in(
-    database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
+    database: &PgDatabase<Client>,
     test_name: &str,
-) -> (etl::schema::TableName, etl::schema::TableId) {
+) -> (TableName, TableId) {
     let table_name = test_table_name(test_name);
     let table_id = database
         .create_table(
@@ -493,10 +472,10 @@ async fn create_type_matrix_table_in(
 }
 
 async fn create_single_value_table_in(
-    database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
+    database: &PgDatabase<Client>,
     test_name: &str,
     data_type: &str,
-) -> (etl::schema::TableName, etl::schema::TableId) {
+) -> (TableName, TableId) {
     let table_name = test_table_name(test_name);
     let value_column_type = format!("{data_type} not null");
     let table_id = database
@@ -512,8 +491,8 @@ async fn create_single_value_table_in(
 }
 
 async fn insert_single_value_row(
-    database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
-    table_name: &etl::schema::TableName,
+    database: &PgDatabase<Client>,
+    table_name: &TableName,
     expression: &str,
 ) {
     database
@@ -525,10 +504,7 @@ async fn insert_single_value_row(
         .unwrap();
 }
 
-async fn insert_type_matrix_row(
-    database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
-    table_name: &etl::schema::TableName,
-) {
+async fn insert_type_matrix_row(database: &PgDatabase<Client>, table_name: &TableName) {
     database
         .run_sql(&format!(
             r#"
@@ -660,7 +636,7 @@ async fn collect_single_copy_parse_result(
         .expect("copy stream should emit one row")
         .expect("copy stream row should be readable");
     let result = parse_copy_row(&row, column_schemas);
-    assert!(stream.next().await.is_none(), "copy stream should emit exactly one row");
+    assert!(stream.next().await.is_none());
 
     result
 }
@@ -737,10 +713,7 @@ fn assert_money_cell(row: &TableRow, column_schemas: &[ColumnSchema]) {
         panic!("money_col should decode as a string");
     };
 
-    assert!(
-        value.contains("12") && value.contains("34"),
-        "money output should preserve the Postgres text value, got {value}"
-    );
+    assert!(value.contains("12") && value.contains("34"));
 }
 
 fn assert_f32_cell(row: &TableRow, column_schemas: &[ColumnSchema], name: &str, expected: f32) {
@@ -785,7 +758,7 @@ fn assert_string_cell_contains(
         panic!("{name} should decode as a string");
     };
 
-    assert!(value.contains(expected), "{name} should contain {expected:?}, got {value:?}");
+    assert!(value.contains(expected));
 }
 
 fn assert_string_array_cell_contains(
@@ -802,10 +775,7 @@ fn assert_string_array_cell_contains(
     for (value, expected) in values.iter().zip(expected) {
         match (value, expected) {
             (Some(value), Some(expected)) => {
-                assert!(
-                    value.contains(expected),
-                    "{name} should contain {expected:?}, got {value:?}"
-                );
+                assert!(value.contains(expected));
             }
             (None, None) => {}
             _ => panic!("{name} should have matching null positions"),

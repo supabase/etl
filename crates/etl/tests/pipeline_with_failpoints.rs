@@ -13,8 +13,7 @@ use etl::{
     failpoints::{
         FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
-        STORE_APPLY_REPLICATION_CHECKPOINT_FP, STORE_REPLICATION_CHECKPOINT_FP,
-        TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
+        STORE_REPLICATION_CHECKPOINT_FP, TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
     },
     pipeline::PipelineId,
     schema::{ReplicatedTableSchema, SnapshotId, TableId, TableSchema},
@@ -285,40 +284,16 @@ fn assert_relation_insert_schema_pairs(
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        relations.len(),
-        inserts.len(),
-        "each relation must have one insert using the materialized schema"
-    );
-    assert_eq!(
-        relations.len(),
-        expected_snapshot_ids.len(),
-        "each expected schema snapshot must have one relation and insert"
-    );
+    assert_eq!(relations.len(), inserts.len());
+    assert_eq!(relations.len(), expected_snapshot_ids.len());
 
     for ((relation_schema, insert_schema), expected_snapshot_id) in
         relations.into_iter().zip(inserts).zip(expected_snapshot_ids)
     {
-        assert_eq!(
-            relation_schema.inner().snapshot_id,
-            *expected_snapshot_id,
-            "relation must use the expected stored schema snapshot"
-        );
-        assert_eq!(
-            relation_schema.inner().snapshot_id,
-            insert_schema.inner().snapshot_id,
-            "relation and insert must use the same schema snapshot"
-        );
-        assert_eq!(
-            relation_schema.replication_mask(),
-            insert_schema.replication_mask(),
-            "relation and insert must use the same replication mask"
-        );
-        assert_eq!(
-            relation_schema.identity_mask(),
-            insert_schema.identity_mask(),
-            "relation and insert must use the same identity mask"
-        );
+        assert_eq!(relation_schema.inner().snapshot_id, *expected_snapshot_id);
+        assert_eq!(relation_schema.inner().snapshot_id, insert_schema.inner().snapshot_id);
+        assert_eq!(relation_schema.replication_mask(), insert_schema.replication_mask());
+        assert_eq!(relation_schema.identity_mask(), insert_schema.identity_mask());
     }
 }
 
@@ -338,7 +313,7 @@ fn assert_restarted_schema_snapshot_pairs(
     restarted_snapshots: &[(SnapshotId, TableSchema)],
     initial_snapshots: &[(SnapshotId, TableSchema)],
 ) {
-    assert!(initial_snapshots.len() >= 2, "expected at least one non-initial schema snapshot");
+    assert!(initial_snapshots.len() >= 2);
     assert_eq!(restarted_snapshots, initial_snapshots);
 }
 
@@ -672,7 +647,6 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
         )])
         .await;
 
-    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     let sync_done_notify =
         store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
 
@@ -680,6 +654,8 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
 
     all_rows_notify.notified().await;
     sync_done_notify.notified().await;
+
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     // The apply connection already saw and skipped the relation used by the
     // table-sync worker. PostgreSQL does not resend it merely because ETL
@@ -777,10 +753,7 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     assert_eq!(source_err.description(), Some("Table-sync decoding state is incomplete"));
 
     let state_history = store.get_table_state_history(table_id).await;
-    assert!(
-        state_history.iter().all(|state| !matches!(state, TableState::SyncDone { .. })),
-        "incomplete decoding state must fail before SyncDone is persisted"
-    );
+    assert!(state_history.iter().all(|state| !matches!(state, TableState::SyncDone { .. })));
 
     let table_schemas = store.get_table_schemas().await;
     assert_table_schema_snapshots(
@@ -838,7 +811,7 @@ async fn table_sync_idle_handover_waits_for_durability_and_persisted_apply_check
     // Drop apply checkpoint writes before generating the WAL that will become
     // the handover boundary. The apply loop continues running, but the durable
     // checkpoint cannot reach that future boundary.
-    fail::cfg(STORE_APPLY_REPLICATION_CHECKPOINT_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return(apply)").unwrap();
 
     // Commit one published row at A while the table-sync worker is paused, then
     // advance cluster WAL to T in another database. Logical decoding skips that
@@ -899,14 +872,11 @@ async fn table_sync_idle_handover_waits_for_durability_and_persisted_apply_check
     };
     let checkpoint_before_unpause =
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
-    assert!(
-        checkpoint_before_unpause.is_none_or(|checkpoint| checkpoint < sync_done_lsn),
-        "persisted apply checkpoint must remain below SyncDone while its write is paused"
-    );
+    assert!(checkpoint_before_unpause.is_none_or(|checkpoint| checkpoint < sync_done_lsn));
 
     let checkpoint_notify =
         store.notify_on_replication_checkpoint(WorkerType::Apply, sync_done_lsn).await;
-    fail::remove(STORE_APPLY_REPLICATION_CHECKPOINT_FP);
+    fail::remove(STORE_REPLICATION_CHECKPOINT_FP);
 
     // Generate fresh unrelated WAL after restoring checkpoint writes so the
     // apply loop receives a new idle progress opportunity.
@@ -916,10 +886,7 @@ async fn table_sync_idle_handover_waits_for_durability_and_persisted_apply_check
 
     let persisted_checkpoint_lsn =
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap().unwrap();
-    assert!(
-        persisted_checkpoint_lsn >= sync_done_lsn,
-        "idle SyncDone completion must persist the apply checkpoint"
-    );
+    assert!(persisted_checkpoint_lsn >= sync_done_lsn);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
@@ -962,31 +929,26 @@ async fn table_sync_catchup_error_does_not_block_apply_worker() {
         store.notify_on_table_state_type(users_table_id, TableStateType::SyncDone).await;
     let orders_sync_done_notify =
         store.notify_on_table_state_type(orders_table_id, TableStateType::SyncDone).await;
-    let users_ready_notify =
-        store.notify_on_table_state_type(users_table_id, TableStateType::Ready).await;
-    let orders_ready_notify =
-        store.notify_on_table_state_type(orders_table_id, TableStateType::Ready).await;
-
     pipeline.start().await.unwrap();
 
-    let (errored_table_id, healthy_table_id, healthy_table_name, sync_done_notify, ready_notify) = tokio::select! {
+    let (errored_table_id, healthy_table_id, healthy_table_name, sync_done_notify) = tokio::select! {
             () = users_errored_notify.notified() => (
                 users_table_id,
                 orders_table_id,
                 orders_schema.name.clone(),
                 orders_sync_done_notify,
-                orders_ready_notify,
             ),
             () = orders_errored_notify.notified() => (
                 orders_table_id,
                 users_table_id,
                 users_schema.name.clone(),
                 users_sync_done_notify,
-                users_ready_notify,
             ),
     };
 
     sync_done_notify.notified().await;
+    let ready_notify =
+        store.notify_on_table_state_type(healthy_table_id, TableStateType::Ready).await;
     let update_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, healthy_table_id, 1)])
         .await;
@@ -1044,12 +1006,12 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
     );
 
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     table_sync_complete_notify.notified().await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let initial_inserts_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
@@ -1137,7 +1099,7 @@ async fn run_schema_replay_scenario(
 ) {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
-    fail::cfg(STORE_APPLY_REPLICATION_CHECKPOINT_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return(apply)").unwrap();
 
     init_test_tracing();
 
@@ -1245,11 +1207,7 @@ async fn run_schema_replay_scenario(
 
     events_notify.notified().await;
     let table_state = store.get_table_state(table_id).await.unwrap();
-    assert!(
-        matches!(&table_state, Some(TableState::SyncDone { .. })),
-        "expected table to remain in sync_done while apply checkpoint persistence is disabled, \
-         got {table_state:?}"
-    );
+    assert!(matches!(&table_state, Some(TableState::SyncDone { .. })));
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1563,8 +1521,7 @@ async fn publication_schema_snapshots_replay_before_each_table_first_relation() 
     let first_run_events = destination.get_events().await;
     assert!(
         collect_table_events(&first_run_events, first_table_id).is_empty()
-            && collect_table_events(&first_run_events, second_table_id).is_empty(),
-        "DDL-only transactions must not synthesize table events"
+            && collect_table_events(&first_run_events, second_table_id).is_empty()
     );
 
     let first_run_schemas = store.get_table_schemas().await;
@@ -1598,8 +1555,7 @@ async fn publication_schema_snapshots_replay_before_each_table_first_relation() 
         ],
     );
     assert!(
-        first_snapshots[1].0 < first_snapshots[2].0 && first_snapshots[2].0 < second_snapshots[1].0,
-        "multi-table publication messages must receive ordered snapshot ids"
+        first_snapshots[1].0 < first_snapshots[2].0 && first_snapshots[2].0 < second_snapshots[1].0
     );
 
     // Isolate the replay phase without clearing stored schemas. Replayed
@@ -1792,12 +1748,7 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            relation_events.len(),
-            3,
-            "Expected 3 relation events, got {}",
-            relation_events.len()
-        );
+        assert_eq!(relation_events.len(), 3);
 
         // Verify the physical add expands the destination schema before the
         // publication filter contracts it.
@@ -1805,20 +1756,14 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
             .iter()
             .map(|r| r.replicated_table_schema.column_schemas().count())
             .collect();
-        assert_eq!(
-            relation_column_counts,
-            vec![4, 5, 4],
-            "Expected relation column counts [4, 5, 4], got {relation_column_counts:?}"
-        );
+        assert_eq!(relation_column_counts, vec![4, 5, 4]);
         assert!(
             relation_events[0].replicated_table_schema.inner().snapshot_id
-                < relation_events[1].replicated_table_schema.inner().snapshot_id,
-            "the physical schema change must advance the schema snapshot id"
+                < relation_events[1].replicated_table_schema.inner().snapshot_id
         );
         assert!(
             relation_events[1].replicated_table_schema.inner().snapshot_id
-                < relation_events[2].replicated_table_schema.inner().snapshot_id,
-            "the publication change must advance the schema snapshot id"
+                < relation_events[2].replicated_table_schema.inner().snapshot_id
         );
 
         // Verify relation column names for each state.
@@ -1863,7 +1808,7 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
 
         // Verify we have 3 insert events.
         let insert_events = grouped.get(&(EventType::Insert, table_id)).unwrap();
-        assert_eq!(insert_events.len(), 3, "Expected 3 insert events, got {}", insert_events.len());
+        assert_eq!(insert_events.len(), 3);
 
         // Verify exact payloads so a publication-column shift cannot pass by
         // preserving only the number of decoded values.
@@ -1899,8 +1844,7 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
                     Cell::String("charlie@example.com".to_owned()),
                     Cell::String("inactive".to_owned()),
                 ],
-            ],
-            "Insert payloads must follow each destination-facing schema"
+            ]
         );
     };
 

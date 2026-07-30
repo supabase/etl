@@ -10,7 +10,6 @@ use uuid::Uuid;
 use crate::{
     destination::PipelineDestination,
     pipeline::{Pipeline, PipelineId},
-    replication::state::TableStateType,
     schema::{TableId, TableName},
     store::PipelineStore,
     test_utils::{
@@ -288,7 +287,7 @@ where
 }
 
 /// Creates an empty published table and waits for its pipeline to reach
-/// [`TableStateType::SyncDone`].
+/// [`crate::replication::state::TableStateType::SyncDone`].
 pub async fn create_database_and_sync_done_pipeline_with_table(
     table_suffix: &str,
     columns: &[(&str, &str)],
@@ -325,16 +324,11 @@ pub async fn create_database_and_sync_done_pipeline_with_table(
         destination.clone(),
     );
 
-    // An empty table has no apply-owned DML from which to materialize a local
-    // decoder, so a completed handover intentionally remains in SyncDone.
-    // Callers should register their Ready notifier before producing the first
-    // apply-owned row when the scenario needs steady-state ownership.
-    let sync_done_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    sync_done_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication_name)
 }

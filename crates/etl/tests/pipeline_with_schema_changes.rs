@@ -61,11 +61,7 @@ fn assert_column_default_contains<'a>(
     let expression = expression.to_ascii_lowercase();
 
     for fragment in fragments {
-        assert!(
-            expression.contains(&fragment.to_ascii_lowercase()),
-            "expected default expression for column {column_name} to contain {fragment:?}: \
-             {expression}"
-        );
+        assert!(expression.contains(&fragment.to_ascii_lowercase()));
     }
 }
 
@@ -92,6 +88,8 @@ enum RelationSchemaChange {
     DropColumn,
     RenameColumn,
     ChangeColumnType,
+    ChangeColumnDefault,
+    ChangeColumnNullability,
 }
 
 /// Verifies that one table-schema mutation produces the matching Relation,
@@ -104,6 +102,8 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
         RelationSchemaChange::DropColumn => "schema_remove_column",
         RelationSchemaChange::RenameColumn => "schema_rename_column",
         RelationSchemaChange::ChangeColumnType => "schema_change_type",
+        RelationSchemaChange::ChangeColumnDefault => "schema_change_default",
+        RelationSchemaChange::ChangeColumnNullability => "schema_change_nullability",
     };
     let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
         create_database_and_sync_done_pipeline_with_table(
@@ -180,6 +180,34 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
                 .unwrap();
             vec![("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT8)]
         }
+        RelationSchemaChange::ChangeColumnDefault => {
+            database
+                .alter_table(
+                    table_name.clone(),
+                    &[TableModification::AlterColumn { name: "age", alteration: "set default 42" }],
+                )
+                .await
+                .unwrap();
+            database.insert_values(table_name.clone(), &["name"], &[&"Eve"]).await.unwrap();
+            vec![("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)]
+        }
+        RelationSchemaChange::ChangeColumnNullability => {
+            database
+                .alter_table(
+                    table_name.clone(),
+                    &[TableModification::AlterColumn { name: "age", alteration: "drop not null" }],
+                )
+                .await
+                .unwrap();
+            database
+                .run_sql(&format!(
+                    "insert into {} (name, age) values ('Frank', null)",
+                    table_name.as_quoted_identifier()
+                ))
+                .await
+                .unwrap();
+            vec![("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)]
+        }
     };
 
     ready_notify.notified().await;
@@ -200,10 +228,32 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
         panic!("expected insert event");
     };
     assert_eq!(i.table_row.values().len(), expected_columns.len());
+    match change {
+        RelationSchemaChange::ChangeColumnDefault => {
+            assert_eq!(i.table_row.values()[2], Cell::I32(42));
+        }
+        RelationSchemaChange::ChangeColumnNullability => {
+            assert_eq!(i.table_row.values()[2], Cell::Null);
+        }
+        _ => {}
+    }
     assert_eq!(
         i.replicated_table_schema.inner().snapshot_id,
         r.replicated_table_schema.inner().snapshot_id
     );
+
+    let relation_age =
+        r.replicated_table_schema.column_schemas().find(|column| column.name == "age");
+    match change {
+        RelationSchemaChange::DropColumn => assert!(relation_age.is_none()),
+        RelationSchemaChange::ChangeColumnDefault => {
+            assert_eq!(relation_age.unwrap().default_expression.as_deref(), Some("42"));
+        }
+        RelationSchemaChange::ChangeColumnNullability => {
+            assert!(relation_age.unwrap().nullable);
+        }
+        _ => {}
+    }
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
@@ -218,6 +268,17 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
 
     let (_, second_schema) = &snapshots[1];
     assert_table_schema_column_names_types(second_schema, &expected_columns);
+    let stored_age = second_schema.column_schemas.iter().find(|column| column.name == "age");
+    match change {
+        RelationSchemaChange::DropColumn => assert!(stored_age.is_none()),
+        RelationSchemaChange::ChangeColumnDefault => {
+            assert_eq!(stored_age.unwrap().default_expression.as_deref(), Some("42"));
+        }
+        RelationSchemaChange::ChangeColumnNullability => {
+            assert!(stored_age.unwrap().nullable);
+        }
+        _ => {}
+    }
     assert_eq!(snapshots[1].0, r.replicated_table_schema.inner().snapshot_id);
 }
 
@@ -239,6 +300,16 @@ async fn relation_message_updates_when_column_is_renamed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn relation_message_updates_when_column_type_changes() {
     run_relation_schema_change(RelationSchemaChange::ChangeColumnType).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relation_message_updates_when_column_default_changes() {
+    run_relation_schema_change(RelationSchemaChange::ChangeColumnDefault).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relation_message_updates_when_column_nullability_changes() {
+    run_relation_schema_change(RelationSchemaChange::ChangeColumnNullability).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -926,13 +997,13 @@ async fn partitioned_table_schema_change_updates_relation_message() {
 
     let parent_sync_complete_notify =
         state_store.notify_on_table_sync_complete(parent_table_id).await;
-    let parent_ready_notify =
-        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     parent_sync_complete_notify.notified().await;
 
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
     // Wait for the Relation event (schema change) and Insert event.
     let events_notify = destination
         .wait_for_events(vec![
