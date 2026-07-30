@@ -195,7 +195,7 @@ fn assert_users_converged(
     events: &[Event],
     table_id: TableId,
     source_users: &BTreeMap<i64, UserRecord>,
-    transaction_count: usize,
+    case: DirtyRestartCase,
 ) -> Result<(), TestCaseError> {
     let materialized_users = materialize_events::<UserRecord>(events, Some(table_id));
     let table_insert_count = events
@@ -257,7 +257,7 @@ fn assert_users_converged(
 
     prop_assert_eq!(
         source_users.len(),
-        transaction_count,
+        case.transaction_count,
         "source did not contain every committed transaction"
     );
     prop_assert_eq!(
@@ -271,13 +271,37 @@ fn assert_users_converged(
         "destination history contained missing or unexpected user IDs"
     );
 
+    let crash_user_id =
+        i64::try_from(case.crash_after).expect("generated crash position should fit in i64");
+
     for user_id in source_users.keys() {
         let delivery_count =
             delivery_metadata.get(user_id).map_or(0, |(_, delivery_count)| *delivery_count);
-        prop_assert!(
-            (1..=2).contains(&delivery_count),
-            "user {user_id} had {delivery_count} deliveries; expected one delivery or one replay"
-        );
+        if *user_id > crash_user_id {
+            prop_assert_eq!(
+                delivery_count,
+                1,
+                "post-restart user {} had {} deliveries; expected one",
+                user_id,
+                delivery_count
+            );
+        } else if *user_id == crash_user_id
+            && matches!(case.crash_timing, CrashTiming::WhileWriteResponseHeld)
+        {
+            prop_assert_eq!(
+                delivery_count,
+                2,
+                "user {} whose write response was held had {} deliveries; expected one replay",
+                user_id,
+                delivery_count
+            );
+        } else {
+            prop_assert!(
+                (1..=2).contains(&delivery_count),
+                "user {user_id} had {delivery_count} deliveries; expected one delivery or one \
+                 replay"
+            );
+        }
     }
 
     Ok(())
@@ -408,7 +432,7 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
         read_source_users(database.client.as_ref().unwrap(), &users_schema.name).await?;
     let events = memory_destination.events().await;
 
-    assert_users_converged(&events, table_id, &source_users, case.transaction_count)
+    assert_users_converged(&events, table_id, &source_users, case)
 }
 
 #[tokio::test(flavor = "multi_thread")]
