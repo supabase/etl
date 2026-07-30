@@ -686,6 +686,27 @@ where
                         },
                     )?;
 
+                // A floor-semantics schema lookup or a stale mask written by
+                // an older binary can disagree with the stored mask width;
+                // from_mask only debug-asserts, so a mismatch would compute a
+                // silently wrong diff.
+                if previous_replication_mask.len() != old_table_schema.column_schemas.len() {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "Previous replication mask width mismatch for ClickHouse schema recovery",
+                        format!(
+                            "Table {} stored a previous replication mask of length {}, but schema \
+                             snapshot {} (requested {}) has {} columns. Manual intervention may \
+                             be required.",
+                            table_id,
+                            previous_replication_mask.len(),
+                            old_table_schema.snapshot_id,
+                            prev_snapshot_id,
+                            old_table_schema.column_schemas.len()
+                        )
+                    ));
+                }
+
                 let old_schema =
                     ReplicatedTableSchema::from_mask(old_table_schema, previous_replication_mask);
                 let diff = old_schema.diff(schema);

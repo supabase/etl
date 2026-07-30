@@ -192,3 +192,67 @@ async fn fails_closed_when_previous_replication_mask_missing() {
         .expect("destination metadata should exist");
     assert!(metadata.is_applying());
 }
+
+/// Recovery fails closed when the stored previous replication mask width
+/// disagrees with the schema snapshot returned for `previous_snapshot_id`.
+///
+/// The schema lookup has at-or-before semantics and an older binary can leave
+/// a stale mask, so the stored mask can pair with a schema of a different
+/// width. `from_mask` only debug-asserts the widths, so recovery must reject
+/// the mismatch instead of computing a silently wrong diff, and keep the
+/// metadata in `Applying`.
+#[tokio::test(flavor = "multi_thread")]
+async fn fails_closed_when_previous_replication_mask_width_mismatches() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+
+    let table_schema = users_table_schema("maskwidthmismatch");
+    let table_id = table_schema.id;
+    store.store_table_schema(table_schema.clone()).await.unwrap();
+
+    let table_schema = Arc::new(table_schema);
+    let new_replicated = ReplicatedTableSchema::from_mask(
+        Arc::clone(&table_schema),
+        ReplicationMask::from_bytes(vec![1, 0, 1]),
+    );
+
+    // --- GIVEN: an interrupted schema change whose stored previous mask has
+    // width 2, while the schema at the previous snapshot has 3 columns ---
+    let applying_metadata = DestinationTableMetadata {
+        destination_table_id: "public_maskwidthmismatch".to_owned(),
+        snapshot_id: SnapshotId::from(100_u64),
+        previous_snapshot_id: Some(SnapshotId::from(100_u64)),
+        previous_replication_mask: Some(ReplicationMask::from_bytes(vec![1, 1])),
+        schema_status: DestinationTableSchemaStatus::Applying,
+        replication_mask: new_replicated.replication_mask().clone(),
+    };
+    store.store_destination_table_metadata(table_id, applying_metadata).await.unwrap();
+
+    // --- WHEN: a restarted destination attempts to write for the table ---
+    let destination =
+        database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
+    let err = destination
+        .write_table_rows(
+            &new_replicated,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice@example.com".to_owned())])],
+        )
+        .await
+        .unwrap_err();
+
+    // --- THEN: the error fails closed and metadata stays in Applying ---
+    assert_eq!(err.kind(), ErrorKind::InvalidState);
+    assert_eq!(
+        err.description(),
+        Some("Previous replication mask width mismatch for ClickHouse schema recovery")
+    );
+
+    let metadata = store
+        .get_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist");
+    assert!(metadata.is_applying());
+}
