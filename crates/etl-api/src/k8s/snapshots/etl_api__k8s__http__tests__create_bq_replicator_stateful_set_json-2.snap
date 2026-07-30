@@ -154,7 +154,7 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
                 }
               }
             ],
-            "image": "public.ecr.aws/supabase/timberio/vector:0.55.0-distroless-libc",
+            "image": "timberio/vector:0.55.0-distroless-libc",
             "name": "abcdefghijklmnopqrst-42-vector",
             "resources": {
               "limits": {
@@ -187,9 +187,7 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
             ]
           }
         ],
-        "nodeSelector": {
-          "etl.supabase.com/node-role": "workloads"
-        },
+        "nodeSelector": {},
         "securityContext": {
           "seccompProfile": {
             "type": "RuntimeDefault"
@@ -197,14 +195,7 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
         },
         "serviceAccountName": "etl-replicator",
         "terminationGracePeriodSeconds": 300,
-        "tolerations": [
-          {
-            "effect": "NoSchedule",
-            "key": "etl.supabase.com/node-role",
-            "operator": "Equal",
-            "value": "workloads"
-          }
-        ],
+        "tolerations": [],
         "volumes": [
           {
             "configMap": {

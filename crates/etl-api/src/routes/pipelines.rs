@@ -801,7 +801,7 @@ pub(crate) async fn update_pipeline(
     Extension(pool): Extension<PgPool>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     pipeline_id: Path<i64>,
     pipeline: Json<UpdatePipelineRequest>,
@@ -838,7 +838,7 @@ pub(crate) async fn update_pipeline(
         tenant_id,
         pipeline_id,
         &encryption_key,
-        k8s_client.as_deref(),
+        k8s_client.as_ref(),
         source_tls_config.as_ref(),
         api_config.as_ref(),
     )
@@ -874,7 +874,7 @@ pub(crate) async fn delete_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     pipeline_id: Path<i64>,
 ) -> Result<impl IntoResponse, PipelineError> {
@@ -884,7 +884,7 @@ pub(crate) async fn delete_pipeline(
     let pipeline = read_pipeline_for_deletion(&pool, tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
-    if is_replicator_active(k8s_client.as_deref(), tenant_id, pipeline.replicator_id).await? {
+    if is_replicator_active(k8s_client.as_ref(), tenant_id, pipeline.replicator_id).await? {
         return Err(PipelineError::ActivePipeline(pipeline.id));
     }
 
@@ -998,7 +998,7 @@ pub(crate) async fn start_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     pipeline_id: Path<i64>,
@@ -1012,20 +1012,18 @@ pub(crate) async fn start_pipeline(
 
     let tls_config = source_tls_config.get_tls_config();
 
-    if let Some(k8s_client) = k8s_client.as_deref() {
-        create_or_update_pipeline_resources_in_k8s(
-            k8s_client,
-            tenant_id,
-            pipeline,
-            replicator,
-            image,
-            source,
-            destination,
-            api_config.supabase_api_url.as_deref(),
-            tls_config,
-        )
-        .await?;
-    }
+    create_or_update_pipeline_resources_in_k8s(
+        k8s_client.as_ref(),
+        tenant_id,
+        pipeline,
+        replicator,
+        image,
+        source,
+        destination,
+        api_config.supabase_api_url.as_deref(),
+        tls_config,
+    )
+    .await?;
     txn.commit().await?;
 
     Ok(StatusCode::OK)
@@ -1053,7 +1051,7 @@ pub(crate) async fn restart_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     pipeline_id: Path<i64>,
@@ -1067,7 +1065,7 @@ pub(crate) async fn restart_pipeline(
         tenant_id,
         pipeline_id,
         &encryption_key,
-        k8s_client.as_deref(),
+        k8s_client.as_ref(),
         &source_tls_config,
         &api_config,
     )
@@ -1100,7 +1098,7 @@ pub(crate) async fn restart_pipeline(
 pub(crate) async fn stop_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     pipeline_id: Path<i64>,
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -1115,9 +1113,7 @@ pub(crate) async fn stop_pipeline(
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
-    if let Some(k8s_client) = k8s_client.as_deref() {
-        delete_pipeline_resources_in_k8s(k8s_client, tenant_id, replicator).await?;
-    }
+    delete_pipeline_resources_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     txn.commit().await?;
 
     Ok(StatusCode::OK)
@@ -1141,16 +1137,14 @@ pub(crate) async fn stop_pipeline(
 pub(crate) async fn stop_all_pipelines(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
 
     let mut txn = pool.begin().await?;
     let replicators = data::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
     for replicator in replicators {
-        if let Some(k8s_client) = k8s_client.as_deref() {
-            delete_pipeline_resources_in_k8s(k8s_client, tenant_id, replicator).await?;
-        }
+        delete_pipeline_resources_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     }
     txn.commit().await?;
 
@@ -1238,7 +1232,7 @@ pub(crate) async fn get_pipeline_version(
 pub(crate) async fn get_pipeline_status(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     pipeline_id: Path<i64>,
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -1252,12 +1246,8 @@ pub(crate) async fn get_pipeline_status(
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
-    let status = if let Some(k8s_client) = k8s_client.as_deref() {
-        let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
-        k8s_client.get_replicator_pod_status(&prefix).await?.into()
-    } else {
-        PipelineStatus::Stopped
-    };
+    let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
+    let status = k8s_client.get_replicator_pod_status(&prefix).await?.into();
 
     let response = GetPipelineStatusResponse { pipeline_id, status };
 
@@ -1545,7 +1535,7 @@ pub(crate) async fn update_pipeline_version(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
-    Extension(k8s_client): Extension<Option<Arc<dyn K8sClient>>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     pipeline_id: Path<i64>,
@@ -1602,7 +1592,7 @@ pub(crate) async fn update_pipeline_version(
         tenant_id,
         pipeline_id,
         &encryption_key,
-        k8s_client.as_deref(),
+        k8s_client.as_ref(),
         source_tls_config.as_ref(),
         api_config.as_ref(),
     )

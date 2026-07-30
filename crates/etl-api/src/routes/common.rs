@@ -32,16 +32,12 @@ pub(crate) async fn restart_pipeline_replicator_if_running(
     tenant_id: &str,
     pipeline_id: i64,
     encryption_key: &EncryptionKeyring,
-    k8s_client: Option<&dyn K8sClient>,
+    k8s_client: &dyn K8sClient,
     source_tls_config: &SourceTlsConfig,
     api_config: &ApiConfig,
 ) -> Result<bool, PipelineError> {
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(connection, tenant_id, pipeline_id, encryption_key).await?;
-
-    let Some(k8s_client) = k8s_client else {
-        return Ok(false);
-    };
 
     if !should_reconcile_replicator_resources(k8s_client, tenant_id, replicator.id).await? {
         return Ok(false);
