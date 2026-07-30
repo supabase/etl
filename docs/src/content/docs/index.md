@@ -10,8 +10,9 @@ description: Replicate Postgres changes anywhere in near real time.
 destination modules, standalone replicator, and custom implementations. Replicate
 inserts, updates, deletes, truncates, and schema events to a built-in module or
 your own destination. **BigQuery** is the most mature destination module in this
-library; DuckLake, ClickHouse, and Snowflake modules are also available in
-`etl-destinations`, and the Iceberg module is deprecated for new deployments.
+library; DuckLake and Snowflake modules are also available in
+`etl-destinations`; the ClickHouse module is in **closed beta**, and the
+Iceberg module is deprecated for new deployments.
 
 Looking for the managed product in the Supabase Dashboard? Use the canonical
 [Supabase Pipelines documentation](https://supabase.com/docs/guides/database/replication/pipelines)
@@ -189,10 +190,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-This snippet intentionally shows **ETL used as a library** with your own `Destination` implementation.
-Feature-gated destination modules live in `etl-destinations`: BigQuery,
-DuckLake, ClickHouse, Snowflake, and the deprecated Iceberg module. The shared
-pipeline, config, store, and event types should come from `etl`.
+This snippet intentionally shows **ETL used as a library** with your own
+`Destination` implementation. Feature-gated destination modules live in
+`etl-destinations`: BigQuery, DuckLake, ClickHouse (closed beta), Snowflake,
+and the deprecated Iceberg module. The shared pipeline, config, store, and
+event types should come from `etl`.
 
 `Pipeline::start()` installs ETL's **source-side schema helpers** before
 replication begins. If you use `PostgresStore` as the runtime store,

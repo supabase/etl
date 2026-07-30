@@ -204,7 +204,7 @@ one of the modules shipped in `etl-destinations`.
 | Feature | Destination | Status | Notes |
 | --- | --- | --- | --- |
 | `bigquery` | Google BigQuery | Stable | Full CRUD-capable replication for analytics workloads. |
-| `clickhouse` | ClickHouse | In progress | Columnar OLAP replication with current-state or append-only layouts. |
+| `clickhouse` | ClickHouse | Closed beta | Columnar OLAP replication with current-state or append-only layouts. |
 | `ducklake` | DuckLake | In progress | Open data lake replication with local or S3-compatible storage. |
 | `iceberg` | Apache Iceberg | Deprecated for now | The module remains available, but new deployments should prefer BigQuery or DuckLake. |
 | `snowflake` | Snowflake | In progress | Cloud data warehouse replication example and destination module. |

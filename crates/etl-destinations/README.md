@@ -7,7 +7,7 @@ Enable the destination modules you need with crate features:
 | Feature | Destination | Status |
 | --- | --- | --- |
 | `bigquery` | Google BigQuery | Stable |
-| `clickhouse` | ClickHouse | In progress |
+| `clickhouse` | ClickHouse | Closed beta |
 | `ducklake` | DuckLake | In progress |
 | `iceberg` | Apache Iceberg | Deprecated for now |
 | `snowflake` | Snowflake | In progress |
