@@ -3173,6 +3173,14 @@ where
         // delay establishes
         // `Ready(H) => persisted apply checkpoint >= H` without an atomic
         // state/checkpoint write.
+        //
+        // This per-flush write deliberately minimizes the replay window when
+        // PostgreSQL slot feedback has not advanced yet. It could be coalesced
+        // across durable flushes if production metrics show that checkpoint
+        // write amplification is material, at the cost of replaying more
+        // already-flushed events after a crash. Any such optimization must keep
+        // Ready transitions and schema cleanup gated on the checkpoint that is
+        // actually persisted, never on a deferred in-memory candidate.
         let persisted_checkpoint_lsn = self.persist_replication_checkpoint(current_lsn).await?;
         debug_assert!(persisted_checkpoint_lsn >= current_lsn);
 

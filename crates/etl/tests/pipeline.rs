@@ -2688,15 +2688,22 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
 
     let rows_to_insert = 10;
 
-    // Register notifications before starting the pipeline so we do not miss
-    // state transitions or events that happen during startup. `notify_on_*`
-    // and `wait_for_*` only fire on updates that occur after registration.
-    // Every concurrent row may be consumed by table sync, so completion does
-    // not require an apply-owned row that would advance SyncDone to Ready.
+    // Register startup and Ready notifications before starting the pipeline so
+    // we do not miss state transitions or events that happen during startup.
+    // `notify_on_*` and `wait_for_*` only fire on updates that occur after
+    // registration. Every concurrent row may be consumed by table sync, so
+    // completion does not require an apply-owned row that would advance
+    // SyncDone to Ready.
     let users_sync_complete_notify =
         store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
     let orders_sync_complete_notify =
         store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
+    let users_ready_notify = store
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .await;
+    let orders_ready_notify = store
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
+        .await;
 
     // Wait for all rows to be processed (either as table copy or streaming
     // inserts), requiring the expected count for each table.
@@ -2791,8 +2798,9 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     let users_table_name = database_schema.users_schema().name.clone();
     let orders_table_name = database_schema.orders_schema().name.clone();
 
-    // The first apply-owned update restores each stored SyncDone decoder.
-    // Register Ready and event notifications before producing that DML.
+    // The first apply-owned update restores each stored SyncDone decoder. The
+    // Ready notifications are already armed; register the update/delete event
+    // notification before producing that DML.
     let updates_deletes_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(
@@ -2861,6 +2869,8 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     });
 
     updates_deletes_notify.notified().await;
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
