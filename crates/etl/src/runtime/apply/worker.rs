@@ -431,9 +431,9 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
 
     // The two frontiers can legitimately differ because checkpoint persistence
     // and PostgreSQL status feedback are separate operations. The checkpoint
-    // may be selected from a durably flushed commit boundary or, while the loop
-    // is fully idle, from the last received LSN. Each persisted value is safe
-    // for replay. Startup therefore chooses the later available frontier.
+    // is selected from a completed destination flush boundary. PostgreSQL slot
+    // feedback may advance farther while the loop is quiescent, so startup
+    // chooses the later available frontier.
     let start_lsn = persisted_checkpoint_lsn.max(slot_start_lsn);
 
     if persisted_checkpoint_lsn > slot_start_lsn {

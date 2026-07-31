@@ -770,7 +770,7 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_sync_idle_handover_waits_for_durability_and_persisted_apply_checkpoint() {
+async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
 
@@ -873,19 +873,22 @@ async fn table_sync_idle_handover_waits_for_durability_and_persisted_apply_check
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
     assert!(checkpoint_before_unpause.is_none_or(|checkpoint| checkpoint < sync_done_lsn));
 
-    let checkpoint_notify =
-        store.notify_on_replication_checkpoint(WorkerType::Apply, sync_done_lsn).await;
     fail::remove(STORE_REPLICATION_CHECKPOINT_FP);
 
-    // Generate fresh unrelated WAL after restoring checkpoint writes so the
-    // apply loop receives a new idle progress opportunity.
+    // Generate fresh unrelated WAL after restoring checkpoint writes and wait
+    // until the apply worker reports that received progress to PostgreSQL.
+    // Since no destination flush occurred, quiescent coordination must not
+    // persist that received LSN as an apply checkpoint.
     other_database.insert_values(other_database_table, &["value"], &[&2_i32]).await.unwrap();
-
-    checkpoint_notify.notified().await;
+    wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
 
     let persisted_checkpoint_lsn =
-        store.get_replication_checkpoint(WorkerType::Apply).await.unwrap().unwrap();
-    assert!(persisted_checkpoint_lsn >= sync_done_lsn);
+        store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    assert_eq!(persisted_checkpoint_lsn, checkpoint_before_unpause);
+    assert!(matches!(
+        store.get_table_state(table_id).await.unwrap(),
+        Some(TableState::SyncDone { .. })
+    ));
 
     pipeline.shutdown_and_wait().await.unwrap();
 }

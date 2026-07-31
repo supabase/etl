@@ -302,8 +302,8 @@ struct ReplicationLagMetricsInner {
     last_flush_lsn: AtomicU64,
     /// The highest safe frontier selected from received-or-flushed progress.
     ///
-    /// PostgreSQL feedback and ETL durable checkpoint candidates use this same
-    /// idle-or-flushed selection rule.
+    /// PostgreSQL feedback uses this quiescent-or-flushed selection rule.
+    /// Durable ETL checkpoints advance only after destination flushes.
     last_checkpoint_lsn: AtomicU64,
 }
 
@@ -905,19 +905,22 @@ impl ApplyLoopState {
         self.replication_progress.last_received_lsn()
     }
 
-    /// Returns `true` if the apply loop is totally idle.
+    /// Returns `true` if the apply loop is quiescent.
+    ///
+    /// A quiescent loop has no open transaction, buffered or in-flight
+    /// destination work, or carried durability obligation.
     ///
     /// A carried commit end LSN from an accepted-but-not-durable write keeps
-    /// the loop non-idle for status updates. This is conservative: PostgreSQL
-    /// feedback keeps reporting the last flush LSN until a later durable write
-    /// proves the carried LSN safe.
+    /// the loop non-quiescent for status updates. This is conservative:
+    /// PostgreSQL feedback keeps reporting the last flush LSN until a later
+    /// durable write proves the carried LSN safe.
     ///
     /// Ordinarily, if no later batch arrives, durability for the accepted
     /// write is deferred until replay or the next batch. A terminal table-sync
     /// catchup is the exception: once keepalive progress reaches its target,
     /// ETL dispatches an empty required-durability write through the same
     /// pending-result path.
-    fn is_idle(&self) -> bool {
+    fn is_quiescent(&self) -> bool {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
             && self.last_commit_end_lsn.is_none()
@@ -925,20 +928,21 @@ impl ApplyLoopState {
 
     /// Returns the checkpoint LSN to report to PostgreSQL.
     ///
-    /// When the loop is idle, every emitted message has been fully handled, so
-    /// the last received LSN is a safe replay frontier even if no destination
-    /// write occurred. A logical keepalive can cross an open transaction still
-    /// buffered by PostgreSQL; the slot retains its earlier `restart_lsn` and
-    /// rebuilds transactions that commit after the confirmed checkpoint. While
-    /// any client-side transaction, batch, or destination write is unresolved,
-    /// the checkpoint remains at the last completed destination flush.
+    /// When the loop is quiescent, every emitted message has been fully
+    /// handled, so the last received LSN is a safe replay frontier even if
+    /// no destination write occurred. A logical keepalive can cross an open
+    /// transaction still buffered by PostgreSQL; the slot retains its
+    /// earlier `restart_lsn` and rebuilds transactions that commit after
+    /// the confirmed checkpoint. While any client-side transaction, batch,
+    /// or destination write is unresolved, the checkpoint remains at the
+    /// last completed destination flush.
     ///
-    /// Starting new work after an idle checkpoint can make this computed value
-    /// lower than a value already reported on the connection. The replication
-    /// stream keeps PostgreSQL feedback monotonic, so the wire-level checkpoint
-    /// never moves backward.
+    /// Starting new work after a quiescent checkpoint can make this computed
+    /// value lower than a value already reported on the connection. The
+    /// replication stream keeps PostgreSQL feedback monotonic, so the
+    /// wire-level checkpoint never moves backward.
     fn checkpoint_lsn(&self) -> PgLsn {
-        if self.is_idle() {
+        if self.is_quiescent() {
             self.replication_progress.last_received_lsn()
         } else {
             self.replication_progress.last_flush_lsn()
@@ -1278,9 +1282,9 @@ where
     /// Runs one normal apply-loop iteration while the worker is still actively
     /// processing.
     ///
-    /// Each active iteration first advances idle table-sync coordination before
-    /// it can read more WAL. This keeps restarted apply loops from streaming
-    /// while a table-sync worker is already in `Catchup`.
+    /// Each active iteration first advances quiescent table-sync coordination
+    /// before it can read more WAL. This keeps restarted apply loops from
+    /// streaming while a table-sync worker is already in `Catchup`.
     ///
     /// After that preflight, this keeps the priority order explicit:
     /// 1. Shutdown requests.
@@ -1311,9 +1315,9 @@ where
         replication_client: &PgReplicationClient,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
-        // We try to process syncing tables if we are idle, so that we advance state
-        // faster.
-        self.maybe_process_syncing_tables_when_idle().await?;
+        // Process quiescent coordination before waiting for another signal. The
+        // next loop iteration observes progress made by whichever branch runs below.
+        self.maybe_process_syncing_tables_when_quiescent().await?;
 
         // We try to finish the active iteration even before starting it, since we might
         // be able to finish earlier, without having to process any signal from
@@ -1380,10 +1384,6 @@ where
             }
         }
 
-        // We try to process syncing tables if we are idle, so that we advance state
-        // faster.
-        self.maybe_process_syncing_tables_when_idle().await?;
-
         Ok(self.try_finish_active_iteration())
     }
 
@@ -1398,7 +1398,7 @@ where
     /// 3. Batch flush deadline expiry.
     /// 4. Periodic keep alive status updates.
     ///
-    /// Shutdown drain does not start new idle table-sync coordination. If
+    /// Shutdown drain does not start new quiescent table-sync coordination. If
     /// permanent completion already started a required-durability barrier,
     /// the result handler completes the table-sync handoff before this drain
     /// is allowed to return.
@@ -1593,8 +1593,8 @@ where
     /// replication state once more.
     ///
     /// The update uses the loop's [`ApplyLoopState::checkpoint_lsn`], which may
-    /// select received progress while idle or flushed progress while work is
-    /// unresolved.
+    /// select received progress while quiescent or flushed progress while work
+    /// is unresolved.
     async fn send_shutdown_flush_status_update(
         &mut self,
         mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
@@ -1942,17 +1942,17 @@ where
             }
 
             // A keepalive-only table-sync completion records `Complete` before
-            // dispatching its empty durability barrier. The normal idle hook skips
-            // once an exit is requested, and shutdown drain does not run that hook.
-            // Complete the handoff here after the barrier has settled the carried
-            // commit LSN and the loop is fully idle again.
+            // dispatching its empty durability barrier. The normal quiescent hook
+            // skips once an exit is requested, and shutdown drain does not run that
+            // hook. Complete the handoff here after the barrier has settled the
+            // carried commit LSN and the loop is quiescent again.
             if metadata.event_count == 0
                 && metadata.durability == WriteEventsDurability::RequireDurable
                 && status == DestinationWriteStatus::Durable
                 && matches!(self.state.exit_intent, Some(ExitIntent::Complete))
-                && self.state.is_idle()
+                && self.state.is_quiescent()
             {
-                self.process_syncing_tables_when_idle().await?;
+                self.process_syncing_tables_when_quiescent().await?;
             }
         }
 
@@ -2192,7 +2192,7 @@ where
                 // uncommitted transaction whose changes remain in the server's
                 // reorder buffer. The slot retains the earlier `restart_lsn`
                 // needed to rebuild such transactions after a reconnect.
-                // ETL uses this position only while the apply loop is idle;
+                // ETL uses this position only while the apply loop is quiescent;
                 // while emitted work is unresolved, `checkpoint_lsn()` remains
                 // at the completed destination flush frontier. This relies on
                 // the current non-streaming pgoutput session and must be
@@ -3161,9 +3161,10 @@ where
         // The apply-worker hook above intentionally reads the progress that was
         // durable before this flush. If this flush is the first one to reach a
         // SyncDone boundary, that hook leaves the table in SyncDone, this write
-        // advances the persisted checkpoint, and the next idle or after-flush
-        // evaluation may move the table to Ready once this connection has also
-        // materialized its decoder. This one-evaluation delay establishes
+        // advances the persisted checkpoint, and the next quiescent or
+        // after-flush evaluation may move the table to Ready once this
+        // connection has also materialized its decoder. This one-evaluation
+        // delay establishes
         // `Ready(H) => persisted apply checkpoint >= H` without an atomic
         // state/checkpoint write.
         let persisted_checkpoint_lsn = self.persist_replication_checkpoint(current_lsn).await?;
@@ -3174,10 +3175,9 @@ where
 
     /// Persists a worker checkpoint unless fault injection asks us to skip it.
     ///
-    /// The caller selects the checkpoint boundary: after a destination flush it
-    /// passes the flushed commit boundary, while an idle caller passes the last
-    /// received LSN. The store applies a monotonic update and returns the
-    /// checkpoint that remains persisted.
+    /// The caller passes a completed destination flush boundary. The store
+    /// applies a monotonic update and returns the checkpoint that remains
+    /// persisted.
     ///
     /// Test failpoints deliberately return the candidate without writing it so
     /// recovery tests can model a lost checkpoint write.
@@ -3210,12 +3210,12 @@ where
         table_sync_worker::catchup_target_reached(ctx, self.state.last_received_lsn()).await
     }
 
-    /// Processes syncing tables when the apply loop is idle.
+    /// Processes syncing tables when the apply loop is quiescent.
     ///
     /// Once an exit has already been requested we intentionally skip this class
     /// of work so draining stays focused on already-started flushes and
     /// shutdown barriers.
-    async fn maybe_process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
+    async fn maybe_process_syncing_tables_when_quiescent(&mut self) -> EtlResult<()> {
         if self.state.exit_intent.is_some() {
             return Ok(());
         }
@@ -3241,23 +3241,23 @@ where
             return Ok(());
         }
 
-        self.process_syncing_tables_when_idle().await
+        self.process_syncing_tables_when_quiescent().await
     }
 
-    /// Processes syncing tables when the apply loop is idle.
+    /// Processes syncing tables when the apply loop is quiescent.
     ///
     /// Dispatches to worker-specific implementation based on the worker
     /// context.
     ///
-    /// Idle syncing uses the last received LSN so table handoff can make
+    /// Quiescent syncing uses the last received LSN so table handoff can make
     /// progress even when no new transactions arrive. This is made possible
     /// thanks to keepalive messages that carry the logical walsender's sent
     /// position. That position advances through decoded WAL even when the
     /// output plugin emits no events for tables this pipeline is interested
     /// in.
-    async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
-        if !self.state.is_idle() {
-            debug!("skipping table sync processing because apply loop is not idle");
+    async fn process_syncing_tables_when_quiescent(&mut self) -> EtlResult<()> {
+        if !self.state.is_quiescent() {
+            debug!("skipping table sync processing because apply loop is not quiescent");
 
             return Ok(());
         }
@@ -3267,7 +3267,7 @@ where
         debug!(
             worker_type = %self.worker_context.worker_type(),
             %current_lsn,
-            "processing syncing tables outside transaction"
+            "processing syncing tables while apply loop is quiescent"
         );
 
         let table_sync_decoding_state = self.table_sync_decoding_state();
@@ -3275,7 +3275,7 @@ where
 
         let exit_intent = match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
-                apply_worker::process_syncing_tables_when_idle(
+                apply_worker::process_syncing_tables_when_quiescent(
                     ctx,
                     current_lsn,
                     table_decoding_states,
@@ -3283,7 +3283,7 @@ where
                 .await
             }
             WorkerContext::TableSync(ctx) => {
-                table_sync_worker::process_syncing_tables_when_idle(
+                table_sync_worker::process_syncing_tables_when_quiescent(
                     ctx,
                     current_lsn,
                     table_sync_decoding_state.as_ref(),
@@ -3293,18 +3293,6 @@ where
         }?;
 
         self.state.record_exit_intent(exit_intent);
-
-        // Preserve the same ordering as the after-flush path: evaluate table
-        // states against the previously persisted checkpoint, then persist the
-        // current idle checkpoint. When this write first crosses `SyncDone`, a
-        // later loop evaluation may perform the `Ready` transition after this
-        // connection has also materialized the table decoder.
-        //
-        // This does not update `last_flush_lsn`: no destination write completed
-        // on this path. The loop remains idle, so `checkpoint_lsn()` continues
-        // to select `last_received_lsn`.
-        let persisted_checkpoint_lsn = self.persist_replication_checkpoint(current_lsn).await?;
-        debug_assert!(persisted_checkpoint_lsn >= current_lsn);
 
         Ok(())
     }
@@ -3674,8 +3662,8 @@ mod apply_worker {
     /// `persisted_checkpoint_lsn` is the restart frontier from an earlier
     /// evaluation. When the current flush first reaches `SyncDone.lsn`, this
     /// pass keeps the table in `SyncDone`; the caller then persists the new
-    /// checkpoint, and the next idle or after-flush pass can store `Ready` if
-    /// the decoder is also materialized. The deliberate delay makes every
+    /// checkpoint, and the next quiescent or after-flush pass can store `Ready`
+    /// if the decoder is also materialized. The deliberate delay makes every
     /// persisted `Ready` imply both that a checkpoint at or beyond
     /// `SyncDone.lsn` was already durable and that the current connection no
     /// longer needs the stored decoding payload.
@@ -3849,20 +3837,17 @@ mod apply_worker {
         Ok(())
     }
 
-    /// Processes syncing tables outside transaction.
+    /// Processes syncing tables while the apply loop is quiescent.
     ///
     /// Handles `SyncWait → Catchup`, waits for workers already in Catchup,
     /// transitions `SyncDone → Ready` only after the persisted apply checkpoint
     /// reaches `SyncDone.lsn` and this connection has materialized the table
-    /// decoder, and spawns workers. Only called when outside a transaction and
-    /// the batch is empty.
+    /// decoder, and spawns workers.
     ///
-    /// As in the after-flush path, the caller persists `current_lsn` only after
-    /// this function succeeds. If that persistence first reaches
-    /// `SyncDone.lsn`, `Ready` is intentionally deferred until a later loop
-    /// evaluation where both that durable checkpoint and a local decoder are
-    /// visible.
-    pub(super) async fn process_syncing_tables_when_idle<S, D>(
+    /// This path does not advance the apply checkpoint because no destination
+    /// flush completed. A quiet table may therefore remain in `SyncDone` until
+    /// a later durable apply flush advances the persisted checkpoint.
+    pub(super) async fn process_syncing_tables_when_quiescent<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
         table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
@@ -3882,7 +3867,7 @@ mod apply_worker {
         let persisted_checkpoint_lsn =
             ctx.store.get_replication_checkpoint(WorkerType::Apply).await?;
         for (table_id, table_state) in syncing_tables {
-            let exit_intent = process_single_syncing_table_when_idle(
+            let exit_intent = process_single_syncing_table_when_quiescent(
                 ctx,
                 table_id,
                 table_state,
@@ -3900,12 +3885,11 @@ mod apply_worker {
         Ok(None)
     }
 
-    /// Processes a single syncing table outside transaction.
+    /// Processes a single syncing table while the apply loop is quiescent.
     ///
     /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, waits
-    /// for workers already in Catchup, and spawns workers. Only called when
-    /// outside a transaction and the batch is empty.
-    async fn process_single_syncing_table_when_idle<S, D>(
+    /// for workers already in Catchup, and spawns workers.
+    async fn process_single_syncing_table_when_quiescent<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         table_id: TableId,
         table_state: TableState,
@@ -3936,7 +3920,7 @@ mod apply_worker {
                 table_id = table_id.0,
                 table_state_type = %state.as_type(),
                 %current_lsn,
-                "checking table with active worker when idle",
+                "checking table with active worker when quiescent",
             );
 
             match state {
@@ -4025,7 +4009,7 @@ mod apply_worker {
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
                         table_state_type = %state.as_type(),
-                        "no action needed for current state when idle",
+                        "no action needed for current state when quiescent",
                     );
                 }
             }
@@ -4039,7 +4023,7 @@ mod apply_worker {
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
                 table_state_type = %table_state.as_type(),
-                "checking table without active worker when idle",
+                "checking table without active worker when quiescent",
             );
 
             match table_state {
@@ -4284,11 +4268,10 @@ mod table_sync_worker {
         try_complete_catchup(ctx, current_lsn, table_decoding_state).await
     }
 
-    /// Processes syncing tables outside transaction.
+    /// Processes syncing tables while the apply loop is quiescent.
     ///
     /// If catchup position reached, transitions to SyncDone.
-    /// Only called when outside a transaction and the batch is empty.
-    pub(super) async fn process_syncing_tables_when_idle<S>(
+    pub(super) async fn process_syncing_tables_when_quiescent<S>(
         ctx: &mut TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
         table_decoding_state: Option<&TableDecodingState>,
