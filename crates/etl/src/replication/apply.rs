@@ -546,7 +546,8 @@ impl ApplyLoopTasks {
     async fn handle_replication_lag_sampler_task_result(&mut self) {
         // We abort the task, so that awaiting on the handle is as quick as possible.
         //
-        // It's fine to abort this task midway, since it's not going to affect consistency.
+        // It's fine to abort this task midway, since it's not going to affect
+        // consistency.
         self.replication_lag_sampler_task.abort();
 
         if let Err(err) = (&mut self.replication_lag_sampler_task).await
@@ -564,9 +565,9 @@ impl ApplyLoopTasks {
         // request before the apply loop returns.
         //
         // We don't want to call abort on the task, just to prevent possible errors from
-        // partial completion around await points. In practice, it could be suspendable midway,
-        // but it's safer to avoid it, also since the pruning of schemas should be relatively
-        // quick.
+        // partial completion around await points. In practice, it could be suspendable
+        // midway, but it's safer to avoid it, also since the pruning of schemas
+        // should be relatively quick.
         self.schema_cleanup_tx.take();
 
         if let Err(err) = (&mut self.schema_cleanup_worker_task).await {
@@ -574,7 +575,7 @@ impl ApplyLoopTasks {
                 ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
                 WORKER_TYPE_LABEL => worker_type.as_str(),
             )
-                .increment(1);
+            .increment(1);
 
             error!(
                 %worker_type,
