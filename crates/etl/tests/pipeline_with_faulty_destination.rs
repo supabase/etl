@@ -149,22 +149,6 @@ async fn wait_for_notification(
         .map_err(|_| TestCaseError::fail(format!("timed out waiting for {description}")))
 }
 
-/// Inserts one autocommit user transaction and waits for its delivery.
-async fn insert_user_and_wait(
-    database: &mut PgDatabase<Client>,
-    users_table_name: &TableName,
-    destination: &RouletteDestination,
-    table_id: TableId,
-    user_number: usize,
-) -> Result<(), TestCaseError> {
-    let user_id = i64::try_from(user_number).expect("roulette user number should fit in i64");
-    let delivered = notify_on_user_insert(destination, table_id, user_id).await;
-
-    insert_users_data(database, users_table_name, user_number..=user_number).await;
-
-    wait_for_notification(&delivered, format!("delivery of user {user_id}")).await
-}
-
 /// Terminates the active apply walsender and returns its PID.
 async fn terminate_apply_walsender(
     client: &Client,
@@ -193,6 +177,117 @@ async fn wait_for_apply_reconnect(
     tokio::time::timeout(ROULETTE_TIMEOUT, wait_for_new_walsender(client, apply_slot_name, old_pid))
         .await
         .map_err(|_| TestCaseError::fail("timed out waiting for the apply walsender to reconnect"))
+}
+
+/// Mutable state used to execute one walsender roulette workload.
+struct WalsenderRouletteWorkload<'a> {
+    /// Source database receiving generated transactions.
+    database: &'a mut PgDatabase<Client>,
+    /// Qualified users table name.
+    users_table_name: &'a TableName,
+    /// Destination recording replicated events.
+    destination: &'a RouletteDestination,
+    /// Users table identifier.
+    table_id: TableId,
+    /// Apply replication slot name.
+    apply_slot_name: &'a str,
+}
+
+impl<'a> WalsenderRouletteWorkload<'a> {
+    /// Executes the generated transactions and disconnect schedule.
+    async fn run(
+        &mut self,
+        case: WalsenderRouletteCase,
+        users_ready: &TimedNotify,
+    ) -> Result<(), TestCaseError> {
+        wait_for_notification(users_ready, "users table to become ready").await?;
+
+        for user_number in 1..case.disconnect_after {
+            self.insert_user(user_number).await?;
+        }
+
+        self.disconnect(case.disconnect_after, case.response_timing).await?;
+
+        for user_number in (case.disconnect_after + 1)..=case.transaction_count {
+            self.insert_user(user_number).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Inserts one autocommit user transaction and waits for its delivery.
+    async fn insert_user(&mut self, user_number: usize) -> Result<(), TestCaseError> {
+        let user_id = i64::try_from(user_number).expect("roulette user number should fit in i64");
+        let delivered = notify_on_user_insert(self.destination, self.table_id, user_id).await;
+
+        insert_users_data(self.database, self.users_table_name, user_number..=user_number).await;
+
+        wait_for_notification(&delivered, format!("delivery of user {user_id}")).await
+    }
+
+    /// Executes the generated disconnect schedule.
+    async fn disconnect(
+        &mut self,
+        user_number: usize,
+        response_timing: WriteResponseTiming,
+    ) -> Result<(), TestCaseError> {
+        match response_timing {
+            WriteResponseTiming::Unheld => self.disconnect_after_delivered_write(user_number).await,
+            WriteResponseTiming::ReleaseThenWaitForReconnect
+            | WriteResponseTiming::WaitForReconnectThenRelease => {
+                self.disconnect_with_held_write(user_number, response_timing).await
+            }
+        }
+    }
+
+    /// Disconnects after the scheduled write reaches the destination.
+    async fn disconnect_after_delivered_write(
+        &mut self,
+        user_number: usize,
+    ) -> Result<(), TestCaseError> {
+        self.insert_user(user_number).await?;
+
+        let client = self.database.client.as_ref().unwrap();
+        let old_pid = terminate_apply_walsender(client, self.apply_slot_name).await?;
+
+        wait_for_apply_reconnect(client, self.apply_slot_name, old_pid).await
+    }
+
+    /// Disconnects while the scheduled write response is held.
+    async fn disconnect_with_held_write(
+        &mut self,
+        user_number: usize,
+        response_timing: WriteResponseTiming,
+    ) -> Result<(), TestCaseError> {
+        let user_id = i64::try_from(user_number).expect("roulette user number should fit in i64");
+        let delivered = notify_on_user_insert(self.destination, self.table_id, user_id).await;
+        let hold = self.destination.hold_next(FaultyOp::WriteEvents).await;
+
+        insert_users_data(self.database, self.users_table_name, user_number..=user_number).await;
+        tokio::time::timeout(ROULETTE_TIMEOUT, hold.wait_reached())
+            .await
+            .map_err(|_| TestCaseError::fail("timed out waiting for held write response"))?;
+
+        let client = self.database.client.as_ref().unwrap();
+        let old_pid = terminate_apply_walsender(client, self.apply_slot_name).await?;
+
+        match response_timing {
+            WriteResponseTiming::ReleaseThenWaitForReconnect => {
+                hold.release_ok();
+                wait_for_notification(&delivered, format!("delivery of held user {user_id}"))
+                    .await?;
+                wait_for_apply_reconnect(client, self.apply_slot_name, old_pid).await
+            }
+            WriteResponseTiming::WaitForReconnectThenRelease => {
+                wait_for_apply_reconnect(client, self.apply_slot_name, old_pid).await?;
+                hold.release_ok();
+                wait_for_notification(&delivered, format!("delivery of held user {user_id}")).await
+            }
+            WriteResponseTiming::Unheld => {
+                unreachable!("held write disconnect requires a held response timing")
+            }
+        }
+    }
 }
 
 /// Reads the committed users from the source table.
@@ -337,82 +432,16 @@ async fn run_walsender_roulette_case(case: WalsenderRouletteCase) -> Result<(), 
         .start()
         .await
         .map_err(|error| TestCaseError::fail(format!("pipeline failed to start: {error}")))?;
-    let case_result: Result<(), TestCaseError> = async {
-        wait_for_notification(&users_ready, "users table to become ready").await?;
-
-        for user_number in 1..case.disconnect_after {
-            insert_user_and_wait(
-                &mut database,
-                &users_schema.name,
-                &destination,
-                table_id,
-                user_number,
-            )
-            .await?;
-        }
-
-        match case.response_timing {
-            WriteResponseTiming::Unheld => {
-                insert_user_and_wait(
-                    &mut database,
-                    &users_schema.name,
-                    &destination,
-                    table_id,
-                    case.disconnect_after,
-                )
-                .await?;
-
-                let client = database.client.as_ref().unwrap();
-                let old_pid = terminate_apply_walsender(client, &apply_slot_name).await?;
-                wait_for_apply_reconnect(client, &apply_slot_name, old_pid).await?;
-            }
-            timing => {
-                let user_id = i64::try_from(case.disconnect_after)
-                    .expect("roulette user number should fit in i64");
-                let delivered = notify_on_user_insert(&destination, table_id, user_id).await;
-                let hold = destination.hold_next(FaultyOp::WriteEvents).await;
-
-                insert_users_data(
-                    &mut database,
-                    &users_schema.name,
-                    case.disconnect_after..=case.disconnect_after,
-                )
-                .await;
-                tokio::time::timeout(ROULETTE_TIMEOUT, hold.wait_reached()).await.map_err(
-                    |_| TestCaseError::fail("timed out waiting for held write response"),
-                )?;
-
-                let client = database.client.as_ref().unwrap();
-                let old_pid = terminate_apply_walsender(client, &apply_slot_name).await?;
-
-                if matches!(timing, WriteResponseTiming::ReleaseThenWaitForReconnect) {
-                    hold.release_ok();
-                    wait_for_notification(&delivered, format!("delivery of held user {user_id}"))
-                        .await?;
-                    wait_for_apply_reconnect(client, &apply_slot_name, old_pid).await?;
-                } else {
-                    wait_for_apply_reconnect(client, &apply_slot_name, old_pid).await?;
-                    hold.release_ok();
-                    wait_for_notification(&delivered, format!("delivery of held user {user_id}"))
-                        .await?;
-                }
-            }
-        }
-
-        for user_number in (case.disconnect_after + 1)..=case.transaction_count {
-            insert_user_and_wait(
-                &mut database,
-                &users_schema.name,
-                &destination,
-                table_id,
-                user_number,
-            )
-            .await?;
-        }
-
-        Ok(())
-    }
-    .await;
+    let workload_result = {
+        let mut workload = WalsenderRouletteWorkload {
+            database: &mut database,
+            users_table_name: &users_schema.name,
+            destination: &destination,
+            table_id,
+            apply_slot_name: &apply_slot_name,
+        };
+        workload.run(case, &users_ready).await
+    };
 
     let shutdown_result = tokio::time::timeout(ROULETTE_TIMEOUT, pipeline.shutdown_and_wait())
         .await
@@ -422,7 +451,7 @@ async fn run_walsender_roulette_case(case: WalsenderRouletteCase) -> Result<(), 
                 .map_err(|error| TestCaseError::fail(format!("pipeline shutdown failed: {error}")))
         });
 
-    case_result?;
+    workload_result?;
     shutdown_result?;
 
     let source_users =
