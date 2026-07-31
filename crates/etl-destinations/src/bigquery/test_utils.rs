@@ -25,8 +25,8 @@ use crate::{
 /// Maximum number of times we re-run a verification query.
 ///
 /// Sized generously because a view dropped and recreated under the same name
-/// can serve stale NOT_FOUND responses well past the first few seconds.
-const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 120;
+/// can serve stale metadata for several minutes.
+const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 600;
 /// Maximum number of times we poll for a table to report zero rows.
 ///
 /// Kept short: the expected end state is observable as soon as the deletes

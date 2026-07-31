@@ -134,14 +134,7 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
         },
         "serviceAccountName": "etl-replicator",
         "terminationGracePeriodSeconds": 300,
-        "tolerations": [
-          {
-            "effect": "NoSchedule",
-            "key": "etl.supabase.com/node-role",
-            "operator": "Equal",
-            "value": "workloads"
-          }
-        ],
+        "tolerations": [],
         "volumes": [
           {
             "configMap": {
