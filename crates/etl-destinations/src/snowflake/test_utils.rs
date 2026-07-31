@@ -5,7 +5,10 @@ pub fn load_test_config() -> Config {
     Config::require_tests_env().unwrap_or_else(|error| panic!("{error}"))
 }
 
-/// Execute a SELECT query and return result rows. Requires an active warehouse.
+/// Executes a SQL statement and returns its result rows.
+///
+/// Data queries require an active warehouse, while metadata commands such as
+/// `SHOW` do not.
 pub async fn query_rows<T: TokenProvider>(
     client: &SqlClient<T>,
     sql: &str,

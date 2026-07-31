@@ -252,10 +252,12 @@ pub(crate) fn build_table_schema(
     )
 }
 
-/// Calculates the total payload size of tuple data from a replication message.
+/// Calculates the uncompressed value bytes in a pgoutput tuple.
 ///
-/// This is used only for coarse event-size metrics, so `NULL` and
-/// `UnchangedToast` fields contribute zero bytes.
+/// Text and binary values contribute their emitted byte length. `NULL` and
+/// unchanged TOAST fields contribute zero bytes. Tuple markers, value-length
+/// fields, column counts, relation IDs, and replication protocol framing are
+/// excluded.
 pub(crate) fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
     tuple_data
         .iter()
@@ -268,12 +270,12 @@ pub(crate) fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
         .sum()
 }
 
-/// Calculates the payload size of an insert message.
+/// Calculates the new-tuple value bytes in an insert message.
 pub(crate) fn insert_message_payload_bytes(insert_body: &protocol::InsertBody) -> u64 {
     calculate_tuple_bytes(insert_body.tuple().tuple_data())
 }
 
-/// Calculates the payload size of an update message.
+/// Calculates the new- and emitted old-identity-tuple value bytes in an update.
 pub(crate) fn update_message_payload_bytes(update_body: &protocol::UpdateBody) -> u64 {
     let new_tuple_data = update_body.new_tuple().tuple_data();
     let mut total_bytes = calculate_tuple_bytes(new_tuple_data);
@@ -285,7 +287,7 @@ pub(crate) fn update_message_payload_bytes(update_body: &protocol::UpdateBody) -
     total_bytes
 }
 
-/// Calculates the payload size of a delete message.
+/// Calculates the emitted old-identity-tuple value bytes in a delete message.
 pub(crate) fn delete_message_payload_bytes(delete_body: &protocol::DeleteBody) -> u64 {
     delete_body
         .old_tuple()
@@ -989,9 +991,10 @@ mod tests {
     use tokio_postgres::types::{PgLsn, Type};
 
     use super::{
-        IdentityMessage, convert_tuple_to_row, convert_update_tuple_to_updated_table_row,
-        normalize_key_tuple_to_row, parse_event_from_delete_message,
-        parse_event_from_update_message,
+        IdentityMessage, calculate_tuple_bytes, convert_tuple_to_row,
+        convert_update_tuple_to_updated_table_row, delete_message_payload_bytes,
+        insert_message_payload_bytes, normalize_key_tuple_to_row, parse_event_from_delete_message,
+        parse_event_from_update_message, update_message_payload_bytes,
     };
     use crate::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
@@ -1086,6 +1089,24 @@ mod tests {
         }
     }
 
+    fn parse_insert_body_from_parts(
+        rel_id: u32,
+        tuple_data: &[TestTupleData<'_>],
+    ) -> postgres_replication::protocol::InsertBody {
+        let mut bytes = Vec::new();
+        bytes.push(b'I');
+        bytes.extend_from_slice(&rel_id.to_be_bytes());
+        bytes.push(b'N');
+        encode_tuple(&mut bytes, tuple_data);
+
+        let message = LogicalReplicationMessage::parse(&Bytes::from(bytes)).unwrap();
+        let LogicalReplicationMessage::Insert(body) = message else {
+            panic!("expected insert body");
+        };
+
+        body
+    }
+
     fn parse_update_body_from_parts(
         rel_id: u32,
         old_tuple: Option<&[TestTupleData<'_>]>,
@@ -1176,6 +1197,36 @@ mod tests {
             delete_body,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn pgoutput_payload_sizes_count_values_without_protocol_framing() {
+        let tuple_data = [
+            TupleData::Null,
+            TupleData::UnchangedToast,
+            TupleData::Text(Bytes::from_static("é".as_bytes())),
+            TupleData::Binary(Bytes::from_static(b"\x01\x02\x03")),
+        ];
+        assert_eq!(calculate_tuple_bytes(&tuple_data), 5);
+
+        let insert =
+            parse_insert_body_from_parts(42, &[TestTupleData::Text("é"), TestTupleData::Null]);
+        assert_eq!(insert_message_payload_bytes(&insert), 2);
+
+        let update = parse_update_body_from_parts(
+            42,
+            None,
+            Some(&[TestTupleData::Text("old"), TestTupleData::Null]),
+            &[TestTupleData::Text("é"), TestTupleData::UnchangedToast],
+        );
+        assert_eq!(update_message_payload_bytes(&update), 5);
+
+        let delete = parse_delete_body_from_parts(
+            42,
+            Some(&[TestTupleData::Text("gone"), TestTupleData::Null]),
+            None,
+        );
+        assert_eq!(delete_message_payload_bytes(&delete), 4);
     }
 
     #[test]

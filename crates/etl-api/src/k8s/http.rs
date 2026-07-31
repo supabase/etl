@@ -86,12 +86,8 @@ const REPLICATOR_APP_SUFFIX: &str = "replicator-app";
 const REPLICATOR_CONTAINER_NAME_SUFFIX: &str = "replicator";
 /// Container name suffix for the Vector sidecar.
 const VECTOR_CONTAINER_NAME_SUFFIX: &str = "vector";
-/// Namespace where data-plane resources are created.
-const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
 /// Secret storing the Logflare API key.
 const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
-/// Docker image used for the Vector sidecar.
-const VECTOR_IMAGE_NAME: &str = "public.ecr.aws/supabase/timberio/vector:0.55.0-distroless-libc";
 /// Name of the replicator container port that serves Prometheus metrics.
 const REPLICATOR_METRICS_PORT_NAME: &str = "metrics";
 /// Port the replicator listens on for Prometheus metrics.
@@ -114,8 +110,6 @@ const LOGS_VOLUME_NAME: &str = "logs";
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 /// Label used to identify DuckLake maintenance resources.
 const DUCKLAKE_MAINTENANCE_APP_LABEL: &str = "etl-ducklake-maintenance-app";
-/// ServiceAccount used by replicator pods for runtime coordination.
-const REPLICATOR_SERVICE_ACCOUNT_NAME: &str = "etl-replicator";
 /// DuckLake maintenance CRD group.
 const DUCKLAKE_MAINTENANCE_GROUP: &str = "etl.supabase.com";
 /// DuckLake maintenance CRD version.
@@ -249,11 +243,16 @@ fn test_k8s_config(environment: &Environment) -> K8sConfig {
         _ => (250, 125),
     };
     K8sConfig {
+        replicator_namespace: "etl-data-plane".to_owned(),
+        replicator_service_account_name: "etl-replicator".to_owned(),
+        replicator_node_selectors: Default::default(),
+        replicator_tolerations: Default::default(),
         replicator_resources: DefaultReplicatorResourcesConfig {
             memory_request_mib,
             cpu_request_millicores,
             destinations: Default::default(),
         },
+        vector_image: "timberio/vector:0.55.0-distroless-libc".to_owned(),
         vector_resources: DefaultVectorResourcesConfig {
             memory_request_mib: 192,
             cpu_request_millicores: 75,
@@ -263,8 +262,8 @@ fn test_k8s_config(environment: &Environment) -> K8sConfig {
 
 /// HTTP-based implementation of [`K8sClient`].
 ///
-/// The client is namespaced to the data-plane namespace and uses server-side
-/// apply to keep resources in sync.
+/// The client is scoped to the configured replicator namespace and uses
+/// server-side apply to keep resources in sync.
 #[derive(Debug)]
 pub struct HttpK8sClient {
     namespaces_api: Api<Namespace>,
@@ -283,17 +282,18 @@ impl HttpK8sClient {
     /// Prefers in-cluster configuration and falls back to the local kubeconfig
     /// when running outside the cluster.
     pub fn new(client: Client, k8s_config: K8sConfig) -> Result<HttpK8sClient, K8sError> {
+        let replicator_namespace = &k8s_config.replicator_namespace;
         let namespaces_api: Api<Namespace> = Api::all(client.clone());
         let service_accounts_api: Api<ServiceAccount> =
-            Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
-        let secrets_api: Api<Secret> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
-        let config_maps_api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
+            Api::namespaced(client.clone(), replicator_namespace);
+        let secrets_api: Api<Secret> = Api::namespaced(client.clone(), replicator_namespace);
+        let config_maps_api: Api<ConfigMap> = Api::namespaced(client.clone(), replicator_namespace);
         let stateful_sets_api: Api<StatefulSet> =
-            Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
-        let pods_api: Api<Pod> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
+            Api::namespaced(client.clone(), replicator_namespace);
+        let pods_api: Api<Pod> = Api::namespaced(client.clone(), replicator_namespace);
         let ducklake_maintenance_api: Api<DynamicObject> = Api::namespaced_with(
             client,
-            DATA_PLANE_NAMESPACE,
+            replicator_namespace,
             &ducklake_maintenance_api_resource(),
         );
 
@@ -314,31 +314,44 @@ impl HttpK8sClient {
     /// This only checks resources owned outside per-pipeline reconciliation. It
     /// does not create or mutate cluster resources.
     pub async fn preflight(&self) -> Result<(), K8sPreflightError> {
-        self.ensure_data_plane_namespace().await?;
+        self.ensure_replicator_namespace().await?;
         self.ensure_replicator_service_account().await?;
 
         Ok(())
     }
 
-    /// Ensures the data-plane namespace exists before namespaced APIs are used.
-    async fn ensure_data_plane_namespace(&self) -> Result<(), K8sPreflightError> {
-        match self.namespaces_api.get(DATA_PLANE_NAMESPACE).await {
+    /// Ensures the replicator namespace exists before namespaced APIs are used.
+    async fn ensure_replicator_namespace(&self) -> Result<(), K8sPreflightError> {
+        let namespace = &self.k8s_config.replicator_namespace;
+        match self.namespaces_api.get(namespace).await {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(err)) if err.code == 404 => {
-                Err(K8sPreflightError::MissingDataPlaneNamespace)
+                Err(K8sPreflightError::MissingReplicatorNamespace { namespace: namespace.clone() })
             }
-            Err(source) => Err(K8sPreflightError::DataPlaneNamespaceCheck { source }),
+            Err(source) => Err(K8sPreflightError::ReplicatorNamespaceCheck {
+                namespace: namespace.clone(),
+                source,
+            }),
         }
     }
 
     /// Ensures replicator pods can be admitted with their configured identity.
     async fn ensure_replicator_service_account(&self) -> Result<(), K8sPreflightError> {
-        match self.service_accounts_api.get(REPLICATOR_SERVICE_ACCOUNT_NAME).await {
+        let namespace = &self.k8s_config.replicator_namespace;
+        let service_account_name = &self.k8s_config.replicator_service_account_name;
+        match self.service_accounts_api.get(service_account_name).await {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(err)) if err.code == 404 => {
-                Err(K8sPreflightError::MissingReplicatorServiceAccount)
+                Err(K8sPreflightError::MissingReplicatorServiceAccount {
+                    namespace: namespace.clone(),
+                    service_account_name: service_account_name.clone(),
+                })
             }
-            Err(source) => Err(K8sPreflightError::ReplicatorServiceAccountCheck { source }),
+            Err(source) => Err(K8sPreflightError::ReplicatorServiceAccountCheck {
+                namespace: namespace.clone(),
+                service_account_name: service_account_name.clone(),
+                source,
+            }),
         }
     }
 
@@ -409,30 +422,45 @@ impl HttpK8sClient {
 /// Errors found while checking Kubernetes prerequisites at startup.
 #[derive(Debug, Error)]
 pub enum K8sPreflightError {
-    /// The namespace used for data-plane resources does not exist.
+    /// The namespace used for replicator resources does not exist.
     #[error(
-        "Kubernetes data-plane namespace `etl-data-plane` is missing. Create it before starting \
+        "Kubernetes replicator namespace `{namespace}` is missing. Create it before starting \
          etl-api."
     )]
-    MissingDataPlaneNamespace,
-    /// Checking the namespace failed.
-    #[error("Failed to check Kubernetes data-plane namespace `etl-data-plane`")]
-    DataPlaneNamespaceCheck {
+    MissingReplicatorNamespace {
+        /// Configured replicator namespace.
+        namespace: String,
+    },
+    /// Checking the replicator namespace failed.
+    #[error("Failed to check Kubernetes replicator namespace `{namespace}`")]
+    ReplicatorNamespaceCheck {
+        /// Configured replicator namespace.
+        namespace: String,
         /// Kubernetes API error.
         #[source]
         source: kube::Error,
     },
     /// The ServiceAccount used by replicator pods does not exist.
     #[error(
-        "Kubernetes ServiceAccount `etl-replicator` is missing in namespace `etl-data-plane`. \
-         Create it before starting etl-api so replicator pods can be admitted."
+        "Kubernetes ServiceAccount `{service_account_name}` is missing in namespace \
+         `{namespace}`. Create it before starting etl-api so replicator pods can be admitted."
     )]
-    MissingReplicatorServiceAccount,
+    MissingReplicatorServiceAccount {
+        /// Configured replicator namespace.
+        namespace: String,
+        /// Configured replicator ServiceAccount name.
+        service_account_name: String,
+    },
     /// Checking the ServiceAccount failed.
     #[error(
-        "Failed to check Kubernetes ServiceAccount `etl-replicator` in namespace `etl-data-plane`"
+        "Failed to check Kubernetes ServiceAccount `{service_account_name}` in namespace \
+         `{namespace}`"
     )]
     ReplicatorServiceAccountCheck {
+        /// Configured replicator namespace.
+        namespace: String,
+        /// Configured replicator ServiceAccount name.
+        service_account_name: String,
         /// Kubernetes API error.
         #[source]
         source: kube::Error,
@@ -452,6 +480,7 @@ impl K8sClient for HttpK8sClient {
         let postgres_secret_name = create_postgres_secret_name(prefix);
         let replicator_app_name = create_replicator_app_name(prefix);
         let postgres_secret_json = create_postgres_secret_json(
+            &self.k8s_config,
             &postgres_secret_name,
             &replicator_app_name,
             &encoded_postgres_password,
@@ -479,6 +508,7 @@ impl K8sClient for HttpK8sClient {
         let bq_secret_name = create_bq_secret_name(prefix);
         let replicator_app_name = create_replicator_app_name(prefix);
         let bq_secret_json = create_bq_service_account_key_secret_json(
+            &self.k8s_config,
             &bq_secret_name,
             &replicator_app_name,
             &encoded_bq_service_account_key,
@@ -506,6 +536,7 @@ impl K8sClient for HttpK8sClient {
             let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
             let replicator_app_name = create_replicator_app_name(prefix);
             let secret = create_clickhouse_password_secret(
+                &self.k8s_config,
                 &clickhouse_secret_name,
                 &replicator_app_name,
                 password,
@@ -538,6 +569,7 @@ impl K8sClient for HttpK8sClient {
         let iceberg_secret_name = create_iceberg_secret_name(prefix);
         let replicator_app_name = create_replicator_app_name(prefix);
         let iceberg_secret_json = create_iceberg_secret_json(
+            &self.k8s_config,
             &iceberg_secret_name,
             &replicator_app_name,
             &encoded_catalog_token,
@@ -572,6 +604,7 @@ impl K8sClient for HttpK8sClient {
         let ducklake_secret_name = create_ducklake_secret_name(prefix);
         let replicator_app_name = create_replicator_app_name(prefix);
         let ducklake_secret_json = create_ducklake_secret_json(
+            &self.k8s_config,
             &ducklake_secret_name,
             &replicator_app_name,
             &encoded_catalog_url,
@@ -658,6 +691,7 @@ impl K8sClient for HttpK8sClient {
         let snowflake_secret_name = create_snowflake_secret_name(prefix);
         let replicator_app_name = create_replicator_app_name(prefix);
         let snowflake_secret_json = create_snowflake_secret_json(
+            &self.k8s_config,
             &snowflake_secret_name,
             &replicator_app_name,
             &encoded_private_key,
@@ -694,6 +728,7 @@ impl K8sClient for HttpK8sClient {
         let replicator_app_name = create_replicator_app_name(prefix);
 
         let config_map_json = create_replicator_config_map_json(
+            &self.k8s_config,
             &replicator_config_map_name,
             &replicator_app_name,
             files,
@@ -751,6 +786,7 @@ impl K8sClient for HttpK8sClient {
 
         let environment = Environment::load().map_err(K8sError::Config)?;
         let container_environment = create_container_environment_json(
+            &self.k8s_config,
             prefix,
             &environment,
             replicator_image,
@@ -759,13 +795,19 @@ impl K8sClient for HttpK8sClient {
             request.log_level,
         );
 
-        let node_selector = create_node_selector_json(&environment);
-        let init_containers =
-            create_init_containers_json(prefix, &environment, &stateful_set_resources);
+        let node_selector = node_selector_json(&self.k8s_config.replicator_node_selectors);
+        let tolerations = tolerations_json(&self.k8s_config.replicator_tolerations);
+        let init_containers = create_init_containers_json(
+            &self.k8s_config,
+            prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         let volumes = create_volumes_json(prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            &self.k8s_config,
             prefix,
             &request.tenant_id,
             request.pipeline_id,
@@ -773,6 +815,7 @@ impl K8sClient for HttpK8sClient {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -825,7 +868,8 @@ impl K8sClient for HttpK8sClient {
         debug!("patching ducklake maintenance");
 
         let name = create_ducklake_maintenance_name(prefix);
-        let ducklake_maintenance_json = create_ducklake_maintenance_json(prefix, &name, config);
+        let ducklake_maintenance_json =
+            create_ducklake_maintenance_json(&self.k8s_config, prefix, &name, config);
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.ducklake_maintenance_api
             .patch(&name, &pp, &Patch::Apply(ducklake_maintenance_json))
@@ -976,6 +1020,7 @@ fn create_vector_container_name(prefix: &str) -> String {
 }
 
 fn create_postgres_secret_json(
+    k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
     encoded_postgres_password: &str,
@@ -985,7 +1030,7 @@ fn create_postgres_secret_json(
       "kind": "Secret",
       "metadata": {
         "name": secret_name,
-        "namespace": DATA_PLANE_NAMESPACE,
+        "namespace": &k8s_config.replicator_namespace,
         "labels": {
           "etl.supabase.com/app-name": replicator_app_name,
           "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
@@ -999,6 +1044,7 @@ fn create_postgres_secret_json(
 }
 
 fn create_clickhouse_password_secret(
+    k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
     clickhouse_password: &str,
@@ -1006,7 +1052,7 @@ fn create_clickhouse_password_secret(
     Secret {
         metadata: ObjectMeta {
             name: Some(secret_name.to_owned()),
-            namespace: Some(DATA_PLANE_NAMESPACE.to_owned()),
+            namespace: Some(k8s_config.replicator_namespace.clone()),
             labels: Some(BTreeMap::from([
                 ("etl.supabase.com/app-name".to_owned(), replicator_app_name.to_owned()),
                 ("etl.supabase.com/app-type".to_owned(), REPLICATOR_APP_LABEL.to_owned()),
@@ -1023,6 +1069,7 @@ fn create_clickhouse_password_secret(
 }
 
 fn create_snowflake_secret_json(
+    k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
     encoded_private_key: &str,
@@ -1044,7 +1091,7 @@ fn create_snowflake_secret_json(
       "kind": "Secret",
       "metadata": {
         "name": secret_name,
-        "namespace": DATA_PLANE_NAMESPACE,
+        "namespace": &k8s_config.replicator_namespace,
         "labels": {
           "etl.supabase.com/app-name": replicator_app_name,
           "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
@@ -1056,6 +1103,7 @@ fn create_snowflake_secret_json(
 }
 
 fn create_bq_service_account_key_secret_json(
+    k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
     encoded_bq_service_account_key: &str,
@@ -1065,7 +1113,7 @@ fn create_bq_service_account_key_secret_json(
       "kind": "Secret",
       "metadata": {
         "name": secret_name,
-        "namespace": DATA_PLANE_NAMESPACE,
+        "namespace": &k8s_config.replicator_namespace,
         "labels": {
           "etl.supabase.com/app-name": replicator_app_name,
           "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
@@ -1079,6 +1127,7 @@ fn create_bq_service_account_key_secret_json(
 }
 
 fn create_iceberg_secret_json(
+    k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
     encoded_catalog_token: &str,
@@ -1090,7 +1139,7 @@ fn create_iceberg_secret_json(
       "kind": "Secret",
       "metadata": {
         "name": secret_name,
-        "namespace": DATA_PLANE_NAMESPACE,
+        "namespace": &k8s_config.replicator_namespace,
         "labels": {
           "etl.supabase.com/app-name": replicator_app_name,
           "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
@@ -1106,6 +1155,7 @@ fn create_iceberg_secret_json(
 }
 
 fn create_ducklake_secret_json(
+    k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
     encoded_catalog_url: &str,
@@ -1117,7 +1167,7 @@ fn create_ducklake_secret_json(
       "kind": "Secret",
       "metadata": {
         "name": secret_name,
-        "namespace": DATA_PLANE_NAMESPACE,
+        "namespace": &k8s_config.replicator_namespace,
         "labels": {
           "etl.supabase.com/app-name": replicator_app_name,
           "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
@@ -1133,6 +1183,7 @@ fn create_ducklake_secret_json(
 }
 
 fn create_replicator_config_map_json(
+    k8s_config: &K8sConfig,
     config_map_name: &str,
     replicator_app_name: &str,
     files: Vec<ReplicatorConfigMapFile>,
@@ -1147,7 +1198,7 @@ fn create_replicator_config_map_json(
       "apiVersion": "v1",
       "metadata": {
         "name": config_map_name,
-        "namespace": DATA_PLANE_NAMESPACE,
+        "namespace": &k8s_config.replicator_namespace,
         "labels": {
           "etl.supabase.com/app-name": replicator_app_name,
           "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
@@ -1158,6 +1209,7 @@ fn create_replicator_config_map_json(
 }
 
 fn create_ducklake_maintenance_json(
+    k8s_config: &K8sConfig,
     prefix: &str,
     name: &str,
     config: DuckLakeMaintenanceResourceConfig,
@@ -1171,7 +1223,7 @@ fn create_ducklake_maintenance_json(
       "kind": DUCKLAKE_MAINTENANCE_KIND,
       "metadata": {
         "name": name,
-        "namespace": DATA_PLANE_NAMESPACE,
+        "namespace": &k8s_config.replicator_namespace,
         "labels": {
           "etl.supabase.com/app-name": replicator_app_name,
           "etl.supabase.com/app-type": DUCKLAKE_MAINTENANCE_APP_LABEL,
@@ -1230,6 +1282,7 @@ fn create_ducklake_maintenance_json(
 }
 
 fn create_container_environment_json(
+    k8s_config: &K8sConfig,
     prefix: &str,
     environment: &Environment,
     replicator_image: &str,
@@ -1369,7 +1422,7 @@ fn create_container_environment_json(
                 }));
                 container_environment.push(json!({
                     "name": "ETL_DUCKLAKE_MAINTENANCE_CR_NAMESPACE",
-                    "value": DATA_PLANE_NAMESPACE
+                    "value": &k8s_config.replicator_namespace
                 }));
                 container_environment.push(json!({
                     "name": "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_INLINE_FLUSH_MIN_INLINED_BYTES",
@@ -1412,17 +1465,43 @@ fn create_container_environment_json(
     container_environment
 }
 
+#[cfg(test)]
 fn create_node_selector_json(environment: &Environment) -> serde_json::Value {
-    // In staging and prod, pin pods to workload pods.
-    match environment {
-        Environment::Dev => json!({}),
-        Environment::Staging | Environment::Prod => json!({
-            "etl.supabase.com/node-role": "workloads"
-        }),
-    }
+    node_selector_json(&test_k8s_config(environment).replicator_node_selectors)
+}
+
+fn node_selector_json(selectors: &[crate::config::NodeSelectorConfig]) -> serde_json::Value {
+    json!(
+        selectors
+            .iter()
+            .map(|selector| (selector.key.clone(), selector.value.clone()))
+            .collect::<BTreeMap<_, _>>()
+    )
+}
+
+#[cfg(test)]
+fn create_tolerations_json(environment: &Environment) -> serde_json::Value {
+    tolerations_json(&test_k8s_config(environment).replicator_tolerations)
+}
+
+fn tolerations_json(tolerations: &[crate::config::TolerationConfig]) -> serde_json::Value {
+    serde_json::Value::Array(
+        tolerations
+            .iter()
+            .map(|toleration| {
+                json!({
+                    "key": toleration.key,
+                    "operator": "Equal",
+                    "value": toleration.value,
+                    "effect": toleration.effect,
+                })
+            })
+            .collect(),
+    )
 }
 
 fn create_init_containers_json(
+    k8s_config: &K8sConfig,
     prefix: &str,
     environment: &Environment,
     stateful_set_resources: &ReplicatorStatefulSetResourcesConfig,
@@ -1434,7 +1513,7 @@ fn create_init_containers_json(
         Environment::Staging | Environment::Prod => json!([
           {
             "name": vector_container_name,
-            "image": VECTOR_IMAGE_NAME,
+            "image": &k8s_config.vector_image,
             "restartPolicy": "Always",
             "securityContext": {
               "allowPrivilegeEscalation": false,
@@ -1685,6 +1764,7 @@ fn create_snowflake_passphrase_env_var_json(snowflake_secret_name: &str) -> serd
 
 #[expect(clippy::too_many_arguments)]
 fn create_replicator_stateful_set_json(
+    k8s_config: &K8sConfig,
     prefix: &str,
     tenant_id: &str,
     pipeline_id: i64,
@@ -1692,6 +1772,7 @@ fn create_replicator_stateful_set_json(
     replicator_image: &str,
     container_environment: Vec<serde_json::Value>,
     node_selector: serde_json::Value,
+    tolerations: serde_json::Value,
     init_containers: serde_json::Value,
     volumes: Vec<serde_json::Value>,
     volume_mounts: Vec<serde_json::Value>,
@@ -1706,7 +1787,7 @@ fn create_replicator_stateful_set_json(
       "kind": "StatefulSet",
       "metadata": {
         "name": stateful_set_name,
-        "namespace": DATA_PLANE_NAMESPACE,
+        "namespace": &k8s_config.replicator_namespace,
         "labels": {
           "etl.supabase.com/app-name": replicator_app_name,
           "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
@@ -1734,23 +1815,15 @@ fn create_replicator_stateful_set_json(
             }
           },
           "spec": {
-            "serviceAccountName": REPLICATOR_SERVICE_ACCOUNT_NAME,
+            "serviceAccountName": &k8s_config.replicator_service_account_name,
             "securityContext": {
               "seccompProfile": {
                 "type": "RuntimeDefault"
               }
             },
             "volumes": volumes,
-            // Allow scheduling onto nodes tainted with the right node role.
-            "tolerations": [
-              {
-                "key": "etl.supabase.com/node-role",
-                "operator": "Equal",
-                "value": "workloads",
-                "effect": "NoSchedule"
-              }
-            ],
             "nodeSelector": node_selector,
+            "tolerations": tolerations,
             // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to the containers,
             // this way we let the system finish any in-flight transaction, if there are any.
             "terminationGracePeriodSeconds": 300,
@@ -1821,6 +1894,10 @@ mod tests {
     const MAX_BIGINT_ID: i64 = 9_223_372_036_854_775_807;
     const MAX_K8S_LABEL_VALUE_LEN: usize = 63;
     const CONTROLLER_REVISION_HASH_LEN: usize = 10;
+
+    fn default_k8s_config() -> K8sConfig {
+        test_k8s_config(&Environment::Staging)
+    }
 
     fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
         format!("{tenant_id}-{replicator_id}")
@@ -2023,6 +2100,7 @@ mod tests {
                 cpu_request_millicores: 0,
                 memory_request_mib: -20,
             },
+            ..default_k8s_config()
         };
         let default_replicator_resources =
             k8s_config.replicator_resources_for(DestinationKind::BigQuery);
@@ -2081,6 +2159,7 @@ mod tests {
                 cpu_request_millicores: 80,
                 memory_request_mib: 192,
             },
+            ..default_k8s_config()
         };
         let default_replicator_resources =
             k8s_config.replicator_resources_for(DestinationKind::BigQuery);
@@ -2126,6 +2205,7 @@ mod tests {
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
         let replicator_image = "supabase/replicator:1.2.3";
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -2134,19 +2214,30 @@ mod tests {
             LogLevel::Info,
         );
         let node_selector = create_node_selector_json(&environment);
-        let init_containers =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let tolerations = create_tolerations_json(&environment);
+        let init_containers = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let resources = vec![
             (
                 "postgres secret",
-                create_postgres_secret_json(&postgres_secret_name, &replicator_app_name, "secret"),
+                create_postgres_secret_json(
+                    &default_k8s_config(),
+                    &postgres_secret_name,
+                    &replicator_app_name,
+                    "secret",
+                ),
             ),
             (
                 "clickhouse secret",
                 serde_json::to_value(create_clickhouse_password_secret(
+                    &default_k8s_config(),
                     &clickhouse_secret_name,
                     &replicator_app_name,
                     "secret",
@@ -2156,6 +2247,7 @@ mod tests {
             (
                 "bigquery secret",
                 create_bq_service_account_key_secret_json(
+                    &default_k8s_config(),
                     &bq_secret_name,
                     &replicator_app_name,
                     "secret",
@@ -2164,6 +2256,7 @@ mod tests {
             (
                 "iceberg secret",
                 create_iceberg_secret_json(
+                    &default_k8s_config(),
                     &iceberg_secret_name,
                     &replicator_app_name,
                     "secret",
@@ -2174,6 +2267,7 @@ mod tests {
             (
                 "ducklake secret",
                 create_ducklake_secret_json(
+                    &default_k8s_config(),
                     &ducklake_secret_name,
                     &replicator_app_name,
                     "secret",
@@ -2184,6 +2278,7 @@ mod tests {
             (
                 "snowflake secret",
                 create_snowflake_secret_json(
+                    &default_k8s_config(),
                     &snowflake_secret_name,
                     &replicator_app_name,
                     &BASE64_STANDARD.encode("secret"),
@@ -2193,6 +2288,7 @@ mod tests {
             (
                 "replicator config map",
                 create_replicator_config_map_json(
+                    &default_k8s_config(),
                     &config_map_name,
                     &replicator_app_name,
                     vec![ReplicatorConfigMapFile {
@@ -2204,6 +2300,7 @@ mod tests {
             (
                 "ducklake maintenance",
                 create_ducklake_maintenance_json(
+                    &default_k8s_config(),
                     &prefix,
                     &ducklake_maintenance_name,
                     DuckLakeMaintenanceResourceConfig {
@@ -2218,6 +2315,7 @@ mod tests {
             (
                 "replicator stateful set",
                 create_replicator_stateful_set_json(
+                    &default_k8s_config(),
                     &prefix,
                     MAX_TENANT_ID,
                     MAX_BIGINT_ID,
@@ -2225,6 +2323,7 @@ mod tests {
                     replicator_image,
                     container_environment,
                     node_selector,
+                    tolerations,
                     init_containers,
                     volumes,
                     volume_mounts,
@@ -2236,6 +2335,125 @@ mod tests {
         for (resource_name, resource) in resources {
             assert_kubernetes_label_values_are_safe(resource_name, &resource);
         }
+    }
+
+    #[test]
+    fn configured_namespace_service_account_and_vector_image_are_propagated() {
+        let mut k8s_config = default_k8s_config();
+        k8s_config.replicator_namespace = "custom-data-plane".to_owned();
+        k8s_config.replicator_service_account_name = "custom-replicator".to_owned();
+        k8s_config.vector_image = "example.com/vector:custom".to_owned();
+
+        let prefix = create_k8s_object_prefix(TENANT_ID, PIPELINE_ID);
+        let app_name = create_replicator_app_name(&prefix);
+        let namespaced_resources = vec![
+            create_postgres_secret_json(&k8s_config, "postgres-secret", &app_name, "secret"),
+            serde_json::to_value(create_clickhouse_password_secret(
+                &k8s_config,
+                "clickhouse-secret",
+                &app_name,
+                "secret",
+            ))
+            .unwrap(),
+            create_snowflake_secret_json(
+                &k8s_config,
+                "snowflake-secret",
+                &app_name,
+                "secret",
+                None,
+            ),
+            create_bq_service_account_key_secret_json(
+                &k8s_config,
+                "bigquery-secret",
+                &app_name,
+                "secret",
+            ),
+            create_iceberg_secret_json(
+                &k8s_config,
+                "iceberg-secret",
+                &app_name,
+                "secret",
+                "secret",
+                "secret",
+            ),
+            create_ducklake_secret_json(
+                &k8s_config,
+                "ducklake-secret",
+                &app_name,
+                "secret",
+                "secret",
+                "secret",
+            ),
+            create_replicator_config_map_json(&k8s_config, "replicator-config", &app_name, vec![]),
+            create_ducklake_maintenance_json(
+                &k8s_config,
+                &prefix,
+                "ducklake-maintenance",
+                DuckLakeMaintenanceResourceConfig {
+                    tenant_id: TENANT_ID.to_owned(),
+                    pipeline_id: PIPELINE_ID,
+                    replicator_id: PIPELINE_ID,
+                    image: "example.com/replicator:custom".to_owned(),
+                    policy: DuckLakeMaintenancePolicy::default(),
+                },
+            ),
+        ];
+        for resource in namespaced_resources {
+            assert_eq!(resource.pointer("/metadata/namespace"), Some(&json!("custom-data-plane")));
+        }
+
+        let environment = Environment::Staging;
+        let stateful_set_resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let container_environment = create_container_environment_json(
+            &k8s_config,
+            &prefix,
+            &environment,
+            "example.com/replicator:custom",
+            DestinationType::Ducklake,
+            Some(&DuckLakeMaintenanceConfig {
+                min_inlined_bytes: 10,
+                min_active_data_files: 20,
+                ..DuckLakeMaintenanceConfig::default()
+            }),
+            LogLevel::Info,
+        );
+        assert!(container_environment.iter().any(|entry| {
+            entry
+                == &json!({
+                    "name": "ETL_DUCKLAKE_MAINTENANCE_CR_NAMESPACE",
+                    "value": "custom-data-plane"
+                })
+        }));
+
+        let init_containers = create_init_containers_json(
+            &k8s_config,
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
+        assert_eq!(init_containers.pointer("/0/image"), Some(&json!("example.com/vector:custom")));
+
+        let stateful_set = create_replicator_stateful_set_json(
+            &k8s_config,
+            &prefix,
+            TENANT_ID,
+            PIPELINE_ID,
+            &create_stateful_set_name(&prefix),
+            "example.com/replicator:custom",
+            container_environment,
+            json!({}),
+            json!([]),
+            init_containers,
+            create_volumes_json(&prefix, &environment),
+            create_volume_mounts_json(&environment),
+            &stateful_set_resources,
+        );
+        assert_eq!(stateful_set.pointer("/metadata/namespace"), Some(&json!("custom-data-plane")));
+        assert_eq!(
+            stateful_set.pointer("/spec/template/spec/serviceAccountName"),
+            Some(&json!("custom-replicator"))
+        );
     }
 
     #[test]
@@ -2283,6 +2501,7 @@ mod tests {
                 cpu_request_millicores: 80,
                 memory_request_mib: 192,
             },
+            ..default_k8s_config()
         };
         let default_replicator_resources =
             k8s_config.replicator_resources_for(DestinationKind::Ducklake);
@@ -2306,6 +2525,7 @@ mod tests {
         let encoded_postgres_password = "dGVzdC1wYXNzd29yZA==";
 
         let secret_json = create_postgres_secret_json(
+            &default_k8s_config(),
             secret_name,
             &replicator_app_name,
             encoded_postgres_password,
@@ -2324,6 +2544,7 @@ mod tests {
         let encoded_bq_service_account_key = "ewogICJrZXkiOiAidmFsdWUiCn0=";
 
         let secret_json = create_bq_service_account_key_secret_json(
+            &default_k8s_config(),
             secret_name,
             &replicator_app_name,
             encoded_bq_service_account_key,
@@ -2344,6 +2565,7 @@ mod tests {
         let encoded_s3_secret_access_key = "NDUyOWE3ZmMwNzY2NDBjODRiZTgzZGJiNGMyNDI3MTNhOTk0MzE5OTBjYzJmMzIzMGM4MzVjOGJmZjAzYWE2ZQ==";
 
         let secret_json = create_iceberg_secret_json(
+            &default_k8s_config(),
             secret_name,
             &replicator_app_name,
             encoded_catalog_token,
@@ -2423,6 +2645,7 @@ mod tests {
         ];
 
         let config_map_json = create_replicator_config_map_json(
+            &default_k8s_config(),
             &replicator_config_map_name,
             &replicator_app_name,
             files,
@@ -2439,6 +2662,7 @@ mod tests {
         let name = create_ducklake_maintenance_name(&prefix);
 
         let ducklake_maintenance_json = create_ducklake_maintenance_json(
+            &default_k8s_config(),
             &prefix,
             &name,
             DuckLakeMaintenanceResourceConfig {
@@ -2529,6 +2753,7 @@ mod tests {
 
         let environment = Environment::Dev;
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -2540,6 +2765,7 @@ mod tests {
 
         let environment = Environment::Staging;
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -2551,6 +2777,7 @@ mod tests {
 
         let environment = Environment::Prod;
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -2567,6 +2794,7 @@ mod tests {
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &Environment::Dev,
             replicator_image,
@@ -2577,6 +2805,7 @@ mod tests {
         assert_json_snapshot!(container_environment);
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &Environment::Staging,
             replicator_image,
@@ -2587,6 +2816,7 @@ mod tests {
         assert_json_snapshot!(container_environment);
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &Environment::Prod,
             replicator_image,
@@ -2603,6 +2833,7 @@ mod tests {
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &Environment::Dev,
             replicator_image,
@@ -2613,6 +2844,7 @@ mod tests {
         assert_json_snapshot!(container_environment);
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &Environment::Staging,
             replicator_image,
@@ -2623,6 +2855,7 @@ mod tests {
         assert_json_snapshot!(container_environment);
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &Environment::Prod,
             replicator_image,
@@ -2639,6 +2872,7 @@ mod tests {
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &Environment::Dev,
             replicator_image,
@@ -2663,6 +2897,7 @@ mod tests {
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &Environment::Dev,
             replicator_image,
@@ -2687,6 +2922,7 @@ mod tests {
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &Environment::Dev,
             replicator_image,
@@ -2715,6 +2951,7 @@ mod tests {
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &Environment::Dev,
             replicator_image,
@@ -2742,6 +2979,7 @@ mod tests {
         let private_key = "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----";
         let encoded_private_key = BASE64_STANDARD.encode(private_key);
         let snowflake_secret_json = create_snowflake_secret_json(
+            &default_k8s_config(),
             "tenant-42-snowflake",
             "tenant-42-replicator-app",
             &encoded_private_key,
@@ -2750,7 +2988,10 @@ mod tests {
         let secret: Secret = serde_json::from_value(snowflake_secret_json).unwrap();
 
         assert_eq!(secret.metadata.name.as_deref(), Some("tenant-42-snowflake"));
-        assert_eq!(secret.metadata.namespace.as_deref(), Some(DATA_PLANE_NAMESPACE));
+        assert_eq!(
+            secret.metadata.namespace.as_deref(),
+            Some(default_k8s_config().replicator_namespace.as_str())
+        );
         assert_eq!(secret.type_.as_deref(), Some("Opaque"));
 
         let labels = secret.metadata.labels.as_ref().unwrap();
@@ -2770,6 +3011,7 @@ mod tests {
         let encoded_private_key = BASE64_STANDARD.encode(private_key);
         let encoded_passphrase = BASE64_STANDARD.encode(passphrase);
         let snowflake_secret_json = create_snowflake_secret_json(
+            &default_k8s_config(),
             "tenant-42-snowflake",
             "tenant-42-replicator-app",
             &encoded_private_key,
@@ -2797,28 +3039,109 @@ mod tests {
     }
 
     #[test]
+    fn replicator_stateful_set_applies_optional_scheduling_constraints() {
+        let resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Dev).unwrap();
+        let create_stateful_set = |node_selector, tolerations| {
+            create_replicator_stateful_set_json(
+                &default_k8s_config(),
+                "tenant-1-42",
+                "tenant-1",
+                42,
+                "tenant-1-42-replicator",
+                "example.com/replicator:latest",
+                Vec::new(),
+                node_selector,
+                tolerations,
+                json!([]),
+                Vec::new(),
+                Vec::new(),
+                &resources,
+            )
+        };
+
+        let unpinned = create_stateful_set(json!({}), json!([]));
+        assert_eq!(unpinned.pointer("/spec/template/spec/nodeSelector"), Some(&json!({})));
+        assert_eq!(unpinned.pointer("/spec/template/spec/tolerations"), Some(&json!([])));
+
+        let configured = create_stateful_set(
+            node_selector_json(&[
+                crate::config::NodeSelectorConfig {
+                    key: "example.com/node-pool".to_owned(),
+                    value: "data".to_owned(),
+                },
+                crate::config::NodeSelectorConfig {
+                    key: "kubernetes.io/arch".to_owned(),
+                    value: "arm64".to_owned(),
+                },
+            ]),
+            tolerations_json(&[crate::config::TolerationConfig {
+                key: "example.com/dedicated".to_owned(),
+                value: "analytics".to_owned(),
+                effect: "CustomEffect".to_owned(),
+            }]),
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/nodeSelector/example.com~1node-pool"),
+            Some(&json!("data"))
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/nodeSelector/kubernetes.io~1arch"),
+            Some(&json!("arm64"))
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/tolerations/0/key"),
+            Some(&json!("example.com/dedicated"))
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/tolerations/0/operator"),
+            Some(&json!("Equal"))
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/tolerations/0/value"),
+            Some(&json!("analytics"))
+        );
+        assert_eq!(
+            configured.pointer("/spec/template/spec/tolerations/0/effect"),
+            Some(&json!("CustomEffect"))
+        );
+    }
+
+    #[test]
     fn test_create_init_containers() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
 
         let environment = Environment::Dev;
         let stateful_set_resources =
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
-        let node_selector =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let node_selector = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         assert_json_snapshot!(node_selector);
 
         let environment = Environment::Staging;
         let stateful_set_resources =
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
-        let node_selector =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let node_selector = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         assert_json_snapshot!(node_selector);
 
         let environment = Environment::Prod;
         let stateful_set_resources =
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
-        let node_selector =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let node_selector = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         assert_json_snapshot!(node_selector);
     }
 
@@ -2866,6 +3189,7 @@ mod tests {
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -2875,12 +3199,18 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let tolerations = create_tolerations_json(&environment);
+        let init_containers = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            &default_k8s_config(),
             &prefix,
             TENANT_ID,
             PIPELINE_ID,
@@ -2888,6 +3218,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -2908,6 +3239,7 @@ mod tests {
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -2917,12 +3249,18 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let tolerations = create_tolerations_json(&environment);
+        let init_containers = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            &default_k8s_config(),
             &prefix,
             TENANT_ID,
             PIPELINE_ID,
@@ -2930,6 +3268,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -2950,6 +3289,7 @@ mod tests {
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -2959,12 +3299,18 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let tolerations = create_tolerations_json(&environment);
+        let init_containers = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            &default_k8s_config(),
             &prefix,
             TENANT_ID,
             PIPELINE_ID,
@@ -2972,6 +3318,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -2999,6 +3346,7 @@ mod tests {
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -3008,12 +3356,18 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let tolerations = create_tolerations_json(&environment);
+        let init_containers = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            &default_k8s_config(),
             &prefix,
             TENANT_ID,
             PIPELINE_ID,
@@ -3021,6 +3375,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -3041,6 +3396,7 @@ mod tests {
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -3050,12 +3406,18 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let tolerations = create_tolerations_json(&environment);
+        let init_containers = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            &default_k8s_config(),
             &prefix,
             TENANT_ID,
             PIPELINE_ID,
@@ -3063,6 +3425,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -3083,6 +3446,7 @@ mod tests {
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -3092,12 +3456,18 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let tolerations = create_tolerations_json(&environment);
+        let init_containers = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            &default_k8s_config(),
             &prefix,
             TENANT_ID,
             PIPELINE_ID,
@@ -3105,6 +3475,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -3132,6 +3503,7 @@ mod tests {
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -3141,12 +3513,18 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let tolerations = create_tolerations_json(&environment);
+        let init_containers = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            &default_k8s_config(),
             &prefix,
             TENANT_ID,
             PIPELINE_ID,
@@ -3154,6 +3532,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -3174,6 +3553,7 @@ mod tests {
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -3183,12 +3563,18 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let tolerations = create_tolerations_json(&environment);
+        let init_containers = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            &default_k8s_config(),
             &prefix,
             TENANT_ID,
             PIPELINE_ID,
@@ -3196,6 +3582,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,
@@ -3216,6 +3603,7 @@ mod tests {
             ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
+            &default_k8s_config(),
             &prefix,
             &environment,
             replicator_image,
@@ -3225,12 +3613,18 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
-        let init_containers =
-            create_init_containers_json(&prefix, &environment, &stateful_set_resources);
+        let tolerations = create_tolerations_json(&environment);
+        let init_containers = create_init_containers_json(
+            &default_k8s_config(),
+            &prefix,
+            &environment,
+            &stateful_set_resources,
+        );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            &default_k8s_config(),
             &prefix,
             TENANT_ID,
             PIPELINE_ID,
@@ -3238,6 +3632,7 @@ mod tests {
             replicator_image,
             container_environment,
             node_selector,
+            tolerations,
             init_containers,
             volumes,
             volume_mounts,

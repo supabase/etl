@@ -65,6 +65,23 @@ impl TaskSet {
         inner.join_set.spawn(task);
     }
 
+    /// Constructs and spawns a tracked background task after registration is
+    /// admitted.
+    ///
+    /// Unlike [`Self::spawn`], this method does not retain the constructed task
+    /// future while waiting for access to the registry. The factory runs
+    /// synchronously while the registry is locked and should only construct the
+    /// returned future. This keeps large task futures out of callers' async
+    /// state while they wait for registration.
+    pub async fn spawn_with<F, Fut>(&self, task_factory: F)
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let mut inner = self.inner.lock().await;
+        inner.join_set.spawn(task_factory());
+    }
+
     /// Reaps completed tasks once enough of them may have accumulated to
     /// justify the lock.
     pub async fn try_reap(&self) -> EtlResult<()> {
@@ -84,8 +101,8 @@ impl TaskSet {
     ///
     /// Use this when resources used by registered tasks must be changed after
     /// all previously registered work has finished and before later work can
-    /// start. The returned guard blocks [`TaskSet::spawn`] and other registry
-    /// operations until dropped.
+    /// start. The returned guard blocks [`TaskSet::spawn`],
+    /// [`TaskSet::spawn_with`], and other registry operations until dropped.
     ///
     /// This method neither aborts tasks nor imposes a timeout. Cancelling it
     /// releases the registry and leaves unfinished tasks tracked.

@@ -21,7 +21,7 @@ ducklake = ["any-destination", "etl-destinations/ducklake", "etl-maintenance/duc
 iceberg = ["any-destination", "etl-destinations/iceberg"]
 snowflake = ["any-destination", "etl-destinations/snowflake"]
 postgres = ["any-destination", "etl-destinations/postgres"]
-egress = ["etl/egress", "etl-destinations/egress"]
+egress = ["etl/egress"]
 
 [dependencies]
 

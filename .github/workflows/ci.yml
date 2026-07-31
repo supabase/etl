@@ -107,6 +107,9 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.check }}
+          workspaces: |
+            . -> target
+            fuzz -> target
 
       - name: Install cargo-sort
         if: matrix.check == 'sort'
@@ -123,6 +126,10 @@ jobs:
       - name: Run Cargo Clippy
         if: matrix.check == 'clippy'
         run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
+
+      - name: Check Fuzz Crate
+        if: matrix.check == 'clippy'
+        run: cargo check --manifest-path fuzz/Cargo.toml
 
       - name: Run Cargo Sort
         if: matrix.check == 'sort'

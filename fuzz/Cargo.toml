@@ -19,3 +19,24 @@ path = "fuzz_targets/parse_bytea_hex_string.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parse_text_cell"
+path = "fuzz_targets/parse_text_cell.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_copy_row"
+path = "fuzz_targets/parse_copy_row.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "numeric_text_roundtrip"
+path = "fuzz_targets/numeric_text_roundtrip.rs"
+test = false
+doc = false
+bench = false

@@ -1970,6 +1970,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "simdutf8",
  "sqlx",
  "sysinfo",
  "tokio",

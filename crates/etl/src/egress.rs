@@ -1,22 +1,20 @@
-//! Egress logging for billing and usage tracking.
-//!
-//! Provides structured logging for egress metrics with consistent field naming.
-//! All egress logs include `egress_metric = true` for easy filtering in log
-//! aggregators.
+//! Billing usage logging.
 
-/// Logs an egress metric at info level with `egress_metric = true`
-/// automatically included.
+/// Logs acknowledged source payload bytes for billing.
 ///
-/// Accepts a message constant as the first argument followed by any key=value
-/// pairs. The `egress_metric = true` field is always added to enable filtering
-/// egress logs.
-#[macro_export]
-macro_rules! egress_info {
-    ($message:expr $(, $($fields:tt)*)?) => {
-        tracing::info!(
-            message = $message,
-            egress_metric = true,
-            $($($fields)*)?
-        )
-    };
+/// `bytes_sent` is the source payload that ETL treats as sent for billing once
+/// the destination acknowledges the batch. It is not the destination-encoded
+/// request size or the number of bytes written to the network.
+pub(crate) fn log_processed_bytes(
+    destination_type: &'static str,
+    processing_type: &'static str,
+    bytes_sent: u64,
+) {
+    tracing::info!(
+        message = "etl_processed_bytes",
+        egress_metric = true,
+        destination_type,
+        processing_type,
+        bytes_sent
+    );
 }

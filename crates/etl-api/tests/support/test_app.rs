@@ -595,16 +595,12 @@ pub(crate) async fn spawn_test_app_with_k8s_state(
 ) -> TestApp {
     let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient::new(k8s_state.clone()));
 
-    spawn_test_app_with_services(trusted_source_username, Some(k8s_client), k8s_state).await
-}
-
-pub(crate) async fn spawn_test_app_without_k8s_client() -> TestApp {
-    spawn_test_app_with_services(None, None, MockK8sState::default()).await
+    spawn_test_app_with_services(trusted_source_username, k8s_client, k8s_state).await
 }
 
 async fn spawn_test_app_with_services(
     trusted_source_username: Option<String>,
-    k8s_client: Option<Arc<dyn K8sClient>>,
+    k8s_client: Arc<dyn K8sClient>,
     k8s_state: MockK8sState,
 ) -> TestApp {
     Environment::Dev.set();
@@ -633,11 +629,16 @@ async fn spawn_test_app_with_services(
         database: database_config,
         application: ApplicationSettings { host: base_address.to_owned(), port },
         k8s: K8sConfig {
+            replicator_namespace: "etl-data-plane".to_owned(),
+            replicator_service_account_name: "etl-replicator".to_owned(),
+            replicator_node_selectors: Default::default(),
+            replicator_tolerations: Default::default(),
             replicator_resources: DefaultReplicatorResourcesConfig {
                 memory_request_mib: 250,
                 cpu_request_millicores: 125,
                 destinations: Default::default(),
             },
+            vector_image: "timberio/vector:0.55.0-distroless-libc".to_owned(),
             vector_resources: DefaultVectorResourcesConfig {
                 memory_request_mib: 192,
                 cpu_request_millicores: 75,

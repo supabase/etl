@@ -13,7 +13,7 @@ use crate::data::{
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct TableRow {
-    /// Approximate row size in bytes.
+    /// Approximate decoded in-memory size hint in bytes.
     size_hint_bytes: usize,
     /// Column values in table column order
     values: Vec<Cell>,
@@ -66,7 +66,7 @@ impl SizeHint for TableRow {
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct PartialTableRow {
-    /// Approximate row size in bytes.
+    /// Approximate decoded in-memory size hint in bytes.
     size_hint_bytes: usize,
     /// Total number of replicated columns for the table schema.
     total_columns: usize,

@@ -13,8 +13,8 @@ use tokio::{
 use crate::{
     data::TableRow,
     destination::{
-        ApplyLoopAsyncResultMetadata, Destination, DispatchMetrics, DropTableForCopyResult,
-        PipelineDestination, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        ApplyLoopAsyncResultMetadata, Destination, DropTableForCopyResult, PipelineDestination,
+        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -378,10 +378,9 @@ where
             WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
                 commit_end_lsn: None,
                 durability,
-                metrics: DispatchMetrics {
-                    items_count: events.len(),
-                    dispatched_at: Instant::now(),
-                },
+                event_count: events.len(),
+                streaming_payload_metadata: Default::default(),
+                dispatched_at: Instant::now(),
             });
         destination.write_events(events.clone(), durability, wrapped_flush_result).await?;
 
@@ -396,7 +395,7 @@ where
         // the code continue and do something else in the meanwhile.
         let inner = Arc::clone(&self.inner);
         self.tasks
-            .spawn(async move {
+            .spawn_with(move || async move {
                 // We send the result back before doing the internal checks for this utility, to
                 // avoid checking before the apply loop received the result.
                 let result =

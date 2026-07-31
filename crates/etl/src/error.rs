@@ -120,6 +120,8 @@ pub enum ErrorKind {
     DestinationNamespaceMissing,
     /// The destination table does not exist.
     DestinationTableMissing,
+    /// The destination schema is newer than a replayed schema snapshot.
+    DestinationSchemaRewind,
 
     // Data & Transformation Errors
     /// A value could not be converted between source and destination formats.
@@ -561,13 +563,7 @@ where
 /// Converts [`std::io::Error`] to [`EtlError`] with [`ErrorKind::IoError`].
 impl From<std::io::Error> for EtlError {
     fn from(err: std::io::Error) -> EtlError {
-        let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::IoError,
-            Cow::Borrowed("I/O operation failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((ErrorKind::IoError, "I/O operation failed")).with_source(err)
     }
 }
 
@@ -588,8 +584,7 @@ impl From<serde_json::Error> for EtlError {
             }
         };
 
-        let source = Arc::new(err);
-        EtlError::from_components(kind, Cow::Borrowed(description), None, Some(source))
+        EtlError::from((kind, description)).with_source(err)
     }
 }
 
@@ -597,13 +592,15 @@ impl From<serde_json::Error> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<std::str::Utf8Error> for EtlError {
     fn from(err: std::str::Utf8Error) -> EtlError {
-        let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
-            Cow::Borrowed("UTF-8 conversion failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((ErrorKind::ConversionError, "UTF-8 conversion failed")).with_source(err)
+    }
+}
+
+/// Converts [`simdutf8::basic::Utf8Error`] to [`EtlError`] with
+/// [`ErrorKind::ConversionError`].
+impl From<simdutf8::basic::Utf8Error> for EtlError {
+    fn from(err: simdutf8::basic::Utf8Error) -> EtlError {
+        EtlError::from((ErrorKind::ConversionError, "UTF-8 conversion failed")).with_source(err)
     }
 }
 
@@ -611,13 +608,8 @@ impl From<std::str::Utf8Error> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<std::string::FromUtf8Error> for EtlError {
     fn from(err: std::string::FromUtf8Error) -> EtlError {
-        let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
-            Cow::Borrowed("UTF-8 string conversion failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((ErrorKind::ConversionError, "UTF-8 string conversion failed"))
+            .with_source(err)
     }
 }
 
@@ -625,13 +617,7 @@ impl From<std::string::FromUtf8Error> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<std::num::ParseIntError> for EtlError {
     fn from(err: std::num::ParseIntError) -> EtlError {
-        let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
-            Cow::Borrowed("Integer parsing failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((ErrorKind::ConversionError, "Integer parsing failed")).with_source(err)
     }
 }
 
@@ -639,13 +625,7 @@ impl From<std::num::ParseIntError> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<std::num::ParseFloatError> for EtlError {
     fn from(err: std::num::ParseFloatError) -> EtlError {
-        let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
-            Cow::Borrowed("Float parsing failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((ErrorKind::ConversionError, "Float parsing failed")).with_source(err)
     }
 }
 
@@ -932,8 +912,7 @@ impl From<tokio_postgres::Error> for EtlError {
             None => (ErrorKind::SourceConnectionFailed, "PostgreSQL connection failed"),
         };
 
-        let source = Arc::new(err);
-        EtlError::from_components(kind, Cow::Borrowed(description), None, Some(source))
+        EtlError::from((kind, description)).with_source(err)
     }
 }
 
@@ -941,13 +920,7 @@ impl From<tokio_postgres::Error> for EtlError {
 /// [`ErrorKind::EncryptionError`].
 impl From<rustls::Error> for EtlError {
     fn from(err: rustls::Error) -> EtlError {
-        let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::EncryptionError,
-            Cow::Borrowed("TLS configuration failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((ErrorKind::EncryptionError, "TLS configuration failed")).with_source(err)
     }
 }
 
@@ -955,26 +928,14 @@ impl From<rustls::Error> for EtlError {
 /// [`ErrorKind::ConfigError`].
 impl From<rustls::pki_types::pem::Error> for EtlError {
     fn from(err: rustls::pki_types::pem::Error) -> EtlError {
-        let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConfigError,
-            Cow::Borrowed("PEM parsing failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((ErrorKind::ConfigError, "PEM parsing failed")).with_source(err)
     }
 }
 
 /// Converts [`uuid::Error`] to [`EtlError`] with [`ErrorKind::InvalidData`].
 impl From<uuid::Error> for EtlError {
     fn from(err: uuid::Error) -> EtlError {
-        let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::InvalidData,
-            Cow::Borrowed("UUID parsing failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((ErrorKind::InvalidData, "UUID parsing failed")).with_source(err)
     }
 }
 
@@ -982,13 +943,7 @@ impl From<uuid::Error> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<chrono::ParseError> for EtlError {
     fn from(err: chrono::ParseError) -> EtlError {
-        let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
-            Cow::Borrowed("Datetime parsing failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((ErrorKind::ConversionError, "Datetime parsing failed")).with_source(err)
     }
 }
 
@@ -996,13 +951,7 @@ impl From<chrono::ParseError> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<ParseNumericError> for EtlError {
     fn from(err: ParseNumericError) -> EtlError {
-        let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
-            Cow::Borrowed("Numeric parsing failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((ErrorKind::ConversionError, "Numeric parsing failed")).with_source(err)
     }
 }
 
@@ -1010,13 +959,7 @@ impl From<ParseNumericError> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<ParseTimeError> for EtlError {
     fn from(err: ParseTimeError) -> EtlError {
-        let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
-            Cow::Borrowed("Datetime parsing failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((ErrorKind::ConversionError, "Datetime parsing failed")).with_source(err)
     }
 }
 
@@ -1036,13 +979,7 @@ impl From<sqlx::Error> for EtlError {
             _ => ErrorKind::SourceQueryFailed,
         };
 
-        let source = Arc::new(err);
-        EtlError::from_components(
-            kind,
-            Cow::Borrowed("Database operation failed"),
-            None,
-            Some(source),
-        )
+        EtlError::from((kind, "Database operation failed")).with_source(err)
     }
 }
 

@@ -302,7 +302,7 @@ where
             let replicated_table_schema =
                 ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
 
-            let mut total_table_copy_rows = 0;
+            let mut total_table_copy_rows = 0_u64;
             let mut total_table_copy_duration_secs = 0.0;
             let mut table_copy_barrier_required = false;
 
@@ -331,7 +331,7 @@ where
                         total_duration_secs,
                         barrier_required,
                     } => {
-                        total_table_copy_rows = total_rows as usize;
+                        total_table_copy_rows = total_rows;
                         total_table_copy_duration_secs = total_duration_secs;
                         table_copy_barrier_required = barrier_required;
                     }

@@ -171,7 +171,7 @@
 //!
 //! # Feature Flags
 //!
-//! - `egress`: Enable structured egress logging helpers
+//! - `egress`: Enable structured billing usage logs
 //! - `test-utils`: Enable testing utilities and mock implementations
 //! - `failpoints`: Enable fault injection for testing error scenarios
 
@@ -199,6 +199,7 @@ mod postgres;
 mod replication;
 mod runtime;
 pub mod schema;
+mod source_payload_metadata;
 pub mod store;
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-utils"))]

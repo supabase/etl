@@ -1,0 +1,81 @@
+name: Fuzz
+
+on:
+  schedule:
+    # 02:23 UTC (04:23 CEST, 11:23 JST), off the whole hour because GitHub
+    # delays scheduled runs at peak times. Runs against the default branch.
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - parse_bytea_hex_string
+          - parse_text_cell
+          - parse_copy_row
+          - numeric_text_roundtrip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          toolchain: nightly-2026-04-15
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: fuzz
+          workspaces: |
+            fuzz -> target
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-fuzz
+
+      # The corpus evolves across runs: each run restores the newest saved
+      # corpus for its target and saves the grown one under a unique key.
+      - name: Restore Corpus
+        id: restore_corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Run Fuzz Target
+        # The prebuilt cargo-fuzz binary is musl-linked, and cargo-fuzz
+        # defaults --target to its own compile-time triple. Build for the
+        # runner's real host triple so ASan links against glibc.
+        run: |
+          host="$(rustc +nightly-2026-04-15 --print host-tuple)"
+          cargo +nightly-2026-04-15 fuzz run ${{ matrix.target }} --target "$host" -- -max_total_time=120
+
+      - name: Save Corpus
+        if: always() && steps.restore_corpus.outcome == 'success'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload Crash Artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: warn

@@ -14,6 +14,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     runtime::concurrency::{ShutdownResult, ShutdownRx},
+    source_payload_metadata::StreamingPayloadMetadata,
 };
 
 /// Durability status reported by streaming and table-copy destination writes.
@@ -113,15 +114,6 @@ pub(crate) type PendingWriteEventsResult<T = DestinationWriteStatus> =
 pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 
-/// Dispatch-time metrics carried through an asynchronous completion result.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct DispatchMetrics {
-    /// Number of items in the dispatched batch.
-    pub items_count: usize,
-    /// Instant at which the batch was handed off to the destination.
-    pub dispatched_at: Instant,
-}
-
 /// Metadata carried by apply-loop event write completions.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ApplyLoopAsyncResultMetadata {
@@ -135,8 +127,12 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     pub commit_end_lsn: Option<PgLsn>,
     /// Durability requirement supplied with the dispatched write.
     pub durability: WriteEventsDurability,
-    /// Dispatch-time metrics for the batch.
-    pub metrics: DispatchMetrics,
+    /// Number of events in the dispatched batch.
+    pub event_count: usize,
+    /// PostgreSQL tuple bytes accumulated for the dispatched event batch.
+    pub streaming_payload_metadata: StreamingPayloadMetadata,
+    /// Instant at which the event batch was handed off to the destination.
+    pub dispatched_at: Instant,
 }
 
 /// Sender half of a typed asynchronous completion result.
@@ -147,7 +143,7 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
 /// side immediately or later, depending on the method.
 #[derive(Debug)]
 pub struct AsyncResult<T> {
-    tx: Option<oneshot::Sender<EtlResult<T>>>,
+    tx: oneshot::Sender<(Instant, EtlResult<T>)>,
 }
 
 impl<T> AsyncResult<T> {
@@ -159,16 +155,14 @@ impl<T> AsyncResult<T> {
     pub(crate) fn new<M>(metadata: M) -> (Self, PendingAsyncResult<T, M>) {
         let (tx, rx) = oneshot::channel();
 
-        (Self { tx: Some(tx) }, PendingAsyncResult { metadata: Some(metadata), rx })
+        (Self { tx }, PendingAsyncResult { metadata: Some(metadata), rx })
     }
 
-    /// Sends the final result to the waiting receiver.
-    pub fn send(mut self, result: EtlResult<T>) {
-        let Some(tx) = self.tx.take() else {
-            return;
-        };
-
-        if tx.send(result).is_err() {
+    /// Sends the final result to the waiting receiver and records its
+    /// completion instant.
+    pub fn send(self, result: EtlResult<T>) {
+        let completed_at = Instant::now();
+        if self.tx.send((completed_at, result)).is_err() {
             debug!("async result receiver was already closed");
         }
     }
@@ -181,7 +175,7 @@ pin_project! {
     pub(crate) struct PendingAsyncResult<T, M> {
         metadata: Option<M>,
         #[pin]
-        rx: oneshot::Receiver<EtlResult<T>>,
+        rx: oneshot::Receiver<(Instant, EtlResult<T>)>,
     }
 }
 
@@ -192,11 +186,14 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
         let this = self.project();
 
         match this.rx.poll(cx) {
-            Poll::Ready(Ok(result)) => {
-                Poll::Ready(CompletedAsyncResult { metadata: this.metadata.take(), result })
-            }
+            Poll::Ready(Ok((completed_at, result))) => Poll::Ready(CompletedAsyncResult {
+                metadata: this.metadata.take(),
+                completed_at,
+                result,
+            }),
             Poll::Ready(Err(_)) => Poll::Ready(CompletedAsyncResult {
                 metadata: this.metadata.take(),
+                completed_at: Instant::now(),
                 result: Err(etl_error!(
                     ErrorKind::DestinationError,
                     "Async result channel closed before sending"
@@ -227,6 +224,9 @@ impl<T, M> PendingAsyncResult<T, M> {
 #[derive(Debug)]
 pub(crate) struct CompletedAsyncResult<T, M> {
     metadata: Option<M>,
+    /// Instant at which the sender reported completion.
+    completed_at: Instant,
+    /// Final operation result.
     result: EtlResult<T>,
 }
 
@@ -237,8 +237,14 @@ impl<T, M> CompletedAsyncResult<T, M> {
     }
 
     /// Returns the metadata and final result.
+    #[cfg(test)]
     pub(crate) fn into_parts(self) -> (Option<M>, EtlResult<T>) {
         (self.metadata, self.result)
+    }
+
+    /// Returns metadata, the completion instant, and the final result.
+    pub(crate) fn into_parts_with_completion(self) -> (Option<M>, Instant, EtlResult<T>) {
+        (self.metadata, self.completed_at, self.result)
     }
 }
 
@@ -252,7 +258,9 @@ mod tests {
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: Some(PgLsn::from(42)),
             durability: WriteEventsDurability::MayDefer,
-            metrics: DispatchMetrics { items_count: 1, dispatched_at: Instant::now() },
+            event_count: 1,
+            streaming_payload_metadata: StreamingPayloadMetadata::insert(7),
+            dispatched_at: Instant::now(),
         };
         let (result_tx, pending_result) = WriteEventsResult::new(metadata);
 
@@ -283,7 +291,7 @@ mod tests {
         let mut pending_result =
             PendingAsyncResult::<u64, ApplyLoopAsyncResultMetadata> { metadata: None, rx };
 
-        result_tx.send(Ok(7)).unwrap();
+        result_tx.send((Instant::now(), Ok(7))).unwrap();
 
         let completed = std::future::poll_fn(|cx| Pin::new(&mut pending_result).poll(cx)).await;
         let (metadata, result) = completed.into_parts();
