@@ -379,6 +379,7 @@ where
                 commit_end_lsn: None,
                 durability,
                 event_count: events.len(),
+                relation_table_ids: Default::default(),
                 streaming_payload_metadata: Default::default(),
                 dispatched_at: Instant::now(),
             });

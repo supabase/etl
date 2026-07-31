@@ -228,27 +228,29 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_SCHEMA_CLEANUPS_TOTAL,
             Unit::Count,
-            "Total number of asynchronous schema cleanup tasks completed, labeled by worker_type."
+            "Total number of schema cleanup requests successfully completed, labeled by \
+             worker_type."
         );
 
         describe_counter!(
             ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
             Unit::Count,
-            "Total number of asynchronous schema cleanup errors, labeled by worker_type."
+            "Total number of schema cleanup request failures and cleanup worker failures, labeled \
+             by worker_type."
         );
 
         describe_counter!(
             ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
             Unit::Count,
-            "Total number of tables considered by asynchronous schema cleanup tasks, labeled by \
-             worker_type."
+            "Total number of tables included in successfully completed schema cleanup requests, \
+             labeled by worker_type."
         );
 
         describe_counter!(
             ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL,
             Unit::Count,
-            "Total number of obsolete schema versions pruned by asynchronous schema cleanup \
-             tasks, labeled by worker_type."
+            "Total number of obsolete schema versions pruned by successfully completed schema \
+             cleanup requests, labeled by worker_type."
         );
 
         describe_counter!(

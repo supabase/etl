@@ -47,15 +47,6 @@ pub(crate) enum StatusUpdateType {
     ShutdownFlush,
 }
 
-/// Outcome of a status update attempt.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum StatusUpdateResult {
-    /// A status update was accepted by the local replication stream wrapper.
-    Sent,
-    /// No status update was sent because throttling suppressed it.
-    Skipped,
-}
-
 impl StatusUpdateType {
     /// Returns `true` whether this status update type requires a reply from
     /// Postgres, `false` otherwise.
@@ -114,7 +105,7 @@ impl ReplicationMessageStream {
         mut flush_lsn: PgLsn,
         force: bool,
         status_update_type: StatusUpdateType,
-    ) -> EtlResult<StatusUpdateResult> {
+    ) -> EtlResult<()> {
         // If the failpoint is active, we do not send any status update. This is useful
         // for testing the system when we want to check what happens when no
         // status updates are sent.
@@ -122,7 +113,7 @@ impl ReplicationMessageStream {
         if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
             warn!("not sending status update due to active failpoint");
 
-            return Ok(StatusUpdateResult::Skipped);
+            return Ok(());
         }
 
         let this = self.project();
@@ -178,7 +169,7 @@ impl ReplicationMessageStream {
                     "skipping status update"
                 );
 
-                return Ok(StatusUpdateResult::Skipped);
+                return Ok(());
             }
         }
 
@@ -222,7 +213,7 @@ impl ReplicationMessageStream {
         *this.last_write_lsn = Some(write_lsn);
         *this.last_flush_lsn = Some(flush_lsn);
 
-        Ok(StatusUpdateResult::Sent)
+        Ok(())
     }
 }
 
