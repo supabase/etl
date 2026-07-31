@@ -962,6 +962,7 @@ mod tests {
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            table_sorting: Default::default(),
         };
 
         let secrets = build_secrets_from_configs(&source_config, &destination_config).unwrap();
@@ -1002,6 +1003,7 @@ mod tests {
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            table_sorting: Default::default(),
         };
 
         let error = build_secrets_from_configs(&source_config, &destination_config).unwrap_err();
