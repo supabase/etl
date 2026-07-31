@@ -69,6 +69,17 @@ pub(super) async fn start(
                 Err(disabled_destination_error(DestinationKind::Snowflake))
             }
         }
+        DestinationKind::Postgres => {
+            #[cfg(feature = "postgres")]
+            {
+                postgres::start(replicator_config, store).await
+            }
+
+            #[cfg(not(feature = "postgres"))]
+            {
+                Err(disabled_destination_error(DestinationKind::Postgres))
+            }
+        }
     }
 }
 
@@ -77,7 +88,8 @@ pub(super) async fn start(
     not(feature = "clickhouse"),
     not(feature = "ducklake"),
     not(feature = "iceberg"),
-    not(feature = "snowflake")
+    not(feature = "snowflake"),
+    not(feature = "postgres")
 ))]
 fn disabled_destination_error(kind: DestinationKind) -> crate::error::ReplicatorError {
     crate::error::ReplicatorError::config(std::io::Error::other(format!(
@@ -410,6 +422,38 @@ mod snowflake {
         );
         let client = snowflake_destination::Client::new(auth, pipeline_id);
         let destination = snowflake_destination::Destination::new(client, store.clone());
+
+        let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
+        pipeline::start(pipeline).await
+    }
+}
+
+/// Postgres destination startup.
+#[cfg(feature = "postgres")]
+mod postgres {
+    use etl::pipeline::Pipeline;
+    use etl_config::shared::{DestinationConfig, ReplicatorConfig};
+    use etl_destinations::postgres::PostgresDestination;
+
+    use super::super::{ReplicatorStore, pipeline};
+    use crate::error::ReplicatorResult;
+
+    /// Starts the Postgres destination pipeline.
+    pub(super) async fn start(
+        replicator_config: ReplicatorConfig,
+        store: ReplicatorStore,
+    ) -> ReplicatorResult<()> {
+        let DestinationConfig::Postgres { pg_connection, destination_schema } =
+            &replicator_config.destination
+        else {
+            unreachable!("Destination kind should match Postgres config");
+        };
+
+        let destination = PostgresDestination::new(
+            pg_connection.clone(),
+            destination_schema.clone(),
+            store.clone(),
+        );
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
         pipeline::start(pipeline).await

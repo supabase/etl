@@ -15,6 +15,7 @@ mod sql;
     feature = "clickhouse",
     feature = "ducklake",
     feature = "iceberg",
+    feature = "postgres",
     feature = "snowflake"
 ))]
 mod table_name;
@@ -27,5 +28,7 @@ pub mod clickhouse;
 pub mod ducklake;
 #[cfg(feature = "iceberg")]
 pub mod iceberg;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 #[cfg(feature = "snowflake")]
 pub mod snowflake;

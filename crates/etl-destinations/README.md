@@ -11,6 +11,12 @@ Enable the destination modules you need with crate features:
 | `ducklake` | DuckLake | In progress |
 | `iceberg` | Apache Iceberg | Deprecated for now |
 | `snowflake` | Snowflake | In progress |
+| `postgres` | Postgres | In progress |
+
+The Postgres destination creates current-state UPSERT tables (no CDC meta columns),
+auto-applies portable schema changes, maps source `timetz` to destination `text`,
+and accepts TLS through `PgConnectionConfig.tls` (API-created destinations currently
+force TLS disabled).
 
 DuckLake external maintenance is configured at runtime with
 `maintenance_mode`: `disabled`, `kubernetes`, or `postgres`. The default is
@@ -19,3 +25,5 @@ DuckLake external maintenance is configured at runtime with
 `ETL_DUCKLAKE_MAINTENANCE_CR_NAMESPACE`. Postgres coordination uses the same
 Postgres catalog connection as DuckLake and stores coordination state in the
 `etl` schema.
+
+When `destination_schema` is set, destination table names encode the source schema (for example `public.users` → `<schema>.public_users`) to avoid collisions across source schemas.

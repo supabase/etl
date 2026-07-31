@@ -1,6 +1,11 @@
+use std::net::IpAddr;
+
 use etl_config::{
     SerializableSecretString,
-    shared::{ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode, IcebergConfig},
+    shared::{
+        ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode, IcebergConfig,
+        PgConnectionConfig, TcpKeepaliveConfig, TlsConfig,
+    },
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
@@ -170,6 +175,31 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         role: Option<String>,
+    },
+    Postgres {
+        #[schema(example = "localhost")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        host: String,
+        #[schema(value_type = String, example = "127.0.0.1")]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hostaddr: Option<IpAddr>,
+        #[schema(example = 5432)]
+        port: u16,
+        #[schema(example = "analytics")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        name: String,
+        #[schema(example = "postgres")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        username: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        password: Option<SerializableSecretString>,
+        #[schema(example = "replica")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        destination_schema: Option<String>,
     },
 }
 
@@ -470,6 +500,49 @@ pub enum UpdateApiDestinationConfig {
         )]
         role: UpdateField<String>,
     },
+
+    Postgres {
+        #[schema(example = "localhost")]
+        #[serde(
+            default,
+            skip_serializing_if = "UpdateField::is_preserve",
+            deserialize_with = "deserialize_update_trimmed_string"
+        )]
+        host: UpdateField<String>,
+        #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+        #[schema(value_type = Option<String>, example = "127.0.0.1")]
+        hostaddr: UpdateField<IpAddr>,
+        #[schema(example = 5432)]
+        #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+        port: UpdateField<u16>,
+        #[schema(example = "analytics")]
+        #[serde(
+            default,
+            skip_serializing_if = "UpdateField::is_preserve",
+            deserialize_with = "deserialize_update_trimmed_string"
+        )]
+        name: UpdateField<String>,
+        #[schema(example = "postgres")]
+        #[serde(
+            default,
+            skip_serializing_if = "UpdateField::is_preserve",
+            deserialize_with = "deserialize_update_trimmed_string"
+        )]
+        username: UpdateField<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "UpdateField::is_preserve",
+            deserialize_with = "deserialize_update_secret_string"
+        )]
+        password: UpdateField<SerializableSecretString>,
+        #[schema(example = "replica")]
+        #[serde(
+            default,
+            skip_serializing_if = "UpdateField::is_preserve",
+            deserialize_with = "deserialize_update_trimmed_string"
+        )]
+        destination_schema: UpdateField<String>,
+    },
 }
 
 impl UpdateApiDestinationConfig {
@@ -551,6 +624,23 @@ impl UpdateApiDestinationConfig {
                 database: UpdateField::Set(database),
                 schema: UpdateField::Set(schema),
                 role: UpdateField::from_option(role),
+            },
+            ApiDestinationConfig::Postgres {
+                host,
+                hostaddr,
+                port,
+                name,
+                username,
+                password,
+                destination_schema,
+            } => Self::Postgres {
+                host: UpdateField::Set(host),
+                hostaddr: UpdateField::from_option(hostaddr),
+                port: UpdateField::Set(port),
+                name: UpdateField::Set(name),
+                username: UpdateField::Set(username),
+                password: UpdateField::from_option(password),
+                destination_schema: UpdateField::from_option(destination_schema),
             },
         }
     }
@@ -718,6 +808,41 @@ impl UpdateApiDestinationConfig {
                 )?,
                 role: role.apply_to_option(stored_role),
             }),
+
+            (
+                Self::Postgres {
+                    host,
+                    hostaddr,
+                    port,
+                    name,
+                    username,
+                    password,
+                    destination_schema,
+                },
+                StoredDestinationConfig::Postgres {
+                    host: stored_host,
+                    hostaddr: stored_hostaddr,
+                    port: stored_port,
+                    name: stored_name,
+                    username: stored_username,
+                    password: stored_password,
+                    destination_schema: stored_destination_schema,
+                },
+            ) => Ok(StoredDestinationConfig::Postgres {
+                host: host
+                    .apply_to_required(stored_host, required_field_cleared("Postgres", "host"))?,
+                hostaddr: hostaddr.apply_to_option(stored_hostaddr),
+                port: port
+                    .apply_to_required(stored_port, required_field_cleared("Postgres", "port"))?,
+                name: name
+                    .apply_to_required(stored_name, required_field_cleared("Postgres", "name"))?,
+                username: username.apply_to_required(
+                    stored_username,
+                    required_field_cleared("Postgres", "username"),
+                )?,
+                password: password.apply_to_option(stored_password),
+                destination_schema: destination_schema.apply_to_option(stored_destination_schema),
+            }),
             (config, _) => config.into_stored_requiring_secrets(),
         }
     }
@@ -843,6 +968,36 @@ impl UpdateApiDestinationConfig {
                     required_field_cleared("Snowflake", "schema"),
                 )?,
                 role: role.apply_to_option(None),
+            }),
+
+            Self::Postgres {
+                host,
+                hostaddr,
+                port,
+                name,
+                username,
+                password,
+                destination_schema,
+            } => Ok(StoredDestinationConfig::Postgres {
+                host: host.into_required(
+                    missing_required_field("Postgres", "host"),
+                    required_field_cleared("Postgres", "host"),
+                )?,
+                hostaddr: hostaddr.apply_to_option(None),
+                port: port.into_required(
+                    missing_required_field("Postgres", "port"),
+                    required_field_cleared("Postgres", "port"),
+                )?,
+                name: name.into_required(
+                    missing_required_field("Postgres", "name"),
+                    required_field_cleared("Postgres", "name"),
+                )?,
+                username: username.into_required(
+                    missing_required_field("Postgres", "username"),
+                    required_field_cleared("Postgres", "username"),
+                )?,
+                password: password.apply_to_option(None),
+                destination_schema: destination_schema.apply_to_option(None),
             }),
         }
     }
@@ -975,6 +1130,24 @@ impl From<StoredDestinationConfig> for ApiDestinationConfig {
                 schema,
                 role,
             },
+
+            StoredDestinationConfig::Postgres {
+                host,
+                hostaddr,
+                port,
+                name,
+                username,
+                password,
+                destination_schema,
+            } => Self::Postgres {
+                host,
+                hostaddr,
+                port,
+                name,
+                username,
+                password,
+                destination_schema,
+            },
         }
     }
 }
@@ -1021,6 +1194,15 @@ pub enum StoredDestinationConfig {
         database: String,
         schema: String,
         role: Option<String>,
+    },
+    Postgres {
+        host: String,
+        hostaddr: Option<IpAddr>,
+        port: u16,
+        name: String,
+        username: String,
+        password: Option<SerializableSecretString>,
+        destination_schema: Option<String>,
     },
 }
 
@@ -1133,6 +1315,30 @@ impl StoredDestinationConfig {
                 schema,
                 role,
             },
+
+            Self::Postgres {
+                host,
+                hostaddr,
+                port,
+                name,
+                username,
+                password,
+                destination_schema,
+            } => DestinationConfig::Postgres {
+                pg_connection: PgConnectionConfig {
+                    host,
+                    hostaddr,
+                    port,
+                    name,
+                    username,
+                    password: password.map(Into::into),
+                    // API-created Postgres destinations do not expose TLS fields yet.
+                    // Library/replicator configs can enable TLS via `PgConnectionConfig.tls`.
+                    tls: TlsConfig::disabled(),
+                    keepalive: TcpKeepaliveConfig::default(),
+                },
+                destination_schema,
+            },
         }
     }
 }
@@ -1240,6 +1446,24 @@ impl From<ApiDestinationConfig> for StoredDestinationConfig {
                 database,
                 schema,
                 role,
+            },
+
+            ApiDestinationConfig::Postgres {
+                host,
+                hostaddr,
+                port,
+                name,
+                username,
+                password,
+                destination_schema,
+            } => Self::Postgres {
+                host,
+                hostaddr,
+                port,
+                name,
+                username,
+                password,
+                destination_schema,
             },
         }
     }
@@ -1403,6 +1627,31 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     role,
                 })
             }
+
+            Self::Postgres {
+                host,
+                hostaddr,
+                port,
+                name,
+                username,
+                password,
+                destination_schema,
+            } => {
+                let password = password
+                    .map(|password| {
+                        encrypt_text(password.expose_secret().to_owned(), encryption_key)
+                    })
+                    .transpose()?;
+                Ok(EncryptedStoredDestinationConfig::Postgres {
+                    host,
+                    hostaddr,
+                    port,
+                    name,
+                    username,
+                    password,
+                    destination_schema,
+                })
+            }
         }
     }
 }
@@ -1468,6 +1717,15 @@ pub enum EncryptedStoredDestinationConfig {
         schema: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<String>,
+    },
+    Postgres {
+        host: String,
+        hostaddr: Option<IpAddr>,
+        port: u16,
+        name: String,
+        username: String,
+        password: Option<EncryptedValue>,
+        destination_schema: Option<String>,
     },
 }
 
@@ -1644,6 +1902,30 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     database,
                     schema,
                     role,
+                })
+            }
+
+            Self::Postgres {
+                host,
+                hostaddr,
+                port,
+                name,
+                username,
+                password,
+                destination_schema,
+            } => {
+                let password = password
+                    .map(|password| decrypt_text(password, encryption_key))
+                    .transpose()?
+                    .map(SerializableSecretString::from);
+                Ok(StoredDestinationConfig::Postgres {
+                    host,
+                    hostaddr,
+                    port,
+                    name,
+                    username,
+                    password,
+                    destination_schema,
                 })
             }
         }
