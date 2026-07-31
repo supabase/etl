@@ -2187,6 +2187,12 @@ where
                 // a skipped transaction can send a keepalive with its decoded
                 // write location before `sentPtr` has been updated:
                 // https://github.com/postgres/postgres/commit/d5a9d86d8ffcadc52ff3729cd00fbd83bc38643c
+                // pgoutput skips a transaction this way when it reaches commit
+                // without emitting any published change, for example after a
+                // write to a table outside the publication. A burst of such
+                // commits can therefore produce a burst of primary keepalives.
+                // We attempt a response to each one, but the stream-level
+                // status-update debounce suppresses redundant optional replies.
                 // In either case this is a decoded-WAL frontier, not necessarily
                 // an emitted-event frontier: it may advance through an
                 // uncommitted transaction whose changes remain in the server's

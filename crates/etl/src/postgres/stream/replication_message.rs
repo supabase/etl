@@ -29,8 +29,15 @@ use crate::{
     },
 };
 
-/// The amount of milliseconds between two consecutive status updates in case no
-/// forced update is requested.
+/// Minimum interval between non-forced status updates when the flush frontier
+/// has not advanced.
+///
+/// PostgreSQL can emit a primary keepalive for every transaction that pgoutput
+/// skips because it contains no published changes when synchronous replication
+/// is active. The apply loop attempts a status response for each keepalive,
+/// including those that do not request an immediate reply. This interval
+/// prevents such bursts from producing an equally large burst of redundant
+/// responses.
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The status update type when sending a status update message back to
@@ -104,10 +111,25 @@ impl ReplicationMessageStream {
 
     /// Sends a status update to the Postgres server.
     ///
-    /// This method implements a status update logic that balances Postgres's
-    /// need for progress information with network efficiency and system
-    /// performance. It handles multiple error scenarios and edge cases
-    /// related to time synchronization and network communication.
+    /// Primary keepalives do not all request an immediate response. In
+    /// particular, a synchronous logical walsender may send one after pgoutput
+    /// skips a transaction with no published changes. The apply loop still
+    /// calls this method for that keepalive so new flush progress can be
+    /// reported promptly, but passes `force = false` when PostgreSQL did not
+    /// request a reply.
+    ///
+    /// PostgreSQL normally requests an immediate reply only after roughly half
+    /// of `wal_sender_timeout` has elapsed without hearing from ETL. Once it
+    /// sends that requested heartbeat, the walsender waits for the response
+    /// instead of issuing more requested heartbeats. Keepalives emitted for
+    /// skipped transactions do not request a reply.
+    ///
+    /// A non-forced call with an unchanged flush frontier is therefore
+    /// debounced. In normal operation, [`StatusUpdateResult::Skipped`] means
+    /// ETL suppressed that redundant response locally; it does not mean a
+    /// status message was sent and rejected by PostgreSQL. Outside test fault
+    /// injection, forced heartbeat and shutdown responses always bypass this
+    /// interval.
     pub(crate) async fn send_status_update(
         self: Pin<&mut Self>,
         mut write_lsn: PgLsn,
@@ -126,6 +148,7 @@ impl ReplicationMessageStream {
         }
 
         let this = self.project();
+
         // If the new write lsn is less than the last one, we can safely ignore it,
         // since we only want to report monotonically increasing values.
         if let Some(last_write_lsn) = this.last_write_lsn
@@ -146,25 +169,24 @@ impl ReplicationMessageStream {
         // that there was a problem during replication.
         debug_assert!(write_lsn >= flush_lsn);
 
-        // If we are not forced to send an update, we can willingly do so based on a set
-        // of conditions.
+        // Debounce only optional replies. PostgreSQL may generate many primary
+        // keepalives for consecutive transactions that pgoutput filtered to
+        // empty, but replying again before either the flush frontier or this
+        // interval advances would provide no new durability information.
         if !force
-            && let (Some(last_update), Some(last_flush)) =
+            && let (Some(last_update), Some(last_flush_lsn)) =
                 (this.last_update.as_mut(), this.last_flush_lsn.as_mut())
         {
-            // The reason for only checking `flush_lsn` and `apply_lsn` is that if we are
-            // not forced to send a status update to Postgres (when reply is
-            // requested), we want to just notify it in case we actually durably
-            // flushed and persisted events, which is signaled via
-            // the two aforementioned fields. Postgres mostly uses the 'write_lsn' field for
-            // tracking what was received by the replication client but not what the client
-            // actually safely stored.
+            // Only a changed flush frontier bypasses the interval because it
+            // provides PostgreSQL with new confirmed progress. `write_lsn`
+            // tracks receipt and can advance for every incoming message,
+            // including keepalives, without advancing that safe frontier while
+            // ETL still has unresolved work.
             //
-            // If we were to check `write_lsn` too, we would end up sending updates more
-            // frequently when they are not requested, simply because the
-            // `write_lsn` is updated for every incoming message in the apply
-            // loop.
-            if flush_lsn == *last_flush && last_update.elapsed() < STATUS_UPDATE_INTERVAL {
+            // Checking `write_lsn` here would defeat the debounce: each new
+            // keepalive could trigger another optional response even though the
+            // reported flush and apply positions were unchanged.
+            if flush_lsn == *last_flush_lsn && last_update.elapsed() < STATUS_UPDATE_INTERVAL {
                 counter!(
                     ETL_STATUS_UPDATES_SKIPPED_TOTAL,
                     STATUS_UPDATE_TYPE_LABEL => status_update_type.as_str(),
@@ -196,6 +218,11 @@ impl ReplicationMessageStream {
         // `apply_lsn` is used to mark when an LSN is both durable and visible,
         // but from ETL's perspective we are fine with just it being durable, which
         // is marked via the `flush_lsn`.
+        //
+        // This outgoing request flag is separate from `force`. For a primary
+        // keepalive, `force` mirrors PostgreSQL's incoming reply-request flag.
+        // Periodic and shutdown status updates are forced locally and also ask
+        // PostgreSQL to answer so the connection gets a round-trip heartbeat.
         let request_reply: u8 = status_update_type.request_reply().into();
         this.stream
             .standby_status_update(write_lsn, flush_lsn, flush_lsn, ts, request_reply)
