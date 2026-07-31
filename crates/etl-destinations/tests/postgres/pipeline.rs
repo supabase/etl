@@ -11,7 +11,7 @@ use etl::{
     },
 };
 use etl_destinations::postgres::test_utils::{
-    TEST_DESTINATION_SCHEMA, setup_postgres_destination_database,
+    TEST_DESTINATION_SCHEMA, destination_table_ident, setup_postgres_destination_database,
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
@@ -93,9 +93,10 @@ async fn table_copy_roundtrip() {
     let rows = dest_db
         .query(&format!(
             "select id, smallint_col, integer_col, bigint_col, text_col, varchar_col, \
-             numeric_col::text, boolean_col, uuid_col::text from {schema}.pg_copy_types order by \
+             numeric_col::text, boolean_col, uuid_col::text from {schema}.{table} order by \
              id",
             schema = TEST_DESTINATION_SCHEMA,
+            table = destination_table_ident(&table_name),
         ))
         .await;
     assert_eq!(rows.len(), 1);
@@ -174,8 +175,9 @@ async fn updates_and_deletes_streamed() {
 
     let rows = dest_db
         .query(&format!(
-            "select id, value from {schema}.pg_update_delete order by id",
+            "select id, value from {schema}.{table} order by id",
             schema = TEST_DESTINATION_SCHEMA,
+            table = destination_table_ident(&table_name),
         ))
         .await;
     assert_eq!(rows.len(), 1);
@@ -245,8 +247,9 @@ async fn truncate_clears_table() {
 
     let rows = dest_db
         .query(&format!(
-            "select id, value from {schema}.pg_truncate order by id",
+            "select id, value from {schema}.{table} order by id",
             schema = TEST_DESTINATION_SCHEMA,
+            table = destination_table_ident(&table_name),
         ))
         .await;
     assert_eq!(rows.len(), 1);
@@ -297,7 +300,8 @@ async fn schema_change_add_drop_rename() {
     pipeline.start().await.unwrap();
     ready.notified().await;
 
-    let initial_columns = dest_db.column_names(TEST_DESTINATION_SCHEMA, "pg_schema_multi").await;
+    let initial_columns =
+        dest_db.column_names(TEST_DESTINATION_SCHEMA, &destination_table_ident(&table_name)).await;
     assert_eq!(initial_columns, vec!["id", "name", "age", "status"]);
     let initial_snapshot = store
         .get_applied_destination_table_metadata(table_id)
@@ -342,7 +346,8 @@ async fn schema_change_add_drop_rename() {
     events.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let final_columns = dest_db.column_names(TEST_DESTINATION_SCHEMA, "pg_schema_multi").await;
+    let final_columns =
+        dest_db.column_names(TEST_DESTINATION_SCHEMA, &destination_table_ident(&table_name)).await;
     assert_eq!(final_columns, vec!["id", "full_name", "status", "email"]);
 
     let final_snapshot = store
@@ -355,8 +360,9 @@ async fn schema_change_add_drop_rename() {
 
     let rows = dest_db
         .query(&format!(
-            "select id, full_name, status, email from {schema}.pg_schema_multi order by id",
+            "select id, full_name, status, email from {schema}.{table} order by id",
             schema = TEST_DESTINATION_SCHEMA,
+            table = destination_table_ident(&table_name),
         ))
         .await;
     assert_eq!(rows.len(), 2);
@@ -410,8 +416,9 @@ async fn table_copy_reset_drops_destination() {
 
     let before = dest_db
         .query(&format!(
-            "select count(*)::bigint from {schema}.pg_reset_copy",
+            "select count(*)::bigint from {schema}.{table}",
             schema = TEST_DESTINATION_SCHEMA,
+            table = destination_table_ident(&table_name),
         ))
         .await;
     assert_eq!(before[0].get::<_, i64>(0), 2);
@@ -446,8 +453,9 @@ async fn table_copy_reset_drops_destination() {
     assert!(destination.was_table_dropped_for_copy(table_id).await);
     let rows = dest_db
         .query(&format!(
-            "select id, value from {schema}.pg_reset_copy order by id",
+            "select id, value from {schema}.{table} order by id",
             schema = TEST_DESTINATION_SCHEMA,
+            table = destination_table_ident(&table_name),
         ))
         .await;
     assert_eq!(rows.len(), 1);

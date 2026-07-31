@@ -23,13 +23,16 @@ use etl_config::shared::PgConnectionConfig;
 use parking_lot::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
-use crate::postgres::{
-    client::PostgresClient,
-    encoding::{cells_to_postgres_values, values_as_tosql_params},
-    schema::{
-        create_schema_sql, create_table_sql, delete_by_pk_sql, drop_table_sql,
-        ensure_has_primary_key, schema_diff_statements, truncate_table_sql, upsert_sql,
+use crate::{
+    postgres::{
+        client::PostgresClient,
+        encoding::{cells_to_postgres_values, values_as_tosql_params},
+        schema::{
+            create_schema_sql, create_table_sql, delete_by_pk_sql, drop_table_sql,
+            ensure_has_primary_key, schema_diff_statements, truncate_table_sql, upsert_sql,
+        },
     },
+    table_name::try_stringify_table_name,
 };
 
 /// Pending row operation for streaming CDC.
@@ -58,7 +61,8 @@ where
     /// Creates a new Postgres destination.
     ///
     /// When `destination_schema` is `Some`, all tables are placed in that
-    /// schema while preserving source table names. When `None`, source
+    /// schema and destination table names encode the source schema to avoid
+    /// collisions (`public.users` → `dest.public_users`). When `None`, source
     /// `schema.table` names are preserved.
     pub fn new(
         pg_connection: PgConnectionConfig,
@@ -75,12 +79,16 @@ where
     }
 
     /// Resolves the destination [`TableName`] for a replicated source table.
-    fn destination_table_name(&self, schema: &ReplicatedTableSchema) -> TableName {
+    /// When `destination_schema` is set, the source schema is encoded into the
+    /// destination table name (`schema_table` with underscore escaping) so tables
+    /// like `public.users` and `auth.users` cannot collide in one override schema.
+    fn destination_table_name(&self, schema: &ReplicatedTableSchema) -> EtlResult<TableName> {
         match &self.destination_schema {
             Some(override_schema) => {
-                TableName::new(override_schema.clone(), schema.name().name.clone())
+                let encoded_table = try_stringify_table_name(schema.name())?;
+                Ok(TableName::new(override_schema.clone(), encoded_table))
             }
-            None => schema.name().clone(),
+            None => Ok(schema.name().clone()),
         }
     }
 
@@ -89,7 +97,7 @@ where
     async fn ensure_table_exists(&self, schema: &ReplicatedTableSchema) -> EtlResult<TableName> {
         ensure_has_primary_key(schema)?;
         let table_id = schema.id();
-        let destination_table = self.destination_table_name(schema);
+        let destination_table = self.destination_table_name(schema)?;
 
         if self.ensured_tables.read().contains(&table_id) {
             return Ok(destination_table);
@@ -271,7 +279,7 @@ where
             current_table_schema,
             current_replication_mask.clone(),
         );
-        let destination_table = self.destination_table_name(new_schema);
+        let destination_table = self.destination_table_name(new_schema)?;
         let destination_table_id = destination_table.as_quoted_identifier();
 
         let updated_metadata = DestinationTableMetadata::new_applied(
@@ -364,7 +372,7 @@ where
     }
 
     async fn drop_table_for_copy_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
-        let destination_table = self.destination_table_name(schema);
+        let destination_table = self.destination_table_name(schema)?;
         self.client
             .execute_simple(&drop_table_sql(&destination_table), "Postgres drop table failed")
             .await?;
@@ -556,10 +564,10 @@ fn postgres_update_row(
             ErrorKind::SourceReplicaIdentityError,
             "Postgres update requires a full new row image",
             format!(
-                        "Table '{}' emitted a partial update row. Postgres UPSERT does not \
+                "Table '{}' emitted a partial update row. Postgres UPSERT does not \
                          preserve                  omitted columns.",
-                        replicated_table_schema.name()
-                    )
+                replicated_table_schema.name()
+            )
         )),
     }
 }
@@ -576,12 +584,12 @@ fn ensure_postgres_update_without_old_row_can_skip_delete(
             ErrorKind::SourceReplicaIdentityError,
             "Postgres update requires old primary-key values",
             format!(
-                    "Table '{}' emitted an update without an old row image for replica identity \
+                "Table '{}' emitted an update without an old row image for replica identity \
                      {:?}.                  Postgres can only skip the generated delete when the \
                      source replica identity                  matches the primary key.",
-                    replicated_table_schema.name(),
-                    replicated_table_schema.identity_type()
-                )
+                replicated_table_schema.name(),
+                replicated_table_schema.identity_type()
+            )
         ))
     }
 }
@@ -597,11 +605,11 @@ fn ensure_postgres_key_image_matches_primary_key(
             ErrorKind::SourceReplicaIdentityError,
             "Postgres key image does not match the source primary key",
             format!(
-                    "Table '{}' emitted a key image for replica identity {:?}, but Postgres rows \
+                "Table '{}' emitted a key image for replica identity {:?}, but Postgres rows \
                      are                  keyed by the source primary key",
-                    replicated_table_schema.name(),
-                    replicated_table_schema.identity_type()
-                )
+                replicated_table_schema.name(),
+                replicated_table_schema.identity_type()
+            )
         ))
     }
 }
@@ -793,7 +801,7 @@ mod tests {
         },
     };
 
-    use super::postgres_update_row;
+    use super::{PostgresDestination, postgres_update_row};
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
@@ -826,5 +834,44 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
         assert!(error.to_string().contains("emitted a partial update row"));
+    }
+    #[test]
+    fn destination_table_name_encodes_source_schema_under_override() {
+        use etl::store::MemoryStore;
+
+        let store = MemoryStore::new();
+        let destination = PostgresDestination::new(
+            etl_config::shared::PgConnectionConfig {
+                host: "localhost".into(),
+                hostaddr: None,
+                port: 5432,
+                name: "postgres".into(),
+                username: "postgres".into(),
+                password: None,
+                tls: etl_config::shared::TlsConfig::disabled(),
+                keepalive: etl_config::shared::TcpKeepaliveConfig::default(),
+            },
+            Some("replica".to_owned()),
+            store,
+        );
+
+        let public_users = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+        )));
+        let auth_users = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(2),
+            TableName::new("auth".to_owned(), "users".to_owned()),
+            vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+        )));
+
+        let public_dest = destination.destination_table_name(&public_users).unwrap();
+        let auth_dest = destination.destination_table_name(&auth_users).unwrap();
+        assert_eq!(public_dest.schema, "replica");
+        assert_eq!(auth_dest.schema, "replica");
+        assert_eq!(public_dest.name, "public_users");
+        assert_eq!(auth_dest.name, "auth_users");
+        assert_ne!(public_dest.name, auth_dest.name);
     }
 }

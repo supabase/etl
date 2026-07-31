@@ -6,10 +6,16 @@ use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgD
 use tokio_postgres::{Client, Row};
 use uuid::Uuid;
 
-use crate::postgres::PostgresDestination;
+use crate::{postgres::PostgresDestination, table_name::try_stringify_table_name};
+use etl::schema::TableName;
 
 /// Default schema override used by destination integration tests.
 pub const TEST_DESTINATION_SCHEMA: &str = "replica";
+
+/// Destination table name under the test schema override (`test_<name>`).
+pub fn destination_table_ident(source_table: &TableName) -> String {
+    try_stringify_table_name(source_table).expect("test table name should encode")
+}
 
 /// Builds a destination database config on the same server as the test source.
 pub fn destination_pg_connection_config() -> PgConnectionConfig {

@@ -102,6 +102,12 @@ impl DestinationValidator {
                     false,
                 ))
             }
+            ApiDestinationConfig::Postgres { .. } => Some(PrimaryKeyValidator::new(
+                publication_name,
+                "Postgres",
+                "Postgres destination tables use the source primary key for UPSERT and DELETE                  application during initial loads and CDC.",
+                true,
+            )),
             _ => None,
         }
     }

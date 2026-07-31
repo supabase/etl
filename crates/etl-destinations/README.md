@@ -25,3 +25,5 @@ DuckLake external maintenance is configured at runtime with
 `ETL_DUCKLAKE_MAINTENANCE_CR_NAMESPACE`. Postgres coordination uses the same
 Postgres catalog connection as DuckLake and stores coordination state in the
 `etl` schema.
+
+When `destination_schema` is set, destination table names encode the source schema (for example `public.users` → `<schema>.public_users`) to avoid collisions across source schemas.

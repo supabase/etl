@@ -13,6 +13,7 @@ mod sql;
     feature = "clickhouse",
     feature = "ducklake",
     feature = "iceberg",
+    feature = "postgres",
     feature = "snowflake"
 ))]
 mod table_name;
