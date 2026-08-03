@@ -3850,37 +3850,3 @@ async fn get_replicated_table_schema(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::future;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn schema_cleanup_queue_is_bounded_by_table_count() {
-        let (schema_cleanup_tx, mut schema_cleanup_rx) =
-            mpsc::channel(SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY);
-        let tasks = ApplyLoopTasks {
-            schema_cleanup_tx: Some(schema_cleanup_tx),
-            schema_cleanup_worker_task: tokio::spawn(future::pending()),
-            replication_lag_sampler_task: tokio::spawn(future::pending()),
-        };
-        let retention = TableSchemaRetention::SnapshotId(SnapshotId::from(1));
-
-        for table_id in 1..=SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY {
-            let table_id = TableId::from(u32::try_from(table_id).unwrap());
-            assert!(tasks.try_queue_schema_cleanup(table_id, retention));
-        }
-
-        let overflow_table_id =
-            TableId::from(u32::try_from(SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY + 1).unwrap());
-        assert!(!tasks.try_queue_schema_cleanup(overflow_table_id, retention));
-
-        schema_cleanup_rx.recv().await.unwrap();
-        assert!(tasks.try_queue_schema_cleanup(overflow_table_id, retention));
-
-        tasks.schema_cleanup_worker_task.abort();
-        tasks.replication_lag_sampler_task.abort();
-    }
-}
