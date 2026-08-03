@@ -103,6 +103,7 @@ impl SharedTableCache {
 
     /// Returns the current active table ids in the cache, which represent the
     /// active tables being replicated.
+    #[cfg(test)]
     pub(crate) async fn active_table_ids(&self) -> Vec<TableId> {
         let guard = self.inner.read().await;
         guard.keys().copied().collect()

@@ -282,4 +282,35 @@ mod tests {
         assert_eq!(removed, 0);
         assert_eq!(snapshots.snapshots_count(table_id), 1);
     }
+
+    #[test]
+    fn prune_is_idempotent_for_repeated_and_out_of_order_boundaries() {
+        let table_id = TableId::new(10);
+        let mut snapshots = TableSchemaSnapshots::default();
+
+        for snapshot_id in [100, 200, 300] {
+            snapshots.insert(test_schema(table_id, snapshot_id));
+        }
+
+        let newer_retention = HashMap::from([(
+            table_id,
+            TableSchemaRetention::DurableFlushLsn(SnapshotId::from(350).into()),
+        )]);
+        assert_eq!(snapshots.prune(&newer_retention), 2);
+        assert_eq!(snapshots.prune(&newer_retention), 0);
+
+        let older_retention = HashMap::from([(
+            table_id,
+            TableSchemaRetention::DurableFlushLsn(SnapshotId::from(250).into()),
+        )]);
+        assert_eq!(snapshots.prune(&older_retention), 0);
+        assert_eq!(snapshots.snapshots_count(table_id), 1);
+        assert_eq!(
+            snapshots
+                .get_at_or_before(table_id, SnapshotId::max())
+                .expect("newest schema should remain")
+                .snapshot_id,
+            SnapshotId::from(300)
+        );
+    }
 }
