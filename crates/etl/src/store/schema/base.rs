@@ -1,6 +1,5 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
-use super::table::TableSchemaRetention;
 use crate::{
     error::EtlResult,
     schema::{SnapshotId, TableId, TableSchema},
@@ -10,9 +9,9 @@ use crate::{
 ///
 /// [`SchemaStore`] implementations are responsible for defining how the schema
 /// information is stored and retrieved. The store supports schema versioning
-/// where each schema version is identified by a snapshot ID (the LSN carried by
-/// the logical DDL message that created it). Stores may prune obsolete versions
-/// behind a persisted replication checkpoint.
+/// where each schema version is identified by a snapshot ID ordered by commit
+/// LSN and then message LSN. Stores may prune obsolete versions behind a
+/// persisted replication checkpoint.
 ///
 /// Implementations should ensure thread-safety and handle concurrent access to
 /// the data.
@@ -20,10 +19,10 @@ pub trait SchemaStore {
     /// Returns the table schema for the given table at the specified snapshot
     /// point.
     ///
-    /// Returns the schema version with the largest snapshot_id that is <= the
-    /// requested snapshot_id. If not found in cache, loads from the
-    /// persistent store. As an optimization, also loads the latest schema
-    /// version when fetching from the database.
+    /// Returns the newest schema version at or before the requested snapshot.
+    /// If not found in cache, loads from the persistent store. As an
+    /// optimization, also loads the latest schema version when fetching from
+    /// the database.
     ///
     /// Returns `None` if no schema version exists for the table at or before
     /// the given snapshot.
@@ -56,14 +55,15 @@ pub trait SchemaStore {
     /// Prunes obsolete table schema versions for tables at cleanup points.
     ///
     /// For each table id, implementations should find the newest schema version
-    /// at or before that table's retention LSN, preserve it, and remove older
-    /// versions. Versions newer than the retention LSN must also be preserved
+    /// at or before that table's retention boundary, preserve it, and remove
+    /// older versions. Versions newer than the boundary must also be preserved
     /// because PostgreSQL may replay them, or the destination may need them for
-    /// schema application.
+    /// schema application. The ordered map keeps per-table cleanup iteration
+    /// deterministic.
     ///
     /// Returns the number of schema versions removed.
     fn prune_table_schemas(
         &self,
-        _table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+        _retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> impl Future<Output = EtlResult<u64>> + Send;
 }

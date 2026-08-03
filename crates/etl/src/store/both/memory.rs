@@ -13,8 +13,8 @@ use crate::{
     replication::{WorkerType, state::TableState},
     schema::{SnapshotId, TableId, TableSchema},
     store::{
-        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
-        TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,
+        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaSnapshots,
+        TableStateLifecycleStore, TableStateOperation, TableStates,
     },
 };
 
@@ -218,9 +218,8 @@ impl SchemaStore for MemoryStore {
     /// Returns the table schema for the given table at the specified snapshot
     /// point.
     ///
-    /// Returns the schema version with the largest snapshot_id <= the requested
-    /// snapshot_id. For MemoryStore, this only looks in the in-memory
-    /// cache.
+    /// Returns the newest schema version at or before the requested snapshot.
+    /// For [`MemoryStore`], this only looks in the in-memory cache.
     async fn get_table_schema(
         &self,
         table_id: &TableId,
@@ -251,11 +250,11 @@ impl SchemaStore for MemoryStore {
 
     async fn prune_table_schemas(
         &self,
-        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+        retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.lock().await;
 
-        Ok(Arc::make_mut(&mut inner.table_schemas).prune(&table_schema_retentions))
+        Ok(Arc::make_mut(&mut inner.table_schemas).prune(&retention_snapshot_ids))
     }
 }
 

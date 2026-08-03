@@ -583,7 +583,7 @@ where
     /// Drops the specified table before a fresh copy.
     ///
     /// The table sync worker clears ETL metadata after this succeeds, and the
-    /// next copy recreates the table from the fresh `0/0` schema.
+    /// next copy recreates the table from the fresh `0:0` schema.
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -800,6 +800,11 @@ mod tests {
         iceberg_delete_row, iceberg_sequence_key, iceberg_update_row, schema_to_namespace,
     };
 
+    /// Creates a synthetic composite snapshot ID for tests.
+    fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+        SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+    }
+
     #[test]
     fn sequence_key_format_preserves_fixed_width_hex_encoding() {
         let sequence_key = EventSequenceKey::new(PgLsn::from(1), 2);
@@ -857,7 +862,7 @@ mod tests {
             schema.id(),
             schema.name().clone(),
             schema.inner().column_schemas.clone(),
-            SnapshotId::from(1_u64),
+            test_snapshot_id(1_u64, 1_u64),
         ));
         let newer_schema = ReplicatedTableSchema::all(newer_table_schema);
         let newer_error = ensure_iceberg_relation_is_unchanged(&metadata, &newer_schema)
@@ -867,7 +872,7 @@ mod tests {
         let newer_metadata: AppliedDestinationTableMetadata =
             DestinationTableMetadata::new_applied(
                 "public_users_changelog".to_owned(),
-                SnapshotId::from(2_u64),
+                test_snapshot_id(2_u64, 2_u64),
                 schema.replication_mask().clone(),
             )
             .into_applied()

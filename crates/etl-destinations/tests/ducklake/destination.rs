@@ -64,6 +64,11 @@ use crate::support::ducklake::{
 static DUCKLAKE_TEST_HOOKS_GUARD: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
+/// Creates a synthetic composite snapshot ID for tests.
+fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+    SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+}
+
 #[cfg(feature = "test-utils")]
 async fn acquire_ducklake_test_hook_guard() -> OwnedSemaphorePermit {
     Arc::clone(&DUCKLAKE_TEST_HOOKS_GUARD)
@@ -92,7 +97,7 @@ fn make_schema_with_email(previous_schema: &TableSchema, snapshot_id: u64) -> Ta
             ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
         ],
-        SnapshotId::from(snapshot_id),
+        test_snapshot_id(snapshot_id, snapshot_id),
     )
 }
 
@@ -1191,7 +1196,7 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
             ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
         ],
-        SnapshotId::from(42_u64),
+        test_snapshot_id(42_u64, 42_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -1479,7 +1484,7 @@ async fn write_events_applies_defaulted_schema_change() {
             ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 5, true)
                 .with_default_expression("true".to_owned()),
         ],
-        SnapshotId::from(44_u64),
+        test_snapshot_id(44_u64, 44_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -1591,7 +1596,7 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
             ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
         ],
-        SnapshotId::from(43_u64),
+        test_snapshot_id(43_u64, 43_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -1708,7 +1713,7 @@ async fn write_events_supports_drop_and_add_same_column_name() {
             ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 4, true),
         ],
-        SnapshotId::from(48_u64),
+        test_snapshot_id(48_u64, 48_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -1799,7 +1804,7 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
             ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 3, true),
         ],
-        SnapshotId::from(50_u64),
+        test_snapshot_id(50_u64, 50_u64),
     );
     let final_text_schema = TableSchema::with_snapshot_id(
         text_schema.id,
@@ -1808,7 +1813,7 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
             ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 4, true),
         ],
-        SnapshotId::from(51_u64),
+        test_snapshot_id(51_u64, 51_u64),
     );
     let text_replicated_table_schema = make_replicated_table_schema(&text_schema);
     let int_replicated_table_schema = make_replicated_table_schema(&int_schema);
@@ -1901,7 +1906,7 @@ async fn write_events_drops_stale_tombstone_before_reusing_tombstone_name() {
             ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ColumnSchema::new(stale_tombstone_column.to_owned(), PgType::TEXT, -1, 3, true),
         ],
-        SnapshotId::from(53_u64),
+        test_snapshot_id(53_u64, 53_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -2187,7 +2192,7 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
             ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("ddl_col_4_0".to_owned(), PgType::TEXT, -1, 4, true),
         ],
-        SnapshotId::from(54_u64),
+        test_snapshot_id(54_u64, 54_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -2282,7 +2287,7 @@ async fn startup_after_restart_recovers_applying_schema_change_with_pruned_previ
     let data_url = lake.data_url.clone();
 
     let old_schema = make_schema(46, "public", "restart_pruned_previous_schema");
-    let missing_previous_snapshot_id = SnapshotId::from(47_u64);
+    let missing_previous_snapshot_id = test_snapshot_id(47_u64, 47_u64);
     let new_schema = make_schema_with_email(&old_schema, 48);
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);

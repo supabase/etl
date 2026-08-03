@@ -761,6 +761,11 @@ mod tests {
     use super::*;
     use crate::snowflake::{Config, Error, SqlClient};
 
+    /// Creates a synthetic composite snapshot ID for tests.
+    fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+        SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+    }
+
     /// Token provider that fails if a no-network unit test reaches HTTP setup.
     struct UnusedTokenProvider;
 
@@ -853,7 +858,7 @@ mod tests {
                 ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ],
-            SnapshotId::new(PgLsn::from(100_u64)),
+            test_snapshot_id(100_u64, 100_u64),
         ));
         let stale_schema = ReplicatedTableSchema::all(stale_table_schema);
         let applied_table_schema = Arc::new(TableSchema::with_snapshot_id(
@@ -864,7 +869,7 @@ mod tests {
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
                 ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
             ],
-            SnapshotId::new(PgLsn::from(200_u64)),
+            test_snapshot_id(200_u64, 200_u64),
         ));
         let applied_schema = ReplicatedTableSchema::all(applied_table_schema);
         let metadata = DestinationTableMetadata::new_applied(

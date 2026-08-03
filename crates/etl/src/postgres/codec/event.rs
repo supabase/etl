@@ -79,8 +79,8 @@ impl SchemaChangeMessage {
     /// snapshot ID.
     ///
     /// This is used to update the stored table schema when a DDL change is
-    /// detected. The snapshot ID should be the LSN carried by the logical DDL
-    /// message.
+    /// detected. The snapshot ID should identify both the commit LSN that
+    /// activates the schema and the logical DDL message LSN within that commit.
     pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
         build_table_schema(
             self.table_id(),
@@ -106,10 +106,17 @@ impl FromStr for SchemaChangeMessage {
     }
 }
 
-/// Returns the durable schema snapshot identifier carried by a logical
-/// message.
-pub(crate) fn schema_snapshot_id_from_message(message: &protocol::MessageBody) -> SnapshotId {
-    PgLsn::from(message.message_lsn()).into()
+/// Returns the durable schema snapshot identifier for a logical message.
+///
+/// The commit LSN is the activation frontier because transactions are decoded
+/// in commit order. The message LSN cannot provide that order across
+/// overlapping transactions, but it does preserve the order of multiple DDL
+/// messages delivered within the same commit.
+pub(crate) fn schema_snapshot_id_from_message(
+    commit_lsn: PgLsn,
+    message: &protocol::MessageBody,
+) -> SnapshotId {
+    SnapshotId::new(commit_lsn, PgLsn::from(message.message_lsn()))
 }
 
 /// The identity metadata emitted by Postgres.
@@ -1044,14 +1051,15 @@ mod tests {
         let LogicalReplicationMessage::Message(message) = logical_message else {
             panic!("encoded logical message should be Message");
         };
+        let commit_lsn = PgLsn::from(180);
 
         assert_eq!(
-            schema_snapshot_id_from_message(&message),
-            SnapshotId::new(PgLsn::from(message_lsn))
+            schema_snapshot_id_from_message(commit_lsn, &message),
+            SnapshotId::new(commit_lsn, PgLsn::from(message_lsn))
         );
         assert_ne!(
-            schema_snapshot_id_from_message(&message),
-            SnapshotId::new(PgLsn::from(wal_start))
+            schema_snapshot_id_from_message(commit_lsn, &message),
+            SnapshotId::new(commit_lsn, PgLsn::from(wal_start))
         );
     }
 

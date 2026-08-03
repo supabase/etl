@@ -29,6 +29,11 @@ use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
 const DESTINATION_OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DESTINATION_OFFSET_MAX_ATTEMPTS: usize = 90;
 
+/// Creates a synthetic composite snapshot ID for tests.
+fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+    SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+}
+
 type SnowflakeTestDestination = Destination<
     NotifyingStore,
     AuthManager<HttpExchanger>,
@@ -132,7 +137,7 @@ fn make_table_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
 fn status_default_schema(
     table_id: TableId,
     table: &str,
-    snapshot_lsn: Option<u64>,
+    snapshot_id: Option<SnapshotId>,
     default_expression: Option<&str>,
 ) -> TableSchema {
     let mut status_column = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, true);
@@ -146,13 +151,10 @@ fn status_default_schema(
     ];
     let table_name = TableName::new("public".to_owned(), table.to_owned());
 
-    match snapshot_lsn {
-        Some(snapshot_lsn) => TableSchema::with_snapshot_id(
-            table_id,
-            table_name,
-            columns,
-            SnapshotId::new(PgLsn::from(snapshot_lsn)),
-        ),
+    match snapshot_id {
+        Some(snapshot_id) => {
+            TableSchema::with_snapshot_id(table_id, table_name, columns, snapshot_id)
+        }
         None => TableSchema::new(table_id, table_name, columns),
     }
 }
@@ -491,7 +493,7 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
 
-    let new_snapshot_id = SnapshotId::new(PgLsn::from(100u64));
+    let new_snapshot_id = test_snapshot_id(100u64, 100u64);
     let evolved_schema = TableSchema::with_snapshot_id(
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
@@ -670,7 +672,7 @@ async fn schema_evolution_add_column_defaults() {
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
 
-    let new_snapshot_id = SnapshotId::new(PgLsn::from(100u64));
+    let new_snapshot_id = test_snapshot_id(100u64, 100u64);
     let evolved_schema = TableSchema::with_snapshot_id(
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
@@ -803,25 +805,38 @@ async fn schema_evolution_existing_column_default_changes() {
     let initial_schema = status_default_schema(table_id, &src_table, None, None);
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
 
-    let set_default_schema =
-        status_default_schema(table_id, &src_table, Some(100), Some("'pending'::text"));
+    let set_default_schema = status_default_schema(
+        table_id,
+        &src_table,
+        Some(SnapshotId::new(PgLsn::from(100), PgLsn::from(10))),
+        Some("'pending'::text"),
+    );
     let set_default_replicated = ReplicatedTableSchema::all(Arc::new(set_default_schema.clone()));
 
     let unsupported_default_schema = status_default_schema(
         table_id,
         &src_table,
-        Some(200),
+        Some(SnapshotId::new(PgLsn::from(200), PgLsn::from(20))),
         Some("array['unsupported']::text[]"),
     );
     let unsupported_default_replicated =
         ReplicatedTableSchema::all(Arc::new(unsupported_default_schema.clone()));
 
-    let reset_default_schema =
-        status_default_schema(table_id, &src_table, Some(300), Some("'queued'::text"));
+    let reset_default_schema = status_default_schema(
+        table_id,
+        &src_table,
+        Some(SnapshotId::new(PgLsn::from(300), PgLsn::from(30))),
+        Some("'queued'::text"),
+    );
     let reset_default_replicated =
         ReplicatedTableSchema::all(Arc::new(reset_default_schema.clone()));
 
-    let drop_default_schema = status_default_schema(table_id, &src_table, Some(400), None);
+    let drop_default_schema = status_default_schema(
+        table_id,
+        &src_table,
+        Some(SnapshotId::new(PgLsn::from(400), PgLsn::from(40))),
+        None,
+    );
     let drop_default_replicated = ReplicatedTableSchema::all(Arc::new(drop_default_schema.clone()));
 
     harness.store.store_table_schema(initial_schema).await.unwrap();
@@ -883,7 +898,7 @@ async fn schema_evolution_rename_column() {
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
 
-    let new_snapshot_id = SnapshotId::new(PgLsn::from(100u64));
+    let new_snapshot_id = test_snapshot_id(100u64, 100u64);
     let evolved_schema = TableSchema::with_snapshot_id(
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
@@ -1004,7 +1019,7 @@ async fn schema_evolution_drop_column() {
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
 
-    let new_snapshot_id = SnapshotId::new(PgLsn::from(100u64));
+    let new_snapshot_id = test_snapshot_id(100u64, 100u64);
     let evolved_schema = TableSchema::with_snapshot_id(
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
@@ -1141,7 +1156,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
         ],
-        SnapshotId::new(PgLsn::from(100u64)),
+        test_snapshot_id(100u64, 100u64),
     );
     let replicated_v2 = ReplicatedTableSchema::all(Arc::new(schema_v2.clone()));
 
@@ -1154,7 +1169,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, true),
             ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
         ],
-        SnapshotId::new(PgLsn::from(200u64)),
+        test_snapshot_id(200u64, 200u64),
     );
     let replicated_v3 = ReplicatedTableSchema::all(Arc::new(schema_v3.clone()));
 
@@ -1166,7 +1181,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, true),
         ],
-        SnapshotId::new(PgLsn::from(300u64)),
+        test_snapshot_id(300u64, 300u64),
     );
     let replicated_v4 = ReplicatedTableSchema::all(Arc::new(schema_v4.clone()));
 

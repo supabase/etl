@@ -3,14 +3,18 @@ use etl::{
     data::{ArrayCell, Cell, PgNumeric, PgTimeTz, TableRow},
     error::EtlResult,
     postgres::client::PgReplicationClient,
-    schema::{ColumnSchema, TableId, TableName},
+    schema::{ColumnSchema, SnapshotId, TableId, TableName},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         pipeline::test_slot_name,
         replication_stream::{parse_copy_row, parse_tuple},
     },
 };
-use etl_postgres::{below_version, tokio::test_utils::PgDatabase, version::POSTGRES_15};
+use etl_postgres::{
+    below_version,
+    tokio::test_utils::{PgDatabase, connect_to_pg_database},
+    version::POSTGRES_15,
+};
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
 use pg_escape::quote_identifier;
@@ -1232,6 +1236,187 @@ async fn logical_replication_replays_consecutive_ddl_only_transactions_without_r
         &expected,
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_orders_concurrent_ddl_transactions_by_commit_lsn() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+
+    let first_table = test_table_name("concurrent_ddl_first");
+    let first_table_id = database
+        .create_table(first_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let second_table = test_table_name("concurrent_ddl_second");
+    let second_table_id = database
+        .create_table(second_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "concurrent_ddl_commit_order_pub";
+    database
+        .create_publication(publication_name, &[first_table.clone(), second_table.clone()])
+        .await
+        .unwrap();
+
+    let (client, stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "concurrent_ddl_commit_order_slot")
+            .await;
+
+    // The event trigger's pg_publication_tables lookup reads every published
+    // table, which serializes otherwise independent concurrent ALTER TABLE
+    // commands. Suppress the trigger and emit its transactional schema records
+    // explicitly so this test isolates logical-decoding commit order.
+    let (mut second_client, _) = connect_to_pg_database(&database.config).await;
+    let first_transaction = database.begin_transaction().await;
+    first_transaction.run_sql("set local supabase_etl.skip_ddl_log = true").await.unwrap();
+    first_transaction
+        .run_sql(&format!(
+            "alter table {} add column first_change text",
+            first_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    first_transaction
+        .run_sql(&format!(
+            "select pg_catalog.pg_logical_emit_message(
+                true,
+                'supabase_etl_ddl',
+                pg_catalog.jsonb_build_object(
+                    'oid', {},
+                    'columns', pg_catalog.jsonb_build_array(
+                        pg_catalog.jsonb_build_object('attname', 'id'),
+                        pg_catalog.jsonb_build_object('attname', 'value'),
+                        pg_catalog.jsonb_build_object('attname', 'first_change')
+                    )
+                )::pg_catalog.text
+            )",
+            first_table_id.into_inner()
+        ))
+        .await
+        .unwrap();
+    first_transaction
+        .run_sql(&format!(
+            "alter table {} add column second_change text",
+            first_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    first_transaction
+        .run_sql(&format!(
+            "select pg_catalog.pg_logical_emit_message(
+                true,
+                'supabase_etl_ddl',
+                pg_catalog.jsonb_build_object(
+                    'oid', {},
+                    'columns', pg_catalog.jsonb_build_array(
+                        pg_catalog.jsonb_build_object('attname', 'id'),
+                        pg_catalog.jsonb_build_object('attname', 'value'),
+                        pg_catalog.jsonb_build_object('attname', 'first_change'),
+                        pg_catalog.jsonb_build_object('attname', 'second_change')
+                    )
+                )::pg_catalog.text
+            )",
+            first_table_id.into_inner()
+        ))
+        .await
+        .unwrap();
+
+    let second_transaction = second_client.transaction().await.unwrap();
+    second_transaction
+        .batch_execute(&format!(
+            "set local supabase_etl.skip_ddl_log = true;
+            alter table {} add column committed_first text;
+            select pg_catalog.pg_logical_emit_message(
+                true,
+                'supabase_etl_ddl',
+                pg_catalog.jsonb_build_object(
+                    'oid', {},
+                    'columns', pg_catalog.jsonb_build_array(
+                        pg_catalog.jsonb_build_object('attname', 'id'),
+                        pg_catalog.jsonb_build_object('attname', 'value'),
+                        pg_catalog.jsonb_build_object('attname', 'committed_first')
+                    )
+                )::pg_catalog.text
+            );",
+            second_table.as_quoted_identifier(),
+            second_table_id.into_inner()
+        ))
+        .await
+        .unwrap();
+    second_transaction.commit().await.unwrap();
+    first_transaction.commit_transaction().await;
+
+    let markers = collect_stream_markers(stream, 7).await;
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            second_table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "value".to_owned(), "committed_first".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            first_table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "value".to_owned(), "first_change".to_owned()],
+        ),
+        ExpectedStreamMarker::DdlMessage(
+            first_table_id.into_inner(),
+            None,
+            vec![
+                "id".to_owned(),
+                "value".to_owned(),
+                "first_change".to_owned(),
+                "second_change".to_owned(),
+            ],
+        ),
+        ExpectedStreamMarker::Commit,
+    ];
+    assert_eq!(markers.iter().map(StreamMarker::expected).collect::<Vec<_>>(), expected);
+
+    let [
+        StreamMarker::Begin(second_commit_lsn),
+        StreamMarker::DdlMessage(second_message_lsn, ..),
+        StreamMarker::Commit(second_commit_lsn_again),
+        StreamMarker::Begin(first_commit_lsn),
+        StreamMarker::DdlMessage(first_message_lsn, ..),
+        StreamMarker::DdlMessage(first_second_message_lsn, ..),
+        StreamMarker::Commit(first_commit_lsn_again),
+    ] = markers.as_slice()
+    else {
+        panic!("expected concurrent DDL transaction markers");
+    };
+
+    assert_eq!(second_commit_lsn, second_commit_lsn_again);
+    assert_eq!(first_commit_lsn, first_commit_lsn_again);
+    assert!(first_message_lsn < first_second_message_lsn);
+    assert!(first_second_message_lsn < second_message_lsn);
+    assert!(second_commit_lsn < first_commit_lsn);
+
+    let delivered_message_lsns =
+        [*second_message_lsn, *first_message_lsn, *first_second_message_lsn];
+    assert!(!delivered_message_lsns.windows(2).all(|window| window[0] < window[1]));
+
+    let delivered_snapshot_ids = [
+        SnapshotId::new(*second_commit_lsn, *second_message_lsn),
+        SnapshotId::new(*first_commit_lsn, *first_message_lsn),
+        SnapshotId::new(*first_commit_lsn, *first_second_message_lsn),
+    ];
+    assert!(delivered_snapshot_ids.windows(2).all(|window| window[0] < window[1]));
+
+    drop(client);
+    database.wait_for_slot_inactive(&slot_name).await;
+
+    let replay_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let replay_stream = replay_client
+        .start_logical_replication(publication_name, &slot_name, start_lsn)
+        .await
+        .unwrap();
+    let replay_markers = collect_stream_markers(replay_stream, expected.len()).await;
+    assert_eq!(replay_markers, markers);
 }
 
 #[tokio::test(flavor = "multi_thread")]

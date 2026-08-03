@@ -58,7 +58,8 @@ impl StoredTableDecodingState {
         // reachable by this handover. Durable JSON can also outlive the writer
         // version or be malformed independently, so validate the complete
         // stored representation before rebuilding unchecked mask types.
-        if self.snapshot_id.into_inner() > sync_done_lsn {
+        let sync_done_snapshot_frontier = SnapshotId::at_lsn(sync_done_lsn);
+        if self.snapshot_id > sync_done_snapshot_frontier {
             bail!(
                 ErrorKind::InvalidState,
                 "Table-schema decoding snapshot is ahead of SyncDone",
@@ -477,7 +478,7 @@ mod snapshot_id_serde {
     where
         S: Serializer,
     {
-        snapshot_id.to_pg_lsn_string().serialize(serializer)
+        snapshot_id.to_string().serialize(serializer)
     }
 
     pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<SnapshotId, D::Error>
@@ -485,12 +486,14 @@ mod snapshot_id_serde {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        SnapshotId::from_pg_lsn_string(&value).map_err(serde::de::Error::custom)
+        value.parse::<SnapshotId>().map_err(serde::de::Error::custom)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use etl_postgres::store::table_state;
     use tokio_postgres::types::PgLsn;
 
@@ -500,8 +503,43 @@ mod tests {
         replication::state::{
             StoredTableDecodingState, TableRetryPolicy, TableState, TableStateType,
         },
-        schema::SnapshotId,
+        schema::{SnapshotId, TableId, TableName, TableSchema},
     };
+
+    /// Builds an empty table schema at an exact snapshot for decoder tests.
+    fn table_schema_at(snapshot_id: SnapshotId) -> Arc<TableSchema> {
+        Arc::new(TableSchema::with_snapshot_id(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![],
+            snapshot_id,
+        ))
+    }
+
+    /// Builds a stored decoder at an exact snapshot with empty masks.
+    fn decoding_state_at(snapshot_id: SnapshotId) -> StoredTableDecodingState {
+        StoredTableDecodingState { snapshot_id, replication_mask: vec![], identity_mask: vec![] }
+    }
+
+    #[test]
+    fn materialize_compares_snapshot_with_inclusive_sync_done_frontier() {
+        let sync_done_lsn = PgLsn::from(100);
+        let last_snapshot_at_sync_done = SnapshotId::new(sync_done_lsn, PgLsn::from(u64::MAX));
+
+        decoding_state_at(last_snapshot_at_sync_done)
+            .materialize(table_schema_at(last_snapshot_at_sync_done), sync_done_lsn)
+            .unwrap();
+
+        let first_snapshot_after_sync_done = SnapshotId::new(PgLsn::from(101), PgLsn::from(0));
+        let error = decoding_state_at(first_snapshot_after_sync_done)
+            .materialize(table_schema_at(first_snapshot_after_sync_done), sync_done_lsn)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+
+        decoding_state_at(SnapshotId::max())
+            .materialize(table_schema_at(SnapshotId::max()), PgLsn::from(u64::MAX))
+            .unwrap();
+    }
 
     #[test]
     fn table_state_json_round_trip() {
@@ -523,7 +561,10 @@ mod tests {
         }
 
         let table_decoding_state = StoredTableDecodingState {
-            snapshot_id: SnapshotId::new("0/900000".parse::<PgLsn>().unwrap()),
+            snapshot_id: SnapshotId::new(
+                "0/800000".parse::<PgLsn>().unwrap(),
+                "0/900000".parse::<PgLsn>().unwrap(),
+            ),
             replication_mask: vec![1, 0, 1],
             identity_mask: vec![1, 0, 0],
         };
@@ -536,7 +577,7 @@ mod tests {
                 "type": "sync_done",
                 "lsn": "0/1000000",
                 "table_decoding_state": {
-                    "snapshot_id": "0/900000",
+                    "snapshot_id": "8388608:9437184",
                     "replication_mask": [1, 0, 1],
                     "identity_mask": [1, 0, 0]
                 }
@@ -579,12 +620,27 @@ mod tests {
             "type": "sync_done",
             "lsn": "0/1000000",
             "table_decoding_state": {
-                "snapshot_id": "0/900000",
+                "snapshot_id": "8388608:9437184",
                 "replication_mask": [1, 0, 1]
             }
         });
 
         assert!(serde_json::from_value::<TableState>(incomplete_decoding_state).is_err());
+    }
+
+    #[test]
+    fn sync_done_json_rejects_legacy_message_lsn_snapshot_id() {
+        let legacy_state = serde_json::json!({
+            "type": "sync_done",
+            "lsn": "0/1000000",
+            "table_decoding_state": {
+                "snapshot_id": "0/900000",
+                "replication_mask": [1, 0, 1],
+                "identity_mask": [1, 0, 0]
+            }
+        });
+
+        assert!(serde_json::from_value::<TableState>(legacy_state).is_err());
     }
 
     #[test]
@@ -674,7 +730,10 @@ mod tests {
     fn from_state_row_round_trip() {
         let sync_done_lsn = "0/1000000".parse::<PgLsn>().unwrap();
         let table_decoding_state = StoredTableDecodingState {
-            snapshot_id: SnapshotId::new("0/900000".parse::<PgLsn>().unwrap()),
+            snapshot_id: SnapshotId::new(
+                "0/800000".parse::<PgLsn>().unwrap(),
+                "0/900000".parse::<PgLsn>().unwrap(),
+            ),
             replication_mask: vec![1, 0, 1],
             identity_mask: vec![1, 0, 0],
         };

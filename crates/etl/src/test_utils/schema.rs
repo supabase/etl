@@ -198,26 +198,27 @@ fn assert_all_columns_replicated(schema: &ReplicatedTableSchema, expected_len: u
 /// Asserts that schema snapshots are in strictly increasing order by snapshot
 /// ID.
 ///
-/// If `first_is_zero` is true, the first snapshot ID must be 0.
-/// If `first_is_zero` is false, the first snapshot ID must be > 0.
-/// Each subsequent snapshot ID must be strictly greater than the previous one.
+/// If `first_is_initial` is true, the first snapshot ID must be
+/// [`SnapshotId::initial`]. Otherwise, the first snapshot ID must sort after
+/// [`SnapshotId::initial`]. Each subsequent snapshot ID must be strictly
+/// greater than the previous one.
 pub fn assert_schema_snapshots_ordering(
     snapshots: &[(SnapshotId, TableSchema)],
-    first_is_zero: bool,
+    first_is_initial: bool,
 ) {
     assert!(!snapshots.is_empty(), "expected at least one schema snapshot");
 
     let (first_snapshot_id, _) = &snapshots[0];
-    if first_is_zero {
+    if first_is_initial {
         assert_eq!(
             *first_snapshot_id,
             SnapshotId::initial(),
-            "first snapshot_id is {first_snapshot_id}, expected 0"
+            "first snapshot ID is {first_snapshot_id}, expected initial snapshot 0:0"
         );
     } else {
         assert!(
             *first_snapshot_id > SnapshotId::initial(),
-            "first snapshot_id is {first_snapshot_id}, expected > 0"
+            "first snapshot ID is {first_snapshot_id}, expected it to sort after 0:0"
         );
     }
 

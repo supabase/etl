@@ -80,8 +80,8 @@ use etl::{
     error::EtlResult,
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
-        SchemaStore, StateStore, TableSchemaRetention, TableState, TableStateLifecycleStore,
-        TableStateOperation, TableStates, WorkerType,
+        SchemaStore, StateStore, TableState, TableStateLifecycleStore, TableStateOperation,
+        TableStates, WorkerType,
     },
 };
 
@@ -108,6 +108,8 @@ impl CustomStore {
     }
 }
 
+// Compare SnapshotId values directly. Their display strings use variable-width
+// decimal components and therefore do not have the same lexical ordering.
 impl SchemaStore for CustomStore {
     async fn get_table_schema(
         &self,
@@ -152,21 +154,20 @@ impl SchemaStore for CustomStore {
 
     async fn prune_table_schemas(
         &self,
-        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+        retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> EtlResult<u64> {
         let mut tables = self.tables.lock().await;
         let mut removed_count = 0u64;
 
         for (table_id, entry) in tables.iter_mut() {
-            let Some(retention) = table_schema_retentions.get(table_id) else {
+            let Some(retention_snapshot_id) = retention_snapshot_ids.get(table_id) else {
                 continue;
             };
-            let retention_snapshot_id = SnapshotId::from(retention.to_lsn());
 
             let retained_snapshot_id = entry
                 .schemas
                 .keys()
-                .filter(|snapshot_id| **snapshot_id <= retention_snapshot_id)
+                .filter(|snapshot_id| **snapshot_id <= *retention_snapshot_id)
                 .max()
                 .copied();
             let Some(retained_snapshot_id) = retained_snapshot_id else {

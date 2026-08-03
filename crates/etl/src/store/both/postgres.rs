@@ -31,8 +31,8 @@ use crate::{
     },
     schema::{ReplicationMask, SnapshotId, TableId, TableSchema},
     store::{
-        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
-        TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,
+        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaSnapshots,
+        TableStateLifecycleStore, TableStateOperation, TableStates,
     },
 };
 
@@ -495,11 +495,10 @@ impl StateStore for PostgresStore {
 impl SchemaStore for PostgresStore {
     /// Retrieves a table schema at a specific snapshot point.
     ///
-    /// Returns the schema version with the largest snapshot_id <= the requested
-    /// snapshot_id. First checks the in-memory cache, then loads from the
-    /// database if not found. The loaded schema is cached for subsequent
-    /// requests. Note that the cache is optimized for active schemas, not
-    /// historical snapshots.
+    /// Returns the newest schema version at or before the requested snapshot.
+    /// First checks the in-memory cache, then loads from the database if not
+    /// found. The loaded schema is cached for subsequent requests. The cache is
+    /// optimized for active schemas, not historical snapshots.
     async fn get_table_schema(
         &self,
         table_id: &TableId,
@@ -587,7 +586,7 @@ impl SchemaStore for PostgresStore {
     /// Stores a table schema in both database and cache.
     ///
     /// This method persists a table schema to the database and updates the
-    /// in-memory cache atomically. The schema's snapshot_id determines which
+    /// in-memory cache atomically. The schema's `snapshot_id` determines which
     /// version this schema represents.
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         debug!(table_name = %table_schema.name, snapshot_id = %table_schema.snapshot_id, "storing table schema");
@@ -609,17 +608,13 @@ impl SchemaStore for PostgresStore {
 
     async fn prune_table_schemas(
         &self,
-        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+        retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.lock().await;
-        let retention_lsns = table_schema_retentions
-            .iter()
-            .map(|(table_id, retention)| (*table_id, retention.to_lsn()))
-            .collect::<HashMap<_, _>>();
         let deleted_count = schema::delete_obsolete_table_schema_versions(
             &self.pool,
             self.pipeline_id as i64,
-            &retention_lsns,
+            &retention_snapshot_ids,
         )
         .await
         .map_err(|err| {
@@ -630,13 +625,13 @@ impl SchemaStore for PostgresStore {
             )
         })?;
 
-        let cached_count = Arc::make_mut(&mut inner.table_schemas).prune(&table_schema_retentions);
+        let cached_count = Arc::make_mut(&mut inner.table_schemas).prune(&retention_snapshot_ids);
 
         if deleted_count > 0 || cached_count > 0 {
             info!(
                 deleted_count,
                 cached_count,
-                table_count = table_schema_retentions.len(),
+                table_count = retention_snapshot_ids.len(),
                 "pruned obsolete table schema versions"
             );
         }

@@ -8,7 +8,7 @@
 //! cycle.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     future::Future,
     pin::Pin,
     str::FromStr,
@@ -89,7 +89,7 @@ use crate::{
         IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
     },
     source_payload_metadata::StreamingPayloadMetadata,
-    store::{PipelineStore, SchemaStore, SharedStateStore, StateStore, TableSchemaRetention},
+    store::{PipelineStore, SchemaStore, SharedStateStore, StateStore},
 };
 
 /// Default keep alive value if it can't be fetched from Postgres.
@@ -426,8 +426,22 @@ impl HandleMessageResult {
 struct SchemaCleanupRequest {
     /// Table whose obsolete schema versions may be pruned.
     table_id: TableId,
-    /// Retention boundary captured at the durable flush result.
-    retention: TableSchemaRetention,
+    /// Inclusive retention boundary captured at the durable flush result.
+    retention_snapshot_id: SnapshotId,
+}
+
+/// Returns the earliest safe schema-cleanup boundary.
+///
+/// A persisted checkpoint at LSN `X` covers every transaction committed
+/// through `X`, including every DDL message within a transaction committed at
+/// exactly `X`. It therefore maps to `(X, u64::MAX)`, not `(X, 0)`. Taking the
+/// minimum of that inclusive frontier and the exact destination snapshot keeps
+/// both replay and destination recovery safe.
+fn schema_cleanup_retention_snapshot_id(
+    persisted_checkpoint_lsn: PgLsn,
+    destination_retention_snapshot_id: SnapshotId,
+) -> SnapshotId {
+    SnapshotId::at_lsn(persisted_checkpoint_lsn).min(destination_retention_snapshot_id)
 }
 
 /// Background tasks owned by an apply loop invocation.
@@ -476,12 +490,16 @@ impl ApplyLoopTasks {
     ///
     /// Returns `false` when the bounded queue is full or the background worker
     /// has stopped. This method never waits for queue capacity.
-    fn try_queue_schema_cleanup(&self, table_id: TableId, retention: TableSchemaRetention) -> bool {
+    fn try_queue_schema_cleanup(
+        &self,
+        table_id: TableId,
+        retention_snapshot_id: SnapshotId,
+    ) -> bool {
         let Some(schema_cleanup_tx) = &self.schema_cleanup_tx else {
             return false;
         };
 
-        let request = SchemaCleanupRequest { table_id, retention };
+        let request = SchemaCleanupRequest { table_id, retention_snapshot_id };
         match schema_cleanup_tx.try_send(request) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => false,
@@ -507,20 +525,19 @@ impl ApplyLoopTasks {
                 // Coalesce up to one bounded batch of available requests to
                 // retain batched store cleanup without making the apply loop
                 // wait for it.
-                let mut table_schema_retentions =
-                    HashMap::with_capacity(schema_cleanup_rx.len().saturating_add(1));
-                table_schema_retentions.insert(request.table_id, request.retention);
+                let mut retention_snapshot_ids = BTreeMap::new();
+                retention_snapshot_ids.insert(request.table_id, request.retention_snapshot_id);
 
                 for _ in 1..SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY {
                     let Ok(request) = schema_cleanup_rx.try_recv() else {
                         break;
                     };
 
-                    table_schema_retentions.insert(request.table_id, request.retention);
+                    retention_snapshot_ids.insert(request.table_id, request.retention_snapshot_id);
                 }
 
-                let table_count = table_schema_retentions.len() as u64;
-                match schema_store.prune_table_schemas(table_schema_retentions).await {
+                let table_count = retention_snapshot_ids.len() as u64;
+                match schema_store.prune_table_schemas(retention_snapshot_ids).await {
                     Ok(deleted_count) => {
                         counter!(
                             ETL_SCHEMA_CLEANUPS_TOTAL,
@@ -823,9 +840,9 @@ struct ApplyLoopState {
     /// Fallback snapshot used before a table establishes connection-local
     /// protocol state or receives stored table decoding state.
     ///
-    /// This is seeded from the worker start LSN so a first `RELATION` message
-    /// can always resolve the latest schema version whose snapshot is less
-    /// than or equal to the worker's start point.
+    /// This is seeded from the worker start LSN as an inclusive
+    /// [`SnapshotId::at_lsn`] frontier, so a first `RELATION` message can
+    /// resolve the latest schema committed at or before the start point.
     bootstrap_snapshot_id: SnapshotId,
     /// Replication slot name used by this loop.
     slot_name: String,
@@ -1178,7 +1195,10 @@ where
                 Self::compute_keep_alive_deadline_duration(DEFAULT_KEEP_ALIVE_DURATION)
             }
         };
-        let bootstrap_snapshot_id: SnapshotId = start_lsn.into();
+        // A restart LSN is an inclusive WAL frontier, not an exact schema
+        // snapshot. Use the maximum message LSN so a restart at a transaction's
+        // commit LSN can select the last DDL within that committed transaction.
+        let bootstrap_snapshot_id = SnapshotId::at_lsn(start_lsn);
 
         let replication_progress = ReplicationProgress::new(start_lsn);
         let replication_lag_metrics = ReplicationLagMetrics::new(start_lsn);
@@ -1206,7 +1226,7 @@ where
         let mut table_decoding_states = HashMap::new();
         if let Some(replicated_table_schema) = initial_replicated_table_schema {
             // Only the table-sync worker supplies this schema. It seeds catchup
-            // with the same snapshot `0/0` and publication/identity masks used
+            // with the same snapshot `0:0` and publication/identity masks used
             // by the initial copy before later relation messages replace it.
             table_decoding_states.insert(
                 replicated_table_schema.id(),
@@ -1696,9 +1716,9 @@ where
         // can safely prune up to. The map is frozen before the request is
         // queued, so any concurrent progress can only make this cleanup
         // conservative.
-        let table_schema_retentions =
-            match self.get_table_schema_retentions(persisted_checkpoint_lsn).await {
-                Ok(table_schema_retentions) => table_schema_retentions,
+        let retention_snapshot_ids =
+            match self.get_table_schema_retention_snapshot_ids(persisted_checkpoint_lsn).await {
+                Ok(retention_snapshot_ids) => retention_snapshot_ids,
                 Err(err) => {
                     error!(
                         %worker_type,
@@ -1711,22 +1731,23 @@ where
             };
 
         // If there are no tables to try to prune, we don't want to attempt it.
-        if table_schema_retentions.is_empty() {
+        if retention_snapshot_ids.is_empty() {
             self.state.pending_relation_table_ids.clear();
 
             return;
         }
 
-        // Queue each frozen table boundary without waiting for capacity. The
-        // cleanup worker coalesces available entries into batched store calls.
-        // Candidates that do not fit remain pending for the next durable result.
+        // Queue each frozen table boundary in table ID order without waiting
+        // for capacity. The cleanup worker coalesces available entries into
+        // batched store calls. Candidates that do not fit remain pending for
+        // the next durable result.
         let mut deferred_table_ids = HashSet::new();
-        let mut table_schema_retentions = table_schema_retentions.into_iter();
+        let mut retention_snapshot_ids = retention_snapshot_ids.into_iter();
 
-        while let Some((table_id, retention)) = table_schema_retentions.next() {
-            if !self.tasks.try_queue_schema_cleanup(table_id, retention) {
+        while let Some((table_id, retention_snapshot_id)) = retention_snapshot_ids.next() {
+            if !self.tasks.try_queue_schema_cleanup(table_id, retention_snapshot_id) {
                 deferred_table_ids.insert(table_id);
-                deferred_table_ids.extend(table_schema_retentions.map(|(table_id, _)| table_id));
+                deferred_table_ids.extend(retention_snapshot_ids.map(|(table_id, _)| table_id));
 
                 break;
             }
@@ -1743,24 +1764,23 @@ where
     /// destination result. The worker's normal ownership check decides which
     /// of those tables can be considered.
     ///
-    /// The cleanup LSN is the minimum of the persisted commit-boundary
-    /// checkpoint and the earliest snapshot still referenced by destination
-    /// metadata. A persisted checkpoint is an arbitrary LSN and need not
-    /// identify a schema version. The schema store resolves it to the greatest
-    /// snapshot at or below that LSN, preserving that snapshot and every newer
-    /// version.
+    /// The cleanup boundary is the minimum of the persisted checkpoint frontier
+    /// and the earliest snapshot still referenced by destination metadata. A
+    /// checkpoint at `X` becomes `(X, u64::MAX)` because it covers every schema
+    /// message in a transaction committed at `X`. The schema store resolves the
+    /// resulting boundary to the greatest stored snapshot at or below it,
+    /// preserving that snapshot and every newer version.
     ///
     /// Progress and metadata do not need to be read in one transaction. During
     /// normal replication both safe boundaries move forward, so taking their
     /// minimum from a mixed observation is conservative. Table lifecycle resets
-    /// remove the prior schemas before rebuilding them, and rebuilt nonzero
-    /// snapshots occur after the frozen checkpoint boundary.
-    async fn get_table_schema_retentions(
+    /// remove the prior schemas before rebuilding them, and rebuilt snapshots
+    /// with nonzero commit LSNs occur after the frozen checkpoint boundary.
+    async fn get_table_schema_retention_snapshot_ids(
         &self,
         persisted_checkpoint_lsn: PgLsn,
-    ) -> EtlResult<HashMap<TableId, TableSchemaRetention>> {
-        let mut table_schema_retentions =
-            HashMap::with_capacity(self.state.pending_relation_table_ids.len());
+    ) -> EtlResult<BTreeMap<TableId, SnapshotId>> {
+        let mut retention_snapshot_ids = BTreeMap::new();
 
         for &table_id in &self.state.pending_relation_table_ids {
             // Only prune snapshots for tables this worker would apply at this
@@ -1796,20 +1816,15 @@ where
                 .unwrap_or(destination_table_metadata.snapshot_id)
                 .min(destination_table_metadata.snapshot_id);
 
-            // Choose the smaller LSN while retaining why it bounded cleanup. Unlike the
-            // destination value, a persisted checkpoint need not coincide with a schema
-            // snapshot.
-            let retention =
-                if persisted_checkpoint_lsn <= destination_retention_snapshot_id.into_inner() {
-                    TableSchemaRetention::PersistedCheckpointLsn(persisted_checkpoint_lsn)
-                } else {
-                    TableSchemaRetention::SnapshotId(destination_retention_snapshot_id)
-                };
+            let retention_snapshot_id = schema_cleanup_retention_snapshot_id(
+                persisted_checkpoint_lsn,
+                destination_retention_snapshot_id,
+            );
 
-            table_schema_retentions.insert(table_id, retention);
+            retention_snapshot_ids.insert(table_id, retention_snapshot_id);
         }
 
-        Ok(table_schema_retentions)
+        Ok(retention_snapshot_ids)
     }
 
     /// Waits for the pending flush result, if any.
@@ -2412,7 +2427,8 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        let snapshot_id = schema_snapshot_id_from_message(message);
+        // The `remote_final_lsn` is the `commit_lsn` of the current transaction.
+        let snapshot_id = schema_snapshot_id_from_message(remote_final_lsn, message);
         let table_schema = Arc::new(schema_change_message.into_table_schema(snapshot_id));
         self.table_decoding_states
             .insert(table_id, TableDecodingState::WaitingForRelation { snapshot_id });
@@ -2676,7 +2692,7 @@ where
                 let bootstrap_snapshot_id = self.state.bootstrap_snapshot_id();
                 let schema_upper_bound = sync_done_lsn
                     .map_or(bootstrap_snapshot_id, |sync_done_lsn| {
-                        bootstrap_snapshot_id.max(SnapshotId::from(sync_done_lsn))
+                        bootstrap_snapshot_id.max(SnapshotId::at_lsn(sync_done_lsn))
                     });
 
                 RelationSchemaSelection::AtOrBefore(schema_upper_bound)
@@ -4416,6 +4432,11 @@ mod tests {
         schema::{ColumnSchema, TableName},
     };
 
+    /// Creates a synthetic composite snapshot ID for tests.
+    fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+        SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+    }
+
     fn replicated_schema(snapshot_id: SnapshotId) -> ReplicatedTableSchema {
         let table_schema = TableSchema::with_snapshot_id(
             TableId::new(1),
@@ -4443,8 +4464,47 @@ mod tests {
     }
 
     #[test]
+    fn schema_cleanup_uses_inclusive_checkpoint_frontier() {
+        let destination_snapshot_id = SnapshotId::new(PgLsn::from(300), PgLsn::from(100));
+
+        assert_eq!(
+            schema_cleanup_retention_snapshot_id(PgLsn::from(200), destination_snapshot_id),
+            SnapshotId::at_lsn(PgLsn::from(200))
+        );
+        assert_eq!(
+            schema_cleanup_retention_snapshot_id(PgLsn::from(300), destination_snapshot_id),
+            destination_snapshot_id
+        );
+        assert_eq!(
+            schema_cleanup_retention_snapshot_id(PgLsn::from(400), destination_snapshot_id),
+            destination_snapshot_id
+        );
+        assert_eq!(
+            schema_cleanup_retention_snapshot_id(PgLsn::from(0), SnapshotId::initial()),
+            SnapshotId::initial()
+        );
+
+        let max_commit_first_message = SnapshotId::new(PgLsn::from(u64::MAX), PgLsn::from(0));
+        assert_eq!(
+            schema_cleanup_retention_snapshot_id(
+                PgLsn::from(u64::MAX - 1),
+                max_commit_first_message
+            ),
+            SnapshotId::at_lsn(PgLsn::from(u64::MAX - 1))
+        );
+        assert_eq!(
+            schema_cleanup_retention_snapshot_id(PgLsn::from(u64::MAX), max_commit_first_message),
+            max_commit_first_message
+        );
+        assert_eq!(
+            schema_cleanup_retention_snapshot_id(PgLsn::from(u64::MAX), SnapshotId::max()),
+            SnapshotId::max()
+        );
+    }
+
+    #[test]
     fn stored_sync_done_decoder_materializes_schema_and_masks() {
-        let snapshot_id = SnapshotId::new(20.into());
+        let snapshot_id = test_snapshot_id(20_u64, 20_u64);
         let replicated_table_schema = replicated_schema(snapshot_id);
         let table_state = TableState::sync_done(20.into(), &replicated_table_schema);
         let (sync_done_lsn, table_decoding_state) = sync_done_decoding_state(&table_state);

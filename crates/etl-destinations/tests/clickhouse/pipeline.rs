@@ -66,6 +66,11 @@ const RESTART_FLOW_TABLE: &str = "test_restart__flow";
 const RESET_COPY_TABLE: &str = "test_reset__copy";
 const TRUNCATE_FLOW_TABLE: &str = "test_truncate__flow";
 
+/// Creates a synthetic composite snapshot ID for tests.
+fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+    SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+}
+
 /// Days from 1970-01-01 to 2024-01-15 (used to verify the `date_col`
 /// round-trip).
 ///
@@ -2466,7 +2471,7 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
             ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
         ],
-        SnapshotId::new(PgLsn::from(100)),
+        test_snapshot_id(100_u64, 100_u64),
     ));
     let replication_mask = ReplicationMask::all(&table_schema);
     let stale_schema =
@@ -2475,11 +2480,11 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
     // Interrupted schema change: metadata targets snapshot 200, previous 100.
     let metadata = DestinationTableMetadata::new_applied(
         "public_stale_recovery".to_owned(),
-        SnapshotId::new(PgLsn::from(100)),
+        test_snapshot_id(100_u64, 100_u64),
         replication_mask.clone(),
     )
     .with_schema_change(
-        SnapshotId::new(PgLsn::from(200)),
+        test_snapshot_id(200_u64, 200_u64),
         replication_mask,
         DestinationTableSchemaStatus::Applying,
     );
@@ -2516,18 +2521,18 @@ async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
             ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
         ],
-        SnapshotId::new(PgLsn::from(200)),
+        test_snapshot_id(200_u64, 200_u64),
     ));
     let target_mask = ReplicationMask::all(&table_schema);
     let arriving_schema =
         ReplicatedTableSchema::from_mask(table_schema, ReplicationMask::from_bytes(vec![1, 0]));
     let metadata = DestinationTableMetadata::new_applied(
         "public_mask_recovery".to_owned(),
-        SnapshotId::new(PgLsn::from(100)),
+        test_snapshot_id(100_u64, 100_u64),
         target_mask.clone(),
     )
     .with_schema_change(
-        SnapshotId::new(PgLsn::from(200)),
+        test_snapshot_id(200_u64, 200_u64),
         target_mask,
         DestinationTableSchemaStatus::Applying,
     );
@@ -2586,7 +2591,7 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
             table_id,
             table_name.clone(),
             old_columns.clone(),
-            SnapshotId::new(PgLsn::from(100)),
+            test_snapshot_id(100_u64, 100_u64),
         ))
         .await
         .unwrap();
@@ -2606,7 +2611,7 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         table_id,
         table_name,
         new_columns,
-        SnapshotId::new(PgLsn::from(200)),
+        test_snapshot_id(200_u64, 200_u64),
     ));
     let new_mask = ReplicationMask::all(&new_table_schema);
     let new_schema = ReplicatedTableSchema::from_mask(new_table_schema, new_mask.clone());
@@ -2621,11 +2626,11 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     let clickhouse_table_name = applied_metadata.destination_table_id.clone();
     let interrupted_metadata = DestinationTableMetadata::new_applied(
         clickhouse_table_name.clone(),
-        SnapshotId::new(PgLsn::from(100)),
+        test_snapshot_id(100_u64, 100_u64),
         old_mask,
     )
     .with_schema_change(
-        SnapshotId::new(PgLsn::from(200)),
+        test_snapshot_id(200_u64, 200_u64),
         new_mask,
         DestinationTableSchemaStatus::Applying,
     );
@@ -2651,7 +2656,7 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         .expect("metadata should be applied after recovery");
     assert_eq!(
         recovered_metadata.snapshot_id,
-        SnapshotId::new(PgLsn::from(200)),
+        test_snapshot_id(200_u64, 200_u64),
         "recovery must mark the target snapshot applied"
     );
 }
@@ -2678,7 +2683,7 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
             table_id,
             table_name.clone(),
             columns.clone(),
-            SnapshotId::new(PgLsn::from(100)),
+            test_snapshot_id(100_u64, 100_u64),
         ))
         .await
         .unwrap();
@@ -2704,7 +2709,7 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
         table_id,
         table_name,
         columns,
-        SnapshotId::new(PgLsn::from(200)),
+        test_snapshot_id(200_u64, 200_u64),
     ));
     let target_mask = ReplicationMask::from_bytes(vec![1, 1, 0]);
     let target_schema =
@@ -2718,7 +2723,7 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
     let clickhouse_table_name = applied_metadata.destination_table_id.clone();
     let interrupted_metadata = DestinationTableMetadata::new_applied(
         clickhouse_table_name.clone(),
-        SnapshotId::new(PgLsn::from(100)),
+        test_snapshot_id(100_u64, 100_u64),
         old_mask,
     )
     .with_schema_change(

@@ -77,17 +77,22 @@ mod tests {
     use etl::schema::{ColumnSchema, ReplicatedTableSchema, TableName, TableSchema, Type};
     use etl::{
         error::ErrorKind,
-        schema::{ReplicationMask, SnapshotId, TableId},
+        schema::{PgLsn, ReplicationMask, SnapshotId, TableId},
     };
 
     #[cfg(feature = "ducklake")]
     use crate::recovery::conservative_previous_replication_mask;
     use crate::recovery::ensure_relation_schema_transition;
 
+    /// Creates a synthetic composite snapshot ID for tests.
+    fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+        SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+    }
+
     #[test]
     fn relation_schema_transition_accepts_identical_or_newer_state() {
         let table_id = TableId::new(7);
-        let applied_snapshot_id = SnapshotId::from(200_u64);
+        let applied_snapshot_id = test_snapshot_id(200_u64, 200_u64);
         let applied_mask = ReplicationMask::from_bytes(vec![1, 1, 0]);
 
         ensure_relation_schema_transition(
@@ -104,7 +109,7 @@ mod tests {
             table_id,
             applied_snapshot_id,
             &applied_mask,
-            SnapshotId::from(300_u64),
+            test_snapshot_id(300_u64, 300_u64),
             &ReplicationMask::from_bytes(vec![1, 0, 1]),
         )
         .expect("a newer schema snapshot should be accepted");
@@ -113,14 +118,14 @@ mod tests {
     #[test]
     fn relation_schema_transition_rejects_older_snapshot() {
         let table_id = TableId::new(7);
-        let applied_snapshot_id = SnapshotId::from(200_u64);
+        let applied_snapshot_id = test_snapshot_id(200_u64, 200_u64);
         let applied_mask = ReplicationMask::from_bytes(vec![1, 1, 0]);
         let older_error = ensure_relation_schema_transition(
             "Test",
             table_id,
             applied_snapshot_id,
             &applied_mask,
-            SnapshotId::from(100_u64),
+            test_snapshot_id(100_u64, 100_u64),
             &applied_mask,
         )
         .expect_err("an older schema snapshot should be rejected");
@@ -130,7 +135,7 @@ mod tests {
     #[test]
     fn relation_schema_transition_rejects_different_mask_at_equal_snapshot() {
         let table_id = TableId::new(7);
-        let applied_snapshot_id = SnapshotId::from(200_u64);
+        let applied_snapshot_id = test_snapshot_id(200_u64, 200_u64);
         let applied_mask = ReplicationMask::from_bytes(vec![1, 1, 0]);
         let ambiguous_error = ensure_relation_schema_transition(
             "Test",
@@ -159,7 +164,7 @@ mod tests {
             previous_schema.id,
             previous_schema.name.clone(),
             previous_schema.column_schemas.clone(),
-            SnapshotId::from(42_u64),
+            test_snapshot_id(42_u64, 42_u64),
         ));
         let previous_mask = conservative_previous_replication_mask(&previous_schema);
         assert_eq!(previous_mask.as_slice(), &[1, 1]);
@@ -196,7 +201,7 @@ mod tests {
                 ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ],
-            SnapshotId::from(43_u64),
+            test_snapshot_id(43_u64, 43_u64),
         ));
         let previous_mask = conservative_previous_replication_mask(&previous_schema);
         let previous = ReplicatedTableSchema::from_mask(previous_schema, previous_mask);

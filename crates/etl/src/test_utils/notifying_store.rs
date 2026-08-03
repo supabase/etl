@@ -20,8 +20,8 @@ use crate::{
     },
     schema::{SnapshotId, TableId, TableSchema},
     store::{
-        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
-        TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,
+        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaSnapshots,
+        TableStateLifecycleStore, TableStateOperation, TableStates,
     },
     test_utils::notify::TimedNotify,
 };
@@ -505,10 +505,10 @@ impl SchemaStore for NotifyingStore {
 
     async fn prune_table_schemas(
         &self,
-        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+        retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.write().await;
-        let removed_count = Arc::make_mut(&mut inner.table_schemas).prune(&table_schema_retentions);
+        let removed_count = Arc::make_mut(&mut inner.table_schemas).prune(&retention_snapshot_ids);
 
         if removed_count > 0 {
             for notify in std::mem::take(&mut inner.table_schema_prune_conditions) {

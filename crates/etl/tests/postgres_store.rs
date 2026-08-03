@@ -1,6 +1,6 @@
 #![cfg(feature = "test-utils")]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use etl::{
     destination::DestinationTableMetadata,
@@ -8,7 +8,7 @@ use etl::{
     etl_error,
     schema::{ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema},
     store::{
-        PostgresStore, SchemaStore, StateStore, TableRetryPolicy, TableSchemaRetention, TableState,
+        PostgresStore, SchemaStore, StateStore, TableRetryPolicy, TableState,
         TableStateLifecycleStore, WorkerType,
     },
     test_utils::database::spawn_source_database,
@@ -17,6 +17,11 @@ use etl_postgres::source::connect_to_source_database;
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::postgres::types::Oid as SqlxTableId;
 use tokio_postgres::types::{PgLsn, Type as PgType};
+
+/// Creates a synthetic composite snapshot ID for tests.
+fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+    SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+}
 
 /// Creates a test column schema with sensible defaults.
 fn test_column(
@@ -346,10 +351,10 @@ async fn schema_store_versioning() {
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let mut table_schema = create_sample_table_schema();
 
-    // Store initial schema at snapshot 0
+    // Store the initial schema at snapshot 0:0.
     store.store_table_schema(table_schema.clone()).await.unwrap();
 
-    // Create a new version with a higher snapshot_id
+    // Create a new version with a later composite snapshot ID.
     table_schema.add_column_schema(test_column(
         "updated_at",
         PgType::TIMESTAMPTZ,
@@ -358,30 +363,104 @@ async fn schema_store_versioning() {
         true,
         false,
     ));
-    table_schema.snapshot_id = SnapshotId::from(100u64); // New snapshot for the schema change
+    table_schema.snapshot_id = test_snapshot_id(100u64, 100u64);
 
-    // Store updated schema as new version
+    // Store the updated schema as a new version.
     store.store_table_schema(table_schema.clone()).await.unwrap();
 
-    // Verify querying at snapshot 100+ returns the updated schema
+    // The maximum boundary returns the updated schema.
     let schema = store.get_table_schema(&table_schema.id, SnapshotId::max()).await.unwrap();
     assert!(schema.is_some());
     let schema = schema.unwrap();
-    assert_eq!(schema.column_schemas.len(), 4); // Original 3 + 1 new column
-    assert_eq!(schema.snapshot_id, SnapshotId::from(100u64));
+    assert_eq!(schema.column_schemas.len(), 4);
+    assert_eq!(schema.snapshot_id, test_snapshot_id(100u64, 100u64));
 
-    // Verify querying at snapshot 50 returns the original schema
-    let schema = store.get_table_schema(&table_schema.id, SnapshotId::from(50u64)).await.unwrap();
+    // An earlier composite boundary returns the initial schema.
+    let schema =
+        store.get_table_schema(&table_schema.id, test_snapshot_id(50u64, 50u64)).await.unwrap();
     assert!(schema.is_some());
     let schema = schema.unwrap();
-    assert_eq!(schema.column_schemas.len(), 3); // Original 3 columns
+    assert_eq!(schema.column_schemas.len(), 3);
     assert_eq!(schema.snapshot_id, SnapshotId::initial());
 
-    // Verify the new column was added in the latest version
+    // The latest version contains the new column.
     let schema =
         store.get_table_schema(&table_schema.id, SnapshotId::max()).await.unwrap().unwrap();
     let updated_at_column = schema.column_schemas.iter().find(|c| c.name == "updated_at");
     assert!(updated_at_column.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_store_orders_composite_snapshots_by_commit_then_message_lsn() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let mut table_schema = create_sample_table_schema();
+    let table_id = table_schema.id;
+
+    store.store_table_schema(table_schema.clone()).await.unwrap();
+
+    let first_commit_snapshot = SnapshotId::new(PgLsn::from(2), PgLsn::from(30));
+    table_schema.add_column_schema(test_column("first", PgType::TEXT, -1, 4, true, false));
+    table_schema.snapshot_id = first_commit_snapshot;
+    store.store_table_schema(table_schema.clone()).await.unwrap();
+
+    let second_commit_first_snapshot = SnapshotId::new(PgLsn::from(10), PgLsn::from(2));
+    table_schema.add_column_schema(test_column("second", PgType::TEXT, -1, 5, true, false));
+    table_schema.snapshot_id = second_commit_first_snapshot;
+    store.store_table_schema(table_schema.clone()).await.unwrap();
+
+    let second_commit_second_snapshot = SnapshotId::new(PgLsn::from(10), PgLsn::from(10));
+    table_schema.add_column_schema(test_column("third", PgType::TEXT, -1, 6, true, false));
+    table_schema.snapshot_id = second_commit_second_snapshot;
+    store.store_table_schema(table_schema.clone()).await.unwrap();
+
+    table_schema.add_column_schema(test_column("maximum", PgType::TEXT, -1, 7, true, false));
+    table_schema.snapshot_id = SnapshotId::max();
+    store.store_table_schema(table_schema).await.unwrap();
+
+    let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let checkpoint_lsn = PgLsn::from(5);
+
+    let at_maximum =
+        reloaded_store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().unwrap();
+    assert_eq!(at_maximum.snapshot_id, SnapshotId::max());
+
+    // This is the original failure relationship: the schema message was
+    // written before the checkpoint, but its schema does not activate until a
+    // later commit LSN. A message-LSN-only identifier would incorrectly make
+    // it eligible at the checkpoint.
+    assert!(second_commit_first_snapshot.message_lsn() < checkpoint_lsn);
+    assert!(checkpoint_lsn < second_commit_first_snapshot.commit_lsn());
+    let legacy_message_lsn = second_commit_first_snapshot.message_lsn();
+    let migrated_snapshot_id = SnapshotId::new(legacy_message_lsn, legacy_message_lsn);
+    assert!(migrated_snapshot_id <= SnapshotId::at_lsn(checkpoint_lsn));
+    assert!(second_commit_first_snapshot > SnapshotId::at_lsn(checkpoint_lsn));
+
+    // Query from newest to oldest so each narrower bound misses newer cached
+    // entries and exercises numeric ordering of the persisted text.
+    let at_second_commit = reloaded_store
+        .get_table_schema(&table_id, SnapshotId::at_lsn(PgLsn::from(10)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(at_second_commit.snapshot_id, second_commit_second_snapshot);
+
+    let between_second_commit_messages = reloaded_store
+        .get_table_schema(&table_id, SnapshotId::new(PgLsn::from(10), PgLsn::from(5)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(between_second_commit_messages.snapshot_id, second_commit_first_snapshot);
+
+    let at_checkpoint_before_second_commit = reloaded_store
+        .get_table_schema(&table_id, SnapshotId::at_lsn(checkpoint_lsn))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(at_checkpoint_before_second_commit.snapshot_id, first_commit_snapshot);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -393,7 +472,7 @@ async fn schema_store_upsert_replaces_columns() {
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
-    // Create initial schema with 3 columns
+    // Create the initial schema with three columns.
     let table_id = TableId::new(12345);
     let table_name = TableName::new("public".to_owned(), "test_table".to_owned());
     let initial_columns = vec![
@@ -403,16 +482,16 @@ async fn schema_store_upsert_replaces_columns() {
     ];
     let table_schema = TableSchema::new(table_id, table_name.clone(), initial_columns);
 
-    // Store initial schema
+    // Store the initial schema.
     store.store_table_schema(table_schema.clone()).await.unwrap();
 
-    // Verify initial columns
+    // Verify the initial columns.
     let schema = store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().unwrap();
     assert_eq!(schema.column_schemas.len(), 3);
     assert!(schema.column_schemas.iter().any(|c| c.name == "old_column"));
 
-    // Create updated schema with SAME snapshot_id but different columns
-    // (simulating a retry or re-processing scenario)
+    // Create an updated schema with the same snapshot ID but different columns,
+    // simulating a retry or reprocessing scenario.
     let updated_columns = vec![
         test_column("id", PgType::INT4, -1, 1, false, true),
         test_column("name", PgType::TEXT, -1, 2, true, false),
@@ -421,11 +500,11 @@ async fn schema_store_upsert_replaces_columns() {
     ];
     let updated_schema = TableSchema::new(table_id, table_name, updated_columns);
 
-    // Store updated schema with same snapshot_id (upsert)
+    // Upsert the updated schema at the same snapshot ID.
     store.store_table_schema(updated_schema.clone()).await.unwrap();
 
-    // Verify columns were replaced, not accumulated
-    // Need to clear cache and reload from DB to verify DB state
+    // Reload from the database to verify that columns were replaced rather
+    // than accumulated.
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let schema = new_store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().unwrap();
 
@@ -453,7 +532,7 @@ async fn schema_cache_eviction() {
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
-    // Store 3 schema versions for table 1
+    // Store three schema versions for table 1.
     let table_id_1 = TableId::new(12345);
     let table_name_1 = TableName::new("public".to_owned(), "test_table".to_owned());
     for snapshot_id in [0u64, 100, 200] {
@@ -462,41 +541,44 @@ async fn schema_cache_eviction() {
             test_column(&format!("col_at_{snapshot_id}"), PgType::TEXT, -1, 2, true, false),
         ];
         let mut table_schema = TableSchema::new(table_id_1, table_name_1.clone(), columns);
-        table_schema.snapshot_id = SnapshotId::from(snapshot_id);
+        table_schema.snapshot_id = test_snapshot_id(snapshot_id, snapshot_id);
         store.store_table_schema(table_schema.clone()).await.unwrap();
     }
 
-    // Store 3 schemas for table 2 to verify eviction is per-table
+    // Store three schemas for table 2 to verify that eviction is per-table.
     let table_id_2 = TableId::new(67890);
     let table_name_2 = TableName::new("public".to_owned(), "table_2".to_owned());
     for snapshot_id in [0u64, 100, 200] {
         let columns = vec![test_column("id", PgType::INT4, -1, 1, false, true)];
         let mut schema = TableSchema::new(table_id_2, table_name_2.clone(), columns);
-        schema.snapshot_id = SnapshotId::from(snapshot_id);
+        schema.snapshot_id = test_snapshot_id(snapshot_id, snapshot_id);
         store.store_table_schema(schema).await.unwrap();
     }
 
-    // Check cache size - should have 2 schemas per table = 4 total
+    // The cache retains two schemas per table, for four schemas total.
     let cached_schemas = store.get_table_schemas().await.unwrap();
     assert_eq!(cached_schemas.len(), 4, "Should have 2 schemas per table");
 
-    // Verify eviction keeps newest snapshots (100 and 200), evicts oldest (0)
+    // Eviction keeps the two newest snapshots and removes the initial snapshot.
     let table_1_snapshots: Vec<SnapshotId> =
         cached_schemas.iter().filter(|s| s.id == table_id_1).map(|s| s.snapshot_id).collect();
     assert!(
-        table_1_snapshots.contains(&SnapshotId::from(100u64))
-            && table_1_snapshots.contains(&SnapshotId::from(200u64))
+        table_1_snapshots.contains(&test_snapshot_id(100u64, 100u64))
+            && table_1_snapshots.contains(&test_snapshot_id(200u64, 200u64))
     );
-    assert!(!table_1_snapshots.contains(&SnapshotId::initial()), "Snapshot 0 should be evicted");
+    assert!(
+        !table_1_snapshots.contains(&SnapshotId::initial()),
+        "Initial snapshot 0:0 should be evicted"
+    );
 
     let table_2_snapshots: Vec<SnapshotId> =
         cached_schemas.iter().filter(|s| s.id == table_id_2).map(|s| s.snapshot_id).collect();
     assert!(
         !table_2_snapshots.contains(&SnapshotId::initial()),
-        "Table 2 snapshot 0 should be evicted"
+        "Table 2 initial snapshot 0:0 should be evicted"
     );
 
-    // Evicted schemas should still be loadable from DB
+    // Evicted schemas remain loadable from the database.
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let schema_0 =
         new_store.get_table_schema(&table_id_1, SnapshotId::initial()).await.unwrap().unwrap();
@@ -521,7 +603,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
             test_column(&format!("col_at_{snapshot_id}"), PgType::TEXT, -1, 2, true, false),
         ];
         let mut table_schema = TableSchema::new(table_id, table_name.clone(), columns);
-        table_schema.snapshot_id = SnapshotId::from(snapshot_id);
+        table_schema.snapshot_id = test_snapshot_id(snapshot_id, snapshot_id);
         store.store_table_schema(table_schema).await.unwrap();
     }
 
@@ -533,7 +615,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
             test_column(&format!("other_col_at_{snapshot_id}"), PgType::TEXT, -1, 2, true, false),
         ];
         let mut table_schema = TableSchema::new(other_table_id, other_table_name.clone(), columns);
-        table_schema.snapshot_id = SnapshotId::from(snapshot_id);
+        table_schema.snapshot_id = test_snapshot_id(snapshot_id, snapshot_id);
         store.store_table_schema(table_schema).await.unwrap();
     }
 
@@ -553,7 +635,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
         ];
         let mut table_schema =
             TableSchema::new(untouched_table_id, untouched_table_name.clone(), columns);
-        table_schema.snapshot_id = SnapshotId::from(snapshot_id);
+        table_schema.snapshot_id = test_snapshot_id(snapshot_id, snapshot_id);
         store.store_table_schema(table_schema).await.unwrap();
     }
 
@@ -564,16 +646,34 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
         from etl.table_schemas
         where pipeline_id = $1
           and (
-              (table_id = $2 and snapshot_id < $3::pg_lsn)
-              or (table_id = $4 and snapshot_id < $5::pg_lsn)
+              (
+                  table_id = $2
+                  and (
+                      pg_catalog.split_part(snapshot_id, ':', 1)::pg_catalog.numeric,
+                      pg_catalog.split_part(snapshot_id, ':', 2)::pg_catalog.numeric
+                  ) < (
+                      pg_catalog.split_part($3, ':', 1)::pg_catalog.numeric,
+                      pg_catalog.split_part($3, ':', 2)::pg_catalog.numeric
+                  )
+              )
+              or (
+                  table_id = $4
+                  and (
+                      pg_catalog.split_part(snapshot_id, ':', 1)::pg_catalog.numeric,
+                      pg_catalog.split_part(snapshot_id, ':', 2)::pg_catalog.numeric
+                  ) < (
+                      pg_catalog.split_part($5, ':', 1)::pg_catalog.numeric,
+                      pg_catalog.split_part($5, ':', 2)::pg_catalog.numeric
+                  )
+              )
           )
         "#,
     )
     .bind(pipeline_id as i64)
     .bind(SqlxTableId(table_id.into_inner()))
-    .bind(SnapshotId::from(200u64).to_pg_lsn_string())
+    .bind(test_snapshot_id(200u64, 200u64).to_string())
     .bind(SqlxTableId(other_table_id.into_inner()))
-    .bind(SnapshotId::from(150u64).to_pg_lsn_string())
+    .bind(test_snapshot_id(150u64, 150u64).to_string())
     .fetch_all(&pool)
     .await
     .unwrap();
@@ -589,9 +689,9 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     assert!(obsolete_column_count_before > 0);
 
     let deleted = store
-        .prune_table_schemas(HashMap::from([
-            (table_id, TableSchemaRetention::SnapshotId(SnapshotId::from(200u64))),
-            (other_table_id, TableSchemaRetention::SnapshotId(SnapshotId::from(200u64))),
+        .prune_table_schemas(BTreeMap::from([
+            (table_id, test_snapshot_id(200u64, 200u64)),
+            (other_table_id, test_snapshot_id(200u64, 200u64)),
         ]))
         .await
         .unwrap();
@@ -601,13 +701,17 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     let table_snapshots: Vec<_> =
         cached_schemas.iter().filter(|schema| schema.id == table_id).collect();
     assert_eq!(table_snapshots.len(), 2);
-    assert!(table_snapshots.iter().any(|schema| schema.snapshot_id == SnapshotId::from(200u64)));
-    assert!(table_snapshots.iter().any(|schema| schema.snapshot_id == SnapshotId::from(300u64)));
+    assert!(
+        table_snapshots.iter().any(|schema| schema.snapshot_id == test_snapshot_id(200u64, 200u64))
+    );
+    assert!(
+        table_snapshots.iter().any(|schema| schema.snapshot_id == test_snapshot_id(300u64, 300u64))
+    );
 
     let other_table_snapshots: Vec<_> =
         cached_schemas.iter().filter(|schema| schema.id == other_table_id).collect();
     assert_eq!(other_table_snapshots.len(), 1);
-    assert_eq!(other_table_snapshots[0].snapshot_id, SnapshotId::from(150u64));
+    assert_eq!(other_table_snapshots[0].snapshot_id, test_snapshot_id(150u64, 150u64));
 
     let untouched_table_snapshots: Vec<_> =
         cached_schemas.iter().filter(|schema| schema.id == untouched_table_id).collect();
@@ -642,16 +746,17 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     .unwrap();
     assert_eq!(obsolete_column_count_after, 0);
 
-    let old_schema = store.get_table_schema(&table_id, SnapshotId::from(100u64)).await.unwrap();
+    let old_schema =
+        store.get_table_schema(&table_id, test_snapshot_id(100u64, 100u64)).await.unwrap();
     assert!(old_schema.is_none());
 
     let retained_schema =
-        store.get_table_schema(&table_id, SnapshotId::from(250u64)).await.unwrap().unwrap();
-    assert_eq!(retained_schema.snapshot_id, SnapshotId::from(200u64));
+        store.get_table_schema(&table_id, test_snapshot_id(250u64, 250u64)).await.unwrap().unwrap();
+    assert_eq!(retained_schema.snapshot_id, test_snapshot_id(200u64, 200u64));
 
     let latest_schema =
         store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().unwrap();
-    assert_eq!(latest_schema.snapshot_id, SnapshotId::from(300u64));
+    assert_eq!(latest_schema.snapshot_id, test_snapshot_id(300u64, 300u64));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -969,13 +1074,13 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
 
     table_schema.snapshot_id = SnapshotId::initial();
     store.store_table_schema(table_schema.clone()).await.unwrap();
-    table_schema.snapshot_id = SnapshotId::from(100u64);
+    table_schema.snapshot_id = test_snapshot_id(100u64, 100u64);
     store.store_table_schema(table_schema).await.unwrap();
     store.store_table_schema(other_table_schema).await.unwrap();
 
     let metadata = DestinationTableMetadata::new_applied(
         "dest_table".to_owned(),
-        SnapshotId::from(100u64),
+        test_snapshot_id(100u64, 100u64),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
     let other_metadata = DestinationTableMetadata::new_applied(
@@ -1151,7 +1256,14 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
         r#"
         INSERT INTO etl.destination_tables_metadata
             (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
-        VALUES ($1, $2, 'test_dest_table', '0/0'::pg_lsn, 'applied', $3::bytea)
+        VALUES (
+            $1,
+            $2,
+            'test_dest_table',
+            '0:0',
+            'applied',
+            $3::bytea
+        )
         "#,
     )
     .bind(pipeline_id as i64)
@@ -1217,7 +1329,14 @@ async fn replication_mask_various_patterns() {
             r#"
             INSERT INTO etl.destination_tables_metadata
                 (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
-            VALUES ($1, $2, $3, '0/0'::pg_lsn, 'applied', $4)
+            VALUES (
+                $1,
+                $2,
+                $3,
+                '0:0',
+                'applied',
+                $4
+            )
             "#,
         )
         .bind(pipeline_id as i64)
@@ -1253,29 +1372,30 @@ async fn replication_mask_various_patterns() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn replication_mask_roundtrip() {
+async fn destination_metadata_roundtrip_preserves_composite_snapshot_and_replication_mask() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
     let pipeline_id = 1;
     let table_id = TableId::new(54321);
 
-    // Create a store and save metadata with a specific mask
+    // Store metadata with a composite snapshot ID and a specific mask.
     let original_mask = ReplicationMask::from_bytes(vec![1, 0, 1, 0, 1, 1, 0, 0]);
+    let snapshot_id = SnapshotId::new(PgLsn::from(200), PgLsn::from(100));
     let metadata = DestinationTableMetadata::new_applied(
         "roundtrip_table".to_owned(),
-        SnapshotId::initial(),
+        snapshot_id,
         original_mask.clone(),
     );
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     store.store_destination_table_metadata(table_id, metadata).await.unwrap();
 
-    // Create a fresh store and load from database
+    // Load the metadata through a fresh store.
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     new_store.load_destination_tables_metadata().await.unwrap();
 
-    // Verify the loaded mask matches the original
+    // The loaded metadata preserves both the mask and composite snapshot ID.
     let loaded_metadata = new_store
         .get_applied_destination_table_metadata(table_id)
         .await
@@ -1287,4 +1407,5 @@ async fn replication_mask_roundtrip() {
         original_mask.as_slice(),
         "Roundtrip should preserve replication mask exactly"
     );
+    assert_eq!(loaded_metadata.snapshot_id, snapshot_id);
 }

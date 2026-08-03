@@ -67,13 +67,17 @@ That message is **internal plumbing**. Destinations do not receive it directly.
 Instead, ETL:
 
 1. Parses the schema-change message.
-2. Stores a new versioned table schema using the message LSN as the schema
-   snapshot ID.
+2. Stores a new versioned table schema using a composite snapshot ID ordered by
+   commit LSN and then message LSN.
 3. Invalidates the in-memory relation state for that table.
 4. Waits for PostgreSQL pgoutput to emit a fresh `RELATION` message before the
    next row event for that table.
 5. Sends destinations a public `Event::Relation` with the new
    `ReplicatedTableSchema`.
+
+Snapshot IDs display both LSNs as decimal unsigned 64-bit values in
+`commit_lsn:message_lsn` form. Their ordering is the numeric tuple ordering of
+those two components, not the lexical ordering of the displayed string.
 
 `ALTER PUBLICATION ... DROP TABLE` intentionally emits no schema snapshot for
 the removed table because it is no longer part of the publication. PostgreSQL
@@ -88,9 +92,10 @@ For a table already known to the pipeline, a supported publication change
 creates a new snapshot ID even when the full physical table schema is unchanged.
 The following `RELATION` message supplies the current publication and identity
 masks. This gives successive mask changes distinct snapshot IDs and preserves
-their ordering. A newly published table that the running pipeline does not know
-is ignored until startup publication reconciliation creates its table state and
-initial copy.
+their ordering. Multiple schema messages sharing one commit LSN are ordered by
+their message LSN. A newly published table that the running pipeline does not
+know is ignored until startup publication reconciliation creates its table
+state and initial copy.
 
 The important public boundary is:
 
@@ -368,7 +373,7 @@ These behaviors are **not full destination DDL semantics** yet:
   ordered relation schemas instead of rewinding. An older snapshot could drive
   reverse DDL that drops newer columns and their data. An equal snapshot with a
   different replication mask is also rejected: supported publication
-  column-list changes always receive a new logical-message snapshot ID, so the
+  column-list changes always receive a new composite snapshot ID, so the
   conflicting masks have no ordering with which to choose a safe winner. The
   pipeline fails with a schema-rewind error and the affected table must be
   resynchronized.

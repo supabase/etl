@@ -1,12 +1,12 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use etl::{
     destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     error::{EtlError, EtlResult},
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
-        SchemaStore, StateStore, TableSchemaRetention, TableState, TableStateLifecycleStore,
-        TableStateOperation, TableStates, WorkerType,
+        SchemaStore, StateStore, TableState, TableStateLifecycleStore, TableStateOperation,
+        TableStates, WorkerType,
     },
 };
 use tracing::info;
@@ -178,9 +178,9 @@ where
 
     async fn prune_table_schemas(
         &self,
-        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+        retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> EtlResult<u64> {
-        self.inner.prune_table_schemas(table_schema_retentions).await
+        self.inner.prune_table_schemas(retention_snapshot_ids).await
     }
 }
 

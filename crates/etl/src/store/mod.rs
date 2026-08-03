@@ -26,8 +26,8 @@ mod state;
 pub use both::{memory::MemoryStore, postgres::PostgresStore};
 pub use capabilities::{DestinationStore, PipelineStore, SharedStateStore};
 pub use lifecycle::{TableStateLifecycleStore, TableStateOperation};
+pub use schema::SchemaStore;
 pub(crate) use schema::TableSchemaSnapshots;
-pub use schema::{SchemaStore, TableSchemaRetention};
 pub(crate) use state::DestinationTablesMetadata;
 pub use state::{StateStore, TableStates};
 

@@ -1615,11 +1615,18 @@ fn clickhouse_engine_matches(existing: &str, configured: &str) -> bool {
 mod tests {
     use etl::{
         data::{ArrayCell, PartialTableRow},
-        schema::{ColumnSchema, IdentityMask, ReplicationMask, SnapshotId, TableName, TableSchema},
+        schema::{
+            ColumnSchema, IdentityMask, PgLsn, ReplicationMask, SnapshotId, TableName, TableSchema,
+        },
     };
 
     use super::*;
     use crate::clickhouse::schema::{CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME};
+
+    /// Creates a synthetic composite snapshot ID for tests.
+    fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+        SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+    }
 
     fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
         ClickHouseTableColumn { name: name.to_owned(), type_name: type_name.to_owned() }
@@ -1642,7 +1649,7 @@ mod tests {
         let arriving_schema = replicated_schema(IdentityType::PrimaryKey);
         let metadata = DestinationTableMetadata::new_applying(
             "public_users".to_owned(),
-            SnapshotId::from(1_u64),
+            test_snapshot_id(1_u64, 1_u64),
             arriving_schema.replication_mask().clone(),
         );
 
