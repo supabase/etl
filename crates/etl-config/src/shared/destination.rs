@@ -62,6 +62,85 @@ pub enum DuckLakeMaintenanceMode {
     Postgres,
 }
 
+/// Per-table sort-order configuration for DuckLake destinations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct DuckLakeTableSortingConfig {
+    /// Source tables whose DuckLake counterparts should have a sort order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<DuckLakeTableSortConfig>,
+}
+
+impl DuckLakeTableSortingConfig {
+    /// Returns whether no table sort orders are configured.
+    pub fn is_empty(&self) -> bool {
+        self.tables.is_empty()
+    }
+}
+
+/// Sort-order configuration for one source table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct DuckLakeTableSortConfig {
+    /// Source PostgreSQL schema name.
+    pub schema: String,
+    /// Source PostgreSQL table name.
+    pub table: String,
+    /// Columns used by the DuckLake sort order.
+    pub sort_by: DuckLakeSortBy,
+}
+
+/// Selector used to resolve a DuckLake table's sort columns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DuckLakeSortBy {
+    /// Use the explicitly configured columns in their listed order.
+    Columns {
+        /// Ordered sort columns.
+        columns: Vec<DuckLakeSortColumn>,
+    },
+    /// Use the source PostgreSQL primary-key columns in key-definition order.
+    PrimaryKey,
+}
+
+/// One column in an explicit DuckLake sort order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct DuckLakeSortColumn {
+    /// Source column name.
+    pub name: String,
+    /// Sort direction.
+    #[serde(default)]
+    pub direction: DuckLakeSortDirection,
+    /// Optional null placement. DuckLake's default is used when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nulls: Option<DuckLakeSortNulls>,
+}
+
+/// Direction of a DuckLake sort column.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DuckLakeSortDirection {
+    /// Sort values in ascending order.
+    #[default]
+    Asc,
+    /// Sort values in descending order.
+    Desc,
+}
+
+/// Null placement for a DuckLake sort column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DuckLakeSortNulls {
+    /// Place null values before non-null values.
+    First,
+    /// Place null values after non-null values.
+    Last,
+}
+
 /// Supported product destination kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -178,6 +257,9 @@ pub enum DestinationConfig {
         /// External maintenance coordination backend.
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
+        /// Optional per-table sort orders applied during DuckLake maintenance.
+        #[serde(default, skip_serializing_if = "DuckLakeTableSortingConfig::is_empty")]
+        table_sorting: DuckLakeTableSortingConfig,
     },
     Snowflake {
         /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
@@ -399,6 +481,9 @@ pub enum DestinationConfigWithoutSecrets {
         /// External maintenance coordination backend.
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
+        /// Optional per-table sort orders applied during DuckLake maintenance.
+        #[serde(default, skip_serializing_if = "DuckLakeTableSortingConfig::is_empty")]
+        table_sorting: DuckLakeTableSortingConfig,
     },
     Snowflake {
         /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
@@ -450,6 +535,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                table_sorting,
             } => DestinationConfigWithoutSecrets::Ducklake {
                 data_path,
                 pool_size,
@@ -461,6 +547,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                table_sorting,
             },
             DestinationConfig::Snowflake {
                 account_id,
@@ -501,6 +588,13 @@ mod tests {
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            table_sorting: DuckLakeTableSortingConfig {
+                tables: vec![DuckLakeTableSortConfig {
+                    schema: "public".to_owned(),
+                    table: "events".to_owned(),
+                    sort_by: DuckLakeSortBy::PrimaryKey,
+                }],
+            },
         };
 
         let without_secrets = DestinationConfigWithoutSecrets::from(config);
@@ -509,6 +603,53 @@ mod tests {
 
         assert!(!serialized.contains("catalog_url"));
         assert!(!serialized.contains("user:pass"));
+        assert_eq!(
+            json["ducklake"]["table_sorting"]["tables"][0]["sort_by"]["kind"],
+            "primary_key"
+        );
+    }
+
+    #[test]
+    fn ducklake_table_sorting_deserializes_column_and_primary_key_modes() {
+        let config: DuckLakeTableSortingConfig = serde_json::from_value(serde_json::json!({
+            "tables": [
+                {
+                    "schema": "public",
+                    "table": "events",
+                    "sort_by": {
+                        "kind": "columns",
+                        "columns": [
+                            {
+                                "name": "tenant_id"
+                            },
+                            {
+                                "name": "created_at",
+                                "direction": "desc",
+                                "nulls": "first"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "schema": "public",
+                    "table": "accounts",
+                    "sort_by": {
+                        "kind": "primary_key"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(config.tables.len(), 2);
+        let DuckLakeSortBy::Columns { columns } = &config.tables[0].sort_by else {
+            panic!("Expected explicit columns");
+        };
+        assert_eq!(columns[0].direction, DuckLakeSortDirection::Asc);
+        assert_eq!(columns[0].nulls, None);
+        assert_eq!(columns[1].direction, DuckLakeSortDirection::Desc);
+        assert_eq!(columns[1].nulls, Some(DuckLakeSortNulls::First));
+        assert_eq!(config.tables[1].sort_by, DuckLakeSortBy::PrimaryKey);
     }
 
     #[test]
