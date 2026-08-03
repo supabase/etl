@@ -2412,7 +2412,10 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
     let stored_snapshots = state_store.get_table_schemas().await;
     let stored_snapshot_ids =
         stored_snapshots[&table_id].iter().map(|(snapshot_id, _)| *snapshot_id).collect::<Vec<_>>();
-    assert_eq!(stored_snapshot_ids, relation_snapshot_ids);
+    assert_eq!(
+        stored_snapshot_ids,
+        vec![relation_after_removing_age.replicated_table_schema.inner().snapshot_id]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

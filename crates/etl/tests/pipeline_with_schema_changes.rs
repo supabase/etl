@@ -326,8 +326,14 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_only_schema_snapshot(
-        snapshots,
+    assert_eq!(snapshots.len(), 2);
+    assert_schema_snapshots_ordering(snapshots, true);
+    assert_table_schema_column_names_types(
+        &snapshots[0].1,
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
+    );
+    assert_table_schema_column_names_types(
+        &snapshots[1].1,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 
