@@ -2344,6 +2344,15 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         .unwrap()
         .expect("metadata should exist after table creation");
     let initial_snapshot_id = initial_metadata.snapshot_id;
+    let stale_table_schema = store
+        .get_table_schema(&table_id, initial_snapshot_id)
+        .await
+        .unwrap()
+        .expect("initial schema snapshot should exist before schema change");
+    let stale_schema = ReplicatedTableSchema::from_mask(
+        stale_table_schema,
+        initial_metadata.replication_mask.clone(),
+    );
 
     // Add a column and stream one row that carries data in it.
     let event_notify = destination
@@ -2383,16 +2392,6 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
     let clickhouse_table_name = applied_metadata.destination_table_id.clone();
 
     // --- WHEN: a fresh destination on the same store replays the old relation ---
-    let stale_table_schema = store
-        .get_table_schema(&table_id, initial_snapshot_id)
-        .await
-        .unwrap()
-        .expect("pre-change schema snapshot should still be retained");
-    let stale_schema = ReplicatedTableSchema::from_mask(
-        stale_table_schema,
-        initial_metadata.replication_mask.clone(),
-    );
-
     let restarted_destination =
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
     let result = restarted_destination

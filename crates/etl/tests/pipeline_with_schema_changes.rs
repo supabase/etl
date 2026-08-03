@@ -4,7 +4,7 @@ use etl::{
     data::{ArrayCell, Cell},
     event::{Event, EventType},
     pipeline::PipelineId,
-    schema::{ColumnSchema, TableId},
+    schema::{ColumnSchema, SnapshotId, TableId, TableSchema},
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -41,10 +41,6 @@ fn get_last_insert_event(events: &[Event], table_id: TableId) -> &Event {
         .expect("no insert events for table")
 }
 
-fn schema_columns(schema: &etl::schema::TableSchema) -> Vec<(String, Type)> {
-    schema.column_schemas.iter().map(|column| (column.name.clone(), column.typ.clone())).collect()
-}
-
 fn assert_column_default_contains<'a>(
     columns: impl IntoIterator<Item = &'a ColumnSchema>,
     column_name: &str,
@@ -65,20 +61,18 @@ fn assert_column_default_contains<'a>(
     }
 }
 
-fn find_snapshot_index_after(
-    snapshots: &[(etl::schema::SnapshotId, etl::schema::TableSchema)],
-    start_index: usize,
+/// Asserts that cleanup retained only the expected current schema.
+fn assert_only_schema_snapshot<'a>(
+    snapshots: &'a [(SnapshotId, TableSchema)],
     expected: &[(&str, Type)],
-) -> usize {
-    let expected =
-        expected.iter().map(|(name, typ)| ((*name).to_owned(), typ.clone())).collect::<Vec<_>>();
+) -> &'a TableSchema {
+    assert_eq!(snapshots.len(), 1);
+    assert_schema_snapshots_ordering(snapshots, false);
 
-    snapshots
-        .iter()
-        .enumerate()
-        .skip(start_index)
-        .find_map(|(index, (_, schema))| (schema_columns(schema) == expected).then_some(index))
-        .expect("expected schema snapshot in order")
+    let (_, schema) = &snapshots[0];
+    assert_table_schema_column_names_types(schema, expected);
+
+    schema
 }
 
 /// Schema mutation exercised by [`run_relation_schema_change`].
@@ -93,7 +87,7 @@ enum RelationSchemaChange {
 }
 
 /// Verifies that one table-schema mutation produces the matching Relation,
-/// decodes the following row, and persists both schema snapshots.
+/// decodes the following row, and retains the current schema snapshot.
 async fn run_relation_schema_change(change: RelationSchemaChange) {
     init_test_tracing();
 
@@ -257,18 +251,8 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_eq!(snapshots.len(), 2);
-    assert_schema_snapshots_ordering(snapshots, true);
-
-    let (_, first_schema) = &snapshots[0];
-    assert_table_schema_column_names_types(
-        first_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
-    );
-
-    let (_, second_schema) = &snapshots[1];
-    assert_table_schema_column_names_types(second_schema, &expected_columns);
-    let stored_age = second_schema.column_schemas.iter().find(|column| column.name == "age");
+    let stored_schema = assert_only_schema_snapshot(snapshots, &expected_columns);
+    let stored_age = stored_schema.column_schemas.iter().find(|column| column.name == "age");
     match change {
         RelationSchemaChange::DropColumn => assert!(stored_age.is_none()),
         RelationSchemaChange::ChangeColumnDefault => {
@@ -279,7 +263,7 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
         }
         _ => {}
     }
-    assert_eq!(snapshots[1].0, r.replicated_table_schema.inner().snapshot_id);
+    assert_eq!(snapshots[0].0, r.replicated_table_schema.inner().snapshot_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -342,18 +326,8 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_eq!(snapshots.len(), 2);
-    assert_schema_snapshots_ordering(snapshots, true);
-
-    let (_, first_schema) = &snapshots[0];
-    assert_table_schema_column_names_types(
-        first_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
-    );
-
-    let (_, second_schema) = &snapshots[1];
-    assert_table_schema_column_names_types(
-        second_schema,
+    assert_only_schema_snapshot(
+        snapshots,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 
@@ -434,19 +408,11 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_eq!(snapshots.len(), 2);
-    assert_schema_snapshots_ordering(snapshots, true);
-    let (_, first_schema) = &snapshots[0];
-    assert_table_schema_column_names_types(
-        first_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
-    );
-    let (_, second_schema) = &snapshots[1];
-    assert_table_schema_column_names_types(
-        second_schema,
+    assert_only_schema_snapshot(
+        snapshots,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
-    assert_eq!(snapshots[1].0, relation.replicated_table_schema.inner().snapshot_id);
+    assert_eq!(snapshots[0].0, relation.replicated_table_schema.inner().snapshot_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -628,12 +594,8 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_eq!(snapshots.len(), 2);
-    assert_schema_snapshots_ordering(snapshots, true);
-
-    let (_, second_schema) = &snapshots[1];
-    assert_table_schema_column_names_types(
-        second_schema,
+    let schema = assert_only_schema_snapshot(
+        snapshots,
         &[
             ("id", Type::INT8),
             ("name", Type::TEXT),
@@ -650,38 +612,26 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
             ("expires_at", Type::TIMESTAMPTZ),
         ],
     );
-    assert_column_default_contains(&second_schema.column_schemas, "status_text", &["pending"]);
-    assert_column_default_contains(&second_schema.column_schemas, "score", &["10", "5"]);
-    assert_column_default_contains(&second_schema.column_schemas, "active", &["true"]);
-    assert_column_default_contains(&second_schema.column_schemas, "created_at", &["now"]);
-    assert_column_default_contains(&second_schema.column_schemas, "created_on", &["2026-01-01"]);
+    assert_column_default_contains(&schema.column_schemas, "status_text", &["pending"]);
+    assert_column_default_contains(&schema.column_schemas, "score", &["10", "5"]);
+    assert_column_default_contains(&schema.column_schemas, "active", &["true"]);
+    assert_column_default_contains(&schema.column_schemas, "created_at", &["now"]);
+    assert_column_default_contains(&schema.column_schemas, "created_on", &["2026-01-01"]);
     assert_column_default_contains(
-        &second_schema.column_schemas,
+        &schema.column_schemas,
         "payload",
         &["jsonb_build_object", "source", "api"],
     );
-    assert_column_default_contains(&second_schema.column_schemas, "lower_name", &["lower", "user"]);
+    assert_column_default_contains(&schema.column_schemas, "lower_name", &["lower", "user"]);
+    assert_column_default_contains(&schema.column_schemas, "label", &["coalesce", "fallback"]);
+    assert_column_default_contains(&schema.column_schemas, "tags", &["array", "alpha", "beta"]);
     assert_column_default_contains(
-        &second_schema.column_schemas,
-        "label",
-        &["coalesce", "fallback"],
-    );
-    assert_column_default_contains(
-        &second_schema.column_schemas,
-        "tags",
-        &["array", "alpha", "beta"],
-    );
-    assert_column_default_contains(
-        &second_schema.column_schemas,
+        &schema.column_schemas,
         "fixed_uuid",
         &["00000000-0000-0000-0000-000000000001"],
     );
-    assert_column_default_contains(
-        &second_schema.column_schemas,
-        "expires_at",
-        &["now", "30 days"],
-    );
-    assert_eq!(snapshots[1].0, relation.replicated_table_schema.inner().snapshot_id);
+    assert_column_default_contains(&schema.column_schemas, "expires_at", &["now", "30 days"]);
+    assert_eq!(snapshots[0].0, relation.replicated_table_schema.inner().snapshot_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -875,77 +825,11 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         r.replicated_table_schema.inner().snapshot_id
     );
 
-    // Verify the expected schema versions are stored in order.
-    //
-    // Around restarts we may re-observe equivalent schema state, so this test
-    // checks that the important versions appear in order instead of pinning the
-    // total snapshot count exactly.
+    // Verify cleanup across restarts retained only the current schema.
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_schema_snapshots_ordering(snapshots, true);
-    let mut index = find_snapshot_index_after(
+    assert_only_schema_snapshot(
         snapshots,
-        0,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("status", Type::TEXT)],
-    );
-
-    index = find_snapshot_index_after(
-        snapshots,
-        index + 1,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("status", Type::TEXT),
-            ("email", Type::TEXT),
-        ],
-    );
-
-    index = find_snapshot_index_after(
-        snapshots,
-        index + 1,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("years", Type::INT4),
-            ("status", Type::TEXT),
-            ("email", Type::TEXT),
-        ],
-    );
-
-    index = find_snapshot_index_after(
-        snapshots,
-        index + 1,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("years", Type::INT8),
-            ("status", Type::TEXT),
-            ("email", Type::TEXT),
-        ],
-    );
-
-    index = find_snapshot_index_after(
-        snapshots,
-        index + 1,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("years", Type::INT8), ("email", Type::TEXT)],
-    );
-
-    index = find_snapshot_index_after(
-        snapshots,
-        index + 1,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("years", Type::INT8),
-            ("email", Type::TEXT),
-            ("created_at", Type::TIMESTAMP),
-        ],
-    );
-
-    index = find_snapshot_index_after(
-        snapshots,
-        index + 1,
         &[
             ("id", Type::INT8),
             ("name", Type::TEXT),
@@ -954,7 +838,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
             ("created_at", Type::TIMESTAMP),
         ],
     );
-    assert_eq!(snapshots[index].0, r.replicated_table_schema.inner().snapshot_id);
+    assert_eq!(snapshots[0].0, r.replicated_table_schema.inner().snapshot_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1068,21 +952,11 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         r.replicated_table_schema.inner().snapshot_id
     );
 
-    // Verify schema snapshots are stored in order.
+    // Verify cleanup retained the current schema.
     let table_schemas = state_store.get_table_schemas().await;
     let snapshots = table_schemas.get(&parent_table_id).unwrap();
-    assert_eq!(snapshots.len(), 2);
-    assert_schema_snapshots_ordering(snapshots, true);
-
-    let (_, first_schema) = &snapshots[0];
-    assert_table_schema_column_names_types(
-        first_schema,
-        &[("id", Type::INT8), ("data", Type::TEXT), ("partition_key", Type::INT4)],
-    );
-
-    let (_, second_schema) = &snapshots[1];
-    assert_table_schema_column_names_types(
-        second_schema,
+    assert_only_schema_snapshot(
+        snapshots,
         &[
             ("id", Type::INT8),
             ("data", Type::TEXT),
@@ -1090,5 +964,5 @@ async fn partitioned_table_schema_change_updates_relation_message() {
             ("category", Type::TEXT),
         ],
     );
-    assert_eq!(snapshots[1].0, r.replicated_table_schema.inner().snapshot_id);
+    assert_eq!(snapshots[0].0, r.replicated_table_schema.inner().snapshot_id);
 }
