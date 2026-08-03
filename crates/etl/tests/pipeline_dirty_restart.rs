@@ -166,6 +166,32 @@ async fn wait_for_apply_disconnect(
     .map_err(|_| TestCaseError::fail("timed out waiting for the old apply worker to stop"))
 }
 
+/// Waits until the finished table sync worker's replication slot is removed.
+///
+/// The users table becomes `Ready` while the table sync worker can still be
+/// deleting its progress row and replication slot. Slot removal is the last
+/// cleanup step, so its absence means table sync work has stopped.
+async fn wait_for_sync_slot_removal(
+    database: &PgDatabase<Client>,
+    sync_slot_name: &str,
+) -> Result<(), TestCaseError> {
+    tokio::time::timeout(DIRTY_RESTART_TIMEOUT, async {
+        loop {
+            let slot_state = database
+                .get_replication_slot_state(sync_slot_name)
+                .await
+                .expect("failed to read the table sync slot state");
+            if slot_state.is_none() {
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| TestCaseError::fail("timed out waiting for the table sync slot removal"))
+}
+
 /// Reads the committed users from the source table.
 async fn read_source_users(
     client: &Client,
@@ -320,6 +346,8 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
     let pipeline_id: PipelineId = random();
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let sync_slot_name: String =
+        EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_id).try_into().unwrap();
     let mut first_pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -334,6 +362,12 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
         .await
         .map_err(|error| TestCaseError::fail(format!("pipeline failed to start: {error}")))?;
     wait_for_notification(&users_ready, "users table to become ready").await?;
+
+    // `Ready` is persisted by the apply worker while the table sync worker can
+    // still be cleaning up its progress row and replication slot. Wait for the
+    // slot removal so the crash below hits a state where only the apply worker
+    // serves the users table.
+    wait_for_sync_slot_removal(&database, &sync_slot_name).await?;
 
     for user_number in 1..case.crash_after {
         insert_user_and_wait(
@@ -373,6 +407,12 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
         }
     };
 
+    // Dropping the pipeline simulates a crash instead of a graceful shutdown:
+    // dropping `ApplyWorkerHandle` aborts the apply worker task at an arbitrary
+    // await point, without shutdown handling, stream draining, or a final
+    // status update. Auxiliary tasks stop on the closed shutdown channel. The
+    // walsender poll below is the restart barrier: it proves the aborted
+    // worker's replication connection is gone.
     drop(first_pipeline);
     wait_for_apply_disconnect(database.client.as_ref().unwrap(), &apply_slot_name).await?;
     drop(first_destination);
