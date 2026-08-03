@@ -487,6 +487,7 @@ async fn ducklake_destination_update_preserves_and_clears_encrypted_fields() {
             maintenance_target_file_size: UpdateField::Preserve,
             expire_snapshots_older_than: UpdateField::Preserve,
             maintenance_mode: UpdateField::Preserve,
+            table_sorting: UpdateField::Preserve,
         },
     };
     let response = app.update_destination(tenant_id, destination_id, &update_request).await;

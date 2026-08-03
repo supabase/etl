@@ -128,6 +128,7 @@ async fn set_ducklake_maintenance_mode(
             maintenance_target_file_size,
             expire_snapshots_older_than,
             maintenance_mode: _,
+            table_sorting,
         } => StoredDestinationConfig::Ducklake {
             catalog_url,
             data_path,
@@ -142,6 +143,7 @@ async fn set_ducklake_maintenance_mode(
             maintenance_target_file_size,
             expire_snapshots_older_than,
             maintenance_mode: mode,
+            table_sorting,
         },
         _ => unreachable!(),
     };

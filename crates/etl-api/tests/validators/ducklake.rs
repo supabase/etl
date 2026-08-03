@@ -43,6 +43,7 @@ fn create_ducklake_config(
         maintenance_target_file_size: None,
         expire_snapshots_older_than: None,
         maintenance_mode: DuckLakeMaintenanceMode::Disabled,
+        table_sorting: Default::default(),
     }
 }
 

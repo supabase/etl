@@ -238,11 +238,22 @@ mod ducklake {
             metadata_schema,
             maintenance_target_file_size,
             expire_snapshots_older_than,
-            maintenance_mode: _,
+            maintenance_mode,
+            table_sorting,
         } = config
         else {
             unreachable!("Destination config should match DuckLake.");
         };
+
+        if !table_sorting.is_empty()
+            && *maintenance_mode == etl_config::shared::DuckLakeMaintenanceMode::Disabled
+        {
+            return Ok(vec![ValidationFailure::critical(
+                "DuckLake Table Sorting Invalid",
+                "DuckLake table sorting requires `maintenance_mode` to be `kubernetes` or \
+                 `postgres` so flush and compaction can materialize the configured order.",
+            )]);
+        }
 
         DucklakeValidator::new(
             catalog_url.expose_secret().to_owned(),
@@ -325,3 +336,37 @@ mod snowflake {
 }
 
 disabled_destination!(snowflake, "snowflake", "Snowflake");
+
+#[cfg(all(test, feature = "ducklake"))]
+mod tests {
+    use etl_config::Environment;
+
+    use super::*;
+    use crate::validation::FailureType;
+
+    #[tokio::test]
+    async fn ducklake_table_sorting_requires_maintenance_mode() {
+        let config: ApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "ducklake": {
+                "catalog_url": "postgres://localhost/ducklake",
+                "data_path": "s3://bucket/path",
+                "maintenance_mode": "disabled",
+                "table_sorting": {
+                    "tables": [{
+                        "schema": "public",
+                        "table": "events",
+                        "sort_by": {"kind": "primary_key"}
+                    }]
+                }
+            }
+        }))
+        .unwrap();
+        let ctx = ValidationContext::builder(Environment::Dev).build();
+
+        let failures = ducklake::validate(&config, &ctx).await.unwrap();
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].failure_type, FailureType::Critical);
+        assert_eq!(failures[0].name, "DuckLake Table Sorting Invalid");
+    }
+}

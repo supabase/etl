@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -14,6 +15,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     runtime::concurrency::{ShutdownResult, ShutdownRx},
+    schema::TableId,
     source_payload_metadata::StreamingPayloadMetadata,
 };
 
@@ -115,7 +117,7 @@ pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 
 /// Metadata carried by apply-loop event write completions.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Commit end LSN associated with the dispatched batch, if any.
     ///
@@ -129,6 +131,13 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     pub durability: WriteEventsDurability,
     /// Number of events in the dispatched batch.
     pub event_count: usize,
+    /// Tables whose schemas were communicated through relation events.
+    ///
+    /// A durable result confirms that the destination processed these
+    /// relations, making their tables likely candidates for obsolete schema
+    /// cleanup. Treating every relation as a candidate also reconstructs
+    /// cleanup work after restart without a separate persisted pending marker.
+    pub relation_table_ids: HashSet<TableId>,
     /// PostgreSQL tuple bytes accumulated for the dispatched event batch.
     pub streaming_payload_metadata: StreamingPayloadMetadata,
     /// Instant at which the event batch was handed off to the destination.
@@ -259,6 +268,7 @@ mod tests {
             commit_end_lsn: Some(PgLsn::from(42)),
             durability: WriteEventsDurability::MayDefer,
             event_count: 1,
+            relation_table_ids: HashSet::from([TableId::new(7)]),
             streaming_payload_metadata: StreamingPayloadMetadata::insert(7),
             dispatched_at: Instant::now(),
         };
@@ -272,6 +282,7 @@ mod tests {
         let metadata = metadata.expect("metadata should be present");
         assert_eq!(metadata.commit_end_lsn, Some(PgLsn::from(42)));
         assert_eq!(metadata.durability, WriteEventsDurability::MayDefer);
+        assert_eq!(metadata.relation_table_ids, HashSet::from([TableId::new(7)]));
         assert_eq!(result.unwrap(), 7);
     }
 
