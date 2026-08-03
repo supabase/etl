@@ -116,6 +116,14 @@ const KEEP_ALIVE_DEADLINE_FRACTION: f64 = 0.6;
 const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// Maximum accepted-but-not-durable streaming writes tracked per apply loop.
 const MAX_PENDING_DURABLE_DISPATCHES: usize = 1024;
+/// Maximum number of table schema cleanups buffered per apply loop.
+///
+/// Each queue entry contains one table identifier and one frozen retention
+/// boundary. A capacity of 1024 accommodates large bursts of relation messages
+/// while keeping queue memory bounded. Queueing is non-blocking, so additional
+/// candidates remain pending in the apply loop and are retried after a later
+/// durable flush result.
+const SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY: usize = 1024;
 
 /// Result type for the apply loop execution.
 ///
@@ -394,11 +402,11 @@ impl HandleMessageResult {
     }
 }
 
-/// Immutable retention boundaries for one asynchronous schema cleanup.
+/// Immutable retention boundary for one asynchronous table schema cleanup.
 ///
 /// The apply loop builds this request immediately after persisting
 /// commit-boundary progress and reading destination metadata. The background
-/// worker must use these frozen boundaries rather than reloading newer state:
+/// worker must use this frozen boundary rather than reloading newer state:
 /// arbitrary queue delay can then only make the request conservative.
 ///
 /// Concurrent schema insertion is also safe: ordered replication cannot later
@@ -411,15 +419,17 @@ impl HandleMessageResult {
 /// newer one—cannot remove a schema retained by the newer boundary.
 #[derive(Debug)]
 struct SchemaCleanupRequest {
-    /// Per-table boundaries captured at the durable flush result.
-    table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+    /// Table whose obsolete schema versions may be pruned.
+    table_id: TableId,
+    /// Retention boundary captured at the durable flush result.
+    retention: TableSchemaRetention,
 }
 
 /// Background tasks owned by an apply loop invocation.
 #[derive(Debug)]
 struct ApplyLoopTasks {
     /// Sender for serialized background schema cleanup requests.
-    schema_cleanup_tx: Option<mpsc::UnboundedSender<SchemaCleanupRequest>>,
+    schema_cleanup_tx: Option<mpsc::Sender<SchemaCleanupRequest>>,
     /// Background worker that serially processes schema cleanup requests.
     schema_cleanup_worker_task: JoinHandle<()>,
     /// Background replication lag sampler task owned by this apply loop.
@@ -438,7 +448,8 @@ impl ApplyLoopTasks {
     where
         S: SchemaStore + Send + Sync + 'static,
     {
-        let (schema_cleanup_tx, schema_cleanup_rx) = mpsc::unbounded_channel();
+        let (schema_cleanup_tx, schema_cleanup_rx) =
+            mpsc::channel(SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY);
         let schema_cleanup_worker_task =
             Self::spawn_schema_cleanup_worker(schema_store, schema_cleanup_rx, worker_type);
 
@@ -456,33 +467,31 @@ impl ApplyLoopTasks {
         }
     }
 
-    /// Tries to queue a schema cleanup request for the provided retention
-    /// boundaries.
+    /// Tries to queue a schema cleanup request for one table.
     ///
-    /// Returns `false` only when the background worker cannot accept the
-    /// request.
-    fn try_queue_schema_cleanup(
-        &self,
-        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
-    ) -> bool {
+    /// Returns `false` when the bounded queue is full or the background worker
+    /// has stopped. This method never waits for queue capacity.
+    fn try_queue_schema_cleanup(&self, table_id: TableId, retention: TableSchemaRetention) -> bool {
         let Some(schema_cleanup_tx) = &self.schema_cleanup_tx else {
             return false;
         };
 
-        let request = SchemaCleanupRequest { table_schema_retentions };
-        if schema_cleanup_tx.send(request).is_err() {
-            error!("schema cleanup worker stopped before accepting cleanup request");
+        let request = SchemaCleanupRequest { table_id, retention };
+        match schema_cleanup_tx.try_send(request) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => false,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                error!("schema cleanup worker stopped before accepting cleanup request");
 
-            return false;
+                false
+            }
         }
-
-        true
     }
 
     /// Starts the worker that serially prunes requested table schema versions.
     fn spawn_schema_cleanup_worker<S>(
         schema_store: S,
-        mut schema_cleanup_rx: mpsc::UnboundedReceiver<SchemaCleanupRequest>,
+        mut schema_cleanup_rx: mpsc::Receiver<SchemaCleanupRequest>,
         worker_type: WorkerType,
     ) -> JoinHandle<()>
     where
@@ -490,7 +499,21 @@ impl ApplyLoopTasks {
     {
         tokio::spawn(async move {
             while let Some(request) = schema_cleanup_rx.recv().await {
-                let table_schema_retentions = request.table_schema_retentions;
+                // Coalesce up to one bounded batch of available requests to
+                // retain batched store cleanup without making the apply loop
+                // wait for it.
+                let mut table_schema_retentions =
+                    HashMap::with_capacity(schema_cleanup_rx.len().saturating_add(1));
+                table_schema_retentions.insert(request.table_id, request.retention);
+
+                for _ in 1..SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY {
+                    let Ok(request) = schema_cleanup_rx.try_recv() else {
+                        break;
+                    };
+
+                    table_schema_retentions.insert(request.table_id, request.retention);
+                }
+
                 let table_count = table_schema_retentions.len() as u64;
                 match schema_store.prune_table_schemas(table_schema_retentions).await {
                     Ok(deleted_count) => {
@@ -1669,12 +1692,24 @@ where
             return;
         }
 
-        // With the retention boundaries fixed, queue the database deletion
-        // without stalling the apply loop. The cleanup worker serializes
-        // requests from this apply loop.
-        if self.tasks.try_queue_schema_cleanup(table_schema_retentions) {
-            self.state.pending_relation_table_ids.clear();
+        // Queue each frozen table boundary without waiting for capacity. The
+        // cleanup worker coalesces available entries into batched store calls.
+        // Candidates that do not fit remain pending for the next durable result.
+        let mut deferred_table_ids = HashSet::new();
+        let mut table_schema_retentions = table_schema_retentions.into_iter();
+
+        while let Some((table_id, retention)) = table_schema_retentions.next() {
+            if !self.tasks.try_queue_schema_cleanup(table_id, retention) {
+                deferred_table_ids.insert(table_id);
+                deferred_table_ids.extend(table_schema_retentions.map(|(table_id, _)| table_id));
+
+                break;
+            }
         }
+
+        self.state
+            .pending_relation_table_ids
+            .retain(|table_id| deferred_table_ids.contains(table_id));
     }
 
     /// Returns schema retention boundaries for tables this worker may clean up.
@@ -3813,5 +3848,39 @@ async fn get_replicated_table_schema(
                 )
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn schema_cleanup_queue_is_bounded_by_table_count() {
+        let (schema_cleanup_tx, mut schema_cleanup_rx) =
+            mpsc::channel(SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY);
+        let tasks = ApplyLoopTasks {
+            schema_cleanup_tx: Some(schema_cleanup_tx),
+            schema_cleanup_worker_task: tokio::spawn(future::pending()),
+            replication_lag_sampler_task: tokio::spawn(future::pending()),
+        };
+        let retention = TableSchemaRetention::SnapshotId(SnapshotId::from(1));
+
+        for table_id in 1..=SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY {
+            let table_id = TableId::from(u32::try_from(table_id).unwrap());
+            assert!(tasks.try_queue_schema_cleanup(table_id, retention));
+        }
+
+        let overflow_table_id =
+            TableId::from(u32::try_from(SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY + 1).unwrap());
+        assert!(!tasks.try_queue_schema_cleanup(overflow_table_id, retention));
+
+        schema_cleanup_rx.recv().await.unwrap();
+        assert!(tasks.try_queue_schema_cleanup(overflow_table_id, retention));
+
+        tasks.schema_cleanup_worker_task.abort();
+        tasks.replication_lag_sampler_task.abort();
     }
 }

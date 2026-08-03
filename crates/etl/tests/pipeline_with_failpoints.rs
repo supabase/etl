@@ -1694,8 +1694,17 @@ async fn first_relation_after_restart_retries_schema_cleanup() {
     events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
+    // Without durable progress, cleanup cannot determine a crash-safe
+    // retention boundary. All schema versions therefore remain available.
     let table_schemas = store.get_table_schemas().await;
-    assert_eq!(table_schemas.get(&table_id).unwrap().len(), 3);
+    assert_table_schema_snapshots(
+        table_schemas.get(&table_id).unwrap(),
+        &[
+            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("email", Type::TEXT)],
+        ],
+    );
 
     fail::remove(STORE_REPLICATION_PROGRESS_FP);
 
