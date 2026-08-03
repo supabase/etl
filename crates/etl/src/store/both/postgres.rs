@@ -6,7 +6,8 @@ use std::{
 };
 
 use etl_postgres::store::{
-    destination_table_metadata as pg_destination_table_metadata, progress, schema,
+    destination_table_metadata as pg_destination_table_metadata,
+    destination_write_stream as pg_destination_write_stream, progress, schema,
     table_state as pg_table_state,
 };
 use metrics::gauge;
@@ -19,6 +20,7 @@ use crate::{
     config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
     destination::{
         AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
+        DestinationWriteStreamState,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -487,6 +489,81 @@ impl StateStore for PostgresStore {
 
         Ok(())
     }
+
+    async fn get_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        destination_table_id: String,
+    ) -> EtlResult<Option<DestinationWriteStreamState>> {
+        pg_destination_write_stream::get_destination_write_stream(
+            &self.pool,
+            self.pipeline_id as i64,
+            table_id,
+            &destination_table_id,
+        )
+        .await
+        .map(|row| {
+            row.map(|row| {
+                DestinationWriteStreamState::new(
+                    row.destination_table_id,
+                    row.stream_name,
+                    row.next_offset,
+                )
+            })
+        })
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Destination write stream state loading failed",
+                source: err
+            )
+        })
+    }
+
+    async fn store_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        state: DestinationWriteStreamState,
+    ) -> EtlResult<()> {
+        pg_destination_write_stream::store_destination_write_stream(
+            &self.pool,
+            self.pipeline_id as i64,
+            table_id,
+            &state.destination_table_id,
+            &state.stream_name,
+            state.next_offset,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Destination write stream state storage failed",
+                source: err
+            )
+        })
+    }
+
+    async fn delete_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        destination_table_id: String,
+    ) -> EtlResult<()> {
+        pg_destination_write_stream::delete_destination_write_stream(
+            &self.pool,
+            self.pipeline_id as i64,
+            table_id,
+            &destination_table_id,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Destination write stream state deletion failed",
+                source: err
+            )
+        })
+    }
 }
 
 impl SchemaStore for PostgresStore {
@@ -666,6 +743,20 @@ impl TableStateLifecycleStore for PostgresStore {
                     )
                 })?;
 
+                pg_destination_write_stream::delete_destination_write_streams_for_table(
+                    &mut *tx,
+                    self.pipeline_id as i64,
+                    table_id,
+                )
+                .await
+                .map_err(|err| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Destination write stream state deletion failed",
+                        source: err
+                    )
+                })?;
+
                 schema::delete_table_schema_for_table(&mut *tx, self.pipeline_id as i64, table_id)
                     .await
                     .map_err(|err| {
@@ -730,6 +821,19 @@ impl TableStateLifecycleStore for PostgresStore {
                     )
                 })?;
 
+                pg_destination_write_stream::delete_destination_write_streams_for_all_tables(
+                    &mut *tx,
+                    self.pipeline_id as i64,
+                )
+                .await
+                .map_err(|err| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Destination write stream state deletion failed",
+                        source: err
+                    )
+                })?;
+
                 tx.commit().await?;
 
                 for table_id in table_ids {
@@ -754,6 +858,20 @@ impl TableStateLifecycleStore for PostgresStore {
                     etl_error!(
                         ErrorKind::SourceQueryFailed,
                         "Destination table metadata deletion failed",
+                        source: err
+                    )
+                })?;
+
+                pg_destination_write_stream::delete_destination_write_streams_for_table(
+                    &mut *tx,
+                    self.pipeline_id as i64,
+                    table_id,
+                )
+                .await
+                .map_err(|err| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Destination write stream state deletion failed",
                         source: err
                     )
                 })?;

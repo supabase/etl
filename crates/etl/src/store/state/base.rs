@@ -1,7 +1,9 @@
 use std::{collections::BTreeMap, future::Future, sync::Arc};
 
 use crate::{
-    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    destination::{
+        AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationWriteStreamState,
+    },
     error::EtlResult,
     schema::{PgLsn, TableId},
     store::{TableState, WorkerType},
@@ -12,6 +14,10 @@ pub type TableStates = Arc<BTreeMap<TableId, TableState>>;
 
 /// Arc-wrapped dictionary of destination table metadata.
 pub(crate) type DestinationTablesMetadata = Arc<BTreeMap<TableId, DestinationTableMetadata>>;
+
+/// Arc-wrapped dictionary of destination write stream states.
+pub(crate) type DestinationWriteStreamStates =
+    Arc<BTreeMap<(TableId, String), DestinationWriteStreamState>>;
 
 /// Trait for storing and retrieving table states, durable replication progress,
 /// and destination metadata.
@@ -135,5 +141,26 @@ pub trait StateStore {
         &self,
         table_id: TableId,
         metadata: DestinationTableMetadata,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+
+    /// Returns durable write stream state for a physical destination table.
+    fn get_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        destination_table_id: String,
+    ) -> impl Future<Output = EtlResult<Option<DestinationWriteStreamState>>> + Send;
+
+    /// Stores durable write stream state for a physical destination table.
+    fn store_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        state: DestinationWriteStreamState,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+
+    /// Deletes durable write stream state for a physical destination table.
+    fn delete_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        destination_table_id: String,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }

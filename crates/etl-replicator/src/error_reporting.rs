@@ -1,7 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use etl::{
-    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    destination::{
+        AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationWriteStreamState,
+    },
     error::{EtlError, EtlResult},
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
@@ -146,6 +148,30 @@ where
         metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
         self.inner.store_destination_table_metadata(table_id, metadata).await
+    }
+
+    async fn get_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        destination_table_id: String,
+    ) -> EtlResult<Option<DestinationWriteStreamState>> {
+        self.inner.get_destination_write_stream_state(table_id, destination_table_id).await
+    }
+
+    async fn store_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        state: DestinationWriteStreamState,
+    ) -> EtlResult<()> {
+        self.inner.store_destination_write_stream_state(table_id, state).await
+    }
+
+    async fn delete_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        destination_table_id: String,
+    ) -> EtlResult<()> {
+        self.inner.delete_destination_write_stream_state(table_id, destination_table_id).await
     }
 }
 

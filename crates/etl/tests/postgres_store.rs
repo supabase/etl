@@ -3,15 +3,15 @@
 use std::collections::HashMap;
 
 use etl::{
-    destination::DestinationTableMetadata,
+    destination::{DestinationTableMetadata, DestinationWriteStreamState},
     error::ErrorKind,
     etl_error,
     schema::{ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema},
     store::{
-        PostgresStore, SchemaStore, StateStore, TableRetryPolicy, TableSchemaRetention, TableState,
-        TableStateLifecycleStore, WorkerType,
+        MemoryStore, PostgresStore, SchemaStore, StateStore, TableRetryPolicy,
+        TableSchemaRetention, TableState, TableStateLifecycleStore, WorkerType,
     },
-    test_utils::database::spawn_source_database,
+    test_utils::{database::spawn_source_database, notifying_store::NotifyingStore},
 };
 use etl_postgres::source::connect_to_source_database;
 use etl_telemetry::tracing::init_test_tracing;
@@ -252,6 +252,208 @@ async fn state_store_replication_progress_is_monotonic() {
     store.delete_replication_progress(table_sync_worker).await.unwrap();
     assert_eq!(store.get_replication_progress(table_sync_worker).await.unwrap(), None);
     assert_eq!(store.get_replication_progress(apply_worker).await.unwrap(), Some(later_lsn));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn state_store_destination_write_stream_state_persists_and_clears() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let table_id = TableId::new(12345);
+    let other_table_id = TableId::new(67890);
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let stream_state = DestinationWriteStreamState::new(
+        "dest_table_0001".to_owned(),
+        "projects/p/datasets/d/tables/dest_table_0001/streams/s1".to_owned(),
+        42,
+    );
+    let other_stream_state = DestinationWriteStreamState::new(
+        "other_dest_table_0001".to_owned(),
+        "projects/p/datasets/d/tables/other_dest_table_0001/streams/s2".to_owned(),
+        7,
+    );
+
+    assert!(
+        store
+            .get_destination_write_stream_state(table_id, stream_state.destination_table_id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    store.store_destination_write_stream_state(table_id, stream_state.clone()).await.unwrap();
+    store
+        .store_destination_write_stream_state(other_table_id, other_stream_state.clone())
+        .await
+        .unwrap();
+
+    let loaded = store
+        .get_destination_write_stream_state(table_id, stream_state.destination_table_id.clone())
+        .await
+        .unwrap()
+        .expect("stream state should be stored");
+    assert_eq!(loaded, stream_state);
+
+    let advanced = stream_state.advanced_by(3);
+    store.store_destination_write_stream_state(table_id, advanced.clone()).await.unwrap();
+    assert_eq!(
+        store
+            .get_destination_write_stream_state(table_id, advanced.destination_table_id.clone())
+            .await
+            .unwrap(),
+        Some(advanced.clone())
+    );
+
+    let stale = DestinationWriteStreamState::new(
+        advanced.destination_table_id.clone(),
+        "projects/p/datasets/d/tables/dest_table_0001/streams/stale".to_owned(),
+        advanced.next_offset - 1,
+    );
+    store.store_destination_write_stream_state(table_id, stale).await.unwrap();
+    assert_eq!(
+        store
+            .get_destination_write_stream_state(table_id, advanced.destination_table_id.clone())
+            .await
+            .unwrap(),
+        Some(advanced.clone())
+    );
+
+    let same_offset_different_stream = DestinationWriteStreamState::new(
+        advanced.destination_table_id.clone(),
+        "projects/p/datasets/d/tables/dest_table_0001/streams/same_offset_stale".to_owned(),
+        advanced.next_offset,
+    );
+    store
+        .store_destination_write_stream_state(table_id, same_offset_different_stream)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_destination_write_stream_state(table_id, advanced.destination_table_id.clone())
+            .await
+            .unwrap(),
+        Some(advanced.clone())
+    );
+
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    assert_eq!(
+        new_store
+            .get_destination_write_stream_state(table_id, advanced.destination_table_id.clone())
+            .await
+            .unwrap(),
+        Some(advanced)
+    );
+
+    new_store.prepare_table_state_for_copy(table_id).await.unwrap();
+    assert!(
+        new_store
+            .get_destination_write_stream_state(table_id, stream_state.destination_table_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        new_store
+            .get_destination_write_stream_state(
+                other_table_id,
+                other_stream_state.destination_table_id.clone()
+            )
+            .await
+            .unwrap(),
+        Some(other_stream_state)
+    );
+}
+
+async fn assert_destination_write_stream_state_is_monotonic<S>(store: S)
+where
+    S: StateStore,
+{
+    let table_id = TableId::new(12345);
+    let stream_state = DestinationWriteStreamState::new(
+        "dest_table_0001".to_owned(),
+        "projects/p/datasets/d/tables/dest_table_0001/streams/s1".to_owned(),
+        42,
+    );
+    let advanced = stream_state.advanced_by(3);
+
+    store.store_destination_write_stream_state(table_id, advanced.clone()).await.unwrap();
+    store.store_destination_write_stream_state(table_id, stream_state).await.unwrap();
+    assert_eq!(
+        store
+            .get_destination_write_stream_state(table_id, advanced.destination_table_id.clone())
+            .await
+            .unwrap(),
+        Some(advanced.clone())
+    );
+
+    let same_offset_different_stream = DestinationWriteStreamState::new(
+        advanced.destination_table_id.clone(),
+        "projects/p/datasets/d/tables/dest_table_0001/streams/same_offset_stale".to_owned(),
+        advanced.next_offset,
+    );
+    store
+        .store_destination_write_stream_state(table_id, same_offset_different_stream)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_destination_write_stream_state(table_id, advanced.destination_table_id.clone())
+            .await
+            .unwrap(),
+        Some(advanced)
+    );
+}
+
+#[tokio::test]
+async fn memory_store_destination_write_stream_state_is_monotonic() {
+    assert_destination_write_stream_state_is_monotonic(MemoryStore::new()).await;
+}
+
+#[tokio::test]
+async fn notifying_store_destination_write_stream_state_is_monotonic() {
+    assert_destination_write_stream_state_is_monotonic(NotifyingStore::new()).await;
+}
+
+async fn assert_reset_for_resync_clears_destination_write_stream_state<S>(store: S)
+where
+    S: StateStore + TableStateLifecycleStore,
+{
+    let table_id = TableId::new(12345);
+    let stream_state = DestinationWriteStreamState::new(
+        "dest_table_0001".to_owned(),
+        "projects/p/datasets/d/tables/dest_table_0001/streams/s1".to_owned(),
+        42,
+    );
+
+    store.store_destination_write_stream_state(table_id, stream_state.clone()).await.unwrap();
+    assert!(
+        store
+            .get_destination_write_stream_state(table_id, stream_state.destination_table_id.clone())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    store.reset_table_states_for_resync().await.unwrap();
+    assert!(
+        store
+            .get_destination_write_stream_state(table_id, stream_state.destination_table_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn memory_store_reset_for_resync_clears_destination_write_stream_state() {
+    assert_reset_for_resync_clears_destination_write_stream_state(MemoryStore::new()).await;
+}
+
+#[tokio::test]
+async fn notifying_store_reset_for_resync_clears_destination_write_stream_state() {
+    assert_reset_for_resync_clears_destination_write_stream_state(NotifyingStore::new()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

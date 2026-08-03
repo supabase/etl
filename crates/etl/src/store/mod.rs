@@ -28,7 +28,7 @@ pub use capabilities::{DestinationStore, PipelineStore, SharedStateStore};
 pub use lifecycle::{TableStateLifecycleStore, TableStateOperation};
 pub(crate) use schema::TableSchemaSnapshots;
 pub use schema::{SchemaStore, TableSchemaRetention};
-pub(crate) use state::DestinationTablesMetadata;
+pub(crate) use state::{DestinationTablesMetadata, DestinationWriteStreamStates};
 pub use state::{StateStore, TableStates};
 
 pub use crate::replication::{

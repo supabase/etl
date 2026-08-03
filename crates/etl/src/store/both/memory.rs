@@ -7,14 +7,17 @@ use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 
 use crate::{
-    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    destination::{
+        AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationWriteStreamState,
+    },
     error::{ErrorKind, EtlResult},
     etl_error,
     replication::{WorkerType, state::TableState},
     schema::{SnapshotId, TableId, TableSchema},
     store::{
-        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
-        TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,
+        DestinationTablesMetadata, DestinationWriteStreamStates, SchemaStore, StateStore,
+        TableSchemaRetention, TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation,
+        TableStates,
     },
 };
 
@@ -34,6 +37,8 @@ struct Inner {
     table_schemas: Arc<TableSchemaSnapshots>,
     /// Cached destination table metadata indexed by table ID.
     destination_tables_metadata: DestinationTablesMetadata,
+    /// Durable write stream state indexed by source table and destination table.
+    destination_write_stream_states: DestinationWriteStreamStates,
     /// Durable replication progress indexed by worker type and optional table.
     replication_progress: HashMap<WorkerType, PgLsn>,
 }
@@ -65,6 +70,7 @@ impl MemoryStore {
             table_state_history: HashMap::new(),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
             destination_tables_metadata: Arc::new(BTreeMap::new()),
+            destination_write_stream_states: Arc::new(BTreeMap::new()),
             replication_progress: HashMap::new(),
         };
 
@@ -209,6 +215,59 @@ impl StateStore for MemoryStore {
 
         Ok(())
     }
+
+    async fn get_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        destination_table_id: String,
+    ) -> EtlResult<Option<DestinationWriteStreamState>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.destination_write_stream_states.get(&(table_id, destination_table_id)).cloned())
+    }
+
+    async fn store_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        state: DestinationWriteStreamState,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        let key = (table_id, state.destination_table_id.clone());
+        if should_store_destination_write_stream_state(
+            inner.destination_write_stream_states.get(&key),
+            &state,
+        ) {
+            Arc::make_mut(&mut inner.destination_write_stream_states).insert(key, state);
+        }
+
+        Ok(())
+    }
+
+    async fn delete_destination_write_stream_state(
+        &self,
+        table_id: TableId,
+        destination_table_id: String,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        Arc::make_mut(&mut inner.destination_write_stream_states)
+            .remove(&(table_id, destination_table_id));
+
+        Ok(())
+    }
+}
+
+fn should_store_destination_write_stream_state(
+    current: Option<&DestinationWriteStreamState>,
+    next: &DestinationWriteStreamState,
+) -> bool {
+    match current {
+        None => true,
+        Some(current) => {
+            current.next_offset < next.next_offset
+                || (current.next_offset == next.next_offset
+                    && current.stream_name == next.stream_name)
+        }
+    }
 }
 
 impl SchemaStore for MemoryStore {
@@ -266,6 +325,8 @@ impl TableStateLifecycleStore for MemoryStore {
                 let mut inner = self.inner.lock().await;
                 Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+                Arc::make_mut(&mut inner.destination_write_stream_states)
+                    .retain(|(state_table_id, _), _| *state_table_id != table_id);
                 inner.replication_progress.remove(&WorkerType::TableSync { table_id });
 
                 Ok(0)
@@ -291,6 +352,7 @@ impl TableStateLifecycleStore for MemoryStore {
                 }
 
                 inner.replication_progress.remove(&WorkerType::Apply);
+                Arc::make_mut(&mut inner.destination_write_stream_states).clear();
 
                 Ok(reset_count)
             }
@@ -302,6 +364,8 @@ impl TableStateLifecycleStore for MemoryStore {
                 inner.table_state_history.remove(&table_id);
                 Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+                Arc::make_mut(&mut inner.destination_write_stream_states)
+                    .retain(|(state_table_id, _), _| *state_table_id != table_id);
                 inner.replication_progress.remove(&WorkerType::TableSync { table_id });
 
                 Ok(affected_table_count)
