@@ -49,7 +49,9 @@ impl ExampleArgs {
         inject(&mut extra, "--db-host", &db_host, &self.args);
         inject(&mut extra, "--db-port", &db_port, &self.args);
         inject(&mut extra, "--db-username", &db_username, &self.args);
-        inject(&mut extra, "--db-password", &db_password, &self.args);
+        if name != "clickhouse" {
+            inject(&mut extra, "--db-password", &db_password, &self.args);
+        }
         inject(&mut extra, "--db-name", &Some("etl_testdata".to_owned()), &self.args);
         inject(&mut extra, "--publication", &Some("seed_pub".to_owned()), &self.args);
 
@@ -63,17 +65,7 @@ impl ExampleArgs {
                     &self.args,
                 );
             }
-            "clickhouse" => {
-                inject_env(&mut extra, "--clickhouse-url", "TESTS_CLICKHOUSE_URL", &self.args);
-                inject_env(&mut extra, "--clickhouse-user", "TESTS_CLICKHOUSE_USER", &self.args);
-                inject_env(
-                    &mut extra,
-                    "--clickhouse-password",
-                    "TESTS_CLICKHOUSE_PASSWORD",
-                    &self.args,
-                );
-            }
-            "snowflake" => {}
+            "clickhouse" | "snowflake" => {}
             _ => {}
         }
 
