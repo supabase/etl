@@ -1,12 +1,12 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use etl::{
     destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     error::{EtlError, EtlResult},
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
-        SchemaStore, StateStore, TableSchemaRetention, TableState, TableStateLifecycleStore,
-        TableStateOperation, TableStates, WorkerType,
+        SchemaStore, StateStore, TableState, TableStateLifecycleStore, TableStateOperation,
+        TableStates, WorkerType,
     },
 };
 use tracing::info;
@@ -106,20 +106,23 @@ where
         self.inner.rollback_table_state(table_id).await
     }
 
-    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
-        self.inner.get_replication_progress(worker_type).await
-    }
-
-    async fn upsert_replication_progress(
+    async fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
-        flush_lsn: PgLsn,
-    ) -> EtlResult<PgLsn> {
-        self.inner.upsert_replication_progress(worker_type, flush_lsn).await
+    ) -> EtlResult<Option<PgLsn>> {
+        self.inner.get_replication_checkpoint(worker_type).await
     }
 
-    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
-        self.inner.delete_replication_progress(worker_type).await
+    async fn upsert_replication_checkpoint(
+        &self,
+        worker_type: WorkerType,
+        checkpoint_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
+        self.inner.upsert_replication_checkpoint(worker_type, checkpoint_lsn).await
+    }
+
+    async fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> EtlResult<()> {
+        self.inner.delete_replication_checkpoint(worker_type).await
     }
 
     async fn get_destination_table_metadata(
@@ -175,9 +178,9 @@ where
 
     async fn prune_table_schemas(
         &self,
-        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+        retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> EtlResult<u64> {
-        self.inner.prune_table_schemas(table_schema_retentions).await
+        self.inner.prune_table_schemas(retention_snapshot_ids).await
     }
 }
 

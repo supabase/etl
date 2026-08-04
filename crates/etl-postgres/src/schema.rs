@@ -28,88 +28,188 @@ type Oid = u32;
 
 /// Snapshot identifier for schema versioning.
 ///
-/// Wraps a [`PgLsn`] to represent the start_lsn of the DDL message that created
-/// a schema version. A value of 0/0 indicates the initial schema before any DDL
-/// changes. Stored as `pg_lsn` in the database.
+/// ETL's non-streaming logical-decoding session delivers whole transactions in
+/// commit order, which can differ from the WAL positions of messages written
+/// inside those transactions. For example, if one transaction writes DDL
+/// messages `M1` and `M2`, a second transaction later writes `M3`, and the
+/// second transaction commits first, delivery order is `M3`, `M1`, `M2` even
+/// though message-LSN order is `M1`, `M2`, `M3`. The commit LSN therefore
+/// orders schema activation across transactions, while the message LSN orders
+/// multiple schema changes within one transaction.
+///
+/// The commit LSN also prevents an uncommitted schema message from becoming
+/// visible too early. A message at `M` may be below a durable checkpoint `P`
+/// while its transaction remains open and eventually commits at `C > P`.
+/// Ordering only by `M` would incorrectly select that schema at `P`; ordering
+/// by `(C, M)` does not.
+///
+/// The `0:0` value represents the initial schema before any DDL changes.
+///
+/// The string representation encodes both LSNs as decimal `u64` values
+/// separated by a colon.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-pub struct SnapshotId(PgLsn);
+pub struct SnapshotId {
+    /// Commit LSN that determines when the schema becomes active.
+    commit_lsn: PgLsn,
+    /// Message LSN that orders schemas sharing the same commit LSN.
+    message_lsn: PgLsn,
+}
 
 impl SnapshotId {
-    /// Returns the initial snapshot ID (0/0) for the first schema version.
+    /// Returns the initial snapshot ID (`0:0`) for the first schema version.
     pub fn initial() -> Self {
-        Self(PgLsn::from(0))
+        Self::new(PgLsn::from(0), PgLsn::from(0))
     }
 
     /// Returns the maximum possible snapshot ID.
     pub fn max() -> Self {
-        Self(PgLsn::from(u64::MAX))
+        Self::new(PgLsn::from(u64::MAX), PgLsn::from(u64::MAX))
     }
 
-    /// Creates a new [`SnapshotId`] from a [`PgLsn`].
-    pub fn new(lsn: PgLsn) -> Self {
-        Self(lsn)
+    /// Creates a schema snapshot identifier from its commit and message LSNs.
+    pub fn new(commit_lsn: PgLsn, message_lsn: PgLsn) -> Self {
+        Self { commit_lsn, message_lsn }
     }
 
-    /// Returns the inner [`PgLsn`] value.
-    pub fn into_inner(self) -> PgLsn {
-        self.0
-    }
-
-    /// Returns the underlying `u64` representation.
-    pub fn as_u64(self) -> u64 {
-        self.0.into()
-    }
-
-    /// Converts to a `pg_lsn` string.
-    pub fn to_pg_lsn_string(self) -> String {
-        self.0.to_string()
-    }
-
-    /// Parses a `pg_lsn` string.
+    /// Returns an inclusive snapshot upper bound for a WAL frontier.
     ///
-    /// # Errors
-    ///
-    /// Returns [`SchemaError::InvalidSnapshotId`] if the string is not a valid
-    /// `pg_lsn` format.
-    pub fn from_pg_lsn_string(s: &str) -> Result<Self, SchemaError> {
-        s.parse::<PgLsn>().map(Self).map_err(|_| SchemaError::InvalidSnapshotId(s.to_owned()))
+    /// Every schema committed at or before `lsn` sorts at or below this value,
+    /// including every schema message sharing that commit LSN.
+    /// Use this method when an LSN represents a WAL frontier; comparing only
+    /// [`SnapshotId::commit_lsn`] discards the within-transaction ordering
+    /// component.
+    pub fn at_lsn(lsn: PgLsn) -> Self {
+        Self::new(lsn, PgLsn::from(u64::MAX))
+    }
+
+    /// Returns the commit LSN that activates this schema.
+    pub fn commit_lsn(self) -> PgLsn {
+        self.commit_lsn
+    }
+
+    /// Returns the logical-message LSN that distinguishes schemas sharing the
+    /// same commit LSN.
+    pub fn message_lsn(self) -> PgLsn {
+        self.message_lsn
     }
 }
 
 impl Hash for SnapshotId {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let value: u64 = self.0.into();
-        value.hash(state);
+        u64::from(self.commit_lsn).hash(state);
+        u64::from(self.message_lsn).hash(state);
     }
 }
 
-impl From<PgLsn> for SnapshotId {
-    fn from(lsn: PgLsn) -> Self {
-        Self(lsn)
-    }
-}
+impl FromStr for SnapshotId {
+    type Err = SchemaError;
 
-impl From<SnapshotId> for PgLsn {
-    fn from(snapshot_id: SnapshotId) -> Self {
-        snapshot_id.0
-    }
-}
+    /// Parses a snapshot identifier from its string representation.
+    ///
+    /// Values contain two decimal `u64` components separated by a colon.
+    /// Startup migrations convert every message-LSN-only `pg_lsn` value before
+    /// stores load it, so this parser intentionally accepts only the composite
+    /// representation.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let Some((commit_lsn, message_lsn)) = s.split_once(':') else {
+            return Err(SchemaError::InvalidSnapshotId(s.to_owned()));
+        };
+        if message_lsn.contains(':') {
+            return Err(SchemaError::InvalidSnapshotId(s.to_owned()));
+        }
 
-impl From<u64> for SnapshotId {
-    fn from(value: u64) -> Self {
-        Self(PgLsn::from(value))
-    }
-}
+        let commit_lsn = commit_lsn
+            .parse::<u64>()
+            .map(PgLsn::from)
+            .map_err(|_| SchemaError::InvalidSnapshotId(s.to_owned()))?;
+        let message_lsn = message_lsn
+            .parse::<u64>()
+            .map(PgLsn::from)
+            .map_err(|_| SchemaError::InvalidSnapshotId(s.to_owned()))?;
 
-impl From<SnapshotId> for u64 {
-    fn from(snapshot_id: SnapshotId) -> Self {
-        snapshot_id.0.into()
+        Ok(Self::new(commit_lsn, message_lsn))
     }
 }
 
 impl fmt::Display for SnapshotId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}:{}", u64::from(self.commit_lsn), u64::from(self.message_lsn))
+    }
+}
+
+#[cfg(test)]
+mod snapshot_id_tests {
+    use super::*;
+
+    /// Creates the `M:M` representation produced by the legacy-data migration.
+    fn migrated_snapshot_id(lsn: PgLsn) -> SnapshotId {
+        SnapshotId::new(lsn, lsn)
+    }
+
+    #[test]
+    fn snapshot_id_orders_by_commit_then_message_lsn() {
+        let committed_first = SnapshotId::new(PgLsn::from(200), PgLsn::from(300));
+        let committed_second_first_message = SnapshotId::new(PgLsn::from(400), PgLsn::from(100));
+        let committed_second_second_message = SnapshotId::new(PgLsn::from(400), PgLsn::from(150));
+
+        assert!(SnapshotId::initial() < committed_first);
+        assert!(committed_first < committed_second_first_message);
+        assert!(committed_second_first_message < committed_second_second_message);
+    }
+
+    #[test]
+    fn snapshot_id_wal_frontier_includes_every_message_at_commit_lsn() {
+        let commit_lsn = PgLsn::from(400);
+
+        assert!(SnapshotId::new(commit_lsn, PgLsn::from(100)) <= SnapshotId::at_lsn(commit_lsn));
+        assert!(SnapshotId::new(commit_lsn, PgLsn::from(300)) <= SnapshotId::at_lsn(commit_lsn));
+        assert_eq!(
+            SnapshotId::new(commit_lsn, PgLsn::from(u64::MAX)),
+            SnapshotId::at_lsn(commit_lsn)
+        );
+        assert!(SnapshotId::new(PgLsn::from(401), PgLsn::from(1)) > SnapshotId::at_lsn(commit_lsn));
+        assert_eq!(SnapshotId::at_lsn(PgLsn::from(u64::MAX)), SnapshotId::max());
+    }
+
+    #[test]
+    fn migrated_snapshot_preserves_message_lsn_frontier_ordering() {
+        let migrated_snapshot = migrated_snapshot_id(PgLsn::from(200));
+
+        assert!(migrated_snapshot > SnapshotId::at_lsn(PgLsn::from(199)));
+        assert!(migrated_snapshot <= SnapshotId::at_lsn(PgLsn::from(200)));
+        assert!(migrated_snapshot <= SnapshotId::at_lsn(PgLsn::from(201)));
+        assert!(migrated_snapshot < SnapshotId::new(PgLsn::from(201), PgLsn::from(150)));
+        assert_eq!(migrated_snapshot_id(PgLsn::from(u64::MAX)), SnapshotId::max());
+    }
+
+    #[test]
+    fn snapshot_id_string_representation_uses_decimal_u64_components() {
+        assert_eq!(SnapshotId::initial().to_string(), "0:0");
+        assert_eq!(SnapshotId::max().to_string(), "18446744073709551615:18446744073709551615");
+        let composite = SnapshotId::new(PgLsn::from(0x1_0000_0000), PgLsn::from(u64::MAX));
+        assert_eq!(composite.to_string(), "4294967296:18446744073709551615");
+    }
+
+    #[test]
+    fn snapshot_id_parses_composite_and_rejects_legacy_strings() {
+        let composite = SnapshotId::new(PgLsn::from(0x200), PgLsn::from(0x100));
+
+        assert_eq!(composite.to_string().parse::<SnapshotId>().unwrap(), composite);
+        assert_eq!("512:256".parse::<SnapshotId>().unwrap(), composite);
+        assert_eq!(
+            "18446744073709551615:18446744073709551615".parse::<SnapshotId>().unwrap(),
+            SnapshotId::max()
+        );
+        assert_eq!(
+            migrated_snapshot_id(PgLsn::from(0x300)),
+            SnapshotId::new(PgLsn::from(0x300), PgLsn::from(0x300))
+        );
+        assert!("0/300".parse::<SnapshotId>().is_err());
+        assert!("0/0".parse::<SnapshotId>().is_err());
+        assert!("not-an-lsn".parse::<SnapshotId>().is_err());
+        assert!("1:2:3".parse::<SnapshotId>().is_err());
+        assert!("18446744073709551616:0".parse::<SnapshotId>().is_err());
+        assert!("0:18446744073709551616".parse::<SnapshotId>().is_err());
     }
 }
 
@@ -461,13 +561,13 @@ pub struct TableSchema {
     pub column_schemas: Vec<ColumnSchema>,
     /// The snapshot identifier for this schema version.
     ///
-    /// Value 0 indicates the initial schema, other values are start_lsn
-    /// positions of DDL changes.
+    /// The commit LSN determines when the schema becomes active, and the
+    /// message LSN orders multiple schema changes within the same transaction.
     pub snapshot_id: SnapshotId,
 }
 
 impl TableSchema {
-    /// Creates a new [`TableSchema`] with the initial snapshot ID (0/0).
+    /// Creates a new [`TableSchema`] with the initial snapshot ID (`0:0`).
     pub fn new(id: TableId, name: TableName, column_schemas: Vec<ColumnSchema>) -> Self {
         Self::with_snapshot_id(id, name, column_schemas, SnapshotId::initial())
     }

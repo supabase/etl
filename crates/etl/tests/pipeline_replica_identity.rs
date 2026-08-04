@@ -2,7 +2,6 @@ use etl::{
     data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     event::{DeleteEvent, Event, EventType, UpdateEvent},
     pipeline::PipelineId,
-    store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -241,11 +240,10 @@ async fn run_replica_identity_scenario(
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let initial_large_text = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     let updated_large_text = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);

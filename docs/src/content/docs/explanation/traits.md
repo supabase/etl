@@ -57,7 +57,9 @@ tasks, but custom destinations only implement `Destination` directly.
 ## SchemaStore
 
 Stores **versioned table schema information** (column names, types, primary keys,
-and snapshot IDs).
+and snapshot IDs). A `SnapshotId` compares its commit LSN first and its message
+LSN second; store implementations should compare the type directly rather than
+its variable-width decimal display string.
 
 ```rust
 pub trait SchemaStore {
@@ -65,7 +67,7 @@ pub trait SchemaStore {
     fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
     fn load_table_schemas(&self) -> impl Future<Output = EtlResult<usize>> + Send;
     fn store_table_schema(&self, table_schema: TableSchema) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send;
-    fn prune_table_schemas(&self, table_schema_retentions: HashMap<TableId, TableSchemaRetention>) -> impl Future<Output = EtlResult<u64>> + Send;
+    fn prune_table_schemas(&self, retention_snapshot_ids: BTreeMap<TableId, SnapshotId>) -> impl Future<Output = EtlResult<u64>> + Send;
 }
 ```
 
@@ -77,11 +79,12 @@ pub trait SchemaStore {
 | `get_table_schemas()` | Returns all cached schemas without reading persistent storage |
 | `load_table_schemas()` | Loads schemas from persistent storage into cache. Call once at startup. Returns the number of schemas loaded |
 | `store_table_schema()` | Saves a schema version to both cache and persistent storage and returns the cached `Arc` |
-| `prune_table_schemas()` | For the supplied per-table retention boundaries, preserves the newest schema version at or before each retention LSN, preserves versions newer than that LSN, and removes older versions. Implementations with both cache and persistent storage must prune both |
+| `prune_table_schemas()` | For the supplied per-table snapshot boundaries, preserves the newest schema version at or before each boundary, preserves newer versions, and removes older versions. The `BTreeMap` provides deterministic table-ID iteration. Implementations with both cache and persistent storage must prune both |
 
 ## StateStore
 
-Tracks **table states**, **durable replication progress**, and **destination table metadata**.
+Tracks **table states**, **persisted replication checkpoints**, and
+**destination table metadata**.
 
 ```rust
 pub trait StateStore {
@@ -93,10 +96,10 @@ pub trait StateStore {
     fn update_table_state(&self, table_id: TableId, state: TableState) -> impl Future<Output = EtlResult<()>> + Send;
     fn rollback_table_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<TableState>> + Send;
 
-    // Durable replication progress
-    fn get_replication_progress(&self, worker_type: WorkerType) -> impl Future<Output = EtlResult<Option<PgLsn>>> + Send;
-    fn upsert_replication_progress(&self, worker_type: WorkerType, flush_lsn: PgLsn) -> impl Future<Output = EtlResult<PgLsn>> + Send;
-    fn delete_replication_progress(&self, worker_type: WorkerType) -> impl Future<Output = EtlResult<()>> + Send;
+    // Persisted replication checkpoints
+    fn get_replication_checkpoint(&self, worker_type: WorkerType) -> impl Future<Output = EtlResult<Option<PgLsn>>> + Send;
+    fn upsert_replication_checkpoint(&self, worker_type: WorkerType, checkpoint_lsn: PgLsn) -> impl Future<Output = EtlResult<PgLsn>> + Send;
+    fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> impl Future<Output = EtlResult<()>> + Send;
 
     // Destination table metadata
     fn get_destination_table_metadata(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<DestinationTableMetadata>>> + Send;
@@ -117,17 +120,18 @@ pub trait StateStore {
 | `update_table_state()` | Updates state in both cache and persistent storage |
 | `rollback_table_state()` | Reverts table to previous state. Returns the state after rollback |
 
-### Durable Progress Methods
+### Replication Checkpoint Methods
 
-Durable replication progress records the **latest flushed LSN** for the apply worker
-and table sync workers. It lets ETL resume from a safe boundary even when a slot
-or worker restarts.
+A persisted replication checkpoint records a safe replay frontier for the apply
+worker or a table-sync worker. ETL can select a durably flushed commit boundary
+or, when the apply loop is fully idle, its last received LSN. The checkpoint
+lets the worker resume safely after a restart.
 
 | Method | Purpose |
 |--------|---------|
-| `get_replication_progress()` | Returns stored flush progress for a worker, if present |
-| `upsert_replication_progress()` | Monotonically stores flush progress and returns the stored LSN. Implementations must not move progress backward |
-| `delete_replication_progress()` | Deletes progress when a worker slot lineage is intentionally reset |
+| `get_replication_checkpoint()` | Returns the persisted checkpoint for a worker, if present |
+| `upsert_replication_checkpoint()` | Monotonically stores a checkpoint and returns the stored LSN. Implementations must not move it backward |
+| `delete_replication_checkpoint()` | Deletes the checkpoint when a worker slot lineage is intentionally reset |
 
 ### Destination Metadata Methods
 
@@ -151,14 +155,14 @@ Tables progress through these states:
 | `FinishedCopy` | Yes | Copy complete, waiting for coordination |
 | `SyncWait` | No | Table sync worker signaling apply worker to pause |
 | `Catchup { lsn }` | No | Apply worker paused, table sync worker catching up to LSN |
-| `SyncDone { lsn }` | Yes | Caught up to LSN, ready for handoff |
+| `SyncDone { lsn }` | Yes | Caught up to LSN; durable decoder retained until Apply materializes local state |
 | `Ready` | Yes | Streaming changes via apply worker |
 | `Errored { reason, solution, retry_policy }` | Yes | Error occurred, excluded until rollback |
 
 ## TableStateLifecycleStore
 
 Coordinates ETL table-state lifecycle operations across state, schema,
-destination metadata, durable progress, and any store caches.
+destination metadata, persisted checkpoints, and any store caches.
 
 ```rust
 pub trait TableStateLifecycleStore {
@@ -186,8 +190,8 @@ pub trait TableStateLifecycleStore {
 | Method | Purpose |
 |--------|---------|
 | `apply_table_state_operation()` | Single implementation point for [`TableStateOperation`]. Custom stores implement the prepare, reset, and delete semantics here |
-| `prepare_table_state_for_copy()` | Deletes destination metadata, schema versions, and durable table-sync progress while preserving the table state. This is called only after the destination object was dropped for a fresh copy |
-| `reset_table_states_for_resync()` | Resets all current table states to `Init` and deletes durable apply-worker progress while preserving destination metadata, schema versions, and durable table-sync progress |
+| `prepare_table_state_for_copy()` | Deletes destination metadata, schema versions, and the table-sync checkpoint while preserving the table state. This is called only after the destination object was dropped for a fresh copy |
+| `reset_table_states_for_resync()` | Resets all current table states to `Init` and deletes the apply-worker checkpoint while preserving destination metadata, schema versions, and table-sync checkpoints |
 | `delete_table_state()` | Deletes all stored ETL-owned state for a table removed from the publication. Does not modify destination tables |
 
 ## Combining Traits

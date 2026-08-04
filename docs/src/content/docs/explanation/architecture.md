@@ -60,13 +60,12 @@ Once tables are copied, the **Apply Worker** streams ongoing changes from the Po
 
 ### Schema Changes
 
-ETL supports schema changes for simple `ALTER TABLE` column evolution. A
-source-side event trigger emits internal DDL messages for published permanent
-tables, ETL stores a new schema snapshot, and destinations observe the change
-through a fresh `Relation` event before following row events. Today ETL models
-column adds, drops, renames, nullability changes, and supported default changes.
-See [Schema Changes](/etl/explanation/schema-changes/) for exact semantics and
-limitations.
+ETL supports simple column evolution from `ALTER TABLE` and supported
+`ALTER PUBLICATION` changes. A source-side event trigger emits internal schema
+messages for published permanent tables, ETL stores a new schema snapshot, and
+destinations observe the change through a fresh `Relation` event before
+following row events. See [Schema Changes](/etl/explanation/schema-changes/) for
+the supported operations and limitations.
 
 ## Core Components
 
@@ -101,15 +100,15 @@ pub trait Destination {
 Each write-like method receives an async result handle. The intent is different per method:
 
 - `write_events()`: after dispatch succeeds, ETL may keep processing other work while the destination finishes the batch. ETL still waits for that batch's async result before handing the destination the next streaming batch. `MayDefer` permits `Accepted` or `Durable`; `RequireDurable` requires cumulative durable completion. ETL may send an empty `RequireDurable` write as a durability-only barrier for earlier accepted work, but never sends an empty `MayDefer` write.
-- `drop_table_for_copy()`: ETL waits for the result immediately. After a successful drop, ETL clears its own copy-scoped schema, destination metadata, and table-sync progress before storing the fresh `0/0` copy schema.
+- `drop_table_for_copy()`: ETL waits for the result immediately. After a successful drop, ETL clears its own copy-scoped schema, destination metadata, and table-sync progress before storing the fresh `0:0` copy schema.
 - `write_table_rows()`: ETL waits for each result before requesting the next batch for that copy partition. `Durable` confirms that batch and any earlier accepted writes covered by the result. `Accepted` transfers ownership to the destination and lets copying continue without marking the table copy finished. If any batch is accepted this way, ETL sends a final empty batch after all copy workers finish; that table-wide barrier must cover every accepted write and return `Durable` before ETL stores `FinishedCopy`.
 
 ### Store
 
 Persists pipeline state so replication can resume after restarts. **Three traits work together**:
 
-- **StateStore**: Tracks table state, durable replication progress, and destination table metadata
-- **SchemaStore**: Stores versioned table schema information (columns, types, primary keys, snapshot IDs) and prunes obsolete schema versions after acknowledged progress while preserving the retained boundary schema and newer versions
+- **StateStore**: Tracks table state, persisted replication checkpoints, and destination table metadata
+- **SchemaStore**: Stores versioned table schema information (columns, types, primary keys, snapshot IDs) and prunes obsolete schema versions behind persisted checkpoints while preserving the retained boundary schema and newer versions
 - **TableStateLifecycleStore**: Prepares table-copy state, resets table states for resync, and deletes all ETL-owned state when a table leaves the publication
 
 `StateStore` and `SchemaStore` use a cache-first pattern: normal reads hit an in-memory cache, startup loaders hydrate that cache from persistent storage, and writes go to both the cache and persistent storage. `get_table_schema()` may load a missing version from persistent storage, while `get_table_schemas()` returns cached schemas only. Schema pruning follows the same rule for implementations with durable storage: obsolete versions are removed from both the cache and the persistent store.
@@ -133,7 +132,10 @@ tables, persist a sequence key derived from `commit_lsn` and `tx_ordinal`. For
 current-state tables, upsert by the destination's chosen row key so replayed
 events converge to the same state.
 
-The `start_lsn` and `commit_lsn` fields on events are useful for **ordering and checkpointing**. For example, BigQuery destinations use these to maintain correct event order in destination tables. See [Event Types](/etl/explanation/events/#understanding-lsn-fields) for details on LSN semantics.
+The `commit_lsn` and `tx_ordinal` fields on sequenced events provide stable
+**ordering and checkpointing**. For example, BigQuery destinations use the pair
+to maintain correct event order in destination tables. See [Event
+Types](/etl/explanation/events/#understanding-event-sequence-keys) for details.
 
 ## Table States
 
@@ -146,7 +148,7 @@ Each table progresses through these states:
 | **FinishedCopy** | Table Sync Worker | Initial copy complete |
 | **SyncWait** | Table Sync Worker | Waiting for Apply Worker to pause (in-memory only) |
 | **Catchup** | Apply Worker | Apply Worker paused; Table Sync Worker catching up to its LSN (in-memory only) |
-| **SyncDone** | Table Sync Worker | Catch-up complete, ready for handoff |
+| **SyncDone** | Table Sync Worker | Catch-up complete; durable decoder retained until Apply materializes local state |
 | **Ready** | Apply Worker | Apply Worker now handles this table exclusively |
 | **Errored** | Either | Error occurred; contains reason, solution hint, and retry policy |
 

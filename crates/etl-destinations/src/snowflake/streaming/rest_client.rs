@@ -142,7 +142,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     if status != StatusCode::OK {
                         let body = resp.text().await.unwrap_or_default();
                         if status == StatusCode::UNAUTHORIZED {
-                            warn!("received 401 from Snowpipe Streaming API, invalidating token");
+                            warn!("received 401 from snowpipe streaming api, invalidating token");
                             auth.invalidate_token().await;
                         }
                         return Err(SnowpipeError::from_response(status, body).into());
@@ -238,7 +238,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         let body = resp.text().await.unwrap_or_default();
                         let error = SnowpipeError::from_response(status, body);
                         if status == StatusCode::UNAUTHORIZED {
-                            warn!("received 401 from Snowpipe Streaming API, invalidating token");
+                            warn!("received 401 from snowpipe streaming api, invalidating token");
                             auth.invalidate_token().await;
                         }
                         if error.is_authentication_expired() {
@@ -304,7 +304,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     if status != StatusCode::OK {
                         let body = resp.text().await.unwrap_or_default();
                         if status == StatusCode::UNAUTHORIZED {
-                            warn!("received 401 from Snowpipe Streaming API, invalidating token");
+                            warn!("received 401 from snowpipe streaming api, invalidating token");
                             auth.invalidate_token().await;
                         }
                         return Err(SnowpipeError::from_response(status, body).into());
@@ -365,7 +365,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     if status != StatusCode::OK {
                         let body = resp.text().await.unwrap_or_default();
                         if status == StatusCode::UNAUTHORIZED {
-                            warn!("received 401 from Snowpipe Streaming API, invalidating token");
+                            warn!("received 401 from snowpipe streaming api, invalidating token");
                             auth.invalidate_token().await;
                         }
                         return Err(SnowpipeError::from_response(status, body).into());

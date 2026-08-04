@@ -320,9 +320,9 @@ pub(crate) fn register_metrics() {
         describe_gauge!(
             ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
             Unit::Bytes,
-            "Difference between ETL's last received LSN and effective flush LSN. The effective \
-             flush LSN is the apply-loop progress frontier; when the loop is idle and no data \
-             needs flushing, it follows the last received LSN."
+            "Difference between ETL's last received LSN and checkpoint LSN. The checkpoint \
+             follows the last received LSN while the loop is fully idle and the last flush LSN \
+             while work is unresolved."
         );
 
         describe_gauge!(
@@ -336,8 +336,7 @@ pub(crate) fn register_metrics() {
         describe_gauge!(
             ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
             Unit::Bytes,
-            "Difference between the source Postgres current WAL position and ETL's effective \
-             flush LSN."
+            "Difference between the source Postgres current WAL position and ETL's checkpoint LSN."
         );
     });
 }

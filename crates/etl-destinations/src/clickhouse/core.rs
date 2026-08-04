@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
@@ -11,8 +15,8 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnModification, IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId, Type,
-        is_array_type,
+        ColumnModification, IdentityType, PgLsn, ReplicatedTableSchema, ReplicationMask,
+        SchemaDiff, TableId, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
 };
@@ -32,7 +36,7 @@ use crate::{
             supports_column_default, trailing_cdc_column_names,
         },
     },
-    recovery::previous_replication_mask_for_recovery,
+    recovery::ensure_relation_schema_transition,
     table_name::try_stringify_table_name,
 };
 
@@ -69,15 +73,10 @@ struct PendingRow {
     /// CDC op kind. Drives both the MergeTree `cdc_operation` string and the
     /// ReplacingMergeTree `_etl_deleted` tombstone flag.
     operation: CdcOperation,
-    /// Transaction commit LSN. Written to the MergeTree `cdc_lsn` column,
-    /// and forms the high 64 bits of the ReplacingMergeTree `_etl_version`
-    /// column.
-    commit_lsn: PgLsn,
-    /// Zero-based ordinal of this event within its transaction. Forms the
-    /// low 64 bits of the ReplacingMergeTree `_etl_version` column so
-    /// multi-event same-commit transactions tie-break correctly under
-    /// `FINAL`.
-    tx_ordinal: u64,
+    /// Source ordering for this DML event. MergeTree exposes its commit LSN in
+    /// `cdc_lsn`; ReplacingMergeTree stores the complete packed key in
+    /// `_etl_version`.
+    sequence_key: EventSequenceKey,
     /// User column values in source schema order. The trailing CDC columns
     /// are appended at encode time and are not present here.
     cells: Vec<Cell>,
@@ -96,17 +95,16 @@ fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
 fn append_cdc_columns(
     values: &mut Vec<ClickHouseValue>,
     operation: CdcOperation,
-    commit_lsn: PgLsn,
-    tx_ordinal: u64,
+    sequence_key: EventSequenceKey,
     engine: ClickHouseEngine,
 ) {
     match engine {
         ClickHouseEngine::MergeTree => {
             values.push(ClickHouseValue::String(operation.to_string()));
-            values.push(cdc_lsn_to_clickhouse_value(commit_lsn));
+            values.push(cdc_lsn_to_clickhouse_value(sequence_key.commit_lsn));
         }
         ClickHouseEngine::ReplacingMergeTree => {
-            let version = EventSequenceKey::new(commit_lsn, tx_ordinal).as_u128();
+            let version = sequence_key.as_u128();
             values.push(ClickHouseValue::UInt128(version));
             values.push(ClickHouseValue::UInt8(matches!(operation, CdcOperation::Delete) as u8));
         }
@@ -632,28 +630,14 @@ where
         schema: &ReplicatedTableSchema,
         metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
-        warn!("table {} has Applying metadata, recovering interrupted operation", table_id);
+        warn!("table {} has applying metadata, recovering interrupted operation", table_id);
+
+        ensure_clickhouse_recovery_schema_matches(table_id, schema, &metadata)?;
 
         match metadata.previous_snapshot_id {
             Some(prev_snapshot_id) => {
                 // Recovery replays the interrupted diff from the previous
-                // snapshot to the target snapshot recorded in the metadata. A
-                // schema arriving with any other snapshot, older or newer,
-                // must not drive DDL: diffing against it could execute
-                // reverse DDL or wrongly mark the interrupted change applied.
-                let arriving_snapshot_id = schema.inner().snapshot_id;
-                if arriving_snapshot_id != metadata.snapshot_id {
-                    return Err(etl_error!(
-                        ErrorKind::DestinationSchemaRewind,
-                        "ClickHouse schema recovery received a mismatched schema snapshot",
-                        format!(
-                            "Table {} has an interrupted schema change targeting snapshot {}, but \
-                             received snapshot {}. Resynchronize the table to recover.",
-                            table_id, metadata.snapshot_id, arriving_snapshot_id
-                        )
-                    ));
-                }
-
+                // snapshot to the target snapshot recorded in the metadata.
                 let old_table_schema =
                     self.store.get_table_schema(&table_id, prev_snapshot_id).await?.ok_or_else(
                         || {
@@ -668,14 +652,21 @@ where
                             )
                         },
                     )?;
-                // The metadata records the target mask, not the previous one,
-                // so project it back onto the previous schema; a raw copy has
-                // the wrong width whenever the change added or dropped
-                // columns.
-                let previous_replication_mask = previous_replication_mask_for_recovery(
-                    &old_table_schema,
-                    schema.inner(),
-                    &metadata.replication_mask,
+                // Destination metadata does not retain the previous replication
+                // mask. Reconstruct the previous endpoint from physical columns
+                // instead of assuming that either the target mask or every
+                // previous-schema column was present before the interruption.
+                let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
+                let actual_column_names = actual_columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<HashSet<_>>();
+                let previous_replication_mask = ReplicationMask::from_bytes(
+                    old_table_schema
+                        .column_schemas
+                        .iter()
+                        .map(|column| u8::from(actual_column_names.contains(column.name.as_str())))
+                        .collect(),
                 );
                 let old_schema =
                     ReplicatedTableSchema::from_mask(old_table_schema, previous_replication_mask);
@@ -687,7 +678,17 @@ where
             }
         }
 
+        let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
+        let expected_column_names =
+            expected_clickhouse_column_names(schema, self.inserter_config.engine);
+        nullable_flags_from_clickhouse_columns(
+            clickhouse_table_name,
+            &expected_column_names,
+            &actual_columns,
+        )?;
+
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        self.table_cache.write().remove(clickhouse_table_name);
         Ok(())
     }
 
@@ -756,7 +757,12 @@ where
                 // (sentinel meaning "this row pre-dates the streaming cursor"). For
                 // ReplacingMergeTree, any streaming event then wins on FINAL because its packed
                 // `_etl_version` is non-zero.
-                append_cdc_columns(&mut values, CdcOperation::Insert, PgLsn::from(0), 0, engine);
+                append_cdc_columns(
+                    &mut values,
+                    CdcOperation::Insert,
+                    EventSequenceKey::new(PgLsn::from(0), 0),
+                    engine,
+                );
                 Ok(values)
             })
             .collect::<EtlResult<_>>()?;
@@ -782,52 +788,57 @@ where
         let new_replication_mask = new_schema.replication_mask().clone();
 
         let metadata =
-            self.store.get_applied_destination_table_metadata(table_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::CorruptedTableSchema,
-                        "Destination metadata missing for ClickHouse schema change",
-                        format!(
-                            "Table {} received schema snapshot {}, but destination metadata from \
-                             initial synchronization was not found.",
-                            table_id, new_snapshot_id
-                        )
+            self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::CorruptedTableSchema,
+                    "Destination metadata missing for ClickHouse schema change",
+                    format!(
+                        "Table {} received schema snapshot {}, but destination metadata from \
+                         initial synchronization was not found.",
+                        table_id, new_snapshot_id
                     )
-                },
-            )?;
+                )
+            })?;
+
+        // A relation event identifies the exact target schema through its
+        // snapshot ID and replication mask. It can therefore resume an
+        // interrupted change without inventing a DML event sequence key.
+        if metadata.is_applying() {
+            let clickhouse_table_name = metadata.destination_table_id.clone();
+            self.recover_applying_metadata(table_id, &clickhouse_table_name, new_schema, metadata)
+                .await?;
+            return Ok(());
+        }
 
         let current_snapshot_id = metadata.snapshot_id;
         let current_replication_mask = metadata.replication_mask.clone();
 
-        // Reject stale schema snapshots replayed after a restart. At-least-once
-        // delivery can re-send a relation event whose snapshot predates the
-        // schema already applied at the destination. Diffing backwards would
-        // execute reverse DDL (e.g. DROP COLUMN) and physically delete newer
-        // column data, and ClickHouse has no ETL-owned durable per-table DML
-        // watermark that would make replaying the following old events safe.
-        if new_snapshot_id < current_snapshot_id {
-            return Err(etl_error!(
-                ErrorKind::DestinationSchemaRewind,
-                "ClickHouse destination schema is newer than the replayed schema snapshot",
-                format!(
-                    "Table {} received schema snapshot {}, but the destination already applied \
-                     snapshot {}. Reverse DDL is not executed because it could delete newer \
-                     column data; resynchronize the table to recover.",
-                    table_id, new_snapshot_id, current_snapshot_id
-                )
-            ));
-        }
+        // At-least-once delivery can replay an older relation or an
+        // equal-snapshot mask from a deployment that missed its logical schema
+        // message. Neither carries ordering sufficient to drive ClickHouse DDL.
+        ensure_relation_schema_transition(
+            "ClickHouse",
+            table_id,
+            current_snapshot_id,
+            &current_replication_mask,
+            new_snapshot_id,
+            &new_replication_mask,
+        )?;
 
-        if current_snapshot_id == new_snapshot_id
-            && current_replication_mask == new_replication_mask
-        {
-            info!("schema for table {} unchanged (snapshot_id: {})", table_id, new_snapshot_id);
+        if current_snapshot_id == new_snapshot_id {
+            debug!(
+                table_id = %table_id,
+                snapshot_id = %new_snapshot_id,
+                "clickhouse table schema unchanged"
+            );
             return Ok(());
         }
 
         info!(
-            "schema change detected for table {}: snapshot_id {} -> {}",
-            table_id, current_snapshot_id, new_snapshot_id
+            table_id = %table_id,
+            current_snapshot_id = %current_snapshot_id,
+            new_snapshot_id = %new_snapshot_id,
+            "clickhouse table schema change detected"
         );
 
         // Retrieve the old schema to compute the diff.
@@ -872,8 +883,9 @@ where
             self.apply_schema_diff(clickhouse_table_name, &diff, &current_schema, new_schema).await
         {
             warn!(
-                "schema change failed for table {}: {}. Manual intervention may be required.",
-                table_id, err
+                table_id = %table_id,
+                error = %err,
+                "clickhouse table schema change failed; manual intervention may be required"
             );
             return Err(err);
         }
@@ -890,8 +902,9 @@ where
         }
 
         info!(
-            "schema change completed for table {}: snapshot_id {} applied",
-            table_id, new_snapshot_id
+            table_id = %table_id,
+            snapshot_id = %new_snapshot_id,
+            "clickhouse table schema change completed"
         );
 
         Ok(())
@@ -982,7 +995,7 @@ where
                             column_name = %change.new_column.name,
                             old_nullable,
                             new_nullable,
-                            "skipping source column nullability change for ClickHouse"
+                            "skipping source column nullability change for clickhouse"
                         );
                     }
                     ColumnModification::Default { old_expression, new_expression } => {
@@ -1008,7 +1021,7 @@ where
                                 warn!(
                                     table_name = %clickhouse_table_name,
                                     column_name = %change.new_column.name,
-                                    "skipping unsupported source column default for ClickHouse"
+                                    "skipping unsupported source column default for clickhouse"
                                 );
                                 if old_default_was_supported {
                                     self.client
@@ -1027,7 +1040,7 @@ where
                             warn!(
                                 table_name = %clickhouse_table_name,
                                 column_name = %change.new_column.name,
-                                "skipping source column default removal for ClickHouse because no \
+                                "skipping source column default removal for clickhouse because no \
                                  supported destination default was set"
                             );
                         }
@@ -1076,18 +1089,19 @@ where
                 let event = event_iter.next().expect("peeked event must be present; qed");
                 match event {
                     Event::Insert(insert) => {
+                        let sequence_key = insert.event_sequence_key();
                         let table_id = insert.replicated_table_schema.id();
                         let entry = pending
                             .entry(table_id)
                             .or_insert_with(|| (insert.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Insert,
-                            commit_lsn: insert.commit_lsn,
-                            tx_ordinal: insert.tx_ordinal,
+                            sequence_key,
                             cells: insert.table_row.into_values(),
                         });
                     }
                     Event::Update(update) => {
+                        let sequence_key = update.event_sequence_key();
                         let table_row = clickhouse_update_row(
                             &update.replicated_table_schema,
                             update.updated_table_row,
@@ -1099,12 +1113,12 @@ where
                             .or_insert_with(|| (update.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Update,
-                            commit_lsn: update.commit_lsn,
-                            tx_ordinal: update.tx_ordinal,
+                            sequence_key,
                             cells: table_row.into_values(),
                         });
                     }
                     Event::Delete(delete) => {
+                        let sequence_key = delete.event_sequence_key();
                         let old_table_row = clickhouse_delete_old_row(
                             &delete.replicated_table_schema,
                             delete.old_table_row,
@@ -1121,8 +1135,7 @@ where
                             .or_insert_with(|| (delete.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Delete,
-                            commit_lsn: delete.commit_lsn,
-                            tx_ordinal: delete.tx_ordinal,
+                            sequence_key,
                             cells: old_row.into_values(),
                         });
                     }
@@ -1193,12 +1206,12 @@ where
             join_set.spawn(async move {
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
-                    .map(|PendingRow { operation, commit_lsn, tx_ordinal, cells }| {
+                    .map(|PendingRow { operation, sequence_key, cells }| {
                         let mut values: Vec<ClickHouseValue> = cells
                             .into_iter()
                             .map(cell_to_clickhouse_value)
                             .collect::<EtlResult<_>>()?;
-                        append_cdc_columns(&mut values, operation, commit_lsn, tx_ordinal, engine);
+                        append_cdc_columns(&mut values, operation, sequence_key, engine);
                         Ok(values)
                     })
                     .collect::<EtlResult<_>>()?;
@@ -1563,6 +1576,36 @@ where
     }
 }
 
+/// Requires interrupted ClickHouse DDL to use its recorded target schema.
+fn ensure_clickhouse_recovery_schema_matches(
+    table_id: TableId,
+    schema: &ReplicatedTableSchema,
+    metadata: &DestinationTableMetadata,
+) -> EtlResult<()> {
+    let arriving_snapshot_id = schema.inner().snapshot_id;
+    let arriving_replication_mask = schema.replication_mask();
+    if arriving_snapshot_id == metadata.snapshot_id
+        && arriving_replication_mask == &metadata.replication_mask
+    {
+        return Ok(());
+    }
+
+    Err(etl_error!(
+        ErrorKind::DestinationSchemaRewind,
+        "ClickHouse schema recovery received mismatched schema state",
+        format!(
+            "Table {} has an interrupted destination operation targeting snapshot {} and \
+             replication mask {}, but received snapshot {} and replication mask {}. Resynchronize \
+             the table to recover.",
+            table_id,
+            metadata.snapshot_id,
+            metadata.replication_mask,
+            arriving_snapshot_id,
+            arriving_replication_mask
+        )
+    ))
+}
+
 /// Strips ClickHouse Cloud's `Shared` storage-variant prefix so the shared and
 /// non-shared MergeTree-family engines compare equal (see
 /// `ensure_engine_matches`).
@@ -1580,11 +1623,18 @@ fn clickhouse_engine_matches(existing: &str, configured: &str) -> bool {
 mod tests {
     use etl::{
         data::{ArrayCell, PartialTableRow},
-        schema::{ColumnSchema, IdentityMask, ReplicationMask, TableName, TableSchema},
+        schema::{
+            ColumnSchema, IdentityMask, PgLsn, ReplicationMask, SnapshotId, TableName, TableSchema,
+        },
     };
 
     use super::*;
     use crate::clickhouse::schema::{CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME};
+
+    /// Creates a synthetic composite snapshot ID for tests.
+    fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+        SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+    }
 
     fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
         ClickHouseTableColumn { name: name.to_owned(), type_name: type_name.to_owned() }
@@ -1600,6 +1650,25 @@ mod tests {
         // Genuine engine mismatches still fail.
         assert!(!clickhouse_engine_matches("SharedReplacingMergeTree", "MergeTree"));
         assert!(!clickhouse_engine_matches("MergeTree", "ReplacingMergeTree"));
+    }
+
+    #[test]
+    fn initial_creation_recovery_rejects_a_different_schema_target() {
+        let arriving_schema = replicated_schema(IdentityType::PrimaryKey);
+        let metadata = DestinationTableMetadata::new_applying(
+            "public_users".to_owned(),
+            test_snapshot_id(1_u64, 1_u64),
+            arriving_schema.replication_mask().clone(),
+        );
+
+        let error = ensure_clickhouse_recovery_schema_matches(
+            arriving_schema.id(),
+            &arriving_schema,
+            &metadata,
+        )
+        .expect_err("initial creation recovery should require its recorded target");
+
+        assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {

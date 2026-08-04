@@ -117,7 +117,7 @@ fn ducklake_default_clause(column_schema: &ColumnSchema) -> Option<String> {
     if default_clause.is_none() && column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
-            "skipping unsupported source column default for DuckLake"
+            "skipping unsupported source column default for ducklake"
         );
     }
 

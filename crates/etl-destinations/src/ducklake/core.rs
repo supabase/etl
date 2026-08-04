@@ -89,7 +89,7 @@ use crate::{
         },
         sql::{qualified_lake_table_name, quote_identifier},
     },
-    recovery::previous_replication_mask_for_recovery,
+    recovery::{conservative_previous_replication_mask, ensure_relation_schema_transition},
 };
 
 /// Shared Postgres metadata pool size for DuckLake background samplers.
@@ -1722,9 +1722,20 @@ where
 
         let current_snapshot_id = metadata.snapshot_id;
         let current_replication_mask = metadata.replication_mask.clone();
-        if current_snapshot_id == new_snapshot_id
-            && current_replication_mask == new_replication_mask
-        {
+
+        // A relation carries no durable DML sequence key. Reject both schema
+        // rewind and an equal-snapshot mask conflict before either can drive
+        // DuckLake DDL or run ahead of streaming replay-watermark checks.
+        ensure_relation_schema_transition(
+            "DuckLake",
+            table_id,
+            current_snapshot_id,
+            &current_replication_mask,
+            new_snapshot_id,
+            &new_replication_mask,
+        )?;
+
+        if current_snapshot_id == new_snapshot_id {
             self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema)
                 .await?;
             self.reconcile_table_sorting(&table_name, new_replicated_table_schema).await?;
@@ -2138,9 +2149,7 @@ where
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();
                         let mutation = TrackedTableMutation::new(
-                            insert.start_lsn,
-                            insert.commit_lsn,
-                            insert.tx_ordinal,
+                            insert.event_sequence_key(),
                             TableMutation::Insert(insert.table_row),
                         );
                         push_table_mutation_segment(
@@ -2154,6 +2163,7 @@ where
                             &update.replicated_table_schema,
                             "update",
                         )?;
+                        let sequence_key = update.event_sequence_key();
                         let table_id = update.replicated_table_schema.id();
                         let replicated_table_schema = update.replicated_table_schema;
                         let table_row = update.updated_table_row;
@@ -2161,9 +2171,7 @@ where
                         let segments = table_id_to_mutations.entry(table_id).or_default();
                         if let Some(old_row) = old_table_row {
                             let mutation = TrackedTableMutation::new(
-                                update.start_lsn,
-                                update.commit_lsn,
-                                update.tx_ordinal,
+                                sequence_key,
                                 TableMutation::Update { delete_row: old_row, new_row: table_row },
                             );
                             push_table_mutation_segment(
@@ -2179,9 +2187,7 @@ where
                                          identity from new row"
                                     );
                                     let mutation = TrackedTableMutation::new(
-                                        update.start_lsn,
-                                        update.commit_lsn,
-                                        update.tx_ordinal,
+                                        sequence_key,
                                         TableMutation::Replace(table_row),
                                     );
                                     push_table_mutation_segment(
@@ -2200,9 +2206,7 @@ where
                                          partial new row"
                                     );
                                     let mutation = TrackedTableMutation::new(
-                                        update.start_lsn,
-                                        update.commit_lsn,
-                                        update.tx_ordinal,
+                                        sequence_key,
                                         TableMutation::Update {
                                             delete_row: OldTableRow::Key(key_row),
                                             new_row: UpdatedTableRow::Partial(partial_row),
@@ -2222,6 +2226,7 @@ where
                             &delete.replicated_table_schema,
                             "delete",
                         )?;
+                        let sequence_key = delete.event_sequence_key();
                         let Some(old_row) = delete.old_table_row else {
                             return Err(etl_error!(
                                 ErrorKind::SourceReplicaIdentityError,
@@ -2234,12 +2239,8 @@ where
                             ));
                         };
                         let table_id = delete.replicated_table_schema.id();
-                        let mutation = TrackedTableMutation::new(
-                            delete.start_lsn,
-                            delete.commit_lsn,
-                            delete.tx_ordinal,
-                            TableMutation::Delete(old_row),
-                        );
+                        let mutation =
+                            TrackedTableMutation::new(sequence_key, TableMutation::Delete(old_row));
                         push_table_mutation_segment(
                             table_id_to_mutations.entry(table_id).or_default(),
                             delete.replicated_table_schema,
@@ -2356,18 +2357,14 @@ where
             > = HashMap::new();
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate)) = event_iter.next() {
+                    let sequence_key = truncate.event_sequence_key();
                     for replicated_table_schema in truncate.truncated_tables {
                         let table_id = replicated_table_schema.id();
                         let entry = truncate_table_ids
                             .entry(table_id)
                             .or_insert_with(|| (replicated_table_schema.clone(), Vec::new()));
                         entry.0 = replicated_table_schema;
-                        entry.1.push(TrackedTruncateEvent::new(
-                            truncate.start_lsn,
-                            truncate.commit_lsn,
-                            truncate.tx_ordinal,
-                            truncate.options,
-                        ));
+                        entry.1.push(TrackedTruncateEvent::new(sequence_key, truncate.options));
                     }
                 }
             }
@@ -2561,11 +2558,29 @@ where
         metadata: &DestinationTableMetadata,
         provided_target_schema: Option<&ReplicatedTableSchema>,
     ) -> EtlResult<ReplicatedTableSchema> {
-        if let Some(schema) = provided_target_schema
-            && schema.inner().snapshot_id == metadata.snapshot_id
-            && schema.replication_mask() == &metadata.replication_mask
-        {
-            return Ok(schema.clone());
+        if let Some(schema) = provided_target_schema {
+            let arriving_snapshot_id = schema.inner().snapshot_id;
+            let arriving_replication_mask = schema.replication_mask();
+            if arriving_snapshot_id == metadata.snapshot_id
+                && arriving_replication_mask == &metadata.replication_mask
+            {
+                return Ok(schema.clone());
+            }
+
+            return Err(etl_error!(
+                ErrorKind::DestinationSchemaRewind,
+                "DuckLake schema recovery received mismatched schema state",
+                format!(
+                    "Table {} has an interrupted destination operation targeting snapshot {} and \
+                     replication mask {}, but received snapshot {} and replication mask {}. \
+                     Resynchronize the table to recover.",
+                    table_id,
+                    metadata.snapshot_id,
+                    metadata.replication_mask,
+                    arriving_snapshot_id,
+                    arriving_replication_mask
+                )
+            ));
         }
 
         let target_table_schema = self
@@ -2602,11 +2617,8 @@ where
                 let previous_table_schema = self
                     .load_previous_recovery_table_schema(table_id, previous_snapshot_id)
                     .await?;
-                let previous_replication_mask = previous_replication_mask_for_recovery(
-                    &previous_table_schema,
-                    target_schema.inner(),
-                    &metadata.replication_mask,
-                );
+                let previous_replication_mask =
+                    conservative_previous_replication_mask(&previous_table_schema);
                 let old_schema = ReplicatedTableSchema::from_mask(
                     previous_table_schema,
                     previous_replication_mask,

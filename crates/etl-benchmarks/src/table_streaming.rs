@@ -148,7 +148,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let destination =
         BenchDestination::new(&args.destination, args.pipeline_id, store.clone()).await?;
 
-    let notifications = register_table_ready_notifications(&store, &table_ids).await?;
+    let notifications = register_table_sync_notifications(&store, &table_ids).await?;
 
     let config = pipeline_config(
         args.pipeline_id,
@@ -166,7 +166,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let pipeline_start_ms = duration_millis(start_started.elapsed());
 
     let ready_started = Instant::now();
-    wait_for_tables_ready(notifications).await?;
+    wait_for_table_sync(notifications).await?;
     let ready_wait_ms = duration_millis(ready_started.elapsed());
 
     destination.reset_cdc_stats();
@@ -360,36 +360,35 @@ fn validate_args(args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
-struct TableReadyNotifications {
+struct TableSyncNotifications {
     table_id: u32,
-    ready: etl::test_utils::notify::TimedNotify,
+    sync_complete: etl::test_utils::notify::TimedNotify,
     errored: etl::test_utils::notify::TimedNotify,
 }
 
-async fn register_table_ready_notifications(
+async fn register_table_sync_notifications(
     store: &NotifyingStore,
     table_ids: &[u32],
-) -> Result<Vec<TableReadyNotifications>> {
+) -> Result<Vec<TableSyncNotifications>> {
     let mut notifications = Vec::with_capacity(table_ids.len());
     for table_id in table_ids {
         let table_id = *table_id;
-        let ready =
-            store.notify_on_table_state_type(TableId::new(table_id), TableStateType::Ready).await;
+        let sync_complete = store.notify_on_table_sync_complete(TableId::new(table_id)).await;
         let errored =
             store.notify_on_table_state_type(TableId::new(table_id), TableStateType::Errored).await;
-        notifications.push(TableReadyNotifications { table_id, ready, errored });
+        notifications.push(TableSyncNotifications { table_id, sync_complete, errored });
     }
 
     Ok(notifications)
 }
 
-async fn wait_for_tables_ready(notifications: Vec<TableReadyNotifications>) -> Result<()> {
+async fn wait_for_table_sync(notifications: Vec<TableSyncNotifications>) -> Result<()> {
     let mut tasks = JoinSet::new();
     for notification in notifications {
         tasks.spawn(async move {
             let table_id = notification.table_id;
             tokio::select! {
-                () = notification.ready.inner().notified() => Ok(()),
+                () = notification.sync_complete.inner().notified() => Ok(()),
                 () = notification.errored.inner().notified() => {
                     bail!("table {table_id} entered errored state before streaming benchmark could start")
                 }
@@ -398,7 +397,7 @@ async fn wait_for_tables_ready(notifications: Vec<TableReadyNotifications>) -> R
     }
 
     while let Some(result) = tasks.join_next().await {
-        result.context("table ready wait task panicked")??;
+        result.context("table sync wait task panicked")??;
     }
 
     Ok(())

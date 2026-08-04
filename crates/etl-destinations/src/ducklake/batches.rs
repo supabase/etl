@@ -94,9 +94,16 @@ fn format_optional_lsn(lsn: Option<PgLsn>) -> String {
     lsn.map_or_else(|| "none".to_owned(), |lsn| lsn.to_string())
 }
 
+/// Formats a sequence key using DuckLake's existing fixed-width hexadecimal
+/// representation.
+fn format_sequence_key(sequence_key: EventSequenceKey) -> String {
+    let commit_lsn = u64::from(sequence_key.commit_lsn);
+    format!("{commit_lsn:016x}/{:016x}", sequence_key.tx_ordinal)
+}
+
 /// Formats an optional sequence key without using debug output.
 fn format_optional_sequence_key(sequence_key: Option<EventSequenceKey>) -> String {
-    sequence_key.map_or_else(|| "none".to_owned(), |sequence_key| sequence_key.to_string())
+    sequence_key.map_or_else(|| "none".to_owned(), format_sequence_key)
 }
 
 /// Returns whether one DuckDB error is the standard interrupted query error.
@@ -211,49 +218,40 @@ impl<'a> From<&'a OldTableRow> for DeletePredicateRowRef<'a> {
     }
 }
 
-/// Event-level table mutation annotated with source LSNs for idempotent replay.
+/// Event-level table mutation annotated for idempotent replay.
 pub(super) struct TrackedTableMutation {
-    start_lsn: PgLsn,
-    commit_lsn: PgLsn,
-    tx_ordinal: u64,
+    sequence_key: EventSequenceKey,
     mutation: TableMutation,
 }
 
 impl TrackedTableMutation {
     /// Creates one tracked mutation preserved for retry-safe replay.
-    pub(super) fn new(
-        start_lsn: PgLsn,
-        commit_lsn: PgLsn,
-        tx_ordinal: u64,
-        mutation: TableMutation,
-    ) -> Self {
-        Self { start_lsn, commit_lsn, tx_ordinal, mutation }
+    pub(super) fn new(sequence_key: EventSequenceKey, mutation: TableMutation) -> Self {
+        Self { sequence_key, mutation }
     }
 
     /// Returns the stable event sequence key for this mutation.
     fn sequence_key(&self) -> EventSequenceKey {
-        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+        self.sequence_key
     }
 }
 
 /// Truncate event metadata preserved for idempotent replay.
 #[derive(Clone, Copy)]
 pub(super) struct TrackedTruncateEvent {
-    start_lsn: PgLsn,
-    commit_lsn: PgLsn,
-    tx_ordinal: u64,
+    sequence_key: EventSequenceKey,
     options: i8,
 }
 
 impl TrackedTruncateEvent {
     /// Creates one tracked truncate event preserved for retry-safe replay.
-    pub(super) fn new(start_lsn: PgLsn, commit_lsn: PgLsn, tx_ordinal: u64, options: i8) -> Self {
-        Self { start_lsn, commit_lsn, tx_ordinal, options }
+    pub(super) fn new(sequence_key: EventSequenceKey, options: i8) -> Self {
+        Self { sequence_key, options }
     }
 
     /// Returns the stable event sequence key for this truncate.
     fn sequence_key(&self) -> EventSequenceKey {
-        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+        self.sequence_key
     }
 }
 
@@ -994,9 +992,9 @@ fn streaming_replay_decision(
                 format!(
                     "table={}, progress={}, first={}, last={}",
                     batch.table_name,
-                    progress.last_sequence_key,
-                    first_sequence_key,
-                    last_sequence_key
+                    format_sequence_key(progress.last_sequence_key),
+                    format_sequence_key(first_sequence_key),
+                    format_sequence_key(last_sequence_key)
                 )
             ));
         }
@@ -1409,8 +1407,8 @@ fn build_mutation_batch_identity(
     table_name.id().hash(&mut hasher);
 
     for tracked_mutation in tracked_mutations {
-        u64::from(tracked_mutation.start_lsn).hash(&mut hasher);
-        u64::from(tracked_mutation.commit_lsn).hash(&mut hasher);
+        u64::from(tracked_mutation.sequence_key.commit_lsn).hash(&mut hasher);
+        tracked_mutation.sequence_key.tx_ordinal.hash(&mut hasher);
 
         match &tracked_mutation.mutation {
             TableMutation::Insert(row) => {
@@ -1439,8 +1437,8 @@ fn build_mutation_batch_identity(
 
     Ok(build_batch_identity(
         DuckLakeTableBatchKind::Mutation,
-        tracked_mutations.first().map(|tracked_mutation| tracked_mutation.start_lsn),
-        tracked_mutations.last().map(|tracked_mutation| tracked_mutation.commit_lsn),
+        None,
+        tracked_mutations.last().map(|tracked_mutation| tracked_mutation.sequence_key.commit_lsn),
         hasher.finish(),
     ))
 }
@@ -1519,15 +1517,15 @@ fn build_truncate_batch_identity(
     table_name.id().hash(&mut hasher);
 
     for tracked_truncate in tracked_truncates {
-        u64::from(tracked_truncate.start_lsn).hash(&mut hasher);
-        u64::from(tracked_truncate.commit_lsn).hash(&mut hasher);
+        u64::from(tracked_truncate.sequence_key.commit_lsn).hash(&mut hasher);
+        tracked_truncate.sequence_key.tx_ordinal.hash(&mut hasher);
         tracked_truncate.options.hash(&mut hasher);
     }
 
     build_batch_identity(
         DuckLakeTableBatchKind::Truncate,
-        tracked_truncates.first().map(|tracked_truncate| tracked_truncate.start_lsn),
-        tracked_truncates.last().map(|tracked_truncate| tracked_truncate.commit_lsn),
+        None,
+        tracked_truncates.last().map(|tracked_truncate| tracked_truncate.sequence_key.commit_lsn),
         hasher.finish(),
     )
 }
@@ -1744,7 +1742,7 @@ impl ReusableStagingTable {
             "insert into {target_table} ({column_list}) select {column_list} from {staging_table};"
         );
         conn.execute_batch(&sql).map_err(|err| {
-            tracing::error!(error = %err, "error INSERT INTO");
+            tracing::error!(error = %err, "error inserting rows");
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake INSERT SELECT failed",
@@ -1796,7 +1794,7 @@ impl ReusableStagingTable {
              select {column_list} from {target_table} limit 0;"
         ))
         .map_err(|error| {
-            tracing::error!(error = %error, "error CREATE TEMP TABLE");
+            tracing::error!(error = %error, "error creating temporary table");
 
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
@@ -1984,7 +1982,7 @@ fn apply_truncate_batch_action(
     let target_table = qualified_lake_table_name(table_name);
     let sql = format!("TRUNCATE TABLE {target_table};");
     conn.execute_batch(&sql).map_err(|error| {
-        tracing::error!(error = %error, "error TRUNCATE TABLE");
+        tracing::error!(error = %error, "error truncating table");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake TRUNCATE TABLE failed",
@@ -2091,7 +2089,7 @@ fn apply_delete_mutation(
                 ducklake_operation_id = operation_context.operation_id(),
                 ducklake_operation_kind = operation_context.operation_kind(),
                 ducklake_operation_timeout_ms = operation_context.timeout_ms(),
-                "error DELETE FROM"
+                "error deleting rows"
             );
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
@@ -2126,7 +2124,7 @@ fn apply_update_mutation(
     let target_table = qualified_lake_table_name(table_name);
     let sql_query = format!("UPDATE {target_table} SET {set_clause} WHERE {predicate};");
     conn.execute_batch(&sql_query).map_err(|_err| {
-        tracing::error!(error = %DuckDbSensitiveQueryError, "error UPDATE");
+        tracing::error!(error = %DuckDbSensitiveQueryError, "error updating rows");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake UPDATE failed",
@@ -2322,6 +2320,13 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn sequence_key_format_preserves_fixed_width_hex_encoding() {
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 2);
+
+        assert_eq!(format_sequence_key(sequence_key), "0000000000000001/0000000000000002");
+    }
 
     fn make_schema() -> TableSchema {
         TableSchema::new(
@@ -2898,18 +2903,14 @@ mod tests {
             LEGACY_REPLAY_EPOCH.to_owned(),
             vec![
                 TrackedTableMutation::new(
-                    PgLsn::from(10),
-                    PgLsn::from(20),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(20), 0),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(1),
                         Cell::String("alice".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
-                    PgLsn::from(10),
-                    PgLsn::from(20),
-                    1,
+                    EventSequenceKey::new(PgLsn::from(20), 1),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(2),
                         Cell::String("bob".to_owned()),
@@ -2952,27 +2953,21 @@ mod tests {
             LEGACY_REPLAY_EPOCH.to_owned(),
             vec![
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(110),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(110), 0),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(0),
                         Cell::String("seed".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(110),
-                    1,
+                    EventSequenceKey::new(PgLsn::from(110), 1),
                     TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                         Cell::I32(0),
                         Cell::String("seed".to_owned()),
                     ]))),
                 ),
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(110),
-                    2,
+                    EventSequenceKey::new(PgLsn::from(110), 2),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(999),
                         Cell::String("tail".to_owned()),
@@ -3010,18 +3005,14 @@ mod tests {
             LEGACY_REPLAY_EPOCH.to_owned(),
             vec![
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(110),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(110), 0),
                     TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                         Cell::I32(1),
                         Cell::String("alice".to_owned()),
                     ]))),
                 ),
                 TrackedTableMutation::new(
-                    PgLsn::from(110),
-                    PgLsn::from(120),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(120), 0),
                     TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                         Cell::I32(2),
                         Cell::String("bob".to_owned()),
@@ -3061,9 +3052,7 @@ mod tests {
             LEGACY_REPLAY_EPOCH.to_owned(),
             vec![
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(110),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(110), 0),
                     TableMutation::Update {
                         delete_row: OldTableRow::Full(TableRow::new(vec![
                             Cell::I32(1),
@@ -3076,9 +3065,7 @@ mod tests {
                     },
                 ),
                 TrackedTableMutation::new(
-                    PgLsn::from(110),
-                    PgLsn::from(120),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(120), 0),
                     TableMutation::Update {
                         delete_row: OldTableRow::Full(TableRow::new(vec![
                             Cell::I32(2),
@@ -3119,9 +3106,7 @@ mod tests {
         let tracked = (0..=CDC_MUTATION_BATCH_SIZE)
             .map(|idx| {
                 TrackedTableMutation::new(
-                    PgLsn::from(100 + idx as u64),
-                    PgLsn::from(200 + idx as u64),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(200 + idx as u64), 0),
                     TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                         Cell::I32(idx as i32),
                         Cell::String(format!("name-{idx}")),
@@ -3173,18 +3158,14 @@ mod tests {
             LEGACY_REPLAY_EPOCH.to_owned(),
             vec![
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(110),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(110), 0),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(0),
                         Cell::String("seed".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
-                    PgLsn::from(110),
-                    PgLsn::from(120),
-                    1,
+                    EventSequenceKey::new(PgLsn::from(120), 1),
                     TableMutation::Update {
                         delete_row: OldTableRow::Full(TableRow::new(vec![
                             Cell::I32(0),
@@ -3197,9 +3178,7 @@ mod tests {
                     },
                 ),
                 TrackedTableMutation::new(
-                    PgLsn::from(120),
-                    PgLsn::from(130),
-                    2,
+                    EventSequenceKey::new(PgLsn::from(130), 2),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(999),
                         Cell::String("tail".to_owned()),
@@ -3237,27 +3216,21 @@ mod tests {
         let retained = retain_mutations_after_sequence_key(
             vec![
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(110),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(110), 0),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(1),
                         Cell::String("one".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(120),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(120), 0),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(2),
                         Cell::String("two".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(130),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(130), 0),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(3),
                         Cell::String("three".to_owned()),
@@ -3275,9 +3248,9 @@ mod tests {
     fn retain_truncates_after_sequence_key_drops_applied_prefix() {
         let retained = retain_truncates_after_sequence_key(
             vec![
-                TrackedTruncateEvent::new(PgLsn::from(100), PgLsn::from(200), 0, 0),
-                TrackedTruncateEvent::new(PgLsn::from(100), PgLsn::from(200), 1, 0),
-                TrackedTruncateEvent::new(PgLsn::from(100), PgLsn::from(210), 0, 0),
+                TrackedTruncateEvent::new(EventSequenceKey::new(PgLsn::from(200), 0), 0),
+                TrackedTruncateEvent::new(EventSequenceKey::new(PgLsn::from(200), 1), 0),
+                TrackedTruncateEvent::new(EventSequenceKey::new(PgLsn::from(210), 0), 0),
             ],
             Some(EventSequenceKey::new(PgLsn::from(200), 0)),
         );
@@ -3292,18 +3265,14 @@ mod tests {
         let replicated_table_schema = make_replicated_schema();
         let tracked = vec![
             TrackedTableMutation::new(
-                PgLsn::from(100),
-                PgLsn::from(200),
-                0,
+                EventSequenceKey::new(PgLsn::from(200), 0),
                 TableMutation::Insert(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("alice".to_owned()),
                 ])),
             ),
             TrackedTableMutation::new(
-                PgLsn::from(100),
-                PgLsn::from(200),
-                1,
+                EventSequenceKey::new(PgLsn::from(200), 1),
                 TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("alice".to_owned()),
@@ -3318,12 +3287,12 @@ mod tests {
             build_mutation_batch_identity(&table_name, &replicated_table_schema, &tracked).unwrap();
 
         assert_eq!(first.batch_id, second.batch_id);
-        assert_eq!(first.first_start_lsn, Some(PgLsn::from(100)));
+        assert_eq!(first.first_start_lsn, None);
         assert_eq!(first.last_commit_lsn, Some(PgLsn::from(200)));
     }
 
     #[test]
-    fn build_mutation_batch_identity_changes_with_order_and_lsn() {
+    fn build_mutation_batch_identity_changes_with_order_and_sequence_key() {
         let replicated_table_schema = make_replicated_schema();
         let table_name = ducklake_table_name();
         let original = build_mutation_batch_identity(
@@ -3331,18 +3300,14 @@ mod tests {
             &replicated_table_schema,
             &[
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(200),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(200), 0),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(1),
                         Cell::String("alice".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(200),
-                    1,
+                    EventSequenceKey::new(PgLsn::from(200), 1),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(2),
                         Cell::String("bob".to_owned()),
@@ -3356,18 +3321,14 @@ mod tests {
             &replicated_table_schema,
             &[
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(200),
-                    0,
+                    EventSequenceKey::new(PgLsn::from(200), 0),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(2),
                         Cell::String("bob".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(200),
-                    1,
+                    EventSequenceKey::new(PgLsn::from(200), 1),
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(1),
                         Cell::String("alice".to_owned()),
@@ -3380,9 +3341,7 @@ mod tests {
             &table_name,
             &replicated_table_schema,
             &[TrackedTableMutation::new(
-                PgLsn::from(101),
-                PgLsn::from(201),
-                0,
+                EventSequenceKey::new(PgLsn::from(201), 0),
                 TableMutation::Insert(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("alice".to_owned()),
@@ -3396,15 +3355,15 @@ mod tests {
     }
 
     #[test]
-    fn build_truncate_batch_identity_changes_with_lsn() {
+    fn build_truncate_batch_identity_changes_with_sequence_key() {
         let table_name = ducklake_table_name();
         let first = build_truncate_batch_identity(
             &table_name,
-            &[TrackedTruncateEvent::new(PgLsn::from(300), PgLsn::from(400), 0, 0)],
+            &[TrackedTruncateEvent::new(EventSequenceKey::new(PgLsn::from(400), 0), 0)],
         );
         let second = build_truncate_batch_identity(
             &table_name,
-            &[TrackedTruncateEvent::new(PgLsn::from(301), PgLsn::from(401), 0, 0)],
+            &[TrackedTruncateEvent::new(EventSequenceKey::new(PgLsn::from(401), 0), 0)],
         );
 
         assert_ne!(first.batch_id, second.batch_id);

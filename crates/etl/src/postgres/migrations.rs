@@ -80,9 +80,9 @@ async fn run_migration_set(
 ) -> Result<(), sqlx::Error> {
     let mut conn = create_migration_connection(connection_config).await?;
 
-    debug!(migration_set = label, "applying ETL migrations");
+    debug!(migration_set = label, "applying etl migrations");
     migrator.run_direct(None, &mut conn, false).await?;
-    debug!(migration_set = label, "ETL migrations successfully applied");
+    debug!(migration_set = label, "etl migrations successfully applied");
 
     Ok(())
 }

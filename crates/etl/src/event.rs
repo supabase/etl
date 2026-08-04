@@ -15,12 +15,10 @@ use crate::{
 /// Transaction begin event from Postgres logical replication.
 ///
 /// [`BeginEvent`] marks the start of a new transaction in the replication
-/// stream. It contains metadata about the transaction including LSN positions
+/// stream. It contains metadata about the transaction including its commit LSN
 /// and timing information for proper sequencing and recovery.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
-    /// LSN position where the transaction started.
-    pub start_lsn: PgLsn,
     /// LSN position where the transaction will commit.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
@@ -45,8 +43,6 @@ impl BeginEvent {
 /// including timing and LSN positions for maintaining consistency and ordering.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitEvent {
-    /// LSN position where the transaction started.
-    pub start_lsn: PgLsn,
     /// LSN position where the transaction committed.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
@@ -73,8 +69,6 @@ impl CommitEvent {
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct InsertEvent {
-    /// LSN position where the event started.
-    pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
@@ -112,8 +106,6 @@ impl InsertEvent {
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct UpdateEvent {
-    /// LSN position where the event started.
-    pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
@@ -157,8 +149,6 @@ impl UpdateEvent {
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct DeleteEvent {
-    /// LSN position where the event started.
-    pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
@@ -184,8 +174,6 @@ impl DeleteEvent {
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct TruncateEvent {
-    /// LSN position where the event started.
-    pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
@@ -217,25 +205,17 @@ impl TruncateEvent {
 /// schema creates a [`ReplicatedTableSchema`] whose column order matches the
 /// tuple payloads. Event conversion can then decode row values by
 /// replicated-column position.
+///
+/// Relation messages are connection-local protocol metadata: PostgreSQL may
+/// emit them again after a reconnect even when the source schema has not
+/// changed. They therefore do not have a durable event sequence key and do not
+/// consume a transaction ordinal.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct RelationEvent {
-    /// LSN position where the event started.
-    pub start_lsn: PgLsn,
-    /// LSN position where the transaction of this event will commit.
-    pub commit_lsn: PgLsn,
-    /// Zero-based ordinal of this event within the transaction.
-    pub tx_ordinal: u64,
     /// The replicated table schema containing the table schema, replication
     /// mask, and identity mask.
     pub replicated_table_schema: ReplicatedTableSchema,
-}
-
-impl RelationEvent {
-    /// Returns the sequence key for this event.
-    pub fn event_sequence_key(&self) -> EventSequenceKey {
-        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
-    }
 }
 
 /// Represents a single replication event from Postgres logical replication.
@@ -319,6 +299,9 @@ impl SizeHint for Event {
 }
 
 /// Pair used to build a CDC sequence key for destinations.
+///
+/// Destinations choose their own storage and wire representation instead of
+/// relying on a generic string encoding for this domain value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventSequenceKey {
     /// Commit LSN identifying transaction order across transactions.
@@ -341,37 +324,6 @@ impl EventSequenceKey {
     pub fn as_u128(self) -> u128 {
         (u128::from(u64::from(self.commit_lsn)) << 64) | u128::from(self.tx_ordinal)
     }
-}
-
-impl fmt::Display for EventSequenceKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let commit_lsn = u64::from(self.commit_lsn);
-        write!(f, "{commit_lsn:016x}/{:016x}", self.tx_ordinal)
-    }
-}
-
-/// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct
-/// event ordering.
-///
-/// Creates a hex-encoded sequence number that ensures events are processed in
-/// the correct order even when they have the same system time. The format is
-/// compatible with BigQuery's `_CHANGE_SEQUENCE_NUMBER` column requirements.
-///
-/// The rationale for using the LSN is that downstream systems will preserve the
-/// highest sequence number in case of equal primary key, which is what we want
-/// since in case of updates, we want the latest update in Postgres order to be
-/// the winner. We have first the `commit_lsn` in the key so that operations are
-/// first ordered based on the LSN at which the transaction committed,
-/// and if two operations belong to the same transaction (meaning they have the
-/// same `commit_lsn`), the `start_lsn` will be used as a tiebreaker. We first
-/// order by `commit_lsn` to preserve the order in which operations are received
-/// by the pipeline since transactions are ordered by commit time
-/// and not interleaved.
-pub fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
-    let start_lsn = u64::from(start_lsn);
-    let commit_lsn = u64::from(commit_lsn);
-
-    format!("{commit_lsn:016x}/{start_lsn:016x}")
 }
 
 /// Classification of Postgres replication event types.
@@ -432,34 +384,5 @@ impl From<&Event> for EventType {
 impl From<Event> for EventType {
     fn from(event: Event) -> Self {
         (&event).into()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn generate_sequence_number_fn() {
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(0), PgLsn::from(0)),
-            "0000000000000000/0000000000000000"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(1), PgLsn::from(0)),
-            "0000000000000000/0000000000000001"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(255), PgLsn::from(0)),
-            "0000000000000000/00000000000000ff"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(65535), PgLsn::from(0)),
-            "0000000000000000/000000000000ffff"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(u64::MAX), PgLsn::from(0)),
-            "0000000000000000/ffffffffffffffff"
-        );
     }
 }

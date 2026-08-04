@@ -7,7 +7,7 @@ use duckdb::Connection;
 use etl::{
     event::EventType,
     pipeline::PipelineId,
-    store::{StateStore, TableStateType},
+    store::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -408,17 +408,15 @@ async fn table_copy_and_streaming_with_restart() {
         destination.clone(),
     );
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_ready_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let orders_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
-    orders_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
@@ -526,12 +524,11 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         destination.clone(),
     );
 
-    let users_ready_notify =
-        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(users_schema.id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -566,12 +563,11 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         destination.clone(),
     );
 
-    let users_ready_notify =
-        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(users_schema.id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -620,17 +616,15 @@ async fn table_copy_and_streaming_without_restart() {
         destination.clone(),
     );
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_ready_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let orders_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
-    orders_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -690,9 +684,8 @@ async fn table_insert_update_delete() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
@@ -704,7 +697,7 @@ async fn table_insert_update_delete() {
     );
 
     pipeline.start().await.unwrap();
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(
@@ -830,17 +823,15 @@ async fn cdc_streaming_with_truncate() {
         destination.clone(),
     );
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_ready_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let orders_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
-    orders_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -947,11 +938,10 @@ async fn schema_change_add_column() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let initial_metadata = store
         .get_applied_destination_table_metadata(table_id)
@@ -1058,11 +1048,10 @@ async fn schema_change_is_visible_to_already_open_connection() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let initial_snapshot_id = store
         .get_applied_destination_table_metadata(table_id)
@@ -1177,11 +1166,10 @@ async fn schema_change_add_drop_rename() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1284,11 +1272,10 @@ async fn schema_change_then_update_and_delete() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1388,11 +1375,10 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1535,11 +1521,10 @@ async fn schema_change_matches_simulator_generated_column_types() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![

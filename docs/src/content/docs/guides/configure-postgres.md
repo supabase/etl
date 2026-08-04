@@ -276,9 +276,9 @@ customer-owned schemas instead.
 
 ETL supports PostgreSQL partition publications with either
 `publish_via_partition_root = true` or `publish_via_partition_root = false`.
-ETL reads the effective table list from `pg_publication_tables`, so it tracks
-the same relation identities and schemas PostgreSQL uses for logical
-replication messages.
+At startup, ETL loads the effective relation OIDs through
+`pg_get_publication_tables()`, so it tracks the same relation identities and
+schemas PostgreSQL uses for logical replication messages.
 
 | Publication shape | `publish_via_partition_root` | PostgreSQL publishes as | ETL tracks |
 | --- | --- | --- | --- |
@@ -324,6 +324,26 @@ TRUNCATE TABLE orders_2026;
 ```
 
 ### Managing Publications
+
+Create the intended publication shape before starting a pipeline whenever
+possible. For a running pipeline, ETL currently supports changing the column
+list of a table it already tracks. Other `ALTER PUBLICATION` changes are not
+live publication-reconciliation operations.
+
+In particular, adding or removing tables, adding or removing schemas, and
+changing `publish_via_partition_root` can change the effective relation OIDs.
+ETL discovers those new and removed identities during pipeline startup, not
+from schema messages emitted by the DDL trigger. Restarting reconciles ETL's
+table state, but it does not rename, merge, or remove destination tables created
+under the previous relation identities. A root-to-leaf or leaf-to-root change
+may therefore require a table resynchronization or a new pipeline.
+
+> **Warning:** Do not change publication membership, row filters, publication
+> operation settings, or `publish_via_partition_root` while a pipeline is
+> running. These changes are outside the supported live-update contract. ETL
+> may skip events for newly effective relation OIDs, and partition-identity
+> changes can leave stale destination tables or cause missing or duplicated
+> data. Behavior in this state is unsupported and must not be relied upon.
 
 ```sql
 -- View existing publications

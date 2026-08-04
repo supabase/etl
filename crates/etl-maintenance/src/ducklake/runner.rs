@@ -1319,10 +1319,7 @@ impl DuckDbMaintenanceExecutor {
             info!(
                 operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
                 deadline_remaining_ms = remaining_ms_until(deadline),
-                "ducklake maintenance blocking operation invoking DuckDB closure: \
-                 operation_kind={}, deadline_remaining_ms={}",
-                DUCKDB_MAINTENANCE_OPERATION_KIND,
-                remaining_ms_until(deadline)
+                "invoking duckdb maintenance blocking operation"
             );
             let res = operation(&pooled_conn.conn);
             let operation_duration_ms = operation_started.elapsed().as_millis() as u64;
@@ -1331,12 +1328,7 @@ impl DuckDbMaintenanceExecutor {
                 duration_ms = operation_duration_ms,
                 timed_out = watchdog.timed_out(),
                 result_is_error = res.is_err(),
-                "ducklake maintenance blocking operation DuckDB closure returned: \
-                 operation_kind={}, duration_ms={}, timed_out={}, result_is_error={}",
-                DUCKDB_MAINTENANCE_OPERATION_KIND,
-                operation_duration_ms,
-                watchdog.timed_out(),
-                res.is_err()
+                "duckdb maintenance blocking operation returned"
             );
             watchdog.finish();
             trace!(
@@ -2324,7 +2316,7 @@ async fn select_merge_tables(
         if table_name.is_etl_internal_table() {
             info!(
                 table = %table_name,
-                "ducklake rewrite-data-files table skipped because it is internal ETL metadata"
+                "ducklake rewrite-data-files table skipped because it is internal etl metadata"
             );
             continue;
         }
@@ -2388,7 +2380,7 @@ async fn select_rewrite_tables(
         if table_name.is_etl_internal_table() {
             info!(
                 table = %table_name,
-                "ducklake rewrite-data-files table skipped because it is internal ETL metadata"
+                "ducklake rewrite-data-files table skipped because it is internal etl metadata"
             );
             continue;
         }

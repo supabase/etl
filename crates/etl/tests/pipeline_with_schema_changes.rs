@@ -11,7 +11,7 @@ use etl::{
         event::{EventCondition, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline},
+        pipeline::{create_database_and_sync_done_pipeline_with_table, create_pipeline},
         schema::{
             assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
             assert_table_schema_column_names_types,
@@ -57,11 +57,7 @@ fn assert_column_default_contains<'a>(
     let expression = expression.to_ascii_lowercase();
 
     for fragment in fragments {
-        assert!(
-            expression.contains(&fragment.to_ascii_lowercase()),
-            "expected default expression for column {column_name} to contain {fragment:?}: \
-             {expression}"
-        );
+        assert!(expression.contains(&fragment.to_ascii_lowercase()));
     }
 }
 
@@ -79,17 +75,38 @@ fn assert_only_schema_snapshot<'a>(
     schema
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn relation_message_updates_when_column_added() {
+/// Schema mutation exercised by [`run_relation_schema_change`].
+#[derive(Clone, Copy)]
+enum RelationSchemaChange {
+    AddColumn,
+    DropColumn,
+    RenameColumn,
+    ChangeColumnType,
+    ChangeColumnDefault,
+    ChangeColumnNullability,
+}
+
+/// Verifies that one table-schema mutation produces the matching Relation,
+/// decodes the following row, and retains the current schema snapshot.
+async fn run_relation_schema_change(change: RelationSchemaChange) {
     init_test_tracing();
 
+    let table_suffix = match change {
+        RelationSchemaChange::AddColumn => "schema_add_column",
+        RelationSchemaChange::DropColumn => "schema_remove_column",
+        RelationSchemaChange::RenameColumn => "schema_rename_column",
+        RelationSchemaChange::ChangeColumnType => "schema_change_type",
+        RelationSchemaChange::ChangeColumnDefault => "schema_change_default",
+        RelationSchemaChange::ChangeColumnNullability => "schema_change_nullability",
+    };
     let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_ready_pipeline_with_table(
-            "schema_add_column",
+        create_database_and_sync_done_pipeline_with_table(
+            table_suffix,
             &[("name", "text not null"), ("age", "integer not null")],
         )
         .await;
 
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
@@ -97,23 +114,97 @@ async fn relation_message_updates_when_column_added() {
         ])
         .await;
 
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AddColumn { name: "email", data_type: "text not null" }],
-        )
-        .await
-        .unwrap();
+    let expected_columns = match change {
+        RelationSchemaChange::AddColumn => {
+            database
+                .alter_table(
+                    table_name.clone(),
+                    &[TableModification::AddColumn { name: "email", data_type: "text not null" }],
+                )
+                .await
+                .unwrap();
+            database
+                .insert_values(
+                    table_name.clone(),
+                    &["name", "age", "email"],
+                    &[&"Alice", &25, &"alice@example.com"],
+                )
+                .await
+                .unwrap();
+            vec![
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("email", Type::TEXT),
+            ]
+        }
+        RelationSchemaChange::DropColumn => {
+            database
+                .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
+                .await
+                .unwrap();
+            database.insert_values(table_name.clone(), &["name"], &[&"Bob"]).await.unwrap();
+            vec![("id", Type::INT8), ("name", Type::TEXT)]
+        }
+        RelationSchemaChange::RenameColumn => {
+            database
+                .alter_table(
+                    table_name.clone(),
+                    &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
+                )
+                .await
+                .unwrap();
+            database
+                .insert_values(table_name.clone(), &["full_name", "age"], &[&"Carol", &41])
+                .await
+                .unwrap();
+            vec![("id", Type::INT8), ("full_name", Type::TEXT), ("age", Type::INT4)]
+        }
+        RelationSchemaChange::ChangeColumnType => {
+            database
+                .alter_table(
+                    table_name.clone(),
+                    &[TableModification::AlterColumn { name: "age", alteration: "type bigint" }],
+                )
+                .await
+                .unwrap();
+            database
+                .insert_values(table_name.clone(), &["name", "age"], &[&"Dave", &45_i64])
+                .await
+                .unwrap();
+            vec![("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT8)]
+        }
+        RelationSchemaChange::ChangeColumnDefault => {
+            database
+                .alter_table(
+                    table_name.clone(),
+                    &[TableModification::AlterColumn { name: "age", alteration: "set default 42" }],
+                )
+                .await
+                .unwrap();
+            database.insert_values(table_name.clone(), &["name"], &[&"Eve"]).await.unwrap();
+            vec![("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)]
+        }
+        RelationSchemaChange::ChangeColumnNullability => {
+            database
+                .alter_table(
+                    table_name.clone(),
+                    &[TableModification::AlterColumn { name: "age", alteration: "drop not null" }],
+                )
+                .await
+                .unwrap();
+            database
+                .run_sql(&format!(
+                    "insert into {} (name, age) values ('Frank', null)",
+                    table_name.as_quoted_identifier()
+                ))
+                .await
+                .unwrap();
+            vec![("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)]
+        }
+    };
 
-    database
-        .insert_values(
-            table_name.clone(),
-            &["name", "age", "email"],
-            &[&"Alice", &25, &"alice@example.com"],
-        )
-        .await
-        .unwrap();
-
+    ready_notify.notified().await;
     events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -126,196 +217,83 @@ async fn relation_message_updates_when_column_added() {
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
-    assert_replicated_schema_column_names_types(
-        &r.replicated_table_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
-    );
+    assert_replicated_schema_column_names_types(&r.replicated_table_schema, &expected_columns);
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
-    assert_eq!(i.table_row.values().len(), 4);
+    assert_eq!(i.table_row.values().len(), expected_columns.len());
+    match change {
+        RelationSchemaChange::ChangeColumnDefault => {
+            assert_eq!(i.table_row.values()[2], Cell::I32(42));
+        }
+        RelationSchemaChange::ChangeColumnNullability => {
+            assert_eq!(i.table_row.values()[2], Cell::Null);
+        }
+        _ => {}
+    }
+    assert_eq!(
+        i.replicated_table_schema.inner().snapshot_id,
+        r.replicated_table_schema.inner().snapshot_id
+    );
 
-    // Verify cleanup retained the current schema.
+    let relation_age =
+        r.replicated_table_schema.column_schemas().find(|column| column.name == "age");
+    match change {
+        RelationSchemaChange::DropColumn => assert!(relation_age.is_none()),
+        RelationSchemaChange::ChangeColumnDefault => {
+            assert_eq!(relation_age.unwrap().default_expression.as_deref(), Some("42"));
+        }
+        RelationSchemaChange::ChangeColumnNullability => {
+            assert!(relation_age.unwrap().nullable);
+        }
+        _ => {}
+    }
+
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_only_schema_snapshot(
-        snapshots,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
-    );
+    let stored_schema = assert_only_schema_snapshot(snapshots, &expected_columns);
+    let stored_age = stored_schema.column_schemas.iter().find(|column| column.name == "age");
+    match change {
+        RelationSchemaChange::DropColumn => assert!(stored_age.is_none()),
+        RelationSchemaChange::ChangeColumnDefault => {
+            assert_eq!(stored_age.unwrap().default_expression.as_deref(), Some("42"));
+        }
+        RelationSchemaChange::ChangeColumnNullability => {
+            assert!(stored_age.unwrap().nullable);
+        }
+        _ => {}
+    }
+    assert_eq!(snapshots[0].0, r.replicated_table_schema.inner().snapshot_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn relation_message_updates_when_column_removed() {
-    init_test_tracing();
-
-    let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_ready_pipeline_with_table(
-            "schema_remove_column",
-            &[("name", "text not null"), ("age", "integer not null")],
-        )
-        .await;
-
-    let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
-        .await;
-
-    database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
-        .await
-        .unwrap();
-
-    database.insert_values(table_name.clone(), &["name"], &[&"Bob"]).await.unwrap();
-
-    events_notify.notified().await;
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let events = destination.get_events().await;
-    let grouped = group_events_by_type_and_table_id(&events);
-
-    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
-    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
-
-    let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
-        panic!("expected relation event");
-    };
-    assert_replicated_schema_column_names_types(
-        &r.replicated_table_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT)],
-    );
-    let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
-        panic!("expected insert event");
-    };
-    assert_eq!(i.table_row.values().len(), 2);
-
-    // Verify cleanup retained the current schema.
-    let table_schemas = store.get_table_schemas().await;
-    let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_only_schema_snapshot(snapshots, &[("id", Type::INT8), ("name", Type::TEXT)]);
+async fn relation_message_updates_when_column_is_added() {
+    run_relation_schema_change(RelationSchemaChange::AddColumn).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn relation_message_updates_when_column_renamed() {
-    init_test_tracing();
+async fn relation_message_updates_when_column_is_removed() {
+    run_relation_schema_change(RelationSchemaChange::DropColumn).await;
+}
 
-    let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_ready_pipeline_with_table(
-            "schema_rename_column",
-            &[("name", "text not null"), ("age", "integer not null")],
-        )
-        .await;
-
-    let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
-        .await;
-
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
-        )
-        .await
-        .unwrap();
-
-    database
-        .insert_values(table_name.clone(), &["full_name", "age"], &[&"Carol", &41])
-        .await
-        .unwrap();
-
-    events_notify.notified().await;
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let events = destination.get_events().await;
-    let grouped = group_events_by_type_and_table_id(&events);
-
-    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
-    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
-
-    let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
-        panic!("expected relation event");
-    };
-    assert_replicated_schema_column_names_types(
-        &r.replicated_table_schema,
-        &[("id", Type::INT8), ("full_name", Type::TEXT), ("age", Type::INT4)],
-    );
-    let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
-        panic!("expected insert event");
-    };
-    assert_eq!(i.table_row.values().len(), 3);
-
-    // Verify cleanup retained the current schema.
-    let table_schemas = store.get_table_schemas().await;
-    let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_only_schema_snapshot(
-        snapshots,
-        &[("id", Type::INT8), ("full_name", Type::TEXT), ("age", Type::INT4)],
-    );
+#[tokio::test(flavor = "multi_thread")]
+async fn relation_message_updates_when_column_is_renamed() {
+    run_relation_schema_change(RelationSchemaChange::RenameColumn).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn relation_message_updates_when_column_type_changes() {
-    init_test_tracing();
+    run_relation_schema_change(RelationSchemaChange::ChangeColumnType).await;
+}
 
-    let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_ready_pipeline_with_table(
-            "schema_change_type",
-            &[("name", "text not null"), ("age", "integer not null")],
-        )
-        .await;
+#[tokio::test(flavor = "multi_thread")]
+async fn relation_message_updates_when_column_default_changes() {
+    run_relation_schema_change(RelationSchemaChange::ChangeColumnDefault).await;
+}
 
-    let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
-        .await;
-
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AlterColumn { name: "age", alteration: "type bigint" }],
-        )
-        .await
-        .unwrap();
-
-    database
-        .insert_values(table_name.clone(), &["name", "age"], &[&"Dave", &45_i64])
-        .await
-        .unwrap();
-
-    events_notify.notified().await;
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let events = destination.get_events().await;
-    let grouped = group_events_by_type_and_table_id(&events);
-
-    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
-    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
-
-    let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
-        panic!("expected relation event");
-    };
-    assert_replicated_schema_column_names_types(
-        &r.replicated_table_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT8)],
-    );
-    let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
-        panic!("expected insert event");
-    };
-    assert_eq!(i.table_row.values().len(), 3);
-
-    // Verify cleanup retained the current schema.
-    let table_schemas = store.get_table_schemas().await;
-    let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_only_schema_snapshot(
-        snapshots,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT8)],
-    );
+#[tokio::test(flavor = "multi_thread")]
+async fn relation_message_updates_when_column_nullability_changes() {
+    run_relation_schema_change(RelationSchemaChange::ChangeColumnNullability).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -323,7 +301,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
     init_test_tracing();
 
     let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
-        create_database_and_ready_pipeline_with_table(
+        create_database_and_sync_done_pipeline_with_table(
             "schema_add_column_no_dml",
             &[("name", "text not null"), ("age", "integer not null")],
         )
@@ -350,16 +328,12 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
     let snapshots = table_schemas.get(&table_id).unwrap();
     assert_eq!(snapshots.len(), 2);
     assert_schema_snapshots_ordering(snapshots, true);
-
-    let (_, first_schema) = &snapshots[0];
     assert_table_schema_column_names_types(
-        first_schema,
+        &snapshots[0].1,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
     );
-
-    let (_, second_schema) = &snapshots[1];
     assert_table_schema_column_names_types(
-        second_schema,
+        &snapshots[1].1,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 
@@ -433,6 +407,10 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         panic!("expected insert event");
     };
     assert_eq!(insert.table_row.values().len(), 4);
+    assert_eq!(
+        insert.replicated_table_schema.inner().snapshot_id,
+        relation.replicated_table_schema.inner().snapshot_id
+    );
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
@@ -440,6 +418,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         snapshots,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
+    assert_eq!(snapshots[0].0, relation.replicated_table_schema.inner().snapshot_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -447,12 +426,13 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
     init_test_tracing();
 
     let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_ready_pipeline_with_table(
+        create_database_and_sync_done_pipeline_with_table(
             "schema_default_shapes",
             &[("name", "text not null")],
         )
         .await;
 
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
@@ -521,6 +501,7 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
         .await
         .unwrap();
 
+    ready_notify.notified().await;
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
@@ -612,6 +593,10 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
         matches!(&values[11], Cell::Uuid(uuid) if uuid.to_string() == "00000000-0000-0000-0000-000000000001")
     );
     assert!(matches!(values[12], Cell::TimestampTz(_)));
+    assert_eq!(
+        insert.replicated_table_schema.inner().snapshot_id,
+        relation.replicated_table_schema.inner().snapshot_id
+    );
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
@@ -652,6 +637,7 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
         &["00000000-0000-0000-0000-000000000001"],
     );
     assert_column_default_contains(&schema.column_schemas, "expires_at", &["now", "30 days"]);
+    assert_eq!(snapshots[0].0, relation.replicated_table_schema.inner().snapshot_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -659,20 +645,20 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     init_test_tracing();
 
     let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
-        create_database_and_ready_pipeline_with_table(
+        create_database_and_sync_done_pipeline_with_table(
             "schema_multi_change_restart",
             &[("name", "text not null"), ("age", "integer not null"), ("status", "text not null")],
         )
         .await;
 
     // Add column + insert, then restart.
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
         ])
         .await;
-
     database
         .alter_table(
             table_name.clone(),
@@ -690,6 +676,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
+    ready_notify.notified().await;
     events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -710,7 +697,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
             EventCondition::TableCount(EventType::Insert, table_id, 2),
         ])
         .await;
-
     database
         .alter_table(
             table_name.clone(),
@@ -756,7 +742,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
             EventCondition::TableCount(EventType::Insert, table_id, 3),
         ])
         .await;
-
     database
         .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "status" }])
         .await
@@ -791,7 +776,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
             EventCondition::TableCount(EventType::Insert, table_id, 4),
         ])
         .await;
-
     database
         .alter_table(
             table_name.clone(),
@@ -842,6 +826,10 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         panic!("expected insert event");
     };
     assert_eq!(i.table_row.values().len(), 5);
+    assert_eq!(
+        i.replicated_table_schema.inner().snapshot_id,
+        r.replicated_table_schema.inner().snapshot_id
+    );
 
     // Verify cleanup across restarts retained only the current schema.
     let table_schemas = store.get_table_schemas().await;
@@ -856,6 +844,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
             ("created_at", Type::TIMESTAMP),
         ],
     );
+    assert_eq!(snapshots[0].0, r.replicated_table_schema.inner().snapshot_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -896,12 +885,14 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         destination.clone(),
     );
 
+    let parent_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(parent_table_id).await;
     let parent_ready_notify =
         state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    parent_ready_notify.notified().await;
+    parent_sync_complete_notify.notified().await;
 
     // Wait for the Relation event (schema change) and Insert event.
     let events_notify = destination
@@ -932,6 +923,7 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         .await
         .unwrap();
 
+    parent_ready_notify.notified().await;
     events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -961,6 +953,10 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         panic!("expected insert event");
     };
     assert_eq!(i.table_row.values().len(), 4);
+    assert_eq!(
+        i.replicated_table_schema.inner().snapshot_id,
+        r.replicated_table_schema.inner().snapshot_id
+    );
 
     // Verify cleanup retained the current schema.
     let table_schemas = state_store.get_table_schemas().await;
@@ -974,4 +970,5 @@ async fn partitioned_table_schema_change_updates_relation_message() {
             ("category", Type::TEXT),
         ],
     );
+    assert_eq!(snapshots[0].0, r.replicated_table_schema.inner().snapshot_id);
 }

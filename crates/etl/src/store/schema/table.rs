@@ -1,34 +1,6 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
-
-use tokio_postgres::types::PgLsn;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::schema::{SnapshotId, TableId, TableSchema};
-
-/// Per-table schema cleanup retention boundary.
-///
-/// Retention can be bounded by a stored schema snapshot that the destination
-/// still needs, or by ETL-owned durable replication progress. Both are LSN
-/// values, but the variant records why that boundary was chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TableSchemaRetention {
-    /// Retain schemas according to a destination-useful schema snapshot.
-    SnapshotId(SnapshotId),
-    /// Retain schemas according to ETL-owned durable replication progress.
-    DurableFlushLsn(PgLsn),
-}
-
-impl TableSchemaRetention {
-    /// Returns the underlying LSN used as the retention boundary.
-    pub fn to_lsn(self) -> PgLsn {
-        match self {
-            Self::SnapshotId(snapshot_id) => snapshot_id.into(),
-            Self::DurableFlushLsn(lsn) => lsn,
-        }
-    }
-}
 
 /// In-memory index of table schema snapshots grouped by table.
 ///
@@ -129,30 +101,28 @@ impl TableSchemaSnapshots {
     /// limits.
     ///
     /// For each table, this preserves the newest schema at or before the
-    /// retention LSN and every newer schema. Older schemas are removed.
-    pub(crate) fn prune(
-        &mut self,
-        table_schema_retentions: &HashMap<TableId, TableSchemaRetention>,
-    ) -> u64 {
+    /// retention snapshot and every newer schema. Older schemas are removed.
+    pub(crate) fn prune(&mut self, retention_snapshot_ids: &BTreeMap<TableId, SnapshotId>) -> u64 {
         let mut removed_count = 0u64;
 
         for (table_id, schemas) in &mut self.table_schemas {
-            let Some(retention) = table_schema_retentions.get(table_id) else {
+            let Some(retention_snapshot_id) = retention_snapshot_ids.get(table_id) else {
                 continue;
             };
 
-            // We find the biggest snapshot id <= than the retention one. We can rely on the
-            // sorted properties of the BTreeMap to perform this traversal from
-            // the right without finding a maximum by scanning the whole list.
-            let retention_snapshot_id = SnapshotId::from(retention.to_lsn());
-            let retained_snapshot_id =
-                schemas.keys().rfind(|snapshot_id| **snapshot_id <= retention_snapshot_id).copied();
+            // The map is ordered by `(commit_lsn, message_lsn)`, so the last
+            // entry at or below the inclusive boundary is the schema active at
+            // that point.
+            let retained_snapshot_id = schemas
+                .range(..=retention_snapshot_id)
+                .next_back()
+                .map(|(snapshot_id, _)| *snapshot_id);
 
             let Some(retained_snapshot_id) = retained_snapshot_id else {
                 continue;
             };
 
-            // We keep all snapshots that are >= than the retained one.
+            // Keep the retained snapshot and every newer snapshot.
             let before_count = schemas.len();
             schemas.retain(|snapshot_id, _| *snapshot_id >= retained_snapshot_id);
             removed_count =
@@ -165,21 +135,31 @@ impl TableSchemaSnapshots {
 
 #[cfg(test)]
 mod tests {
-    use tokio_postgres::types::Type;
+    use tokio_postgres::types::{PgLsn, Type};
 
     use super::*;
     use crate::schema::{ColumnSchema, TableName};
 
+    /// Creates a synthetic composite snapshot ID for tests.
+    fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+        SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+    }
+
     /// Builds a schema with a snapshot-specific non-key column.
     fn test_schema(table_id: TableId, snapshot_id: u64) -> TableSchema {
+        test_schema_at(table_id, test_snapshot_id(snapshot_id, snapshot_id))
+    }
+
+    /// Builds a schema at an exact composite snapshot.
+    fn test_schema_at(table_id: TableId, snapshot_id: SnapshotId) -> TableSchema {
         TableSchema::with_snapshot_id(
             table_id,
             TableName::new("public".to_owned(), format!("table_{table_id}")),
             vec![
                 ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new(format!("col_at_{snapshot_id}"), Type::TEXT, -1, 2, true),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, true),
             ],
-            SnapshotId::from(snapshot_id),
+            snapshot_id,
         )
     }
 
@@ -192,16 +172,56 @@ mod tests {
         snapshots.insert(test_schema(table_id, 300));
 
         let schema = snapshots
-            .get_at_or_before(table_id, SnapshotId::from(250))
+            .get_at_or_before(table_id, test_snapshot_id(250, 250))
             .expect("schema should exist");
-        assert_eq!(schema.snapshot_id, SnapshotId::from(100));
+        assert_eq!(schema.snapshot_id, test_snapshot_id(100, 100));
 
         let schema = snapshots
-            .get_at_or_before(table_id, SnapshotId::from(300))
+            .get_at_or_before(table_id, test_snapshot_id(300, 300))
             .expect("schema should exist");
-        assert_eq!(schema.snapshot_id, SnapshotId::from(300));
+        assert_eq!(schema.snapshot_id, test_snapshot_id(300, 300));
 
-        assert!(snapshots.get_at_or_before(table_id, SnapshotId::from(50)).is_none());
+        assert!(snapshots.get_at_or_before(table_id, test_snapshot_id(50, 50)).is_none());
+    }
+
+    #[test]
+    fn restart_frontier_selects_latest_schema_in_latest_committed_transaction() {
+        let table_id = TableId::new(10);
+        let mut snapshots = TableSchemaSnapshots::default();
+        let first_snapshot_id = SnapshotId::new(PgLsn::from(300), PgLsn::from(100));
+        let second_snapshot_id = SnapshotId::new(PgLsn::from(300), PgLsn::from(200));
+        let next_commit_snapshot_id = SnapshotId::new(PgLsn::from(500), PgLsn::from(150));
+
+        snapshots.insert(test_schema(table_id, 0));
+        snapshots.insert(test_schema_at(table_id, first_snapshot_id));
+        snapshots.insert(test_schema_at(table_id, second_snapshot_id));
+        snapshots.insert(test_schema_at(table_id, next_commit_snapshot_id));
+        snapshots.insert(test_schema_at(table_id, SnapshotId::max()));
+
+        let schema = snapshots
+            .get_at_or_before(table_id, SnapshotId::at_lsn(PgLsn::from(200)))
+            .expect("initial schema should remain eligible");
+        assert_eq!(schema.snapshot_id, SnapshotId::initial());
+
+        let schema = snapshots
+            .get_at_or_before(table_id, SnapshotId::at_lsn(PgLsn::from(300)))
+            .expect("committed schema should be eligible");
+        assert_eq!(schema.snapshot_id, second_snapshot_id);
+
+        let schema = snapshots
+            .get_at_or_before(table_id, SnapshotId::at_lsn(PgLsn::from(499)))
+            .expect("previous committed schema should remain active between commits");
+        assert_eq!(schema.snapshot_id, second_snapshot_id);
+
+        let schema = snapshots
+            .get_at_or_before(table_id, SnapshotId::at_lsn(PgLsn::from(500)))
+            .expect("next committed schema should be eligible");
+        assert_eq!(schema.snapshot_id, next_commit_snapshot_id);
+
+        let schema = snapshots
+            .get_at_or_before(table_id, SnapshotId::at_lsn(PgLsn::from(u64::MAX)))
+            .expect("maximum snapshot should be eligible at the maximum WAL frontier");
+        assert_eq!(schema.snapshot_id, SnapshotId::max());
     }
 
     #[test]
@@ -215,13 +235,13 @@ mod tests {
         snapshots.insert_with_eviction(test_schema(table_id, 300), 2);
         snapshots.insert_with_eviction(test_schema(other_table_id, 50), 2);
 
-        assert!(snapshots.get_at_or_before(table_id, SnapshotId::from(100)).is_none());
+        assert!(snapshots.get_at_or_before(table_id, test_snapshot_id(100, 100)).is_none());
         assert_eq!(
             snapshots
-                .get_at_or_before(table_id, SnapshotId::from(250))
+                .get_at_or_before(table_id, test_snapshot_id(250, 250))
                 .expect("schema should exist")
                 .snapshot_id,
-            SnapshotId::from(200)
+            test_snapshot_id(200, 200)
         );
         assert_eq!(snapshots.snapshots_count(table_id), 2);
         assert_eq!(snapshots.snapshots_count(other_table_id), 1);
@@ -242,26 +262,26 @@ mod tests {
         }
         snapshots.insert(test_schema(untouched_table_id, 0));
 
-        let removed = snapshots.prune(&HashMap::from([
-            (table_id, TableSchemaRetention::SnapshotId(SnapshotId::from(250))),
-            (other_table_id, TableSchemaRetention::DurableFlushLsn(SnapshotId::from(150).into())),
+        let removed = snapshots.prune(&BTreeMap::from([
+            (table_id, test_snapshot_id(250, 250)),
+            (other_table_id, SnapshotId::at_lsn(PgLsn::from(150))),
         ]));
 
         assert_eq!(removed, 3);
-        assert!(snapshots.get_at_or_before(table_id, SnapshotId::from(100)).is_none());
+        assert!(snapshots.get_at_or_before(table_id, test_snapshot_id(100, 100)).is_none());
         assert_eq!(
             snapshots
-                .get_at_or_before(table_id, SnapshotId::from(250))
+                .get_at_or_before(table_id, test_snapshot_id(250, 250))
                 .expect("schema should exist")
                 .snapshot_id,
-            SnapshotId::from(200)
+            test_snapshot_id(200, 200)
         );
         assert_eq!(
             snapshots
-                .get_at_or_before(table_id, SnapshotId::from(400))
+                .get_at_or_before(table_id, test_snapshot_id(400, 400))
                 .expect("schema should exist")
                 .snapshot_id,
-            SnapshotId::from(300)
+            test_snapshot_id(300, 300)
         );
         assert_eq!(snapshots.snapshots_count(other_table_id), 1);
         assert_eq!(snapshots.snapshots_count(untouched_table_id), 1);
@@ -274,13 +294,56 @@ mod tests {
 
         snapshots.insert(test_schema(table_id, 200));
 
-        let removed = snapshots.prune(&HashMap::from([(
-            table_id,
-            TableSchemaRetention::SnapshotId(SnapshotId::from(100)),
-        )]));
+        let removed = snapshots.prune(&BTreeMap::from([(table_id, test_snapshot_id(100, 100))]));
 
         assert_eq!(removed, 0);
         assert_eq!(snapshots.snapshots_count(table_id), 1);
+    }
+
+    #[test]
+    fn prune_exact_boundary_preserves_earlier_message_in_same_commit() {
+        let table_id = TableId::new(10);
+        let mut snapshots = TableSchemaSnapshots::default();
+        let first_snapshot_id = SnapshotId::new(PgLsn::from(300), PgLsn::from(100));
+        let second_snapshot_id = SnapshotId::new(PgLsn::from(300), PgLsn::from(200));
+
+        snapshots.insert(test_schema(table_id, 0));
+        snapshots.insert(test_schema_at(table_id, first_snapshot_id));
+        snapshots.insert(test_schema_at(table_id, second_snapshot_id));
+
+        let removed = snapshots.prune(&BTreeMap::from([(table_id, first_snapshot_id)]));
+
+        assert_eq!(removed, 1);
+        assert_eq!(snapshots.snapshots_count(table_id), 2);
+        assert_eq!(
+            snapshots
+                .get_at_or_before(table_id, first_snapshot_id)
+                .expect("destination snapshot should remain")
+                .snapshot_id,
+            first_snapshot_id
+        );
+        assert_eq!(
+            snapshots
+                .get_at_or_before(table_id, SnapshotId::at_lsn(PgLsn::from(300)))
+                .expect("later same-commit snapshot should remain")
+                .snapshot_id,
+            second_snapshot_id
+        );
+    }
+
+    #[test]
+    fn prune_zero_boundary_preserves_initial_and_newer_snapshots() {
+        let table_id = TableId::new(10);
+        let mut snapshots = TableSchemaSnapshots::default();
+
+        snapshots.insert(test_schema_at(table_id, SnapshotId::initial()));
+        snapshots.insert(test_schema_at(table_id, test_snapshot_id(2, 2)));
+
+        let removed = snapshots.prune(&BTreeMap::from([(table_id, SnapshotId::initial())]));
+
+        assert_eq!(removed, 0);
+        assert_eq!(snapshots.snapshots_count(table_id), 2);
+        assert!(snapshots.get_at_or_before(table_id, SnapshotId::initial()).is_some());
     }
 
     #[test]
@@ -292,17 +355,11 @@ mod tests {
             snapshots.insert(test_schema(table_id, snapshot_id));
         }
 
-        let newer_retention = HashMap::from([(
-            table_id,
-            TableSchemaRetention::DurableFlushLsn(SnapshotId::from(350).into()),
-        )]);
+        let newer_retention = BTreeMap::from([(table_id, SnapshotId::at_lsn(PgLsn::from(350)))]);
         assert_eq!(snapshots.prune(&newer_retention), 2);
         assert_eq!(snapshots.prune(&newer_retention), 0);
 
-        let older_retention = HashMap::from([(
-            table_id,
-            TableSchemaRetention::DurableFlushLsn(SnapshotId::from(250).into()),
-        )]);
+        let older_retention = BTreeMap::from([(table_id, SnapshotId::at_lsn(PgLsn::from(250)))]);
         assert_eq!(snapshots.prune(&older_retention), 0);
         assert_eq!(snapshots.snapshots_count(table_id), 1);
         assert_eq!(
@@ -310,7 +367,7 @@ mod tests {
                 .get_at_or_before(table_id, SnapshotId::max())
                 .expect("newest schema should remain")
                 .snapshot_id,
-            SnapshotId::from(300)
+            test_snapshot_id(300, 300)
         );
     }
 }

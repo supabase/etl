@@ -21,6 +21,7 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
+    recovery::ensure_relation_schema_transition,
     snowflake::{
         Client,
         auth::{AuthManager, HttpExchanger, TokenProvider},
@@ -472,24 +473,19 @@ where
         let current_replication_mask = metadata.replication_mask.clone();
         let new_replication_mask = new_schema.replication_mask().clone();
 
-        // Snowflake waits for all preceding row batches to become durable
-        // before applying schema DDL. On replay, those rows are at or below the
-        // channel's restored committed offset and will be skipped. The older
-        // relation event is therefore already reflected in the destination,
-        // diffing backwards could drop newer columns and delete their data.
-        if new_snapshot_id < current_snapshot_id {
-            info!(
-                table_id = %table_id,
-                received_snapshot_id = %new_snapshot_id,
-                applied_snapshot_id = %current_snapshot_id,
-                "skipping stale Snowflake relation event"
-            );
-            return Ok(false);
-        }
+        // A relation carries no channel offset proving replay coverage or
+        // ordering between masks. Reject older snapshots and equal-snapshot
+        // mask conflicts before relying on provider offsets or diffing DDL.
+        ensure_relation_schema_transition(
+            "Snowflake",
+            table_id,
+            current_snapshot_id,
+            &current_replication_mask,
+            new_snapshot_id,
+            &new_replication_mask,
+        )?;
 
-        if current_snapshot_id == new_snapshot_id
-            && current_replication_mask == new_replication_mask
-        {
+        if current_snapshot_id == new_snapshot_id {
             info!(table_id = ?table_id, "schema unchanged, skipping relation event");
             return Ok(false);
         }
@@ -765,6 +761,11 @@ mod tests {
     use super::*;
     use crate::snowflake::{Config, Error, SqlClient};
 
+    /// Creates a synthetic composite snapshot ID for tests.
+    fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+        SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+    }
+
     /// Token provider that fails if a no-network unit test reaches HTTP setup.
     struct UnusedTokenProvider;
 
@@ -844,9 +845,9 @@ mod tests {
         );
     }
 
-    /// A stale relation event must not drive reverse Snowflake DDL.
+    /// A stale relation event must fail before driving reverse Snowflake DDL.
     #[tokio::test]
-    async fn stale_relation_event_is_skipped() {
+    async fn stale_relation_event_is_rejected() {
         let (destination, store) = test_destination();
         let table_id = TableId::new(3);
         let table_name = TableName::new("public".to_owned(), "users".to_owned());
@@ -857,7 +858,7 @@ mod tests {
                 ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ],
-            SnapshotId::new(PgLsn::from(100_u64)),
+            test_snapshot_id(100_u64, 100_u64),
         ));
         let stale_schema = ReplicatedTableSchema::all(stale_table_schema);
         let applied_table_schema = Arc::new(TableSchema::with_snapshot_id(
@@ -868,7 +869,7 @@ mod tests {
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
                 ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
             ],
-            SnapshotId::new(PgLsn::from(200_u64)),
+            test_snapshot_id(200_u64, 200_u64),
         ));
         let applied_schema = ReplicatedTableSchema::all(applied_table_schema);
         let metadata = DestinationTableMetadata::new_applied(
@@ -878,18 +879,15 @@ mod tests {
         );
         store.store_destination_table_metadata(table_id, metadata.clone()).await.unwrap();
 
-        let status = destination
+        let error = destination
             .writer
             .process_admitted_events(vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100_u64),
-                commit_lsn: PgLsn::from(100_u64),
-                tx_ordinal: 0,
                 replicated_table_schema: stale_schema,
             })])
             .await
-            .expect("stale relation event should be skipped");
+            .expect_err("stale relation event should be rejected");
 
-        assert_eq!(status, DestinationWriteStatus::Durable);
+        assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
         assert_eq!(store.get_destination_table_metadata(table_id).await.unwrap(), Some(metadata));
     }
 

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use etl::{
+    data::{Cell, TableRow},
     destination::{DestinationTableMetadata, DestinationTableSchemaStatus},
     error::ErrorKind,
     event::{Event, EventType, RelationEvent},
@@ -9,7 +10,7 @@ use etl::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
         TableName, TableSchema, Type,
     },
-    store::{SchemaStore, StateStore, TableStateType},
+    store::{SchemaStore, StateStore},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -64,6 +65,11 @@ const DELETE_FLOW_TABLE: &str = "test_delete__flow";
 const RESTART_FLOW_TABLE: &str = "test_restart__flow";
 const RESET_COPY_TABLE: &str = "test_reset__copy";
 const TRUNCATE_FLOW_TABLE: &str = "test_truncate__flow";
+
+/// Creates a synthetic composite snapshot ID for tests.
+fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+    SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+}
 
 /// Days from 1970-01-01 to 2024-01-15 (used to verify the `date_col`
 /// round-trip).
@@ -236,8 +242,7 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -248,7 +253,7 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: every column round-trips correctly ---
@@ -361,8 +366,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -373,7 +377,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
@@ -514,8 +518,7 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -526,7 +529,7 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: ClickHouse data matches Postgres exactly ---
@@ -668,8 +671,7 @@ async fn pre_1970_and_far_future_dates_round_trip_inner(engine: ClickHouseEngine
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -680,7 +682,7 @@ async fn pre_1970_and_far_future_dates_round_trip_inner(engine: ClickHouseEngine
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: each date encodes as the expected signed day offset ---
@@ -782,8 +784,7 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -794,7 +795,7 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
@@ -883,8 +884,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -895,7 +895,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify first run produced exactly one row.
@@ -1004,12 +1004,11 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
         destination,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1044,12 +1043,11 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1106,8 +1104,7 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1118,7 +1115,7 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // Verify both rows arrived from table copy.
     let truncate_query =
@@ -1221,8 +1218,7 @@ async fn intermediate_flush_preserves_all_rows_inner(engine: ClickHouseEngine) {
         )
         .await;
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     // --- WHEN: pipeline copies data with aggressive flush splitting ---
     let mut pipeline = create_pipeline(
@@ -1234,7 +1230,7 @@ async fn intermediate_flush_preserves_all_rows_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: all rows arrive despite being split across many INSERTs ---
@@ -1329,10 +1325,8 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_a_ready_notify =
-        store.notify_on_table_state_type(table_a_id, TableStateType::Ready).await;
-    let table_b_ready_notify =
-        store.notify_on_table_state_type(table_b_id, TableStateType::Ready).await;
+    let table_a_sync_complete_notify = store.notify_on_table_sync_complete(table_a_id).await;
+    let table_b_sync_complete_notify = store.notify_on_table_sync_complete(table_b_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1343,7 +1337,7 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
     );
 
     pipeline.start().await.unwrap();
-    tokio::join!(table_a_ready_notify.notified(), table_b_ready_notify.notified());
+    tokio::join!(table_a_sync_complete_notify.notified(), table_b_sync_complete_notify.notified());
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1512,8 +1506,7 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1524,7 +1517,7 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1643,8 +1636,7 @@ async fn exclusive_large_batch_table_copy_inner(engine: ClickHouseEngine) {
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     // --- WHEN: pipeline copies all rows ---
     let mut pipeline = create_pipeline(
@@ -1656,7 +1648,7 @@ async fn exclusive_large_batch_table_copy_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: all rows arrive, spot-check a sample ---
@@ -1804,8 +1796,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1816,7 +1807,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // Verify initial state.
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
@@ -1968,8 +1959,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
             .await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1981,7 +1971,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -2134,8 +2124,7 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -2146,7 +2135,7 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // Verify initial schema.
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
@@ -2264,6 +2253,13 @@ struct StaleReplayRow {
     email: Option<String>,
 }
 
+/// Retained row shape for interrupted publication-mask recovery.
+#[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
+struct RecoveryMaskRow {
+    id: i64,
+    name: Option<String>,
+}
+
 /// Tests that a stale relation event replayed after a restart is rejected
 /// instead of rewinding the destination schema.
 ///
@@ -2334,7 +2330,7 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -2345,7 +2341,7 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
+    table_sync_complete.notified().await;
 
     let initial_metadata = store
         .get_applied_destination_table_metadata(table_id)
@@ -2405,9 +2401,6 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
     let result = restarted_destination
         .write_events(vec![Event::Relation(RelationEvent {
-            start_lsn: PgLsn::from(0),
-            commit_lsn: PgLsn::from(0),
-            tx_ordinal: 0,
             replicated_table_schema: stale_schema,
         })])
         .await;
@@ -2478,7 +2471,7 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
             ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
         ],
-        SnapshotId::new(PgLsn::from(100)),
+        test_snapshot_id(100_u64, 100_u64),
     ));
     let replication_mask = ReplicationMask::all(&table_schema);
     let stale_schema =
@@ -2487,11 +2480,11 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
     // Interrupted schema change: metadata targets snapshot 200, previous 100.
     let metadata = DestinationTableMetadata::new_applied(
         "public_stale_recovery".to_owned(),
-        SnapshotId::new(PgLsn::from(100)),
+        test_snapshot_id(100_u64, 100_u64),
         replication_mask.clone(),
     )
     .with_schema_change(
-        SnapshotId::new(PgLsn::from(200)),
+        test_snapshot_id(200_u64, 200_u64),
         replication_mask,
         DestinationTableSchemaStatus::Applying,
     );
@@ -2502,9 +2495,58 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
         .await;
 
     let err = destination
-        .write_table_rows(&stale_schema, vec![])
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: stale_schema,
+        })])
         .await
         .expect_err("recovery with a stale schema snapshot should be rejected");
+    assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
+}
+
+/// Interrupted recovery rejects an equal snapshot with a different publication
+/// mask instead of applying DDL for schema state other than the recorded
+/// target.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let table_id = TableId::new(4245);
+    let table_schema = Arc::new(TableSchema::with_snapshot_id(
+        table_id,
+        TableName::new("public".to_owned(), "mask_recovery".to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+        ],
+        test_snapshot_id(200_u64, 200_u64),
+    ));
+    let target_mask = ReplicationMask::all(&table_schema);
+    let arriving_schema =
+        ReplicatedTableSchema::from_mask(table_schema, ReplicationMask::from_bytes(vec![1, 0]));
+    let metadata = DestinationTableMetadata::new_applied(
+        "public_mask_recovery".to_owned(),
+        test_snapshot_id(100_u64, 100_u64),
+        target_mask.clone(),
+    )
+    .with_schema_change(
+        test_snapshot_id(200_u64, 200_u64),
+        target_mask,
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(table_id, metadata).await.unwrap();
+
+    let destination =
+        clickhouse_db.build_destination_with_engine(store, ClickHouseEngine::MergeTree).await;
+    let err = destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: arriving_schema,
+        })])
+        .await
+        .expect_err("Recovery with a mismatched replication mask should be rejected");
+
     assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
 }
 
@@ -2520,13 +2562,14 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
 ///
 /// # WHEN
 ///
-/// A write arrives carrying the target snapshot 200, as happens when the
-/// rows following the interrupted relation event replay after a restart.
+/// A relation event arrives carrying the target snapshot 200 and its exact
+/// replication mask.
 ///
 /// # THEN
 ///
 /// Recovery replays the interrupted diff (adds `email`), transitions the
-/// metadata to `Applied` at snapshot 200, and the write succeeds.
+/// metadata to `Applied` at snapshot 200, and the relation succeeds without a
+/// synthetic DML event sequence key.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     init_test_tracing();
@@ -2548,7 +2591,7 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
             table_id,
             table_name.clone(),
             old_columns.clone(),
-            SnapshotId::new(PgLsn::from(100)),
+            test_snapshot_id(100_u64, 100_u64),
         ))
         .await
         .unwrap();
@@ -2568,7 +2611,7 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         table_id,
         table_name,
         new_columns,
-        SnapshotId::new(PgLsn::from(200)),
+        test_snapshot_id(200_u64, 200_u64),
     ));
     let new_mask = ReplicationMask::all(&new_table_schema);
     let new_schema = ReplicatedTableSchema::from_mask(new_table_schema, new_mask.clone());
@@ -2583,11 +2626,11 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     let clickhouse_table_name = applied_metadata.destination_table_id.clone();
     let interrupted_metadata = DestinationTableMetadata::new_applied(
         clickhouse_table_name.clone(),
-        SnapshotId::new(PgLsn::from(100)),
+        test_snapshot_id(100_u64, 100_u64),
         old_mask,
     )
     .with_schema_change(
-        SnapshotId::new(PgLsn::from(200)),
+        test_snapshot_id(200_u64, 200_u64),
         new_mask,
         DestinationTableSchemaStatus::Applying,
     );
@@ -2598,7 +2641,10 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     let restarted_destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;
-    restarted_destination.write_table_rows(&new_schema, vec![]).await.unwrap();
+    restarted_destination
+        .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: new_schema })])
+        .await
+        .unwrap();
 
     let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
     assert_eq!(columns, vec!["id", "name", "email"], "recovery must add the interrupted column");
@@ -2610,7 +2656,104 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         .expect("metadata should be applied after recovery");
     assert_eq!(
         recovered_metadata.snapshot_id,
-        SnapshotId::new(PgLsn::from(200)),
+        test_snapshot_id(200_u64, 200_u64),
         "recovery must mark the target snapshot applied"
     );
+}
+
+/// Tests that recovery removes a column excluded by an interrupted
+/// publication-mask change.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+
+    let table_id = TableId::new(4244);
+    let table_name = TableName::new("public".to_owned(), "recovery_mask_contraction".to_owned());
+    let columns = vec![
+        ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+        ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+        ColumnSchema::new("hidden".to_owned(), Type::TEXT, -1, 3, true),
+    ];
+    let old_table_schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            table_id,
+            table_name.clone(),
+            columns.clone(),
+            test_snapshot_id(100_u64, 100_u64),
+        ))
+        .await
+        .unwrap();
+    let old_mask = ReplicationMask::all(&old_table_schema);
+    let old_schema = ReplicatedTableSchema::from_mask(old_table_schema, old_mask.clone());
+
+    let destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+    destination
+        .write_table_rows(
+            &old_schema,
+            vec![TableRow::new(vec![
+                Cell::I64(1),
+                Cell::String("Alice".to_owned()),
+                Cell::String("private".to_owned()),
+            ])],
+        )
+        .await
+        .unwrap();
+
+    let target_table_schema = Arc::new(TableSchema::with_snapshot_id(
+        table_id,
+        table_name,
+        columns,
+        test_snapshot_id(200_u64, 200_u64),
+    ));
+    let target_mask = ReplicationMask::from_bytes(vec![1, 1, 0]);
+    let target_schema =
+        ReplicatedTableSchema::from_mask(Arc::clone(&target_table_schema), target_mask.clone());
+
+    let applied_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation");
+    let clickhouse_table_name = applied_metadata.destination_table_id.clone();
+    let interrupted_metadata = DestinationTableMetadata::new_applied(
+        clickhouse_table_name.clone(),
+        test_snapshot_id(100_u64, 100_u64),
+        old_mask,
+    )
+    .with_schema_change(
+        target_table_schema.snapshot_id,
+        target_mask.clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
+
+    let restarted_destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+    restarted_destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: target_schema,
+        })])
+        .await
+        .unwrap();
+
+    assert_eq!(clickhouse_db.column_names(&clickhouse_table_name).await, vec!["id", "name"]);
+    let recovered_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should be applied after recovery");
+    assert_eq!(recovered_metadata.snapshot_id, target_table_schema.snapshot_id);
+    assert_eq!(recovered_metadata.replication_mask, target_mask);
+
+    let rows: Vec<RecoveryMaskRow> = clickhouse_db
+        .query(&format!("SELECT id, name FROM \"{clickhouse_table_name}\" ORDER BY id"))
+        .await;
+    assert_eq!(rows, vec![RecoveryMaskRow { id: 1, name: Some("Alice".to_owned()) }]);
 }

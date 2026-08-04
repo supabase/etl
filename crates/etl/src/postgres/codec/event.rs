@@ -29,8 +29,8 @@ pub(crate) const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
 
 /// Represents a schema change message emitted by Postgres event trigger.
 ///
-/// This message is emitted when ALTER TABLE commands are executed on tables
-/// that are part of a publication.
+/// This message is emitted when supported table or publication commands affect
+/// tables that are part of a publication.
 ///
 /// Unknown fields are ignored on purpose so the SQL payload can grow richer
 /// without forcing a synchronized rollout of every consumer.
@@ -38,17 +38,18 @@ pub(crate) const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
 pub(crate) struct SchemaChangeMessage {
     /// The command tag from `pg_event_trigger_ddl_commands().command_tag`.
     pub(crate) command_tag: String,
+    /// The publication changed by an `ALTER PUBLICATION` command.
+    ///
+    /// This is absent for table DDL and payloads emitted before publication
+    /// schema change messages were introduced. Publication DDL without this
+    /// field is rejected by [`SchemaChangeMessage::applies_to_publication`].
+    pub(crate) publication_name: Option<String>,
     /// The schema name from `pg_namespace.nspname`.
     pub(crate) nspname: String,
     /// The table name from `pg_class.relname`.
     pub(crate) relname: String,
     /// The table OID from `pg_class.oid`.
-    ///
-    /// PostgreSQL table OIDs are `u32` values, but JSON serialization from the
-    /// event trigger uses `bigint` (i64) for transmission. The cast back to
-    /// `u32` in [`into_table_schema`] is safe because PostgreSQL OIDs are
-    /// always within the `u32` range.
-    pub(crate) oid: i64,
+    pub(crate) oid: u32,
     /// The identity metadata emitted by Postgres for this table snapshot.
     pub(crate) identity: IdentityMessage,
     /// The columns of the table after the schema change.
@@ -58,15 +59,28 @@ pub(crate) struct SchemaChangeMessage {
 impl SchemaChangeMessage {
     /// Returns the table identifier as [`TableId`].
     pub(crate) fn table_id(&self) -> TableId {
-        TableId::new(self.oid as u32)
+        TableId::new(self.oid)
+    }
+
+    /// Returns whether this message applies to `publication_name`.
+    ///
+    /// Table DDL is global to every publication containing the table.
+    /// Publication DDL without an explicit publication is rejected so it
+    /// cannot mutate another pipeline's schema state.
+    pub(crate) fn applies_to_publication(&self, publication_name: &str) -> bool {
+        if self.command_tag == "ALTER PUBLICATION" {
+            return self.publication_name.as_deref() == Some(publication_name);
+        }
+
+        true
     }
 
     /// Converts a [`SchemaChangeMessage`] to a [`TableSchema`] with a specific
     /// snapshot ID.
     ///
     /// This is used to update the stored table schema when a DDL change is
-    /// detected. The snapshot_id should be the start_lsn of the DDL
-    /// message.
+    /// detected. The snapshot ID should identify both the commit LSN that
+    /// activates the schema and the logical DDL message LSN within that commit.
     pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
         build_table_schema(
             self.table_id(),
@@ -90,6 +104,19 @@ impl FromStr for SchemaChangeMessage {
             )
         })
     }
+}
+
+/// Returns the durable schema snapshot identifier for a logical message.
+///
+/// The commit LSN is the activation frontier because transactions are decoded
+/// in commit order. The message LSN cannot provide that order across
+/// overlapping transactions, but it does preserve the order of multiple DDL
+/// messages delivered within the same commit.
+pub(crate) fn schema_snapshot_id_from_message(
+    commit_lsn: PgLsn,
+    message: &protocol::MessageBody,
+) -> SnapshotId {
+    SnapshotId::new(commit_lsn, PgLsn::from(message.message_lsn()))
 }
 
 /// The identity metadata emitted by Postgres.
@@ -301,18 +328,11 @@ pub(crate) fn delete_message_payload_bytes(delete_body: &protocol::DeleteBody) -
 /// This method parses the replication protocol begin message and extracts
 /// transaction metadata for use in the ETL pipeline.
 pub(crate) fn parse_event_from_begin_message(
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     begin_body: &protocol::BeginBody,
 ) -> BeginEvent {
-    BeginEvent {
-        start_lsn,
-        commit_lsn,
-        tx_ordinal,
-        timestamp: begin_body.timestamp(),
-        xid: begin_body.xid(),
-    }
+    BeginEvent { commit_lsn, tx_ordinal, timestamp: begin_body.timestamp(), xid: begin_body.xid() }
 }
 
 /// Creates a [`CommitEvent`] from Postgres protocol data.
@@ -320,13 +340,11 @@ pub(crate) fn parse_event_from_begin_message(
 /// This method parses the replication protocol commit message and extracts
 /// transaction completion metadata for use in the ETL pipeline.
 pub(crate) fn parse_event_from_commit_message(
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     commit_body: &protocol::CommitBody,
 ) -> CommitEvent {
     CommitEvent {
-        start_lsn,
         commit_lsn,
         tx_ordinal,
         flags: commit_body.flags(),
@@ -402,7 +420,6 @@ pub(crate) fn parse_replica_identity_column_names(
 /// processing.
 pub(crate) fn parse_event_from_insert_message(
     replicated_table_schema: ReplicatedTableSchema,
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     insert_body: &protocol::InsertBody,
@@ -410,7 +427,7 @@ pub(crate) fn parse_event_from_insert_message(
     let tuple_data = insert_body.tuple().tuple_data();
     let table_row = convert_tuple_to_row(replicated_table_schema.column_schemas(), tuple_data)?;
 
-    Ok(InsertEvent { start_lsn, commit_lsn, tx_ordinal, replicated_table_schema, table_row })
+    Ok(InsertEvent { commit_lsn, tx_ordinal, replicated_table_schema, table_row })
 }
 
 /// Converts a Postgres update message into an [`UpdateEvent`].
@@ -436,7 +453,6 @@ pub(crate) fn parse_event_from_insert_message(
 /// [`UpdatedTableRow::Partial`].
 pub(crate) fn parse_event_from_update_message(
     replicated_table_schema: ReplicatedTableSchema,
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     update_body: &protocol::UpdateBody,
@@ -474,7 +490,6 @@ pub(crate) fn parse_event_from_update_message(
     )?;
 
     Ok(UpdateEvent {
-        start_lsn,
         commit_lsn,
         tx_ordinal,
         replicated_table_schema,
@@ -500,7 +515,6 @@ pub(crate) fn parse_event_from_update_message(
 /// replica-identity rows in replicated table order.
 pub(crate) fn parse_event_from_delete_message(
     replicated_table_schema: ReplicatedTableSchema,
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     delete_body: &protocol::DeleteBody,
@@ -523,7 +537,7 @@ pub(crate) fn parse_event_from_delete_message(
         None => None,
     };
 
-    Ok(DeleteEvent { start_lsn, commit_lsn, tx_ordinal, replicated_table_schema, old_table_row })
+    Ok(DeleteEvent { commit_lsn, tx_ordinal, replicated_table_schema, old_table_row })
 }
 
 /// Creates a [`TruncateEvent`] from Postgres protocol data.
@@ -531,19 +545,12 @@ pub(crate) fn parse_event_from_delete_message(
 /// This method parses the replication protocol truncate message and extracts
 /// information about which tables were truncated and with what options.
 pub(crate) fn parse_event_from_truncate_message(
-    start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     truncate_body: &protocol::TruncateBody,
     truncated_tables: Vec<ReplicatedTableSchema>,
 ) -> TruncateEvent {
-    TruncateEvent {
-        start_lsn,
-        commit_lsn,
-        tx_ordinal,
-        options: truncate_body.options(),
-        truncated_tables,
-    }
+    TruncateEvent { commit_lsn, tx_ordinal, options: truncate_body.options(), truncated_tables }
 }
 
 /// Converts a full tuple image into a dense [`TableRow`].
@@ -987,22 +994,25 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use postgres_replication::protocol::{LogicalReplicationMessage, TupleData};
+    use postgres_replication::protocol::{
+        LogicalReplicationMessage, ReplicationMessage, TupleData,
+    };
     use tokio_postgres::types::{PgLsn, Type};
 
     use super::{
-        IdentityMessage, calculate_tuple_bytes, convert_tuple_to_row,
-        convert_update_tuple_to_updated_table_row, delete_message_payload_bytes,
-        insert_message_payload_bytes, normalize_key_tuple_to_row, parse_event_from_delete_message,
-        parse_event_from_update_message, update_message_payload_bytes,
+        DDL_MESSAGE_PREFIX, IdentityMessage, SchemaChangeMessage, calculate_tuple_bytes,
+        convert_tuple_to_row, convert_update_tuple_to_updated_table_row,
+        delete_message_payload_bytes, insert_message_payload_bytes, normalize_key_tuple_to_row,
+        parse_event_from_delete_message, parse_event_from_update_message,
+        schema_snapshot_id_from_message, update_message_payload_bytes,
     };
     use crate::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
         error::ErrorKind,
         event::{DeleteEvent, UpdateEvent},
         schema::{
-            ColumnSchema, IdentityType, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
-            TableSchema,
+            ColumnSchema, IdentityType, ReplicatedTableSchema, ReplicationMask, SnapshotId,
+            TableId, TableName, TableSchema,
         },
     };
 
@@ -1011,6 +1021,136 @@ mod tests {
         Null,
         UnchangedToast,
         Text(&'a str),
+    }
+
+    #[test]
+    fn schema_snapshot_uses_logical_message_lsn_not_xlogdata_wal_start() {
+        let wal_start = 100_u64;
+        let message_lsn = 140_u64;
+
+        let mut logical_message = vec![b'M', 1];
+        logical_message.extend_from_slice(&message_lsn.to_be_bytes());
+        logical_message.extend_from_slice(DDL_MESSAGE_PREFIX.as_bytes());
+        logical_message.push(0);
+        logical_message.extend_from_slice(&2_i32.to_be_bytes());
+        logical_message.extend_from_slice(b"{}");
+
+        let mut xlog_data = vec![b'w'];
+        xlog_data.extend_from_slice(&wal_start.to_be_bytes());
+        xlog_data.extend_from_slice(&200_u64.to_be_bytes());
+        xlog_data.extend_from_slice(&0_i64.to_be_bytes());
+        xlog_data.extend_from_slice(&logical_message);
+
+        let replication_message = ReplicationMessage::parse(&Bytes::from(xlog_data)).unwrap();
+        let ReplicationMessage::XLogData(xlog_data) = replication_message else {
+            panic!("encoded replication message should be XLogData");
+        };
+        assert_eq!(xlog_data.wal_start(), wal_start);
+
+        let logical_message = LogicalReplicationMessage::parse(xlog_data.data()).unwrap();
+        let LogicalReplicationMessage::Message(message) = logical_message else {
+            panic!("encoded logical message should be Message");
+        };
+        let commit_lsn = PgLsn::from(180);
+
+        assert_eq!(
+            schema_snapshot_id_from_message(commit_lsn, &message),
+            SnapshotId::new(commit_lsn, PgLsn::from(message_lsn))
+        );
+        assert_ne!(
+            schema_snapshot_id_from_message(commit_lsn, &message),
+            SnapshotId::new(commit_lsn, PgLsn::from(wal_start))
+        );
+    }
+
+    #[test]
+    fn schema_change_message_validates_oid_and_publication_scope() {
+        let table_ddl = r#"{
+            "command_tag": "ALTER TABLE",
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [],
+                "relreplident": "d",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#;
+        let unscoped = table_ddl.parse::<SchemaChangeMessage>().unwrap();
+        assert!(unscoped.applies_to_publication("pipeline_publication"));
+
+        for invalid_oid in ["-1", "4294967296"] {
+            let invalid_payload =
+                table_ddl.replace("\"oid\": 42", &format!("\"oid\": {invalid_oid}"));
+            assert!(invalid_payload.parse::<SchemaChangeMessage>().is_err());
+        }
+
+        let null_scoped_table = r#"{
+            "command_tag": "ALTER TABLE",
+            "publication_name": null,
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [],
+                "relreplident": "d",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#
+        .parse::<SchemaChangeMessage>()
+        .unwrap();
+        assert!(null_scoped_table.applies_to_publication("pipeline_publication"));
+
+        let unscoped_publication = r#"{
+            "command_tag": "ALTER PUBLICATION",
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [],
+                "relreplident": "d",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#
+        .parse::<SchemaChangeMessage>()
+        .unwrap();
+        assert!(!unscoped_publication.applies_to_publication("pipeline_publication"));
+
+        let scoped = r#"{
+            "command_tag": "ALTER PUBLICATION",
+            "publication_name": "pipeline_publication",
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [],
+                "relreplident": "d",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#
+        .parse::<SchemaChangeMessage>()
+        .unwrap();
+        assert!(scoped.applies_to_publication("pipeline_publication"));
+        assert!(!scoped.applies_to_publication("other_publication"));
+
+        let malformed = r#"{
+            "command_tag": "ALTER PUBLICATION",
+            "publication_name": 42,
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [],
+                "relreplident": "d",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#;
+        assert!(malformed.parse::<SchemaChangeMessage>().is_err());
     }
 
     fn event_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
@@ -1175,28 +1315,16 @@ mod tests {
         replicated_table_schema: ReplicatedTableSchema,
         update_body: &postgres_replication::protocol::UpdateBody,
     ) -> UpdateEvent {
-        parse_event_from_update_message(
-            replicated_table_schema,
-            PgLsn::from(10),
-            PgLsn::from(20),
-            0,
-            update_body,
-        )
-        .unwrap()
+        parse_event_from_update_message(replicated_table_schema, PgLsn::from(20), 0, update_body)
+            .unwrap()
     }
 
     fn parse_delete_event(
         replicated_table_schema: ReplicatedTableSchema,
         delete_body: &postgres_replication::protocol::DeleteBody,
     ) -> DeleteEvent {
-        parse_event_from_delete_message(
-            replicated_table_schema,
-            PgLsn::from(10),
-            PgLsn::from(20),
-            0,
-            delete_body,
-        )
-        .unwrap()
+        parse_event_from_delete_message(replicated_table_schema, PgLsn::from(20), 0, delete_body)
+            .unwrap()
     }
 
     #[test]

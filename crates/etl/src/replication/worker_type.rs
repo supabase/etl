@@ -35,8 +35,8 @@ impl WorkerType {
         }
     }
 
-    /// Returns the durable progress table ID used by the state store.
-    pub(crate) fn progress_table_id(self) -> Option<TableId> {
+    /// Returns the optional table ID that scopes this worker's checkpoint.
+    pub(crate) fn checkpoint_table_id(self) -> Option<TableId> {
         match self {
             Self::Apply => None,
             Self::TableSync { table_id } => Some(table_id),
