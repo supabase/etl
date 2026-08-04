@@ -2,8 +2,8 @@ use etl::{
     error::ErrorKind,
     event::{Event, EventType, RelationEvent},
     pipeline::PipelineId,
-    schema::{PgLsn, ReplicatedTableSchema},
-    store::{SchemaStore, StateStore, TableStateType},
+    schema::ReplicatedTableSchema,
+    store::{SchemaStore, StateStore},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
