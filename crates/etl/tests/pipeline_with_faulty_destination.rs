@@ -198,9 +198,10 @@ impl<'a> WalsenderRouletteWorkload<'a> {
     async fn run(
         &mut self,
         case: WalsenderRouletteCase,
-        users_ready: &TimedNotify,
+        users_sync_complete: &TimedNotify,
     ) -> Result<(), TestCaseError> {
-        wait_for_notification(users_ready, "users table to become ready").await?;
+        wait_for_notification(users_sync_complete, "users table synchronization to complete")
+            .await?;
 
         for user_number in 1..case.disconnect_after {
             self.insert_user(user_number).await?;
@@ -426,7 +427,7 @@ async fn run_walsender_roulette_case(case: WalsenderRouletteCase) -> Result<(), 
         store.clone(),
         destination.clone(),
     );
-    let users_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_sync_complete = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline
         .start()
@@ -440,7 +441,7 @@ async fn run_walsender_roulette_case(case: WalsenderRouletteCase) -> Result<(), 
             table_id,
             apply_slot_name: &apply_slot_name,
         };
-        workload.run(case, &users_ready).await
+        workload.run(case, &users_sync_complete).await
     };
 
     let shutdown_result = tokio::time::timeout(ROULETTE_TIMEOUT, pipeline.shutdown_and_wait())
