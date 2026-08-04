@@ -109,17 +109,15 @@ async fn table_copy_and_streaming_with_restart() {
     );
 
     // Register notifications for table copy completion.
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_ready_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let orders_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
-    orders_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -241,12 +239,11 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         destination.clone(),
     );
 
-    let users_ready_notify =
-        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(users_schema.id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -277,15 +274,14 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         destination.clone(),
     );
 
-    let users_ready_notify =
-        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(users_schema.id).await;
 
     pipeline.start().await.unwrap();
 
     // BigQuery can keep the default Storage Write stream for a dropped and
     // re-created table unavailable for several minutes. The destination is
     // expected to keep retrying while preserving the physical `*_0` table id.
-    users_ready_notify.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
+    users_sync_complete_notify.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -326,13 +322,12 @@ async fn table_insert_update_delete() {
     );
 
     // Register notifications for table copy completion.
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     // Wait for the first insert.
     let events_notify = destination
@@ -441,13 +436,12 @@ async fn table_subsequent_updates() {
     );
 
     // Register notifications for table copy completion.
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     // Wait for the first insert.
     let events_notify = destination
@@ -536,13 +530,12 @@ async fn table_primary_key_update_rewrites_row() {
         destination.clone(),
     );
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(
@@ -657,12 +650,11 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // With REPLICA IDENTITY FULL, PostgreSQL sends a full old row for updates.
     // That means unchanged external TOAST values can be reconstructed and the
@@ -758,17 +750,15 @@ async fn table_truncate_with_batching() {
     );
 
     // Register notifications for table copy completion.
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_ready_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let orders_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
-    orders_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     // Wait for 4 inserts and 1 truncate per table.
     let events_notify = destination
@@ -884,12 +874,11 @@ async fn table_nullable_scalar_columns() {
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // Insert
     let events_notify = destination
@@ -1086,12 +1075,11 @@ async fn table_nullable_array_columns() {
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // insert with null arrays
     let events_notify = destination
@@ -1308,12 +1296,11 @@ async fn table_non_nullable_scalar_columns() {
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // insert with non-null values
     let events_notify = destination
@@ -1551,12 +1538,11 @@ async fn table_non_nullable_array_columns() {
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // insert with non-null array values
     let events_notify = destination
@@ -1804,12 +1790,11 @@ async fn table_array_with_null_values() {
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     // Insert array with null value
     database
@@ -1858,15 +1843,14 @@ async fn table_array_with_null_values() {
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
     // BigQuery can keep the default Storage Write stream for a dropped and
     // re-created table unavailable for several minutes. The destination is
     // expected to keep retrying while preserving the physical `*_0` table id.
-    table_ready_notify.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
+    table_sync_complete_notify.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
@@ -2155,12 +2139,11 @@ async fn schema_change_add_column_defaults() {
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -2293,12 +2276,11 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let set_not_null_notify = destination
         .wait_for_events(vec![
@@ -2478,12 +2460,11 @@ async fn table_schema_change() {
         destination.clone(),
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let initial_state = store
         .get_applied_destination_table_metadata(table_id)

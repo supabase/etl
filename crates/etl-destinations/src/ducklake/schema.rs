@@ -4,10 +4,12 @@ use etl::schema::{
     ColumnSchema, DefaultExpression, NumericModifiers, Type, is_array_type, numeric_modifiers,
     parse_default_expression,
 };
+use etl_config::shared::{DuckLakeSortColumn, DuckLakeSortDirection, DuckLakeSortNulls};
+use pg_escape::quote_literal;
 use tracing::warn;
 
 use crate::ducklake::{
-    DuckLakeTableName,
+    DuckLakeTableName, LAKE_CATALOG,
     sql::{qualified_lake_schema_name, qualified_lake_table_name, quote_identifier},
 };
 
@@ -115,7 +117,7 @@ fn ducklake_default_clause(column_schema: &ColumnSchema) -> Option<String> {
     if default_clause.is_none() && column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
-            "skipping unsupported source column default for DuckLake"
+            "skipping unsupported source column default for ducklake"
         );
     }
 
@@ -230,6 +232,47 @@ pub(super) fn build_create_table_sql_ducklake(
     )
 }
 
+/// Builds a DuckLake `alter table set sorted by` statement.
+pub(super) fn build_set_sorted_by_sql_ducklake(
+    table_name: &DuckLakeTableName,
+    columns: &[DuckLakeSortColumn],
+) -> String {
+    let table_name = qualified_lake_table_name(table_name);
+    let columns = columns
+        .iter()
+        .map(|column| {
+            let direction = match column.direction {
+                DuckLakeSortDirection::Asc => "asc",
+                DuckLakeSortDirection::Desc => "desc",
+            };
+            let nulls = match column.nulls {
+                Some(DuckLakeSortNulls::First) => " nulls first",
+                Some(DuckLakeSortNulls::Last) => " nulls last",
+                None => "",
+            };
+            format!("{} {direction}{nulls}", quote_identifier(&column.name))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!("alter table {table_name} set sorted by ({columns})")
+}
+
+/// Builds a DuckLake `alter table reset sorted by` statement.
+pub(super) fn build_reset_sorted_by_sql_ducklake(table_name: &DuckLakeTableName) -> String {
+    format!("alter table {} reset sorted by", qualified_lake_table_name(table_name))
+}
+
+/// Builds the table-scoped option that keeps foreground inserts unsorted.
+pub(super) fn build_disable_sort_on_insert_sql_ducklake(table_name: &DuckLakeTableName) -> String {
+    format!(
+        "call {}.set_option('sort_on_insert', false, schema => {}, table_name => {})",
+        quote_identifier(LAKE_CATALOG),
+        quote_literal(table_name.schema()),
+        quote_literal(table_name.table())
+    )
+}
+
 /// Builds a DuckLake `alter table add column` statement.
 ///
 /// DuckLake stores add-time defaults as metadata and does not rewrite data
@@ -325,6 +368,36 @@ mod tests {
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::JSONB, -1), "json");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::OID, -1), "ubigint");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::BYTEA, -1), "blob");
+    }
+
+    #[test]
+    fn builds_sorted_table_statements() {
+        let table_name = table_name(r#"events"2026"#);
+        let columns = vec![
+            DuckLakeSortColumn {
+                name: "tenant_id".to_owned(),
+                direction: DuckLakeSortDirection::Asc,
+                nulls: None,
+            },
+            DuckLakeSortColumn {
+                name: r#"created"at"#.to_owned(),
+                direction: DuckLakeSortDirection::Desc,
+                nulls: Some(DuckLakeSortNulls::First),
+            },
+        ];
+
+        assert_eq!(
+            build_set_sorted_by_sql_ducklake(&table_name, &columns),
+            r#"alter table "lake"."public"."events""2026" set sorted by ("tenant_id" asc, "created""at" desc nulls first)"#
+        );
+        assert_eq!(
+            build_reset_sorted_by_sql_ducklake(&table_name),
+            r#"alter table "lake"."public"."events""2026" reset sorted by"#
+        );
+        assert_eq!(
+            build_disable_sort_on_insert_sql_ducklake(&table_name),
+            r#"call "lake".set_option('sort_on_insert', false, schema => 'public', table_name => 'events"2026')"#
+        );
     }
 
     #[test]

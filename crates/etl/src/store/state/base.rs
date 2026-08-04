@@ -13,12 +13,12 @@ pub type TableStates = Arc<BTreeMap<TableId, TableState>>;
 /// Arc-wrapped dictionary of destination table metadata.
 pub(crate) type DestinationTablesMetadata = Arc<BTreeMap<TableId, DestinationTableMetadata>>;
 
-/// Trait for storing and retrieving table states, durable replication progress,
-/// and destination metadata.
+/// Trait for storing table states, replication checkpoints, and destination
+/// metadata.
 ///
 /// [`StateStore`] implementations are responsible for defining how table
-/// states, replication progress, and destination table metadata are stored and
-/// retrieved.
+/// states, replication checkpoints, and destination table metadata are stored
+/// and retrieved.
 ///
 /// Implementations should ensure thread-safety and handle concurrent access to
 /// the data.
@@ -71,27 +71,30 @@ pub trait StateStore {
         table_id: TableId,
     ) -> impl Future<Output = EtlResult<TableState>> + Send;
 
-    /// Returns the durable flush LSN for a replication worker, if one has been
-    /// stored.
-    fn get_replication_progress(
+    /// Returns the persisted checkpoint LSN for a replication worker, if any.
+    ///
+    /// This checkpoint is the durable replay frontier used during worker
+    /// startup. It is distinct from the apply loop's received and flush LSNs
+    /// and may have been selected from either one at a safe persistence point.
+    fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
     ) -> impl Future<Output = EtlResult<Option<PgLsn>>> + Send;
 
-    /// Monotonically upserts the durable flush LSN for a replication worker.
+    /// Monotonically persists a checkpoint LSN for a replication worker.
     ///
-    /// Implementations must never move stored progress backward. The returned
-    /// value is the LSN stored after applying the monotonic update.
-    fn upsert_replication_progress(
+    /// Implementations must never move the stored checkpoint backward. The
+    /// returned value is the checkpoint stored after the monotonic update.
+    fn upsert_replication_checkpoint(
         &self,
         worker_type: WorkerType,
-        flush_lsn: PgLsn,
+        checkpoint_lsn: PgLsn,
     ) -> impl Future<Output = EtlResult<PgLsn>> + Send;
 
-    /// Deletes durable replication progress for a replication worker.
+    /// Deletes the persisted checkpoint for a replication worker.
     ///
     /// This is used when the worker's slot lineage is intentionally reset.
-    fn delete_replication_progress(
+    fn delete_replication_checkpoint(
         &self,
         worker_type: WorkerType,
     ) -> impl Future<Output = EtlResult<()>> + Send;

@@ -1,4 +1,8 @@
-//! SQL accessors for durable replication progress.
+//! SQL accessors for persisted replication checkpoints.
+//!
+//! The physical `etl.replication_progress.flush_lsn` names are retained for
+//! storage compatibility. At the API boundary, the stored LSN is a checkpoint:
+//! the durable replay frontier selected by the replication worker.
 
 use std::str::FromStr;
 
@@ -16,8 +20,8 @@ fn parse_lsn(lsn: &str) -> sqlx::Result<PgLsn> {
     })
 }
 
-/// Fetches durable replication progress for a pipeline worker.
-pub async fn get_replication_progress<'c, E>(
+/// Fetches the persisted replication checkpoint for a pipeline worker.
+pub async fn get_replication_checkpoint<'c, E>(
     executor: E,
     pipeline_id: i64,
     worker_type: &'static str,
@@ -26,7 +30,7 @@ pub async fn get_replication_progress<'c, E>(
 where
     E: PgExecutor<'c>,
 {
-    let flush_lsn: Option<String> = if let Some(table_id) = table_id {
+    let checkpoint_lsn: Option<String> = if let Some(table_id) = table_id {
         sqlx::query_scalar(
             r#"
             select flush_lsn::text
@@ -57,25 +61,25 @@ where
         .await?
     };
 
-    flush_lsn.as_deref().map(parse_lsn).transpose()
+    checkpoint_lsn.as_deref().map(parse_lsn).transpose()
 }
 
-/// Upserts durable replication progress for a pipeline worker.
+/// Monotonically persists a replication checkpoint for a pipeline worker.
 ///
-/// The update is monotonic: a stale or duplicated flush LSN cannot move stored
-/// progress backward.
-pub async fn upsert_replication_progress<'c, E>(
+/// A stale or duplicated checkpoint cannot move the stored replay frontier
+/// backward.
+pub async fn upsert_replication_checkpoint<'c, E>(
     executor: E,
     pipeline_id: i64,
     worker_type: &'static str,
     table_id: Option<TableId>,
-    flush_lsn: PgLsn,
+    checkpoint_lsn: PgLsn,
 ) -> sqlx::Result<PgLsn>
 where
     E: PgExecutor<'c>,
 {
-    let flush_lsn = flush_lsn.to_string();
-    let stored_lsn: String = if let Some(table_id) = table_id {
+    let checkpoint_lsn = checkpoint_lsn.to_string();
+    let persisted_checkpoint_lsn: String = if let Some(table_id) = table_id {
         sqlx::query_scalar(
             r#"
             insert into etl.replication_progress (pipeline_id, worker_type, table_id, flush_lsn)
@@ -98,7 +102,7 @@ where
         .bind(pipeline_id)
         .bind(worker_type)
         .bind(SqlxTableId(table_id.into_inner()))
-        .bind(flush_lsn)
+        .bind(checkpoint_lsn)
         .fetch_one(executor)
         .await?
     } else {
@@ -123,16 +127,16 @@ where
         )
         .bind(pipeline_id)
         .bind(worker_type)
-        .bind(flush_lsn)
+        .bind(checkpoint_lsn)
         .fetch_one(executor)
         .await?
     };
 
-    parse_lsn(&stored_lsn)
+    parse_lsn(&persisted_checkpoint_lsn)
 }
 
-/// Deletes durable replication progress for a pipeline worker.
-pub async fn delete_replication_progress<'c, E>(
+/// Deletes the persisted replication checkpoint for a pipeline worker.
+pub async fn delete_replication_checkpoint<'c, E>(
     executor: E,
     pipeline_id: i64,
     worker_type: &'static str,
@@ -173,8 +177,8 @@ where
     Ok(result.rows_affected())
 }
 
-/// Deletes durable replication progress for a specific table-sync worker.
-pub async fn delete_replication_progress_for_table<'c, E>(
+/// Deletes the persisted checkpoint for a specific table-sync worker.
+pub async fn delete_replication_checkpoint_for_table<'c, E>(
     executor: E,
     pipeline_id: i64,
     table_id: TableId,
@@ -182,5 +186,5 @@ pub async fn delete_replication_progress_for_table<'c, E>(
 where
     E: PgExecutor<'c>,
 {
-    delete_replication_progress(executor, pipeline_id, "table_sync", Some(table_id)).await
+    delete_replication_checkpoint(executor, pipeline_id, "table_sync", Some(table_id)).await
 }

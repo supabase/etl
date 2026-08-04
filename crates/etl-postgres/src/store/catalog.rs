@@ -45,7 +45,7 @@ pub const TABLE_SCHEMAS_TABLE: EtlTable = EtlTable::new(ETL_SCHEMA_NAME, "table_
 /// The table storing columns for versioned source table schemas.
 pub const TABLE_COLUMNS_TABLE: EtlTable = EtlTable::new(ETL_SCHEMA_NAME, "table_columns");
 
-/// The table storing durable per-worker replication progress.
+/// The table storing persisted per-worker replication checkpoints.
 pub const REPLICATION_PROGRESS_TABLE: EtlTable =
     EtlTable::new(ETL_SCHEMA_NAME, "replication_progress");
 

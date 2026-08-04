@@ -240,6 +240,13 @@ impl IdentityMask {
         &self.0
     }
 
+    /// Returns the underlying mask as a vector of bytes.
+    ///
+    /// Used for serializing the mask into durable `SyncDone` decoding state.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.0.as_ref().clone()
+    }
+
     /// Returns the number of columns in the mask.
     pub fn len(&self) -> usize {
         self.0.len()
@@ -658,6 +665,14 @@ impl ReplicatedTableSchema {
     /// planner emits only the operations needed to reach the schema used by the
     /// next row event.
     pub fn diff(&self, new_schema: &ReplicatedTableSchema) -> SchemaDiff {
+        let old_table_ordinals: HashSet<_> =
+            self.inner().column_schemas.iter().map(|column| column.ordinal_position).collect();
+        let new_table_ordinals: HashSet<_> = new_schema
+            .inner()
+            .column_schemas
+            .iter()
+            .map(|column| column.ordinal_position)
+            .collect();
         let mut old_columns: Vec<_> = self.column_schemas().collect();
         let mut new_columns: Vec<_> = new_schema.column_schemas().collect();
 
@@ -686,11 +701,23 @@ impl ReplicatedTableSchema {
         {
             match old_column.ordinal_position.cmp(&new_column.ordinal_position) {
                 Ordering::Less => {
-                    columns_to_drop.push(old_column.clone());
+                    let reason = if new_table_ordinals.contains(&old_column.ordinal_position) {
+                        ColumnPresenceChangeReason::ReplicationMask
+                    } else {
+                        ColumnPresenceChangeReason::TableSchema
+                    };
+                    columns_to_drop
+                        .push(ColumnPresenceChange { column_schema: old_column.clone(), reason });
                     old_index += 1;
                 }
                 Ordering::Greater => {
-                    columns_to_add.push(new_column.clone());
+                    let reason = if old_table_ordinals.contains(&new_column.ordinal_position) {
+                        ColumnPresenceChangeReason::ReplicationMask
+                    } else {
+                        ColumnPresenceChangeReason::TableSchema
+                    };
+                    columns_to_add
+                        .push(ColumnPresenceChange { column_schema: new_column.clone(), reason });
                     new_index += 1;
                 }
                 Ordering::Equal => {
@@ -725,10 +752,24 @@ impl ReplicatedTableSchema {
             }
         }
 
-        columns_to_drop.extend(old_columns[old_index..].iter().map(|column| (**column).clone()));
-        columns_to_add.extend(new_columns[new_index..].iter().map(|column| (**column).clone()));
+        columns_to_drop.extend(old_columns[old_index..].iter().map(|column| {
+            let reason = if new_table_ordinals.contains(&column.ordinal_position) {
+                ColumnPresenceChangeReason::ReplicationMask
+            } else {
+                ColumnPresenceChangeReason::TableSchema
+            };
+            ColumnPresenceChange { column_schema: (**column).clone(), reason }
+        }));
+        columns_to_add.extend(new_columns[new_index..].iter().map(|column| {
+            let reason = if old_table_ordinals.contains(&column.ordinal_position) {
+                ColumnPresenceChangeReason::ReplicationMask
+            } else {
+                ColumnPresenceChangeReason::TableSchema
+            };
+            ColumnPresenceChange { column_schema: (**column).clone(), reason }
+        }));
 
-        SchemaDiff::new(columns_to_add, columns_to_drop, columns_to_modify)
+        SchemaDiff::from_column_changes(columns_to_add, columns_to_drop, columns_to_modify)
     }
 
     /// Computes the exact endpoint diff and plans it for a destination.
@@ -869,6 +910,26 @@ pub struct ColumnModification {
     pub modification_types: Vec<ColumnModificationType>,
 }
 
+/// Identifies why a column entered or left the replicated destination schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnPresenceChangeReason {
+    /// The column was added to or removed from the physical PostgreSQL table
+    /// schema.
+    TableSchema,
+    /// The physical column exists in both endpoint schemas, but its publication
+    /// column-list membership changed.
+    ReplicationMask,
+}
+
+/// One column added to or removed from the replicated destination schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnPresenceChange {
+    /// The column schema at the endpoint where the column is present.
+    pub column_schema: ColumnSchema,
+    /// Why the column is present in only one replicated endpoint.
+    pub reason: ColumnPresenceChangeReason,
+}
+
 /// One directly executable operation in a destination schema transition.
 ///
 /// Modification operations carry the immediate old and new column states.
@@ -880,11 +941,15 @@ pub enum SchemaOperation {
     DropColumn {
         /// The old endpoint column schema.
         column_schema: ColumnSchema,
+        /// Why the column left the replicated endpoint.
+        reason: ColumnPresenceChangeReason,
     },
     /// Add a new logical column.
     AddColumn {
         /// The new endpoint column schema.
         column_schema: ColumnSchema,
+        /// Why the column entered the replicated endpoint.
+        reason: ColumnPresenceChangeReason,
     },
     /// Modify one field of an existing logical column.
     ModifyColumn {
@@ -906,22 +971,50 @@ pub enum SchemaOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaDiff {
     /// Columns that need to be added to the destination.
-    pub columns_to_add: Vec<ColumnSchema>,
+    pub columns_to_add: Vec<ColumnPresenceChange>,
     /// Columns that need to be dropped from the destination.
-    pub columns_to_drop: Vec<ColumnSchema>,
+    pub columns_to_drop: Vec<ColumnPresenceChange>,
     /// Existing columns that need to be modified in the destination.
     pub columns_to_modify: Vec<ColumnModification>,
 }
 
 impl SchemaDiff {
-    /// Builds a diff from already classified column operations.
+    /// Builds a diff from explicit physical table-schema operations.
     ///
     /// Prefer [`ReplicatedTableSchema::diff`] when both endpoint schemas are
-    /// available. The column vectors and each modification-type vector must be
-    /// in PostgreSQL `attnum` and canonical modification order, respectively.
+    /// available so additions and removals can be distinguished from
+    /// replication-mask changes. Additions and removals supplied here are
+    /// classified as [`ColumnPresenceChangeReason::TableSchema`]. The column
+    /// vectors and each modification-type vector must be in PostgreSQL `attnum`
+    /// and canonical modification order, respectively.
     pub fn new(
         columns_to_add: Vec<ColumnSchema>,
         columns_to_drop: Vec<ColumnSchema>,
+        columns_to_modify: Vec<ColumnModification>,
+    ) -> Self {
+        let columns_to_add = columns_to_add
+            .into_iter()
+            .map(|column_schema| ColumnPresenceChange {
+                column_schema,
+                reason: ColumnPresenceChangeReason::TableSchema,
+            })
+            .collect();
+        let columns_to_drop = columns_to_drop
+            .into_iter()
+            .map(|column_schema| ColumnPresenceChange {
+                column_schema,
+                reason: ColumnPresenceChangeReason::TableSchema,
+            })
+            .collect();
+
+        Self { columns_to_add, columns_to_drop, columns_to_modify }
+    }
+
+    /// Builds a diff whose add and drop reasons were derived from both full
+    /// table-schema endpoints.
+    fn from_column_changes(
+        columns_to_add: Vec<ColumnPresenceChange>,
+        columns_to_drop: Vec<ColumnPresenceChange>,
         columns_to_modify: Vec<ColumnModification>,
     ) -> Self {
         Self { columns_to_add, columns_to_drop, columns_to_modify }
@@ -969,7 +1062,7 @@ impl SchemaDiff {
         for column in &self.columns_to_drop {
             remove_current_column_name(
                 &mut target_names_by_equivalence,
-                &column.name,
+                &column.column_schema.name,
                 column_name_equivalence,
             )?;
         }
@@ -994,7 +1087,7 @@ impl SchemaDiff {
         for column in &self.columns_to_add {
             insert_target_column_name(
                 &mut target_names_by_equivalence,
-                &column.name,
+                &column.column_schema.name,
                 column_name_equivalence,
             )?;
         }
@@ -1200,14 +1293,17 @@ fn collect_unique_column_names(
 /// Validates that every removal or modification owns one current column.
 fn validate_current_column_references(
     current_names_by_equivalence: &HashMap<String, String>,
-    columns_to_drop: &[ColumnSchema],
+    columns_to_drop: &[ColumnPresenceChange],
     columns_to_modify: &[ColumnModification],
     column_name_equivalence: ColumnNameEquivalence,
 ) -> Result<(), SchemaPlanError> {
     let mut referenced_name_equivalence_keys = HashSet::new();
-    let referenced_column_names = columns_to_drop.iter().map(|column| column.name.as_str()).chain(
-        columns_to_modify.iter().map(|modification| modification.old_column_schema.name.as_str()),
-    );
+    let referenced_column_names =
+        columns_to_drop.iter().map(|column| column.column_schema.name.as_str()).chain(
+            columns_to_modify
+                .iter()
+                .map(|modification| modification.old_column_schema.name.as_str()),
+        );
 
     for column_name in referenced_column_names {
         let equivalence_key = column_name_equivalence.equivalence_key(column_name);
@@ -1304,8 +1400,8 @@ struct PendingRename {
 /// Exact names are retained in emitted operations. Destination equivalence
 /// keys are used only for occupancy, dependency, and temporary-name checks.
 fn plan_schema_operations(
-    columns_to_add: &[ColumnSchema],
-    columns_to_drop: &[ColumnSchema],
+    columns_to_add: &[ColumnPresenceChange],
+    columns_to_drop: &[ColumnPresenceChange],
     columns_to_modify: &[ColumnModification],
     mut occupied_name_equivalence_keys: HashSet<String>,
     mut reserved_column_name_equivalence_keys: HashSet<String>,
@@ -1316,10 +1412,14 @@ fn plan_schema_operations(
     // Phase 1: drop every column absent from the new endpoint. This frees all
     // names that renames or additions may reuse and gives every destination the
     // same simple structural ordering.
-    for column in columns_to_drop {
+    for change in columns_to_drop {
+        let column = &change.column_schema;
         occupied_name_equivalence_keys
             .remove(&column_name_equivalence.equivalence_key(&column.name));
-        operations.push(SchemaOperation::DropColumn { column_schema: column.clone() });
+        operations.push(SchemaOperation::DropColumn {
+            column_schema: column.clone(),
+            reason: change.reason,
+        });
     }
 
     // Phase 2: schedule renames from their free targets toward their sources.
@@ -1453,8 +1553,11 @@ fn plan_schema_operations(
 
     // Phase 3: additions are now safe because drops and renames have released
     // every reused name.
-    for column in columns_to_add {
-        operations.push(SchemaOperation::AddColumn { column_schema: column.clone() });
+    for change in columns_to_add {
+        operations.push(SchemaOperation::AddColumn {
+            column_schema: change.column_schema.clone(),
+            reason: change.reason,
+        });
     }
 
     // Phase 4: every structural operation is complete, so metadata changes can
@@ -1638,10 +1741,10 @@ mod tests {
         plan.ordered_operations()
             .iter()
             .map(|operation| match operation {
-                SchemaOperation::DropColumn { column_schema } => {
+                SchemaOperation::DropColumn { column_schema, .. } => {
                     format!("drop:{}", column_schema.name)
                 }
-                SchemaOperation::AddColumn { column_schema } => {
+                SchemaOperation::AddColumn { column_schema, .. } => {
                     format!("add:{}", column_schema.name)
                 }
                 SchemaOperation::ModifyColumn {
@@ -1699,7 +1802,7 @@ mod tests {
 
         for operation in plan.ordered_operations() {
             match operation {
-                SchemaOperation::DropColumn { column_schema } => {
+                SchemaOperation::DropColumn { column_schema, .. } => {
                     assert_eq!(
                         columns_by_ordinal.remove(&column_schema.ordinal_position),
                         Some(column_schema.clone())
@@ -1710,7 +1813,7 @@ mod tests {
                         Some(column_schema.ordinal_position)
                     );
                 }
-                SchemaOperation::AddColumn { column_schema } => {
+                SchemaOperation::AddColumn { column_schema, .. } => {
                     assert_eq!(
                         columns_by_ordinal
                             .insert(column_schema.ordinal_position, column_schema.clone()),
@@ -1901,8 +2004,9 @@ mod tests {
 
         assert!(!diff.is_empty());
         assert_eq!(diff.columns_to_add.len(), 1);
-        assert_eq!(diff.columns_to_add[0].name, "email");
-        assert_eq!(diff.columns_to_add[0].ordinal_position, 3);
+        assert_eq!(diff.columns_to_add[0].column_schema.name, "email");
+        assert_eq!(diff.columns_to_add[0].column_schema.ordinal_position, 3);
+        assert_eq!(diff.columns_to_add[0].reason, ColumnPresenceChangeReason::TableSchema);
         assert!(diff.columns_to_drop.is_empty());
         assert!(diff.columns_to_modify.is_empty());
     }
@@ -1924,9 +2028,55 @@ mod tests {
         assert!(!diff.is_empty());
         assert!(diff.columns_to_add.is_empty());
         assert_eq!(diff.columns_to_drop.len(), 1);
-        assert_eq!(diff.columns_to_drop[0].name, "age");
-        assert_eq!(diff.columns_to_drop[0].ordinal_position, 3);
+        assert_eq!(diff.columns_to_drop[0].column_schema.name, "age");
+        assert_eq!(diff.columns_to_drop[0].column_schema.ordinal_position, 3);
+        assert_eq!(diff.columns_to_drop[0].reason, ColumnPresenceChangeReason::TableSchema);
         assert!(diff.columns_to_modify.is_empty());
+    }
+
+    #[test]
+    fn schema_diff_classifies_publication_mask_addition_and_drop() {
+        let table_schema = Arc::new(create_test_table_schema());
+        let without_age = ReplicatedTableSchema::from_mask(
+            Arc::clone(&table_schema),
+            ReplicationMask::from_bytes(vec![1, 1, 0]),
+        );
+        let with_age = ReplicatedTableSchema::from_mask(
+            table_schema,
+            ReplicationMask::from_bytes(vec![1, 1, 1]),
+        );
+
+        let addition = without_age.diff(&with_age);
+        assert_eq!(addition.columns_to_add.len(), 1);
+        assert_eq!(addition.columns_to_add[0].column_schema.name, "age");
+        assert_eq!(addition.columns_to_add[0].reason, ColumnPresenceChangeReason::ReplicationMask);
+        assert!(addition.columns_to_drop.is_empty());
+        assert_eq!(
+            addition
+                .plan(["id", "name"], ColumnNameEquivalence::CaseSensitive)
+                .expect("mask expansion should plan")
+                .ordered_operations(),
+            &[SchemaOperation::AddColumn {
+                column_schema: create_test_table_schema().column_schemas[2].clone(),
+                reason: ColumnPresenceChangeReason::ReplicationMask,
+            }]
+        );
+
+        let removal = with_age.diff(&without_age);
+        assert_eq!(removal.columns_to_drop.len(), 1);
+        assert_eq!(removal.columns_to_drop[0].column_schema.name, "age");
+        assert_eq!(removal.columns_to_drop[0].reason, ColumnPresenceChangeReason::ReplicationMask);
+        assert!(removal.columns_to_add.is_empty());
+        assert_eq!(
+            removal
+                .plan(["id", "name", "age"], ColumnNameEquivalence::CaseSensitive)
+                .expect("mask contraction should plan")
+                .ordered_operations(),
+            &[SchemaOperation::DropColumn {
+                column_schema: create_test_table_schema().column_schemas[2].clone(),
+                reason: ColumnPresenceChangeReason::ReplicationMask,
+            }]
+        );
     }
 
     #[test]
@@ -2078,10 +2228,10 @@ mod tests {
         assert!(!diff.is_empty());
 
         assert_eq!(diff.columns_to_add.len(), 1);
-        assert_eq!(diff.columns_to_add[0].name, "email");
+        assert_eq!(diff.columns_to_add[0].column_schema.name, "email");
 
         assert_eq!(diff.columns_to_drop.len(), 1);
-        assert_eq!(diff.columns_to_drop[0].name, "age");
+        assert_eq!(diff.columns_to_drop[0].column_schema.name, "age");
 
         assert_eq!(diff.columns_to_modify.len(), 1);
         assert_eq!(diff.columns_to_modify[0].old_column_schema.name, "name");
@@ -2107,7 +2257,7 @@ mod tests {
 
         assert_eq!(diff.columns_to_add.len(), 2);
         let added_names: HashSet<&str> =
-            diff.columns_to_add.iter().map(|c| c.name.as_str()).collect();
+            diff.columns_to_add.iter().map(|change| change.column_schema.name.as_str()).collect();
         assert!(added_names.contains("name"));
         assert!(added_names.contains("email"));
         assert!(diff.columns_to_drop.is_empty());
@@ -2130,7 +2280,7 @@ mod tests {
         assert!(diff.columns_to_add.is_empty());
         assert_eq!(diff.columns_to_drop.len(), 2);
         let dropped_names: HashSet<&str> =
-            diff.columns_to_drop.iter().map(|c| c.name.as_str()).collect();
+            diff.columns_to_drop.iter().map(|change| change.column_schema.name.as_str()).collect();
         assert!(dropped_names.contains("name"));
         assert!(dropped_names.contains("email"));
         assert!(diff.columns_to_modify.is_empty());
@@ -2784,14 +2934,23 @@ mod tests {
         assert!(matches!(
             plan.ordered_operations(),
             [
-                SchemaOperation::DropColumn { column_schema: blocking_drop },
-                SchemaOperation::DropColumn { column_schema: unrelated_drop },
+                SchemaOperation::DropColumn {
+                    column_schema: blocking_drop,
+                    reason: ColumnPresenceChangeReason::TableSchema,
+                },
+                SchemaOperation::DropColumn {
+                    column_schema: unrelated_drop,
+                    reason: ColumnPresenceChangeReason::TableSchema,
+                },
                 SchemaOperation::ModifyColumn {
                     old_column_schema: rename_old_column_schema,
                     new_column_schema: rename_new_column_schema,
                     modification_type: ColumnModificationType::Rename,
                 },
-                SchemaOperation::AddColumn { column_schema: addition },
+                SchemaOperation::AddColumn {
+                    column_schema: addition,
+                    reason: ColumnPresenceChangeReason::TableSchema,
+                },
                 SchemaOperation::ModifyColumn {
                     new_column_schema: nullability_column_schema,
                     modification_type: ColumnModificationType::Nullability,

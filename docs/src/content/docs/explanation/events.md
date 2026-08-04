@@ -60,7 +60,6 @@ A new row was added to a table.
 
 ```rust
 pub struct InsertEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub replicated_table_schema: ReplicatedTableSchema,
@@ -74,7 +73,6 @@ An existing row was modified.
 
 ```rust
 pub struct UpdateEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub replicated_table_schema: ReplicatedTableSchema,
@@ -170,7 +168,6 @@ A row was removed from a table.
 
 ```rust
 pub struct DeleteEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub replicated_table_schema: ReplicatedTableSchema,
@@ -205,7 +202,6 @@ One or more tables were truncated (all rows deleted).
 
 ```rust
 pub struct TruncateEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub options: i8,
@@ -225,7 +221,6 @@ Marks the start of a transaction.
 
 ```rust
 pub struct BeginEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub timestamp: i64,
@@ -239,7 +234,6 @@ Marks successful transaction completion.
 
 ```rust
 pub struct CommitEvent {
-    pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub tx_ordinal: u64,
     pub flags: i8,
@@ -261,28 +255,16 @@ pub struct RelationEvent {
 }
 ```
 
-Relation messages are generated at runtime from `pgoutput`'s session-local
-schema cache; they are not WAL-backed changes. Which relation messages appear
-is therefore session-dependent: a fresh session resets the cache and can
-re-emit schema metadata during replay. `RelationEvent` intentionally has no
-start LSN, commit LSN, transaction ordinal, or sequence key. Those values would
-look like a durable replay identity even though they are not stable across
-sessions. Destinations should treat each relation event as an ordered schema
-barrier for the row events that follow it, not as a checkpoint or deduplication
-key.
-
-During replay, logical decoding uses historical catalog state at each row
-change's WAL position. Committed publication column-list changes are therefore
-reflected in the corresponding relation masks: rows written before and after a
-publication change are decoded with their respective projections. Session
-dependence affects when relation metadata is emitted or re-emitted, not the
-historical projection used to decode a row.
+Relation messages are connection-local protocol metadata. PostgreSQL can emit
+the same relation again after a reconnect even when the source schema did not
+change. A `RelationEvent` therefore has no durable event sequence key and does
+not consume a transaction ordinal.
 
 The carried `SnapshotId` identifies the underlying stored table schema, not the
-complete `ReplicatedTableSchema`. A relation event for the same snapshot can
-carry different replication or identity masks, so destinations must preserve
-those mask changes. Relation delivery order and transaction position are
-session-dependent and must not be used as snapshot identity.
+complete `ReplicatedTableSchema`. A relation for the same physical schema can
+carry different replication or identity masks. Destinations must process those
+mask changes as ordered schema barriers for following row events, rather than
+using relation delivery itself as a checkpoint or deduplication key.
 
 PostgreSQL pgoutput builds relation messages by walking the table descriptor in
 `pg_attribute.attnum` order and skipping columns that are not published. It
@@ -337,23 +319,21 @@ async fn write_events(
 }
 ```
 
-## Understanding LSN Fields
+## Understanding Event Sequence Keys
 
-WAL-backed data and transaction events include **LSN (Log Sequence Number)**
-fields plus a transaction-local ordinal. These values are critical for ordering,
-checkpointing, and idempotent destination writes. `RelationEvent` is the
-exception: it is session-generated schema metadata and must be processed in
-stream order rather than assigned a durable sequence key.
+Transaction and data events include a commit **LSN (Log Sequence Number)** plus
+a transaction-local ordinal. Together, these fields provide stable ordering for
+idempotent destination writes. Relation events are not sequenced because they
+are connection-local protocol metadata.
 
 ### What is an LSN?
 
 An LSN is a pointer to a position in Postgres's **Write-Ahead Log (WAL)**. It's a monotonically increasing 64-bit integer that uniquely identifies a location in the transaction log. Format: `0/16B3748` (segment/offset).
 
-### start_lsn, commit_lsn, and tx_ordinal
+### commit_lsn and tx_ordinal
 
 | Field | Meaning | Use Case |
 |-------|---------|----------|
-| `start_lsn` | Position where this event was recorded in the WAL | Debugging and WAL-position context |
 | `commit_lsn` | Position where the transaction will commit | Transaction grouping, recovery checkpoints |
 | `tx_ordinal` | Zero-based order among sequence-key-bearing events in its transaction | Ordering and idempotency within a transaction |
 
@@ -367,8 +347,8 @@ Consider a transaction that inserts two rows:
 
 ```sql
 BEGIN;                    -- Transaction starts
-INSERT INTO users ...;    -- start_lsn: 0/16B3700, commit_lsn: 0/16B3800
-INSERT INTO users ...;    -- start_lsn: 0/16B3750, commit_lsn: 0/16B3800
+INSERT INTO users ...;    -- commit_lsn: 0/16B3800, tx_ordinal: 1
+INSERT INTO users ...;    -- commit_lsn: 0/16B3800, tx_ordinal: 2
 COMMIT;                   -- Transaction commits at 0/16B3800
 ```
 

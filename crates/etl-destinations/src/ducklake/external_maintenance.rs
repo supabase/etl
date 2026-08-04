@@ -71,7 +71,10 @@ where
     let config = ExternalMaintenanceWatcherConfig::from_env();
     let Some(store) = KubernetesExternalMaintenanceStore::from_env(config.store_timeout).await?
     else {
-        info!("ducklake Kubernetes external maintenance watcher disabled because CR env is absent");
+        info!(
+            "ducklake kubernetes external maintenance watcher disabled because cr environment is \
+             absent"
+        );
         return Ok(());
     };
 
@@ -96,7 +99,7 @@ where
         )
         .await?;
 
-    info!(pipeline_id, "ducklake Postgres external maintenance watcher configured");
+    info!(pipeline_id, "ducklake postgres external maintenance watcher configured");
 
     run_external_maintenance_watcher(destination, store, config).await
 }

@@ -6,7 +6,6 @@ use std::{
 use etl::{
     event::EventType,
     pipeline::PipelineId,
-    store::TableStateType,
     test_utils::{
         database::{
             local_pg_read_replica_connection_config, spawn_source_database, test_table_name,
@@ -276,13 +275,12 @@ async fn pipeline_replicates_table_copy_and_cdc_from_read_replica() {
         destination.clone(),
     );
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    wait_with_standby_snapshots(&primary, users_ready_notify.notified()).await;
+    wait_with_standby_snapshots(&primary, users_sync_complete_notify.notified()).await;
 
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
@@ -343,13 +341,12 @@ async fn pipeline_advances_read_replica_slot_on_idle_keepalive() {
         destination.clone(),
     );
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    wait_with_standby_snapshots(&primary, users_ready_notify.notified()).await;
+    wait_with_standby_snapshots(&primary, users_sync_complete_notify.notified()).await;
 
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();

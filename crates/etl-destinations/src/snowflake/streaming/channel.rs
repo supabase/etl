@@ -8,8 +8,10 @@ use tracing::warn;
 use crate::snowflake::{
     Error, OffsetToken, Result, RowBatch, SnowpipeError, StreamClient,
     metrics::{
-        ETL_SNOWFLAKE_BATCH_BYTES, ETL_SNOWFLAKE_BATCH_SIZE,
+        ETL_SNOWFLAKE_ACCEPTED_BATCHES_TOTAL, ETL_SNOWFLAKE_ACCEPTED_ROWS_TOTAL,
+        ETL_SNOWFLAKE_APPEND_DURATION_SECONDS, ETL_SNOWFLAKE_BATCH_BYTES, ETL_SNOWFLAKE_BATCH_SIZE,
         ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL, ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL,
+        ETL_SNOWFLAKE_REJECTED_ROWS_TOTAL, FAILURE_TYPE_LABEL,
     },
     streaming::ChannelStatusResponse,
 };
@@ -159,16 +161,24 @@ struct ChannelProgress {
     committed_offset: Option<OffsetToken>,
     /// Cumulative inserted rows reported by Snowflake.
     rows_inserted: u64,
-    /// Cumulative row errors reported by Snowflake.
-    rows_error_count: u64,
+    /// Last cumulative row-error count observed in this process.
+    rows_error_count: Option<u64>,
 }
 
 impl ChannelProgress {
     /// Updates progress from a channel status response.
     fn observe(&mut self, status: &ChannelStatusResponse) {
+        if let Some(previous_rows_error_count) = self.rows_error_count
+            && let Some(rejected_rows) =
+                status.rows_error_count.checked_sub(previous_rows_error_count)
+            && rejected_rows > 0
+        {
+            counter!(ETL_SNOWFLAKE_REJECTED_ROWS_TOTAL).increment(rejected_rows);
+        }
+
         self.committed_offset = status.offset_token.clone();
         self.rows_inserted = status.rows_inserted;
-        self.rows_error_count = status.rows_error_count;
+        self.rows_error_count = Some(status.rows_error_count);
     }
 
     /// Returns whether `offset` has already committed.
@@ -288,7 +298,7 @@ impl<C: StreamClient> ChannelHandle<C> {
                     warn!(
                         table = %self.table,
                         channel = %self.channel,
-                        "waiting for Snowflake channel rows to commit before reopening"
+                        "waiting for snowflake channel rows to commit before reopening"
                     );
                     sleep(self.poll_interval).await;
                 }
@@ -323,7 +333,7 @@ impl<C: StreamClient> ChannelHandle<C> {
                     warn!(
                         table = %self.table,
                         channel = %self.channel,
-                        "waiting for Snowflake channel rows to commit before dropping"
+                        "waiting for snowflake channel rows to commit before dropping"
                     );
                     sleep(self.poll_interval).await;
                 }
@@ -536,6 +546,32 @@ impl<C: StreamClient> ChannelHandle<C> {
             return Ok(BatchAcceptance::AlreadyCommitted);
         }
 
+        let started_at = Instant::now();
+        let result = self.accept_batch_inner(batch).await;
+
+        histogram!(ETL_SNOWFLAKE_APPEND_DURATION_SECONDS)
+            .record(started_at.elapsed().as_secs_f64());
+
+        match &result {
+            Ok(BatchAcceptance::Accepted(accepted)) => {
+                counter!(ETL_SNOWFLAKE_ACCEPTED_BATCHES_TOTAL).increment(1);
+                counter!(ETL_SNOWFLAKE_ACCEPTED_ROWS_TOTAL).increment(accepted.rows);
+            }
+            Ok(BatchAcceptance::AlreadyCommitted) => {}
+            Err(error) => {
+                counter!(
+                    ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL,
+                    FAILURE_TYPE_LABEL => error.append_failure_type().as_str(),
+                )
+                .increment(1);
+            }
+        }
+
+        result
+    }
+
+    /// Performs one logical append after cached replay filtering.
+    async fn accept_batch_inner(&mut self, batch: &RowBatch) -> Result<BatchAcceptance> {
         if self.progress.is_committed(batch.start_offset()) {
             return Err(Error::Channel(format!(
                 "Snowflake batch {}..={} overlaps committed offset {:?}; replay filtering should \
@@ -547,7 +583,7 @@ impl<C: StreamClient> ChannelHandle<C> {
         }
 
         let baseline_rows_inserted = self.progress.rows_inserted;
-        let baseline_rows_error_count = self.progress.rows_error_count;
+        let baseline_rows_error_count = self.progress.rows_error_count.unwrap_or_default();
 
         histogram!(ETL_SNOWFLAKE_BATCH_SIZE).record(batch.row_count() as f64);
         histogram!(ETL_SNOWFLAKE_BATCH_BYTES).record(batch.size() as f64);
@@ -602,7 +638,7 @@ impl<C: StreamClient> ChannelHandle<C> {
                 }
 
                 let baseline_rows_inserted = self.progress.rows_inserted;
-                let baseline_rows_error_count = self.progress.rows_error_count;
+                let baseline_rows_error_count = self.progress.rows_error_count.unwrap_or_default();
                 self.append_batch(batch).await?;
 
                 Ok(BatchAcceptance::Accepted(AcceptedRowBatch::from_row_batch(
@@ -611,10 +647,7 @@ impl<C: StreamClient> ChannelHandle<C> {
                     baseline_rows_error_count,
                 )?))
             }
-            Err(error) => {
-                counter!(ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL).increment(1);
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 

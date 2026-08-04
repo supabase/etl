@@ -3,24 +3,233 @@ use etl::{
     data::{ArrayCell, Cell, PgNumeric, PgTimeTz, TableRow},
     error::EtlResult,
     postgres::client::PgReplicationClient,
-    schema::ColumnSchema,
+    schema::{ColumnSchema, SnapshotId, TableId, TableName},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         pipeline::test_slot_name,
         replication_stream::{parse_copy_row, parse_tuple},
+        test_schema::create_partitioned_table,
     },
+};
+use etl_postgres::{
+    below_version,
+    tokio::test_utils::{PgDatabase, connect_to_pg_database},
+    version::POSTGRES_15,
 };
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
+use pg_escape::quote_identifier;
 use postgres_replication::{
     LogicalReplicationStream,
     protocol::{LogicalReplicationMessage, ReplicationMessage},
 };
-use serde_json::json;
-use tokio::pin;
+use serde_json::{Value as JsonValue, json};
+use tokio::{
+    pin,
+    time::{Duration, timeout},
+};
+use tokio_postgres::{Client, types::PgLsn};
 
 const MATRIX_ROW_ID: i64 = 1;
 const MATRIX_UUID: &str = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11";
+
+/// A decoded marker whose DDL variant retains its logical-message LSN.
+#[derive(Debug, PartialEq, Eq)]
+enum StreamMarker {
+    Begin(PgLsn),
+    DdlMessage(PgLsn, u32, Option<String>, Vec<String>),
+    Relation(u32, Vec<String>),
+    Insert(u32),
+    Commit(PgLsn),
+}
+
+/// The expected protocol shape, excluding dynamic logical-message LSN values.
+#[derive(Debug, PartialEq, Eq)]
+enum ExpectedStreamMarker {
+    Begin,
+    DdlMessage(u32, Option<String>, Vec<String>),
+    Relation(u32, Vec<String>),
+    Insert(u32),
+    Commit,
+}
+
+impl StreamMarker {
+    /// Returns the stable protocol shape without the dynamic message LSN.
+    fn expected(&self) -> ExpectedStreamMarker {
+        match self {
+            Self::Begin(_) => ExpectedStreamMarker::Begin,
+            Self::DdlMessage(_, table_id, publication_name, columns) => {
+                ExpectedStreamMarker::DdlMessage(
+                    *table_id,
+                    publication_name.clone(),
+                    columns.clone(),
+                )
+            }
+            Self::Relation(table_id, columns) => {
+                ExpectedStreamMarker::Relation(*table_id, columns.clone())
+            }
+            Self::Insert(table_id) => ExpectedStreamMarker::Insert(*table_id),
+            Self::Commit(_) => ExpectedStreamMarker::Commit,
+        }
+    }
+}
+
+/// Collects protocol markers while preserving their decoded order.
+async fn collect_stream_markers(
+    stream: LogicalReplicationStream,
+    expected_count: usize,
+) -> Vec<StreamMarker> {
+    timeout(Duration::from_secs(10), async {
+        let mut markers = Vec::with_capacity(expected_count);
+
+        pin!(stream);
+        while markers.len() < expected_count {
+            let event = stream
+                .next()
+                .await
+                .expect("Logical replication stream ended unexpectedly")
+                .expect("Failed to decode logical replication data");
+
+            let ReplicationMessage::XLogData(event) = event else {
+                continue;
+            };
+
+            match event.data() {
+                LogicalReplicationMessage::Begin(begin) => {
+                    markers.push(StreamMarker::Begin(PgLsn::from(begin.final_lsn())));
+                }
+                LogicalReplicationMessage::Commit(commit) => {
+                    markers.push(StreamMarker::Commit(PgLsn::from(commit.commit_lsn())));
+                }
+                LogicalReplicationMessage::Message(message) => {
+                    let prefix = message.prefix().expect("Message prefix should decode");
+                    if prefix != "supabase_etl_ddl" {
+                        continue;
+                    }
+
+                    let content = message.content().expect("Message content should decode");
+                    let json: JsonValue =
+                        serde_json::from_str(content).expect("DDL message should be valid JSON");
+                    let table_id = json["oid"]
+                        .as_u64()
+                        .and_then(|oid| u32::try_from(oid).ok())
+                        .expect("DDL message should contain a PostgreSQL table OID");
+                    let publication_name = json["publication_name"].as_str().map(ToOwned::to_owned);
+                    let column_names = json["columns"]
+                        .as_array()
+                        .expect("DDL message columns should be an array")
+                        .iter()
+                        .map(|column| {
+                            column["attname"]
+                                .as_str()
+                                .expect("DDL message column should have attname")
+                                .to_owned()
+                        })
+                        .collect();
+
+                    markers.push(StreamMarker::DdlMessage(
+                        PgLsn::from(message.message_lsn()),
+                        table_id,
+                        publication_name,
+                        column_names,
+                    ));
+                }
+                LogicalReplicationMessage::Relation(relation) => {
+                    let table_id = relation.rel_id();
+                    let column_names = relation
+                        .columns()
+                        .iter()
+                        .map(|column| {
+                            column.name().expect("Relation column name should decode").to_owned()
+                        })
+                        .collect();
+
+                    markers.push(StreamMarker::Relation(table_id, column_names));
+                }
+                LogicalReplicationMessage::Insert(insert) => {
+                    markers.push(StreamMarker::Insert(insert.rel_id()));
+                }
+                _ => {}
+            }
+        }
+
+        markers
+    })
+    .await
+    .expect("Timed out while collecting logical replication markers")
+}
+
+/// Asserts an initial decoding session and a no-feedback replay from the same
+/// LSN.
+async fn assert_stream_markers_and_replay(
+    initial_client: PgReplicationClient,
+    initial_stream: LogicalReplicationStream,
+    database: &PgDatabase<Client>,
+    publication_name: &str,
+    slot_name: &str,
+    start_lsn: PgLsn,
+    expected: &[ExpectedStreamMarker],
+) {
+    let initial_markers = collect_stream_markers(initial_stream, expected.len()).await;
+    let initial_shapes = initial_markers.iter().map(StreamMarker::expected).collect::<Vec<_>>();
+    assert_eq!(initial_shapes, expected);
+
+    let mut transaction_commit_lsn = None;
+    for marker in &initial_markers {
+        match marker {
+            StreamMarker::Begin(commit_lsn) => {
+                assert!(transaction_commit_lsn.replace(*commit_lsn).is_none());
+            }
+            StreamMarker::DdlMessage(message_lsn, ..) => {
+                let commit_lsn =
+                    transaction_commit_lsn.expect("DDL message must be inside a transaction");
+                assert_ne!(*message_lsn, PgLsn::from(0_u64));
+                assert!(*message_lsn <= commit_lsn);
+            }
+            StreamMarker::Commit(commit_lsn) => {
+                assert_eq!(transaction_commit_lsn.take(), Some(*commit_lsn));
+            }
+            _ => {}
+        }
+    }
+    assert!(transaction_commit_lsn.is_none());
+
+    let ddl_lsns = initial_markers
+        .iter()
+        .filter_map(|marker| match marker {
+            StreamMarker::DdlMessage(message_lsn, ..) => Some(*message_lsn),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(ddl_lsns.windows(2).all(|window| window[0] < window[1]));
+
+    drop(initial_client);
+    database.wait_for_slot_inactive(slot_name).await;
+
+    let replay_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let replay_stream = replay_client
+        .start_logical_replication(publication_name, slot_name, start_lsn)
+        .await
+        .unwrap();
+    let replay_markers = collect_stream_markers(replay_stream, expected.len()).await;
+    assert_eq!(replay_markers, initial_markers);
+}
+
+/// Starts a logical replication stream whose slot can be replayed from its
+/// consistent point without sending feedback.
+async fn start_replayable_stream(
+    database: &PgDatabase<Client>,
+    publication_name: &str,
+    slot_suffix: &str,
+) -> (PgReplicationClient, LogicalReplicationStream, String, PgLsn) {
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name(slot_suffix);
+    let start_lsn = client.create_slot(&slot_name).await.unwrap().consistent_point;
+    let stream =
+        client.start_logical_replication(publication_name, &slot_name, start_lsn).await.unwrap();
+
+    (client, stream, slot_name, start_lsn)
+}
 
 struct UnsupportedParserCase {
     name: &'static str,
@@ -182,9 +391,9 @@ fn unsupported_parser_cases() -> &'static [UnsupportedParserCase] {
 }
 
 async fn create_type_matrix_table_in(
-    database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
+    database: &PgDatabase<Client>,
     test_name: &str,
-) -> (etl::schema::TableName, etl::schema::TableId) {
+) -> (TableName, TableId) {
     let table_name = test_table_name(test_name);
     let table_id = database
         .create_table(
@@ -268,10 +477,10 @@ async fn create_type_matrix_table_in(
 }
 
 async fn create_single_value_table_in(
-    database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
+    database: &PgDatabase<Client>,
     test_name: &str,
     data_type: &str,
-) -> (etl::schema::TableName, etl::schema::TableId) {
+) -> (TableName, TableId) {
     let table_name = test_table_name(test_name);
     let value_column_type = format!("{data_type} not null");
     let table_id = database
@@ -287,8 +496,8 @@ async fn create_single_value_table_in(
 }
 
 async fn insert_single_value_row(
-    database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
-    table_name: &etl::schema::TableName,
+    database: &PgDatabase<Client>,
+    table_name: &TableName,
     expression: &str,
 ) {
     database
@@ -300,10 +509,7 @@ async fn insert_single_value_row(
         .unwrap();
 }
 
-async fn insert_type_matrix_row(
-    database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
-    table_name: &etl::schema::TableName,
-) {
+async fn insert_type_matrix_row(database: &PgDatabase<Client>, table_name: &TableName) {
     database
         .run_sql(&format!(
             r#"
@@ -435,7 +641,7 @@ async fn collect_single_copy_parse_result(
         .expect("copy stream should emit one row")
         .expect("copy stream row should be readable");
     let result = parse_copy_row(&row, column_schemas);
-    assert!(stream.next().await.is_none(), "copy stream should emit exactly one row");
+    assert!(stream.next().await.is_none());
 
     result
 }
@@ -512,10 +718,7 @@ fn assert_money_cell(row: &TableRow, column_schemas: &[ColumnSchema]) {
         panic!("money_col should decode as a string");
     };
 
-    assert!(
-        value.contains("12") && value.contains("34"),
-        "money output should preserve the Postgres text value, got {value}"
-    );
+    assert!(value.contains("12") && value.contains("34"));
 }
 
 fn assert_f32_cell(row: &TableRow, column_schemas: &[ColumnSchema], name: &str, expected: f32) {
@@ -560,7 +763,7 @@ fn assert_string_cell_contains(
         panic!("{name} should decode as a string");
     };
 
-    assert!(value.contains(expected), "{name} should contain {expected:?}, got {value:?}");
+    assert!(value.contains(expected));
 }
 
 fn assert_string_array_cell_contains(
@@ -577,10 +780,7 @@ fn assert_string_array_cell_contains(
     for (value, expected) in values.iter().zip(expected) {
         match (value, expected) {
             (Some(value), Some(expected)) => {
-                assert!(
-                    value.contains(expected),
-                    "{name} should contain {expected:?}, got {value:?}"
-                );
+                assert!(value.contains(expected));
             }
             (None, None) => {}
             _ => panic!("{name} should have matching null positions"),
@@ -978,4 +1178,1764 @@ async fn logical_replication_stream_rejects_known_unsupported_postgres_values() 
             case.name
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_consecutive_ddl_only_transactions_without_relations() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("consecutive_ddl_only_transactions");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("a", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "consecutive_ddl_only_transactions_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "consecutive_ddl_only_transactions_slot",
+    )
+    .await;
+
+    // Each ALTER runs in its own transaction. With no DML, pgoutput carries
+    // the self-describing DDL messages but has no reason to emit Relation.
+    database
+        .run_sql(&format!("alter table {quoted_table_name} add column b integer"))
+        .await
+        .unwrap();
+    database.run_sql(&format!("alter table {quoted_table_name} add column c text")).await.unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_consecutive_renames_as_one_final_relation() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("consecutive_rename_cycle");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("a", "text"), ("b", "text")])
+        .await
+        .unwrap();
+
+    let publication_name = "consecutive_rename_cycle_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "consecutive_rename_cycle_slot").await;
+
+    database
+        .run_sql(&format!(
+            "alter table {quoted_table_name} rename column a to supabase_etl_source_swap"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("alter table {quoted_table_name} rename column b to a"))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {quoted_table_name} rename column supabase_etl_source_swap to b"
+        ))
+        .await
+        .unwrap();
+    database.insert_values(table_name, &["a", "b"], &[&"old-b", &"old-a"]).await.unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "supabase_etl_source_swap".to_owned(), "b".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "supabase_etl_source_swap".to_owned(), "a".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "b".to_owned(), "a".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "b".to_owned(), "a".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_orders_concurrent_ddl_transactions_by_commit_lsn() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+
+    let first_table = test_table_name("concurrent_ddl_first");
+    let first_table_id = database
+        .create_table(first_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let second_table = test_table_name("concurrent_ddl_second");
+    let second_table_id = database
+        .create_table(second_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "concurrent_ddl_commit_order_pub";
+    database
+        .create_publication(publication_name, &[first_table.clone(), second_table.clone()])
+        .await
+        .unwrap();
+
+    let (client, stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "concurrent_ddl_commit_order_slot")
+            .await;
+
+    // The event trigger's pg_publication_tables lookup reads every published
+    // table, which serializes otherwise independent concurrent ALTER TABLE
+    // commands. Suppress the trigger and emit its transactional schema records
+    // explicitly so this test isolates logical-decoding commit order.
+    let (mut second_client, _) = connect_to_pg_database(&database.config).await;
+    let first_transaction = database.begin_transaction().await;
+    first_transaction.run_sql("set local supabase_etl.skip_ddl_log = true").await.unwrap();
+    first_transaction
+        .run_sql(&format!(
+            "alter table {} add column first_change text",
+            first_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    first_transaction
+        .run_sql(&format!(
+            "select pg_catalog.pg_logical_emit_message(
+                true,
+                'supabase_etl_ddl',
+                pg_catalog.jsonb_build_object(
+                    'oid', {},
+                    'columns', pg_catalog.jsonb_build_array(
+                        pg_catalog.jsonb_build_object('attname', 'id'),
+                        pg_catalog.jsonb_build_object('attname', 'value'),
+                        pg_catalog.jsonb_build_object('attname', 'first_change')
+                    )
+                )::pg_catalog.text
+            )",
+            first_table_id.into_inner()
+        ))
+        .await
+        .unwrap();
+    first_transaction
+        .run_sql(&format!(
+            "alter table {} add column second_change text",
+            first_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    first_transaction
+        .run_sql(&format!(
+            "select pg_catalog.pg_logical_emit_message(
+                true,
+                'supabase_etl_ddl',
+                pg_catalog.jsonb_build_object(
+                    'oid', {},
+                    'columns', pg_catalog.jsonb_build_array(
+                        pg_catalog.jsonb_build_object('attname', 'id'),
+                        pg_catalog.jsonb_build_object('attname', 'value'),
+                        pg_catalog.jsonb_build_object('attname', 'first_change'),
+                        pg_catalog.jsonb_build_object('attname', 'second_change')
+                    )
+                )::pg_catalog.text
+            )",
+            first_table_id.into_inner()
+        ))
+        .await
+        .unwrap();
+
+    let second_transaction = second_client.transaction().await.unwrap();
+    second_transaction
+        .batch_execute(&format!(
+            "set local supabase_etl.skip_ddl_log = true;
+            alter table {} add column committed_first text;
+            select pg_catalog.pg_logical_emit_message(
+                true,
+                'supabase_etl_ddl',
+                pg_catalog.jsonb_build_object(
+                    'oid', {},
+                    'columns', pg_catalog.jsonb_build_array(
+                        pg_catalog.jsonb_build_object('attname', 'id'),
+                        pg_catalog.jsonb_build_object('attname', 'value'),
+                        pg_catalog.jsonb_build_object('attname', 'committed_first')
+                    )
+                )::pg_catalog.text
+            );",
+            second_table.as_quoted_identifier(),
+            second_table_id.into_inner()
+        ))
+        .await
+        .unwrap();
+    second_transaction.commit().await.unwrap();
+    first_transaction.commit_transaction().await;
+
+    let markers = collect_stream_markers(stream, 7).await;
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            second_table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "value".to_owned(), "committed_first".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            first_table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "value".to_owned(), "first_change".to_owned()],
+        ),
+        ExpectedStreamMarker::DdlMessage(
+            first_table_id.into_inner(),
+            None,
+            vec![
+                "id".to_owned(),
+                "value".to_owned(),
+                "first_change".to_owned(),
+                "second_change".to_owned(),
+            ],
+        ),
+        ExpectedStreamMarker::Commit,
+    ];
+    assert_eq!(markers.iter().map(StreamMarker::expected).collect::<Vec<_>>(), expected);
+
+    let [
+        StreamMarker::Begin(second_commit_lsn),
+        StreamMarker::DdlMessage(second_message_lsn, ..),
+        StreamMarker::Commit(second_commit_lsn_again),
+        StreamMarker::Begin(first_commit_lsn),
+        StreamMarker::DdlMessage(first_message_lsn, ..),
+        StreamMarker::DdlMessage(first_second_message_lsn, ..),
+        StreamMarker::Commit(first_commit_lsn_again),
+    ] = markers.as_slice()
+    else {
+        panic!("expected concurrent DDL transaction markers");
+    };
+
+    assert_eq!(second_commit_lsn, second_commit_lsn_again);
+    assert_eq!(first_commit_lsn, first_commit_lsn_again);
+    assert!(first_message_lsn < first_second_message_lsn);
+    assert!(first_second_message_lsn < second_message_lsn);
+    assert!(second_commit_lsn < first_commit_lsn);
+
+    let delivered_message_lsns =
+        [*second_message_lsn, *first_message_lsn, *first_second_message_lsn];
+    assert!(!delivered_message_lsns.windows(2).all(|window| window[0] < window[1]));
+
+    let delivered_snapshot_ids = [
+        SnapshotId::new(*second_commit_lsn, *second_message_lsn),
+        SnapshotId::new(*first_commit_lsn, *first_message_lsn),
+        SnapshotId::new(*first_commit_lsn, *first_second_message_lsn),
+    ];
+    assert!(delivered_snapshot_ids.windows(2).all(|window| window[0] < window[1]));
+
+    drop(client);
+    database.wait_for_slot_inactive(&slot_name).await;
+
+    let replay_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let replay_stream = replay_client
+        .start_logical_replication(publication_name, &slot_name, start_lsn)
+        .await
+        .unwrap();
+    let replay_markers = collect_stream_markers(replay_stream, expected.len()).await;
+    assert_eq!(replay_markers, markers);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_schema_changes_before_first_dml() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    let table_name = test_table_name("schema_changes_before_first_dml");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("a", "integer not null"), ("b", "integer not null"), ("c", "integer not null")],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = "schema_changes_before_first_dml_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "schema_changes_before_first_dml_slot",
+    )
+    .await;
+
+    // Both schema changes happen before any DML. Each emits a stable schema
+    // snapshot, but neither synthesizes a Relation message.
+    database
+        .run_sql(&format!(
+            "alter table {quoted_table_name} add column d integer not null default 0"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter publication {} set table {quoted_table_name} (id, a, c, d)",
+            quote_identifier(publication_name)
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("insert into {quoted_table_name} (a, b, c, d) values (1, 2, 3, 4)"))
+        .await
+        .unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "a".to_owned(), "c".to_owned(), "d".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_multi_table_publication_column_filter_change_order() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    let first_table = test_table_name("publication_filter_first");
+    let first_table_id = database
+        .create_table(
+            first_table.clone(),
+            true,
+            &[("a", "integer not null"), ("b", "integer not null"), ("c", "integer not null")],
+        )
+        .await
+        .unwrap();
+    let second_table = test_table_name("publication_filter_second");
+    let second_table_id = database
+        .create_table(
+            second_table.clone(),
+            true,
+            &[("a", "integer not null"), ("b", "integer not null"), ("c", "integer not null")],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = "publication_filter_multiple_tables_pub";
+    database
+        .run_sql(&format!(
+            "create publication {} for table {} (id, a, b, c), {} (id, a, b, c)",
+            quote_identifier(publication_name),
+            first_table.as_quoted_identifier(),
+            second_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "publication_filter_multiple_tables_slot",
+    )
+    .await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} set table {} (id, a, b), {} (id, a, b)",
+            quote_identifier(publication_name),
+            first_table.as_quoted_identifier(),
+            second_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (a, b, c) values (1, 2, 3)",
+            first_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (a, b, c) values (4, 5, 6)",
+            second_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            first_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned()],
+        ),
+        ExpectedStreamMarker::DdlMessage(
+            second_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            first_table_id.into_inner(),
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(first_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            second_table_id.into_inner(),
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(second_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_filters_unpublished_transactions_by_server_version() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let published_table = test_table_name("filtered_transaction_published");
+    let published_table_id = database
+        .create_table(published_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let unpublished_table = test_table_name("filtered_transaction_unpublished");
+    database
+        .create_table(unpublished_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "filtered_transaction_pub";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&published_table))
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "filtered_transaction_slot").await;
+
+    database.insert_values(unpublished_table.clone(), &["value"], &[&1]).await.unwrap();
+    database.insert_values(published_table.clone(), &["value"], &[&2]).await.unwrap();
+    database.insert_values(unpublished_table, &["value"], &[&3]).await.unwrap();
+    database.insert_values(published_table, &["value"], &[&4]).await.unwrap();
+
+    let mut expected = Vec::new();
+    // PostgreSQL 14 emits BEGIN/COMMIT when pgoutput filters every change in a
+    // transaction. PostgreSQL 15+ suppresses the empty transaction.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
+    }
+    expected.extend([
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            published_table_id.into_inner(),
+            vec!["id".to_owned(), "value".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(published_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ]);
+    if below_version!(database.server_version(), POSTGRES_15) {
+        expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
+    }
+    expected.extend([
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Insert(published_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ]);
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        expected.as_slice(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_recursive_alter_partitioned_table_emits_no_leaf_ddl_messages() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let root_table = test_table_name("recursive_alter_partitioned_table");
+    let (_root_table_id, leaf_table_ids) = create_partitioned_table(
+        &database,
+        root_table.clone(),
+        &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+
+    let publication_name = "recursive_alter_partitioned_table_pub";
+    database
+        .create_publication_with_config(publication_name, std::slice::from_ref(&root_table), false)
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "recursive_alter_partitioned_table_slot",
+    )
+    .await;
+
+    database
+        .run_sql(&format!(
+            "alter table {} add column category text not null default 'default_category'",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key, category) values ('first', 50, 'category'), \
+             ('second', 150, 'category')",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // PostgreSQL reports only the explicitly altered partitioned parent to the
+    // event trigger. It does not enumerate the regular-table leaves changed by
+    // the recursive `alter table`, so the next leaf DML emits its updated
+    // relation without any preceding DDL message. PostgreSQL 14 still emits an
+    // empty transaction for the filtered ALTER, while PostgreSQL 15+ suppresses
+    // it.
+    let mut expected = Vec::new();
+    if below_version!(database.server_version(), POSTGRES_15) {
+        expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
+    }
+    expected.extend([
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[0].into_inner(),
+            vec![
+                "id".to_owned(),
+                "data".to_owned(),
+                "partition_key".to_owned(),
+                "category".to_owned(),
+            ],
+        ),
+        ExpectedStreamMarker::Insert(leaf_table_ids[0].into_inner()),
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[1].into_inner(),
+            vec![
+                "id".to_owned(),
+                "data".to_owned(),
+                "partition_key".to_owned(),
+                "category".to_owned(),
+            ],
+        ),
+        ExpectedStreamMarker::Insert(leaf_table_ids[1].into_inner()),
+        ExpectedStreamMarker::Commit,
+    ]);
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        expected.as_slice(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_publication_add_partition_root_emits_snapshot_when_using_root() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let initial_table = test_table_name("publication_add_root_identity_initial");
+    database
+        .create_table(initial_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let root_table = test_table_name("publication_add_root_identity_root");
+    let (root_table_id, leaf_table_ids) = create_partitioned_table(
+        &database,
+        root_table.clone(),
+        &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+
+    let publication_name = "publication_add_root_identity_pub";
+    database
+        .create_publication_with_config(
+            publication_name,
+            std::slice::from_ref(&initial_table),
+            true,
+        )
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "publication_add_root_identity_slot")
+            .await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} add table {}",
+            quote_identifier(publication_name),
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('first', 50), ('second', 150)",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // pgoutput describes each physical leaf before publishing its tuple under
+    // the root relation identity.
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            root_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            root_table_id.into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[0].into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(root_table_id.into_inner()),
+        ExpectedStreamMarker::Relation(
+            root_table_id.into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[1].into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(root_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_publication_add_partition_root_emits_no_snapshot_when_using_leaves() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let initial_table = test_table_name("publication_add_partition_initial");
+    database
+        .create_table(initial_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let root_table = test_table_name("publication_add_partition_root");
+    let (_root_table_id, leaf_table_ids) = create_partitioned_table(
+        &database,
+        root_table.clone(),
+        &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+
+    let publication_name = "publication_add_partition_root_pub";
+    database
+        .create_publication_with_config(
+            publication_name,
+            std::slice::from_ref(&initial_table),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "publication_add_partition_root_slot")
+            .await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} add table {}",
+            quote_identifier(publication_name),
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('first', 50), ('second', 150)",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let mut expected = Vec::new();
+    // PostgreSQL reports the explicitly added partitioned root as the
+    // publication-relation event object, but pgoutput publishes its leaves when
+    // publish_via_partition_root is false. The trigger therefore emits no leaf
+    // schema snapshots. PostgreSQL 14 still exposes the empty transaction.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
+    }
+    expected.extend([
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[0].into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(leaf_table_ids[0].into_inner()),
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[1].into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(leaf_table_ids[1].into_inner()),
+        ExpectedStreamMarker::Commit,
+    ]);
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        expected.as_slice(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_publication_add_partition_leaf_emits_leaf_snapshot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let initial_table = test_table_name("publication_add_leaf_initial");
+    database
+        .create_table(initial_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let root_table = test_table_name("publication_add_leaf_root");
+    let (_root_table_id, leaf_table_ids) = create_partitioned_table(
+        &database,
+        root_table.clone(),
+        &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+    let leaf_table = TableName::new(root_table.schema, format!("{}_first", root_table.name));
+
+    let publication_name = "publication_add_leaf_pub";
+    // An explicitly named leaf stays the effective relation even when the
+    // publication otherwise uses partition-root identity.
+    database
+        .create_publication_with_config(
+            publication_name,
+            std::slice::from_ref(&initial_table),
+            true,
+        )
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "publication_add_leaf_slot").await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} add table {}",
+            quote_identifier(publication_name),
+            leaf_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database.insert_values(leaf_table, &["data", "partition_key"], &[&"first", &50]).await.unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            leaf_table_ids[0].into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[0].into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(leaf_table_ids[0].into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_publication_partition_root_option_changes_ddl_and_dml_identity() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let root_table = test_table_name("publication_partition_identity_root");
+    let (root_table_id, leaf_table_ids) = create_partitioned_table(
+        &database,
+        root_table.clone(),
+        &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+
+    let publication_name = "publication_partition_identity_pub";
+    database
+        .create_publication_with_config(publication_name, std::slice::from_ref(&root_table), false)
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "publication_partition_identity_slot")
+            .await;
+
+    let quoted_publication_name = quote_identifier(publication_name);
+    database
+        .run_sql(&format!(
+            "alter publication {quoted_publication_name} set (publish_via_partition_root = true)"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('root first', 50), ('root second', 150)",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter publication {quoted_publication_name} set (publish_via_partition_root = false)"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('leaf first', 50), ('leaf second', 150)",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let columns = vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()];
+    // Publication-wide option changes expand the post-command effective table
+    // set: first the root, then the two leaves in relation-OID order.
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            root_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            columns.clone(),
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(root_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Relation(leaf_table_ids[0].into_inner(), columns.clone()),
+        ExpectedStreamMarker::Insert(root_table_id.into_inner()),
+        ExpectedStreamMarker::Relation(root_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Relation(leaf_table_ids[1].into_inner(), columns.clone()),
+        ExpectedStreamMarker::Insert(root_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            leaf_table_ids[0].into_inner(),
+            Some(publication_name.to_owned()),
+            columns.clone(),
+        ),
+        ExpectedStreamMarker::DdlMessage(
+            leaf_table_ids[1].into_inner(),
+            Some(publication_name.to_owned()),
+            columns.clone(),
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(leaf_table_ids[0].into_inner(), columns.clone()),
+        ExpectedStreamMarker::Insert(leaf_table_ids[0].into_inner()),
+        ExpectedStreamMarker::Relation(leaf_table_ids[1].into_inner(), columns),
+        ExpectedStreamMarker::Insert(leaf_table_ids[1].into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_publication_add_table_schemas_in_oid_order() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let initial_table = test_table_name("publication_add_multiple_initial");
+    database
+        .create_table(initial_table.clone(), true, &[("initial_value", "integer not null")])
+        .await
+        .unwrap();
+    let first_added_table = test_table_name("publication_add_multiple_first");
+    let first_added_table_id = database
+        .create_table(first_added_table.clone(), true, &[("first_value", "integer not null")])
+        .await
+        .unwrap();
+    let second_added_table = test_table_name("publication_add_multiple_second");
+    let second_added_table_id = database
+        .create_table(second_added_table.clone(), true, &[("second_value", "text not null")])
+        .await
+        .unwrap();
+    assert!(first_added_table_id < second_added_table_id);
+
+    let publication_name = "publication_add_multiple_pub";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&initial_table))
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "publication_add_multiple_slot").await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} add table {}, {}",
+            quote_identifier(publication_name),
+            first_added_table.as_quoted_identifier(),
+            second_added_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            first_added_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "first_value".to_owned()],
+        ),
+        ExpectedStreamMarker::DdlMessage(
+            second_added_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "second_value".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_publication_add_and_option_snapshots_but_not_drop() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let first_table = test_table_name("publication_options_first");
+    let first_table_id = database
+        .create_table(first_table.clone(), true, &[("first_value", "integer not null")])
+        .await
+        .unwrap();
+    let second_table = test_table_name("publication_options_second");
+    let second_table_id = database
+        .create_table(second_table.clone(), true, &[("second_value", "integer not null")])
+        .await
+        .unwrap();
+    let added_table = test_table_name("publication_options_added");
+    let added_table_id = database
+        .create_table(added_table.clone(), true, &[("added_value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "publication_membership_and_options_pub";
+    database
+        .create_publication(publication_name, &[first_table.clone(), second_table.clone()])
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "publication_membership_and_options_slot",
+    )
+    .await;
+
+    let quoted_publication_name = quote_identifier(publication_name);
+    database
+        .run_sql(&format!(
+            "alter publication {quoted_publication_name} add table {}",
+            added_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter publication {quoted_publication_name} drop table {}",
+            added_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("alter publication {quoted_publication_name} set (publish = 'insert')"))
+        .await
+        .unwrap();
+    database.insert_values(first_table.clone(), &["first_value"], &[&1]).await.unwrap();
+
+    let mut expected = vec![
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            added_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "added_value".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+    ];
+    // PostgreSQL 14's pgoutput emits BEGIN/COMMIT for this empty
+    // ALTER PUBLICATION ... DROP TABLE transaction. PostgreSQL 15+ postpones
+    // BEGIN until the first publishable change and suppresses both markers when
+    // no such change exists:
+    // https://www.postgresql.org/docs/15/release-15.html
+    // https://github.com/postgres/postgres/commit/d5a9d86d8ffcadc52ff3729cd00fbd83bc38643c
+    if below_version!(database.server_version(), POSTGRES_15) {
+        expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
+    }
+    expected.extend([
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            first_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "first_value".to_owned()],
+        ),
+        ExpectedStreamMarker::DdlMessage(
+            second_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "second_value".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            first_table_id.into_inner(),
+            vec!["id".to_owned(), "first_value".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(first_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ]);
+
+    // The absence of an added-table marker between the ADD and SET-option
+    // transactions proves that DROP TABLE emits no schema snapshot.
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        expected.as_slice(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_consecutive_ddl_before_dml_within_transaction() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+
+    let table_name = test_table_name("consecutive_ddl_before_dml");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "consecutive_ddl_before_dml_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "consecutive_ddl_before_dml_slot")
+            .await;
+
+    let transaction = database.begin_transaction().await;
+    transaction
+        .run_sql(&format!(
+            "alter table {} add column first_change text",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction
+        .run_sql(&format!(
+            "alter table {} add column second_change text",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction.insert_values(table_name, &["value"], &[&1]).await.unwrap();
+    transaction.commit_transaction().await;
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "value".to_owned(), "first_change".to_owned()],
+        ),
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec![
+                "id".to_owned(),
+                "value".to_owned(),
+                "first_change".to_owned(),
+                "second_change".to_owned(),
+            ],
+        ),
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec![
+                "id".to_owned(),
+                "value".to_owned(),
+                "first_change".to_owned(),
+                "second_change".to_owned(),
+            ],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_consecutive_ddl_after_dml_within_transaction() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+
+    let table_name = test_table_name("consecutive_ddl_after_dml");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "consecutive_ddl_after_dml_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "consecutive_ddl_after_dml_slot")
+            .await;
+
+    let transaction = database.begin_transaction().await;
+    transaction.insert_values(table_name.clone(), &["value"], &[&1]).await.unwrap();
+    transaction
+        .run_sql(&format!(
+            "alter table {} add column first_change text",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction
+        .run_sql(&format!(
+            "alter table {} add column second_change text",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction.commit_transaction().await;
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "value".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "value".to_owned(), "first_change".to_owned()],
+        ),
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec![
+                "id".to_owned(),
+                "value".to_owned(),
+                "first_change".to_owned(),
+                "second_change".to_owned(),
+            ],
+        ),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_cross_table_ddl_dml_interleavings_within_transaction() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+
+    let first_table = test_table_name("cross_table_interleaving_first");
+    let first_table_id = database
+        .create_table(first_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let second_table = test_table_name("cross_table_interleaving_second");
+    let second_table_id = database
+        .create_table(second_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "cross_table_interleaving_pub";
+    database
+        .create_publication(publication_name, &[first_table.clone(), second_table.clone()])
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "cross_table_interleaving_slot").await;
+
+    let transaction = database.begin_transaction().await;
+    transaction
+        .run_sql(&format!(
+            "alter table {} add column schema_version text",
+            first_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction.insert_values(second_table.clone(), &["value"], &[&1]).await.unwrap();
+    transaction
+        .run_sql(&format!(
+            "alter table {} add column schema_version text",
+            second_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction.insert_values(first_table, &["value"], &[&2]).await.unwrap();
+    transaction.insert_values(second_table, &["value"], &[&3]).await.unwrap();
+    transaction.commit_transaction().await;
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            first_table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "value".to_owned(), "schema_version".to_owned()],
+        ),
+        ExpectedStreamMarker::Relation(
+            second_table_id.into_inner(),
+            vec!["id".to_owned(), "value".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(second_table_id.into_inner()),
+        ExpectedStreamMarker::DdlMessage(
+            second_table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "value".to_owned(), "schema_version".to_owned()],
+        ),
+        ExpectedStreamMarker::Relation(
+            first_table_id.into_inner(),
+            vec!["id".to_owned(), "value".to_owned(), "schema_version".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(first_table_id.into_inner()),
+        ExpectedStreamMarker::Relation(
+            second_table_id.into_inner(),
+            vec!["id".to_owned(), "value".to_owned(), "schema_version".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(second_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_table_ddl_between_dml_transactions() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("table_ddl_between_dml_transactions");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "table_ddl_between_dml_transactions_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "table_ddl_between_dml_transactions_slot",
+    )
+    .await;
+
+    database.insert_values(table_name.clone(), &["value"], &[&1]).await.unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} add column schema_version text",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database.insert_values(table_name, &["value"], &[&2]).await.unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "value".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "value".to_owned(), "schema_version".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "value".to_owned(), "schema_version".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_discards_rolled_back_ddl_between_dml() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+
+    let table_name = test_table_name("rolled_back_ddl_between_dml");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "rolled_back_ddl_between_dml_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "rolled_back_ddl_between_dml_slot")
+            .await;
+
+    let transaction = database.begin_transaction().await;
+    transaction.insert_values(table_name.clone(), &["value"], &[&1]).await.unwrap();
+    transaction.run_sql("savepoint discarded_schema_change").await.unwrap();
+    transaction
+        .run_sql(&format!(
+            "alter table {} add column discarded_change text",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction.run_sql("rollback to savepoint discarded_schema_change").await.unwrap();
+    transaction
+        .run_sql(&format!(
+            "alter table {} add column retained_change text",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction.insert_values(table_name, &["value"], &[&2]).await.unwrap();
+    transaction.commit_transaction().await;
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "value".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "value".to_owned(), "retained_change".to_owned()],
+        ),
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "value".to_owned(), "retained_change".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_interleaved_table_schema_changes_within_transaction() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+
+    let table_name = test_table_name("ddl_message_ordering");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("age", "integer not null default 0")],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = "ddl_message_ordering_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "ddl_message_ordering_slot").await;
+
+    let transaction = database.begin_transaction().await;
+    transaction
+        .run_sql(&format!(
+            "alter table {} add column status text not null default 'pending'",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction
+        .insert_values(table_name.clone(), &["name", "age", "status"], &[&"alice", &30, &"active"])
+        .await
+        .unwrap();
+    transaction
+        .run_sql(&format!("alter table {} drop column age", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    transaction
+        .insert_values(table_name.clone(), &["name", "status"], &[&"bob", &"pending"])
+        .await
+        .unwrap();
+    transaction.commit_transaction().await;
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "name".to_owned(), "age".to_owned(), "status".to_owned()],
+        ),
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "name".to_owned(), "age".to_owned(), "status".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
+        ),
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_dml_before_table_and_publication_ddl_within_transaction() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    let table_name = test_table_name("interleaved_table_publication_ddl");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("a", "integer not null"), ("b", "integer not null"), ("c", "integer not null")],
+        )
+        .await
+        .unwrap();
+    let quoted_table_name = table_name.as_quoted_identifier();
+
+    let publication_name = "interleaved_table_publication_ddl_pub";
+    let quoted_publication_name = quote_identifier(publication_name);
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "interleaved_table_publication_ddl_slot",
+    )
+    .await;
+
+    let transaction = database.begin_transaction().await;
+    transaction.insert_values(table_name.clone(), &["a", "b", "c"], &[&1, &2, &3]).await.unwrap();
+    transaction
+        .run_sql(&format!(
+            "alter table {quoted_table_name} add column d integer not null default 0"
+        ))
+        .await
+        .unwrap();
+    transaction
+        .insert_values(table_name.clone(), &["a", "b", "c", "d"], &[&4, &5, &6, &7])
+        .await
+        .unwrap();
+    transaction
+        .run_sql(&format!(
+            "alter publication {quoted_publication_name} set table {quoted_table_name} (id, a, c, \
+             d)"
+        ))
+        .await
+        .unwrap();
+    transaction
+        .insert_values(table_name.clone(), &["a", "b", "c", "d"], &[&8, &9, &10, &11])
+        .await
+        .unwrap();
+    transaction.commit_transaction().await;
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+        ),
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+        ),
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "a".to_owned(), "c".to_owned(), "d".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
 }

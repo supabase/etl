@@ -2,14 +2,17 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use etl::{
     pipeline::PipelineId,
-    schema::{ColumnModificationType, ColumnSchema, SchemaOperation, SchemaPlan, TableId},
+    schema::{
+        ColumnModificationType, ColumnPresenceChangeReason, ColumnSchema, SchemaOperation,
+        SchemaPlan, TableId,
+    },
 };
 use metrics::{counter, gauge, histogram};
 use tokio::{
     sync::{Mutex, RwLock},
     time::sleep,
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::snowflake::{
     Config, Error, Result, SnowpipeError,
@@ -336,7 +339,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         // Apply the shared plan without regrouping operations.
         for operation in plan.ordered_operations() {
             match operation {
-                SchemaOperation::DropColumn { column_schema } => {
+                SchemaOperation::DropColumn { column_schema, reason: _ } => {
                     self.sql_client.drop_column(table_name, &column_schema.name).await?;
                 }
                 SchemaOperation::ModifyColumn {
@@ -348,9 +351,18 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                         .rename_column(table_name, &old_column_schema.name, &new_column_schema.name)
                         .await?;
                 }
-                SchemaOperation::AddColumn { column_schema } => {
+                SchemaOperation::AddColumn { column_schema, reason } => {
                     let add_column_default_clause =
-                        schema::add_column_default_clause(column_schema);
+                        if *reason == ColumnPresenceChangeReason::ReplicationMask {
+                            debug!(
+                                table_name,
+                                column_name = %column_schema.name,
+                                "leaving publication-added snowflake column without a default"
+                            );
+                            None
+                        } else {
+                            schema::add_column_default_clause(column_schema)
+                        };
                     self.sql_client
                         .add_column(
                             table_name,
@@ -370,7 +382,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                         column_name = %new_column_schema.name,
                         old_nullable = old_column_schema.nullable,
                         new_nullable = new_column_schema.nullable,
-                        "skipping source column nullability change for Snowflake"
+                        "skipping source column nullability change for snowflake"
                     );
                 }
                 SchemaOperation::ModifyColumn {
@@ -402,7 +414,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         warn!(
             table_name,
             column_name,
-            "skipping source column default change for Snowflake because ALTER COLUMN SET DEFAULT \
+            "skipping source column default change for snowflake because alter column set default \
              is only supported for existing sequence defaults"
         );
     }
@@ -419,8 +431,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             warn!(
                 table_name,
                 column_name = %new_column_schema.name,
-                "skipping source column default drop for Snowflake because defaults introduced \
-                 by ALTER TABLE ADD COLUMN cannot be dropped safely"
+                "skipping source column default removal for snowflake because defaults introduced \
+                 by alter table add column cannot be dropped safely"
             );
         }
     }

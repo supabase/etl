@@ -7,7 +7,7 @@ use duckdb::Connection;
 use etl::{
     event::EventType,
     pipeline::PipelineId,
-    store::{StateStore, TableStateType},
+    store::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -20,7 +20,7 @@ use etl::{
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
 };
-use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::random;
@@ -234,6 +234,30 @@ fn query_schema_add_rows(conn: &Connection, table_name: &DuckLakeTableName) -> V
     result
 }
 
+/// Queries rows after an existing source column enters the replication mask.
+fn query_publication_add_rows(
+    conn: &Connection,
+    table_name: &DuckLakeTableName,
+) -> Vec<(i64, String, Option<String>)> {
+    let sql = format!(
+        "select id, name, status from {} order by id",
+        qualified_lake_table_name(table_name)
+    );
+    let mut statement = conn.prepare(&sql).expect("failed to prepare publication add query");
+    let mut rows = statement.query([]).expect("failed to run publication add query");
+    let mut result = Vec::new();
+
+    while let Some(row) = rows.next().expect("failed to read publication add row") {
+        result.push((
+            row.get(0).expect("failed to read publication add id"),
+            row.get(1).expect("failed to read publication add name"),
+            row.get(2).expect("failed to read publication add status"),
+        ));
+    }
+
+    result
+}
+
 /// Queries rows after an ordered name-reuse schema change using blocking
 /// DuckDB APIs.
 ///
@@ -408,17 +432,15 @@ async fn table_copy_and_streaming_with_restart() {
         destination.clone(),
     );
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_ready_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let orders_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
-    orders_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
@@ -526,12 +548,11 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         destination.clone(),
     );
 
-    let users_ready_notify =
-        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(users_schema.id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -566,12 +587,11 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         destination.clone(),
     );
 
-    let users_ready_notify =
-        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(users_schema.id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -620,17 +640,15 @@ async fn table_copy_and_streaming_without_restart() {
         destination.clone(),
     );
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_ready_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let orders_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
-    orders_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -690,9 +708,8 @@ async fn table_insert_update_delete() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
@@ -704,7 +721,7 @@ async fn table_insert_update_delete() {
     );
 
     pipeline.start().await.unwrap();
-    users_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(
@@ -830,17 +847,15 @@ async fn cdc_streaming_with_truncate() {
         destination.clone(),
     );
 
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_ready_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let orders_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
-    orders_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -947,11 +962,10 @@ async fn schema_change_add_column() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let initial_metadata = store
         .get_applied_destination_table_metadata(table_id)
@@ -1017,6 +1031,97 @@ async fn schema_change_add_column() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn publication_mask_adds_existing_defaulted_column_without_backfill() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for publication column lists");
+        return;
+    }
+
+    let table_name = test_table_name("ducklake_publication_add_col");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("status", "text not null default 'pending'::text")],
+        )
+        .await
+        .expect("failed to create source table");
+    let publication_name = "test_pub_ducklake_publication_add";
+    database
+        .run_sql(&format!(
+            "create publication {} for table {} (id, name)",
+            quote_identifier(publication_name),
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to create filtered publication");
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Alice')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to insert initial source row");
+
+    let lake = create_test_lake("publication_mask_adds_existing_defaulted_column").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
+        .expect("failed to build DuckLake table name");
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
+        .await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} set table {} (id, name, status)",
+            quote_identifier(publication_name),
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to expand publication column list");
+    database
+        .run_sql(&format!(
+            "insert into {} (name, status) values ('Bob', 'replicated')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to insert source row after publication change");
+
+    events_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+    checkpoint_lake(&catalog_url, &data_url);
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(
+        query_publication_add_rows(&conn, &ducklake_table_name),
+        vec![(1, "Alice".to_owned(), None), (2, "Bob".to_owned(), Some("replicated".to_owned())),]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn schema_change_is_visible_to_already_open_connection() {
     init_test_tracing();
 
@@ -1058,11 +1163,10 @@ async fn schema_change_is_visible_to_already_open_connection() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let initial_snapshot_id = store
         .get_applied_destination_table_metadata(table_id)
@@ -1177,11 +1281,10 @@ async fn schema_change_ordered_name_reuse() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1306,11 +1409,10 @@ async fn schema_change_then_update_and_delete() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1410,11 +1512,10 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1557,11 +1658,10 @@ async fn schema_change_matches_simulator_generated_column_types() {
         store.clone(),
         destination.clone(),
     );
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![

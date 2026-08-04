@@ -76,7 +76,7 @@ pub(crate) fn default_clause(column_schema: &ColumnSchema) -> Option<String> {
     if default_clause.is_none() && column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
-            "skipping unsupported source column default for Snowflake"
+            "skipping unsupported source column default for snowflake"
         );
     }
 
@@ -96,7 +96,7 @@ pub(crate) fn add_column_default_clause(column_schema: &ColumnSchema) -> Option<
     if default_clause.is_none() && column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
-            "skipping source column default for Snowflake ADD COLUMN because Snowflake only \
+            "skipping source column default for snowflake add column because snowflake only \
              supports literal add-column defaults"
         );
     }
@@ -118,7 +118,15 @@ fn snowflake_default_expression(default_expression: &str, typ: &Type) -> Option<
 /// Returns a Snowflake `ADD COLUMN` default expression, if supported.
 fn snowflake_add_column_default_expression(default_expression: &str, typ: &Type) -> Option<String> {
     parse_default_expression(default_expression, typ)
-        .and_then(|expression| render_snowflake_add_column_default_expression(&expression, typ))
+        .filter(|expression| {
+            matches!(
+                expression,
+                DefaultExpression::StringLiteral(_)
+                    | DefaultExpression::NumericLiteral(_)
+                    | DefaultExpression::BooleanLiteral(_)
+            )
+        })
+        .and_then(|expression| render_snowflake_default_expression(&expression, typ))
 }
 
 /// Renders a parsed default expression as Snowflake SQL.
@@ -163,37 +171,6 @@ fn render_snowflake_default_expression(
         DefaultExpression::JsonLiteral(expression) => {
             is_json_type(typ).then(|| format!("PARSE_JSON({expression})"))
         }
-    }
-}
-
-/// Renders a parsed default expression for Snowflake `ADD COLUMN`.
-fn render_snowflake_add_column_default_expression(
-    expression: &DefaultExpression,
-    typ: &Type,
-) -> Option<String> {
-    match expression {
-        DefaultExpression::StringLiteral(expression) => {
-            is_snowflake_string_default_type(typ).then(|| expression.clone())
-        }
-        DefaultExpression::NumericLiteral(expression) => {
-            if is_snowflake_numeric_default_type(typ) {
-                Some(expression.clone())
-            } else if is_snowflake_numeric_string_default_type(typ) {
-                Some(quote_numeric_literal_as_string(expression))
-            } else {
-                None
-            }
-        }
-        DefaultExpression::BooleanLiteral(expression) => {
-            matches!(typ, &Type::BOOL).then(|| expression.clone())
-        }
-        DefaultExpression::DateLiteral(_)
-        | DefaultExpression::TimeLiteral(_)
-        | DefaultExpression::TimeTzLiteral(_)
-        | DefaultExpression::TimestampLiteral(_)
-        | DefaultExpression::TimestampTzLiteral(_)
-        | DefaultExpression::IntervalLiteral(_)
-        | DefaultExpression::JsonLiteral(_) => None,
     }
 }
 
@@ -439,42 +416,36 @@ mod tests {
 
     #[test]
     fn add_column_default_clause_renders_supported_expressions() {
-        let supported_text = ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 1, true)
-            .with_default_expression("'pending'::text".to_owned());
-        let supported_integer = ColumnSchema::new("value".to_owned(), Type::INT4, -1, 1, true)
-            .with_default_expression("15".to_owned());
-        let supported_boolean = ColumnSchema::new("value".to_owned(), Type::BOOL, -1, 1, true)
-            .with_default_expression("true".to_owned());
-        let supported_numeric_as_string =
-            ColumnSchema::new("value".to_owned(), Type::NUMERIC, -1, 1, true)
-                .with_default_expression("42".to_owned());
-        let unsupported_function = ColumnSchema::new("value".to_owned(), Type::UUID, -1, 1, true)
-            .with_default_expression("gen_random_uuid()".to_owned());
-        let unsupported_json = ColumnSchema::new("value".to_owned(), Type::JSONB, -1, 1, true)
-            .with_default_expression("'{}'::jsonb".to_owned());
-        let unsupported_timetz = ColumnSchema::new("value".to_owned(), Type::TIMETZ, -1, 1, true)
-            .with_default_expression("'12:30:00+02'::timetz".to_owned());
-        let unsupported_current_timestamp =
-            ColumnSchema::new("value".to_owned(), Type::TIMESTAMPTZ, -1, 1, true)
-                .with_default_expression("now()".to_owned());
-        let unsupported_numeric_expression =
-            ColumnSchema::new("value".to_owned(), Type::INT4, -1, 1, true)
-                .with_default_expression("10 + 5".to_owned());
+        let cases = [
+            (Type::TEXT, "'pending'::text", Some(" DEFAULT 'pending'")),
+            (Type::INT4, "15", Some(" DEFAULT 15")),
+            (Type::BOOL, "true", Some(" DEFAULT true")),
+            (Type::NUMERIC, "42", Some(" DEFAULT '42'")),
+            (
+                Type::UUID,
+                "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid",
+                Some(" DEFAULT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'"),
+            ),
+            (Type::DATE, "'2026-01-01'::date", None),
+            (Type::TIME, "'12:30:00'::time", None),
+            (Type::TIMETZ, "'12:30:00+02'::timetz", None),
+            (Type::TIMESTAMP, "'2026-01-01 12:30:00'::timestamp", None),
+            (Type::TIMESTAMPTZ, "'2026-01-01 12:30:00+02'::timestamptz", None),
+            (Type::INTERVAL, "'30 days'::interval", None),
+            (Type::JSONB, "'{}'::jsonb", None),
+            (Type::UUID, "gen_random_uuid()", None),
+            (Type::INT4, "10 + 5", None),
+        ];
 
-        assert_eq!(
-            add_column_default_clause(&supported_text).as_deref(),
-            Some(" DEFAULT 'pending'")
-        );
-        assert_eq!(add_column_default_clause(&supported_integer).as_deref(), Some(" DEFAULT 15"));
-        assert_eq!(add_column_default_clause(&supported_boolean).as_deref(), Some(" DEFAULT true"));
-        assert_eq!(
-            add_column_default_clause(&supported_numeric_as_string).as_deref(),
-            Some(" DEFAULT '42'")
-        );
-        assert_eq!(add_column_default_clause(&unsupported_function), None);
-        assert_eq!(add_column_default_clause(&unsupported_json), None);
-        assert_eq!(add_column_default_clause(&unsupported_timetz), None);
-        assert_eq!(add_column_default_clause(&unsupported_current_timestamp), None);
-        assert_eq!(add_column_default_clause(&unsupported_numeric_expression), None);
+        for (typ, expression, expected) in cases {
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
+                .with_default_expression(expression.to_owned());
+            let add_clause = add_column_default_clause(&column);
+
+            assert_eq!(add_clause.as_deref(), expected, "add-column default for {expression}");
+            if add_clause.is_some() {
+                assert_eq!(add_clause, default_clause(&column));
+            }
+        }
     }
 }

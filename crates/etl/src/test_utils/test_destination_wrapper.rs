@@ -379,6 +379,7 @@ where
                 commit_end_lsn: None,
                 durability,
                 event_count: events.len(),
+                relation_table_ids: Default::default(),
                 streaming_payload_metadata: Default::default(),
                 dispatched_at: Instant::now(),
             });
@@ -395,7 +396,7 @@ where
         // the code continue and do something else in the meanwhile.
         let inner = Arc::clone(&self.inner);
         self.tasks
-            .spawn(async move {
+            .spawn_with(move || async move {
                 // We send the result back before doing the internal checks for this utility, to
                 // avoid checking before the apply loop received the result.
                 let result =

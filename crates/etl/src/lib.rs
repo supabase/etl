@@ -17,8 +17,8 @@
 //!   strategies
 //! - **Concurrent processing**: Parallel table synchronization and event
 //!   application for increased throughput
-//! - **Suspendable**: Persistent tracking of replication progress which allows
-//!   the pipeline to be safely paused and restarted
+//! - **Suspendable**: Persistent replication checkpoints allow the pipeline to
+//!   be safely paused and restarted
 //!
 //! # Core Concepts
 //!
@@ -40,9 +40,9 @@
 //! operations. These stores are critical to a pipeline's operation, as they
 //! allow it to be safely paused and resumed.
 //!
-//! The [`store::StateStore`] trait handles table states,
-//! durable replication progress, and destination table metadata, providing a
-//! single interface for all state-related storage operations.
+//! The [`store::StateStore`] trait handles table states, persisted replication
+//! checkpoints, and destination table metadata, providing a single interface
+//! for all state-related storage operations.
 //!
 //! The [`store::SchemaStore`] trait handles versioned table schemas,
 //! and [`store::TableStateLifecycleStore`] handles table-scoped preparation,

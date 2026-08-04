@@ -28,9 +28,10 @@ pub struct DestinationTableMetadata {
     pub snapshot_id: SnapshotId,
     /// The schema version before the current change. None for initial schemas.
     ///
-    /// Destinations that support atomic DDL can use this for recovery: if
-    /// `schema_status` is `Applying` on startup, the destination knows the
-    /// DDL was rolled back and can reset to this snapshot to retry.
+    /// Destinations can use this for recovery when `schema_status` is
+    /// `Applying`. The physical DDL may have committed, rolled back, or only
+    /// partially completed, so recovery must reconcile the destination
+    /// idempotently rather than assuming one outcome.
     pub previous_snapshot_id: Option<SnapshotId>,
     /// Status of the current schema change operation.
     ///

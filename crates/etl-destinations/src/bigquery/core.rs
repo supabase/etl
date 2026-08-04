@@ -18,8 +18,8 @@ use etl::{
     event::{Event, EventSequenceKey},
     pipeline::PipelineId,
     schema::{
-        ColumnModificationType, ColumnNameEquivalence, IdentityType, ReplicatedTableSchema,
-        SchemaOperation, SchemaPlan, TableId, TableName,
+        ColumnModificationType, ColumnNameEquivalence, ColumnPresenceChangeReason, IdentityType,
+        ReplicatedTableSchema, SchemaOperation, SchemaPlan, TableId, TableName,
     },
     store::DestinationStore,
 };
@@ -37,6 +37,7 @@ use crate::{
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
         schema::{column_default_sql, column_schemas_to_table_descriptor},
     },
+    recovery::ensure_relation_schema_transition,
     table_name::try_stringify_table_name,
 };
 
@@ -669,9 +670,9 @@ where
     /// [`StateStore::get_applied_destination_table_metadata`]. Missing metadata
     /// is treated as an invariant violation since the metadata should have
     /// been recorded during initial table synchronization in
-    /// [`Self::write_table_rows`]. If the snapshot ID or replication mask
-    /// differs from the incoming [`ReplicatedTableSchema`], the method
-    /// computes and applies the schema diff.
+    /// [`Self::write_table_rows`]. A newer incoming snapshot computes and
+    /// applies the schema diff. An older snapshot, or an equal snapshot with a
+    /// different replication mask, is rejected before DDL.
     async fn handle_relation_event(
         &self,
         new_replicated_table_schema: &ReplicatedTableSchema,
@@ -702,27 +703,40 @@ where
         let current_snapshot_id = metadata.snapshot_id;
         let current_replication_mask = metadata.replication_mask.clone();
         let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
-        // Check both snapshot_id and replication mask - the mask can change
-        // independently if columns are added/removed from the publication.
-        if current_snapshot_id == new_snapshot_id
-            && current_replication_mask == new_replication_mask
-        {
+
+        // BigQuery CDC sequence numbers order row mutations, but they do not
+        // make destructive or ambiguously ordered DDL safe. A relation has no
+        // DML sequence key of its own, so reject older snapshots and
+        // equal-snapshot mask conflicts before computing a diff.
+        ensure_relation_schema_transition(
+            "BigQuery",
+            table_id,
+            current_snapshot_id,
+            &current_replication_mask,
+            new_snapshot_id,
+            &new_replication_mask,
+        )?;
+
+        // The guard above proves that equal snapshots have equal masks.
+        if current_snapshot_id == new_snapshot_id {
             // Schema hasn't changed, nothing to do.
-            info!(
-                "schema for table {} unchanged (snapshot_id: {}, replication_mask: {})",
-                table_id, new_snapshot_id, new_replication_mask
+            debug!(
+                table_id = %table_id,
+                snapshot_id = %new_snapshot_id,
+                replication_mask = %new_replication_mask,
+                "bigquery table schema unchanged"
             );
 
             return Ok(());
         }
 
         info!(
-            "schema change detected for table {}: snapshot_id {} -> {}, mask {} -> {}",
-            table_id,
-            current_snapshot_id,
-            new_snapshot_id,
-            current_replication_mask,
-            new_replication_mask
+            table_id = %table_id,
+            current_snapshot_id = %current_snapshot_id,
+            new_snapshot_id = %new_snapshot_id,
+            current_replication_mask = %current_replication_mask,
+            new_replication_mask = %new_replication_mask,
+            "bigquery table schema change detected"
         );
 
         // Get the current schema from the schema store to compute the diff.
@@ -776,8 +790,9 @@ where
             self.apply_schema_plan(&table_id, &sequenced_bigquery_table_id, &plan).await
         {
             warn!(
-                "schema change failed for table {}: {}. Manual intervention may be required.",
-                table_id, err
+                table_id = %table_id,
+                error = %err,
+                "bigquery table schema change failed; manual intervention may be required"
             );
             return Err(err);
         }
@@ -799,8 +814,9 @@ where
         self.client.invalidate_all_connections().await;
 
         info!(
-            "schema change completed for table {}: snapshot_id {} applied",
-            table_id, new_snapshot_id
+            table_id = %table_id,
+            snapshot_id = %new_snapshot_id,
+            "bigquery table schema change completed"
         );
 
         Ok(())
@@ -821,18 +837,19 @@ where
             return Ok(());
         }
 
-        info!(
-            "applying schema changes to table {}: {} additions, {} drops, {} column modifications",
-            sequenced_bigquery_table_id,
-            plan.diff().columns_to_add.len(),
-            plan.diff().columns_to_drop.len(),
-            plan.diff().columns_to_modify.len()
+        debug!(
+            source_table_id = %table_id,
+            destination_table_id = %sequenced_bigquery_table_id,
+            added_column_count = plan.diff().columns_to_add.len(),
+            removed_column_count = plan.diff().columns_to_drop.len(),
+            changed_column_count = plan.diff().columns_to_modify.len(),
+            "applying bigquery table schema plan"
         );
 
         // Apply the shared plan without regrouping operations.
         for operation in plan.ordered_operations() {
             match operation {
-                SchemaOperation::DropColumn { column_schema } => {
+                SchemaOperation::DropColumn { column_schema, reason: _ } => {
                     self.client
                         .drop_column(
                             &self.dataset_id,
@@ -855,7 +872,7 @@ where
                         )
                         .await?;
                 }
-                SchemaOperation::AddColumn { column_schema } => {
+                SchemaOperation::AddColumn { column_schema, reason } => {
                     self.client
                         .add_column(
                             &self.dataset_id,
@@ -864,7 +881,13 @@ where
                         )
                         .await?;
 
-                    if let Some(default_expression) = column_default_sql(column_schema) {
+                    if *reason == ColumnPresenceChangeReason::ReplicationMask {
+                        debug!(
+                            table_id = %table_id,
+                            column_name = %column_schema.name,
+                            "leaving publication-added bigquery column without a default"
+                        );
+                    } else if let Some(default_expression) = column_default_sql(column_schema) {
                         self.client
                             .set_column_default(
                                 &self.dataset_id,
@@ -940,7 +963,10 @@ where
             }
         }
 
-        info!("schema changes applied successfully to table {}", sequenced_bigquery_table_id);
+        debug!(
+            destination_table_id = %sequenced_bigquery_table_id,
+            "bigquery table schema plan applied"
+        );
 
         Ok(())
     }
@@ -1204,7 +1230,7 @@ where
             let client = self.client.clone();
             let dataset_id = self.dataset_id.clone();
             self.tasks
-                .spawn(async move {
+                .spawn_with(move || async move {
                     if let Err(err) = client
                         .drop_table_if_exists(&dataset_id, &sequenced_bigquery_table_id.to_string())
                         .await
@@ -1414,7 +1440,7 @@ where
 
         let destination = self.clone();
         self.tasks
-            .spawn(async move {
+            .spawn_with(move || async move {
                 let result = destination.write_events(events).await;
                 async_result.send(result.map(|_| DestinationWriteStatus::Durable));
             })
@@ -1439,7 +1465,8 @@ where
 /// ordinal makes the ordering within generated rows explicit instead of relying
 /// on append order or BigQuery ingestion-time tie-breaking.
 fn bigquery_sequence_key(sequence_key: EventSequenceKey, internal_ordinal: u64) -> String {
-    format!("{sequence_key}/{internal_ordinal:016x}")
+    let commit_lsn = u64::from(sequence_key.commit_lsn);
+    format!("{commit_lsn:016x}/{:016x}/{internal_ordinal:016x}", sequence_key.tx_ordinal)
 }
 
 /// Builds a BigQuery CDC upsert row.
@@ -2599,6 +2626,16 @@ mod tests {
                 (4, Cell::String("DELETE".to_owned())),
                 (5, Cell::String("lsn:1".to_owned())),
             ])
+        );
+    }
+
+    #[test]
+    fn bigquery_sequence_key_uses_three_64_bit_hex_sections() {
+        let sequence_key = EventSequenceKey::new(PgLsn::from(u64::MAX), u64::MAX);
+
+        assert_eq!(
+            bigquery_sequence_key(sequence_key, u64::MAX),
+            "ffffffffffffffff/ffffffffffffffff/ffffffffffffffff"
         );
     }
 

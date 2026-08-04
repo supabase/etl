@@ -43,9 +43,12 @@
 - Do not add dependencies unless they are justified by the task.
 - If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
 - Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
-- Never modify migration files unless the user explicitly asks for a migration
-  change. This includes changing comments or other non-executable text inside
-  migration files.
+- Migration files already present in `main` are immutable. Never change their
+  SQL, comments, whitespace, filenames, or any other content; add a new
+  migration instead.
+- Never modify a migration that is not yet in `main` unless the user explicitly
+  asks for a migration change. This includes changing comments or other
+  non-executable text inside migration files.
 - Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `cargo x fmt` and `cargo x fmt --check`.
 - Treat `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics as the source of truth for enforceable style and correctness rules. Prefer adding or tightening static checks over adding prose rules here.
 - Run Clippy, builds, and tests intentionally when they are relevant: for example
@@ -288,6 +291,8 @@
 - Doctests use `cargo test --doc` (nextest does not support them).
 - If test output shows `0 passed; 0 failed; 0 ignored; n filtered out`, treat that as a failure to run tests.
 - Verify that expected tests actually ran, not just that Cargo exited successfully.
+- Do not add custom messages to assertions. Use a preceding comment when an
+  assertion's purpose is not evident from its expression.
 - Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - When a test failure needs deeper debugging, rerun the targeted test with

@@ -21,6 +21,7 @@ const DEFAULT_DATABASE_PORT: &str = "5430";
 const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 const POSTGRES_STORE_BASE_VERSION: i64 = 20250827000000;
+const POSTGRES_STORE_PRE_COMPOSITE_SNAPSHOT_VERSION: i64 = 20260610120000;
 const APP_NAME_TEST_MIGRATIONS: &str = "supabase_etl_test_migrations";
 
 static TEST_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
@@ -150,10 +151,7 @@ fn assert_migration_set_is_reversible(migration_set: &str, migrator: Migrator) {
         }
     }
 
-    assert_eq!(
-        up_versions, down_versions,
-        "{migration_set} migrations must have matching up and down files"
-    );
+    assert_eq!(up_versions, down_versions);
 }
 
 fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
@@ -235,6 +233,412 @@ async fn postgres_store_startup_runs_only_postgres_store_migrations() {
     assert!(!source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, postgres_store_migration_versions());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
+    init_test_tracing();
+
+    let database = spawn_unmigrated_database().await;
+    let mut conn = migration_connection(&database.config).await;
+    postgres_store_migrator()
+        .run_direct(Some(POSTGRES_STORE_PRE_COMPOSITE_SNAPSHOT_VERSION), &mut conn, false)
+        .await
+        .unwrap();
+    drop(conn);
+
+    let client = database.client.as_ref().expect("database client should be initialized");
+    let table_id = 42_u32;
+    client
+        .execute(
+            "insert into etl.table_schemas (
+                pipeline_id,
+                table_id,
+                schema_name,
+                table_name,
+                snapshot_id
+            )
+            values ($1, $2, 'public', 'items', '0/2'::pg_catalog.pg_lsn)",
+            &[&1_i64, &table_id],
+        )
+        .await
+        .unwrap();
+    let above_i64_table_id = 46_u32;
+    client
+        .execute(
+            "insert into etl.table_schemas (
+                pipeline_id,
+                table_id,
+                schema_name,
+                table_name,
+                snapshot_id
+            )
+            values (
+                $1,
+                $2,
+                'public',
+                'above_i64_snapshot_items',
+                '80000000/0'::pg_catalog.pg_lsn
+            )",
+            &[&1_i64, &above_i64_table_id],
+        )
+        .await
+        .unwrap();
+    let initial_table_id = 43_u32;
+    client
+        .execute(
+            "insert into etl.table_schemas (
+                pipeline_id,
+                table_id,
+                schema_name,
+                table_name
+            )
+            values ($1, $2, 'public', 'initial_items')",
+            &[&1_i64, &initial_table_id],
+        )
+        .await
+        .unwrap();
+    let max_table_id = 45_u32;
+    client
+        .execute(
+            "insert into etl.table_schemas (
+                pipeline_id,
+                table_id,
+                schema_name,
+                table_name,
+                snapshot_id
+            )
+            values (
+                $1,
+                $2,
+                'public',
+                'max_snapshot_items',
+                'FFFFFFFF/FFFFFFFF'::pg_catalog.pg_lsn
+            )",
+            &[&1_i64, &max_table_id],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "insert into etl.destination_tables_metadata (
+                pipeline_id,
+                table_id,
+                destination_table_id,
+                snapshot_id,
+                previous_snapshot_id,
+                schema_status,
+                replication_mask
+            )
+            values (
+                $1,
+                $2,
+                'destination_max_snapshot_items',
+                'FFFFFFFF/FFFFFFFF'::pg_catalog.pg_lsn,
+                '80000000/0'::pg_catalog.pg_lsn,
+                'applying',
+                decode('01', 'hex')
+            )",
+            &[&1_i64, &max_table_id],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "insert into etl.destination_tables_metadata (
+                pipeline_id,
+                table_id,
+                destination_table_id,
+                snapshot_id,
+                previous_snapshot_id,
+                schema_status,
+                replication_mask
+            )
+            values (
+                $1,
+                $2,
+                'destination_items',
+                '0/2'::pg_catalog.pg_lsn,
+                '0/1'::pg_catalog.pg_lsn,
+                'applying',
+                decode('01', 'hex')
+            )",
+            &[&1_i64, &table_id],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "insert into etl.destination_tables_metadata (
+                pipeline_id,
+                table_id,
+                destination_table_id,
+                snapshot_id,
+                schema_status,
+                replication_mask
+            )
+            values (
+                $1,
+                $2,
+                'destination_initial_items',
+                '0/0'::pg_catalog.pg_lsn,
+                'applied',
+                decode('01', 'hex')
+            )",
+            &[&1_i64, &initial_table_id],
+        )
+        .await
+        .unwrap();
+
+    let mut conn = migration_connection(&database.config).await;
+    postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
+    drop(conn);
+
+    let schema_snapshot_id: String = client
+        .query_one(
+            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &table_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(schema_snapshot_id, "2:2");
+    let initial_schema_snapshot_id: String = client
+        .query_one(
+            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &initial_table_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(initial_schema_snapshot_id, "0:0");
+    let max_schema_snapshot_id: String = client
+        .query_one(
+            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &max_table_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(max_schema_snapshot_id, "18446744073709551615:18446744073709551615");
+    let above_i64_schema_snapshot_id: String = client
+        .query_one(
+            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &above_i64_table_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(above_i64_schema_snapshot_id, "9223372036854775808:9223372036854775808");
+
+    let metadata_snapshot_ids_row = client
+        .query_one(
+            "select snapshot_id, previous_snapshot_id
+            from etl.destination_tables_metadata
+            where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &table_id],
+        )
+        .await
+        .unwrap();
+    let metadata_snapshot_ids: (String, Option<String>) =
+        (metadata_snapshot_ids_row.get(0), metadata_snapshot_ids_row.get(1));
+    assert_eq!(metadata_snapshot_ids, ("2:2".to_owned(), Some("1:1".to_owned()),));
+    let initial_metadata_row = client
+        .query_one(
+            "select snapshot_id, previous_snapshot_id
+            from etl.destination_tables_metadata
+            where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &initial_table_id],
+        )
+        .await
+        .unwrap();
+    let initial_metadata_snapshot_ids: (String, Option<String>) =
+        (initial_metadata_row.get(0), initial_metadata_row.get(1));
+    assert_eq!(initial_metadata_snapshot_ids, ("0:0".to_owned(), None));
+    let max_metadata_row = client
+        .query_one(
+            "select snapshot_id, previous_snapshot_id
+            from etl.destination_tables_metadata
+            where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &max_table_id],
+        )
+        .await
+        .unwrap();
+    let max_metadata_snapshot_ids: (String, Option<String>) =
+        (max_metadata_row.get(0), max_metadata_row.get(1));
+    assert_eq!(
+        max_metadata_snapshot_ids,
+        (
+            "18446744073709551615:18446744073709551615".to_owned(),
+            Some("9223372036854775808:9223372036854775808".to_owned()),
+        )
+    );
+
+    let new_initial_table_id = 44_u32;
+    let new_initial_snapshot_id: String = client
+        .query_one(
+            "insert into etl.table_schemas (
+                pipeline_id,
+                table_id,
+                schema_name,
+                table_name
+            )
+            values ($1, $2, 'public', 'new_initial_items')
+            returning snapshot_id",
+            &[&1_i64, &new_initial_table_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(new_initial_snapshot_id, "0:0");
+
+    let ordered_migrated_snapshot_ids: Vec<String> = client
+        .query(
+            "select snapshot_id
+            from etl.table_schemas
+            where pipeline_id = $1 and table_id in ($2, $3, $4, $5)
+            order by
+                pg_catalog.split_part(snapshot_id, ':', 1)::pg_catalog.numeric,
+                pg_catalog.split_part(snapshot_id, ':', 2)::pg_catalog.numeric",
+            &[&1_i64, &initial_table_id, &table_id, &above_i64_table_id, &max_table_id],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(
+        ordered_migrated_snapshot_ids,
+        vec![
+            "0:0".to_owned(),
+            "2:2".to_owned(),
+            "9223372036854775808:9223372036854775808".to_owned(),
+            "18446744073709551615:18446744073709551615".to_owned(),
+        ]
+    );
+
+    let snapshot_columns: Vec<(String, String, String)> = client
+        .query(
+            "select table_name, column_name, data_type
+            from information_schema.columns
+            where table_schema = 'etl'
+              and column_name in ('snapshot_id', 'previous_snapshot_id')
+              and table_name in ('table_schemas', 'destination_tables_metadata')
+            order by table_name, column_name",
+            &[],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(
+        snapshot_columns,
+        vec![
+            (
+                "destination_tables_metadata".to_owned(),
+                "previous_snapshot_id".to_owned(),
+                "text".to_owned(),
+            ),
+            ("destination_tables_metadata".to_owned(), "snapshot_id".to_owned(), "text".to_owned(),),
+            ("table_schemas".to_owned(), "snapshot_id".to_owned(), "text".to_owned(),),
+        ]
+    );
+
+    let mut conn = migration_connection(&database.config).await;
+    postgres_store_migrator()
+        .undo(&mut conn, POSTGRES_STORE_PRE_COMPOSITE_SNAPSHOT_VERSION)
+        .await
+        .unwrap();
+    drop(conn);
+
+    let restored_snapshot_id: String = client
+        .query_one(
+            "select snapshot_id::pg_catalog.text
+            from etl.table_schemas
+            where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &table_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(restored_snapshot_id, "0/2");
+
+    let restored_initial_snapshot_id: String = client
+        .query_one(
+            "select snapshot_id::pg_catalog.text
+            from etl.table_schemas
+            where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &initial_table_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(restored_initial_snapshot_id, "0/0");
+
+    let restored_max_snapshot_id: String = client
+        .query_one(
+            "select snapshot_id::pg_catalog.text
+            from etl.table_schemas
+            where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &max_table_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(restored_max_snapshot_id, "FFFFFFFF/FFFFFFFF");
+    let restored_above_i64_snapshot_id: String = client
+        .query_one(
+            "select snapshot_id::pg_catalog.text
+            from etl.table_schemas
+            where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &above_i64_table_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(restored_above_i64_snapshot_id, "80000000/0");
+
+    let restored_metadata_row = client
+        .query_one(
+            "select snapshot_id::pg_catalog.text, previous_snapshot_id::pg_catalog.text
+            from etl.destination_tables_metadata
+            where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &table_id],
+        )
+        .await
+        .unwrap();
+    let restored_metadata_snapshot_ids: (String, Option<String>) =
+        (restored_metadata_row.get(0), restored_metadata_row.get(1));
+    assert_eq!(restored_metadata_snapshot_ids, ("0/2".to_owned(), Some("0/1".to_owned())));
+
+    let restored_initial_metadata_row = client
+        .query_one(
+            "select snapshot_id::pg_catalog.text, previous_snapshot_id::pg_catalog.text
+            from etl.destination_tables_metadata
+            where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &initial_table_id],
+        )
+        .await
+        .unwrap();
+    let restored_initial_metadata_snapshot_ids: (String, Option<String>) =
+        (restored_initial_metadata_row.get(0), restored_initial_metadata_row.get(1));
+    assert_eq!(restored_initial_metadata_snapshot_ids, ("0/0".to_owned(), None));
+    let restored_max_metadata_row = client
+        .query_one(
+            "select snapshot_id::pg_catalog.text, previous_snapshot_id::pg_catalog.text
+            from etl.destination_tables_metadata
+            where pipeline_id = $1 and table_id = $2",
+            &[&1_i64, &max_table_id],
+        )
+        .await
+        .unwrap();
+    let restored_max_metadata_snapshot_ids: (String, Option<String>) =
+        (restored_max_metadata_row.get(0), restored_max_metadata_row.get(1));
+    assert_eq!(
+        restored_max_metadata_snapshot_ids,
+        ("FFFFFFFF/FFFFFFFF".to_owned(), Some("80000000/0".to_owned()),)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -474,7 +878,7 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
                 table_name,
                 snapshot_id
             )
-            values ($1, $2, $3, $4, '0/1'::pg_catalog.pg_lsn)
+            values ($1, $2, $3, $4, '0:1')
             returning id",
             &[&11_i64, &table_id, &"public", &"migration_snapshot_items"],
         )
@@ -490,7 +894,7 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
                 table_name,
                 snapshot_id
             )
-            values ($1, $2, $3, $4, '0/2'::pg_catalog.pg_lsn)
+            values ($1, $2, $3, $4, '0:2')
             returning id",
             &[&11_i64, &table_id, &"public", &"migration_snapshot_items"],
         )
@@ -545,8 +949,8 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
                 $1,
                 $2,
                 $3,
-                '0/2'::pg_catalog.pg_lsn,
-                '0/1'::pg_catalog.pg_lsn,
+                '0:2',
+                '0:1',
                 'applied',
                 decode('0101', 'hex')
             )",
@@ -615,6 +1019,37 @@ async fn split_migrations_can_be_reverted_independently() {
     assert!(source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, all_split_migration_versions());
+
+    let client = database.client.as_ref().expect("database client should be initialized");
+    let previous_source_version =
+        source_migration_versions().into_iter().rev().nth(1).expect("a previous migration exists");
+    let mut conn = migration_connection(&database.config).await;
+    source_migrator().undo(&mut conn, previous_source_version).await.unwrap();
+    drop(conn);
+
+    let tags: Vec<String> = client
+        .query_one(
+            "select evttags
+            from pg_catalog.pg_event_trigger
+            where evtname = 'supabase_etl_ddl_message_trigger'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(tags, vec!["ALTER TABLE"]);
+
+    let function_definition: String = client
+        .query_one(
+            "select pg_catalog.pg_get_functiondef(
+                'etl.emit_schema_change_messages()'::pg_catalog.regprocedure
+            )",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!function_definition.contains("publication_name"));
 
     let mut conn = migration_connection(&database.config).await;
     source_migrator().undo(&mut conn, 0).await.unwrap();

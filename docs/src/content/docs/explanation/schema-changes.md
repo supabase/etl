@@ -5,18 +5,17 @@ description: How ETL handles DDL and evolving table schemas.
 
 **How ETL handles DDL and evolving table schemas**
 
-:::caution[Beta]
-Schema-change support is currently in beta. We are actively improving its
-coverage, destination behavior, and recovery guarantees.
-:::
+Schema-change support is in public beta and is being expanded incrementally. The
+current implementation is intentionally conservative: the source-side event
+trigger captures a rich PostgreSQL-shaped snapshot, while ETL currently models
+well-understood column changes: **adds, drops, renames, and column default
+and nullability changes**, plus publication column-list changes for tables the
+running pipeline already tracks. A few known edge cases remain.
 
-The current implementation is intentionally conservative: the source-side
-event trigger captures a rich PostgreSQL-shaped snapshot, while ETL currently
-models well-understood column changes: **adds, drops, renames, and column
-default changes**. Built-in destination support varies by destination DDL
-capabilities. **BigQuery, ClickHouse, DuckLake, and Snowflake** apply supported
-schema changes automatically; Iceberg is deprecated for new deployments and
-does not support schema-change DDL.
+Built-in destination support varies by destination DDL capabilities.
+**BigQuery, ClickHouse, DuckLake, and Snowflake** apply supported schema changes
+automatically; Iceberg is deprecated for new deployments and does not support
+schema-change DDL.
 
 ## Short Version
 
@@ -32,6 +31,8 @@ changes:
 | Drop a replicated column default | Column default modification |
 | Drop `NOT NULL` from a replicated column | BigQuery relaxes an existing `REQUIRED` column to `NULLABLE`; other built-in destinations currently leave nullability unchanged |
 | Set `NOT NULL` on a replicated column | Detected in the schema snapshot, but not applied to built-in destinations |
+| Publish an existing column | Add column because the replication mask expanded; add it nullable and without source default metadata so historical destination rows remain unbackfilled |
+| Stop publishing an existing column | Drop column because the replication mask contracted |
 | Several of the above in one statement | One final schema snapshot, diffed into a minimal ordered transition |
 
 When several attributes of the same logical column change at once, ETL groups
@@ -42,21 +43,96 @@ single logical column change.
 ## How It Works
 
 ETL installs a PostgreSQL `ddl_command_end` event trigger named
-`supabase_etl_ddl_message_trigger`. When an `ALTER TABLE` statement affects a
-published permanent table, the trigger emits a transactional logical message
-with prefix `supabase_etl_ddl`.
+`supabase_etl_ddl_message_trigger`. When an `ALTER TABLE` statement or supported
+`ALTER PUBLICATION` change affects a published permanent table, the trigger
+emits a transactional logical message with prefix `supabase_etl_ddl`.
+
+PostgreSQL does not pass user-defined arguments to an event-trigger function.
+The function reads `TG_TAG` and the object addresses returned by
+`pg_event_trigger_ddl_commands()`, then resolves the post-DDL catalogs:
+
+- For `ALTER TABLE`, the object address identifies the table. The message has
+  no publication name because a physical table change applies to every
+  publication containing that table.
+- For per-table `ALTER PUBLICATION` changes, the object address identifies a
+  surviving `pg_publication_rel` row, which links the explicitly named table to
+  its publication. This path does not expand a named partition root into its
+  effective leaves.
+- For publication-level `ALTER PUBLICATION` changes, the object address
+  identifies a `pg_publication` row. The trigger does not parse which parameter
+  changed; it expands the publication's complete post-command effective table
+  set through `pg_publication_tables`.
+
+The publication name is therefore optional in the payload for table DDL but
+required for publication DDL. Logical decoding exposes custom messages to a
+slot independently of pgoutput's table filtering, so ETL accepts an
+`ALTER PUBLICATION` message only when its resolved name exactly matches the
+pipeline's configured publication. A missing name fails closed.
 
 That message is **internal plumbing**. Destinations do not receive it directly.
 Instead, ETL:
 
 1. Parses the schema-change message.
-2. Stores a new versioned table schema using the message LSN as the schema
-   snapshot id.
+2. Stores a new versioned table schema using a composite snapshot ID ordered by
+   commit LSN and then message LSN.
 3. Invalidates the in-memory relation state for that table.
 4. Waits for PostgreSQL pgoutput to emit a fresh `RELATION` message before the
    next row event for that table.
 5. Sends destinations a public `Event::Relation` with the new
    `ReplicatedTableSchema`.
+
+Snapshot IDs display both LSNs as decimal unsigned 64-bit values in
+`commit_lsn:message_lsn` form. Their ordering is the numeric tuple ordering of
+those two components, not the lexical ordering of the displayed string.
+
+`ALTER PUBLICATION ... DROP TABLE` intentionally emits no schema snapshot for
+the removed table because it is no longer part of the publication. PostgreSQL
+14 may still send an empty `BEGIN`/`COMMIT` pair for that transaction;
+PostgreSQL 15 and later suppress empty logical-replication transactions. The
+empty pair contains no schema or row event and does not affect snapshot
+ordering. See the [PostgreSQL 15 release
+notes](https://www.postgresql.org/docs/15/release-15.html) and the [upstream
+change](https://github.com/postgres/postgres/commit/d5a9d86d8ffcadc52ff3729cd00fbd83bc38643c).
+
+For a table already known to the pipeline, a supported publication change
+creates a new snapshot ID even when the full physical table schema is unchanged.
+The following `RELATION` message supplies the current publication and identity
+masks. This gives successive mask changes distinct snapshot IDs and preserves
+their ordering. Multiple schema messages sharing one commit LSN are ordered by
+their message LSN. A newly published table that the running pipeline does not
+know is ignored until startup publication reconciliation creates its table
+state and initial copy.
+
+### `ALTER PUBLICATION` support boundary
+
+The trigger's ability to observe an `ALTER PUBLICATION` command is not the same
+as runtime support for that publication change. The trigger emits schema
+snapshots; it does not add or remove ETL table state, start an initial copy, or
+change which relation OIDs the running apply worker owns.
+
+| Publication change | Trigger behavior | Runtime behavior |
+| --- | --- | --- |
+| Change the column list of an already tracked table | Emits a snapshot scoped to that table and publication | Supported. The next `RELATION` message installs the new replication mask before following row events. |
+| `ADD TABLE` or a membership-changing `SET TABLE` | Emits snapshots for surviving, explicitly identified `pg_publication_rel` rows. A named partition root is not expanded into leaves on this path. | Newly effective relation OIDs are ignored until startup reconciliation initializes and copies them. |
+| `DROP TABLE` | Emits no snapshot because the `pg_publication_rel` row is gone at `ddl_command_end`. | Removed table state is purged during startup reconciliation. Destination data is not automatically removed. |
+| Add, set, or drop `TABLES IN SCHEMA` | The current trigger does not resolve `pg_publication_namespace` events into table snapshots. | Effective membership is loaded during startup reconciliation. |
+| Change a row filter | May emit a per-table snapshot, but row-filter mutation is not part of the supported live-update contract. | Do not rely on changing row filters while the pipeline is running. |
+| Change a publication-level setting such as `publish` | A `pg_publication` event expands to one snapshot for every post-command effective table, even if physical schemas did not change. | Publication settings are not a supported live schema-update interface. |
+| Change `publish_via_partition_root` | Emits snapshots for the complete post-change effective set: the root when enabled, or the leaves when disabled. | Unsupported while running. The new relation OIDs are not dynamically initialized, and the previous destination relation layout is not migrated. |
+| Rename the publication or change its owner | These are publication-level events and may expand across the effective table set. A rename scopes messages to the new name. | Not supported as live schema changes. A configured pipeline does not automatically adopt a new publication name. |
+
+At startup, ETL calls `pg_get_publication_tables()` to load the same effective
+relation identities PostgreSQL uses for pgoutput. New identities enter initial
+sync and identities no longer returned by PostgreSQL have their ETL state
+purged. This startup process does not rename, merge, or delete destination
+tables created for an earlier root or leaf identity.
+
+> **Warning:** Only publication column-list changes for already tracked tables
+> are supported while a pipeline is running. Other `ALTER PUBLICATION` changes
+> can produce skipped events, stale destination tables, or missing or duplicated
+> data. Plan a controlled change with source writes paused and the pipeline
+> stopped, followed by an explicit restart, table resynchronization, or new
+> pipeline instead of relying on live behavior.
 
 The important public boundary is:
 
@@ -149,16 +225,32 @@ remain authoritative.
 
 ETL has one shared schema-change signal, but **DDL behavior is implemented per destination**. A destination may choose to apply DDL automatically, reject a schema change, or require operator handling.
 
+For every built-in destination, a relation whose snapshot ID and replication
+mask exactly match the applied destination metadata is idempotent. BigQuery,
+ClickHouse, DuckLake, and Snowflake currently reject an older snapshot, or the
+same snapshot with a different replication mask, instead of attempting to infer
+schema ordering from later row events. A relation has no DML sequence key of its
+own, so destination row-replay deduplication does not prove that reverse or
+ambiguously ordered DDL is safe. Recovering from either rejection currently
+requires resynchronizing the table. This comparison applies only to metadata
+already marked `Applied`; it neither defines nor initiates recovery from an
+interrupted `Applying` state.
+
 | Destination | Current DDL behavior |
 |-------------|----------------------|
-| BigQuery | Supports non-primary-key add, drop, and rename operations, `REQUIRED` to `NULLABLE` relaxation, and supported literal default metadata on non-primary-key columns. The source primary-key definition must remain unchanged because BigQuery CDC uses the destination primary-key constraint and BigQuery cannot rename primary-key columns. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. PostgreSQL remains responsible for enforcing later `SET NOT NULL` changes because BigQuery cannot tighten an existing column in place. |
+| BigQuery | Supports non-primary-key add, drop, and rename operations, `REQUIRED` to `NULLABLE` relaxation, and supported literal default metadata on non-primary-key columns. The source primary-key definition must remain unchanged because BigQuery CDC uses the destination primary-key constraint and BigQuery cannot rename primary-key columns. BigQuery requires added columns to be nullable. PostgreSQL remains responsible for enforcing later `SET NOT NULL` changes because BigQuery cannot tighten an existing column in place. |
 | ClickHouse | Supports add, drop, rename, and supported literal defaults. `ReplacingMergeTree` rejects primary-key drops, renames, or order changes because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. Relation events whose schema snapshot is older than the applied destination snapshot are rejected instead of executing reverse DDL; recovering from that state requires resynchronizing the table. |
 | DuckLake | Supports add, drop, rename, and supported literal defaults. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
-| Snowflake | Supports add, drop, rename, create-table literal defaults, and literal add-column defaults. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. Relation events whose schema snapshot is older than the applied destination snapshot are skipped because Snowflake's durable channel offset safely deduplicates their replayed row events. |
-| Iceberg | Deprecated for now. Schema-change DDL is not a supported path for new deployments. |
+| Snowflake | Supports add, drop, rename, create-table literal defaults, and literal add-column defaults. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. |
+| Iceberg | Deprecated for now. An identical relation is idempotent, but schema-change DDL is not supported and any newer schema is rejected. Older or ambiguously masked relations are rejected before row writes. |
 | Custom destinations | Destination authors decide which `Event::Relation` changes to apply, reject, or handle manually. |
 
 ## Default Backfills
+
+ETL distinguishes a column added to the physical table from an existing column
+newly included by the replication mask. Both transitions add a destination
+column, but only a physical table addition can safely carry the source default
+semantics into the destination schema.
 
 When a source table adds a replicated column with a default, PostgreSQL can make
 pre-existing source rows read as though they already contain that default. ETL
@@ -182,6 +274,15 @@ support:
   as a physical row rewrite, but defaults created this way cannot later be
   dropped.
 
+When a publication starts exposing a column that already existed in PostgreSQL,
+the source has no equivalent add-column operation for historical rows. ETL
+therefore adds that destination column as nullable and without source default
+metadata, even if the source column is `NOT NULL` or has a default. Existing
+destination rows remain null because they have not been backfilled; future row
+events carry their evaluated values normally. A later replication-mask
+contraction is still planned as a drop, but its reason remains available to
+destination implementations separately from a physical table drop.
+
 As a result, pre-existing destination rows might not match PostgreSQL's
 historical `ADD COLUMN ... DEFAULT` view unless the destination has a
 metadata-only initial-default mechanism and the source default is supported.
@@ -189,10 +290,7 @@ This does **not** mean future replicated tuples lose their default values:
 PostgreSQL sends evaluated column values in row data after the relation change,
 and ETL writes those values normally. The limitation is only that unsupported
 defaults are not installed as destination schema default metadata, and existing
-destination rows are not rewritten by ETL. A physical destination backfill mode
-may be added in the future, but it needs explicit controls for batching,
-throttling, observability, and how long the pipeline can safely pause or run
-behind while the destination rewrite happens.
+destination rows are not rewritten by ETL.
 
 ## Supported Column Defaults
 
@@ -278,8 +376,12 @@ The current diff rules are:
 - Same ordinal position, different name: column rename.
 - Same ordinal position, different default expression: column default change.
 - Same ordinal position, different nullability: detected schema metadata change.
-- Old ordinal position missing from the new schema: column drop.
-- New ordinal position missing from the old schema: column add.
+- Old ordinal position missing from the replicated view: column drop. The diff
+  records whether the physical column disappeared or only the replication mask
+  stopped including it.
+- New ordinal position present in the replicated view: column add. The diff
+  records whether the physical column is new or an existing column was added to
+  the replication mask.
 
 This matches PostgreSQL's normal behavior for simple column operations:
 renames keep the same `attnum`, dropped columns disappear from the visible
@@ -343,17 +445,30 @@ The trigger ignores temporary tables, unpublished tables, generated columns,
 dropped-column catalog tombstones, extension-owned DDL, and non-logical-WAL
 databases.
 
-## Current Limitations
+## Known Beta Limitations
 
 These behaviors are **not full destination DDL semantics** yet:
 
-- Only `ALTER TABLE` is captured by the ETL DDL trigger today.
+- Only `ALTER TABLE` and supported `ALTER PUBLICATION` changes are captured by
+  the ETL DDL trigger today.
 - Type changes, constraint changes, identity changes, and replica-identity
   changes may be visible in the emitted snapshot, but they are not yet
   interpreted as destination DDL operations.
 - Table create/drop/rename operations are outside the current schema-change
-  contract. Publication membership changes and table cleanup are handled by
-  other pipeline logic.
+  contract. Publication membership and table cleanup remain separate pipeline
+  lifecycle concerns.
+- Live publication membership, row-filter, operation-setting, publication-name,
+  and `publish_via_partition_root` changes are unsupported. Although the source
+  trigger may emit schema snapshots for some of these commands, it does not
+  dynamically reconcile table ownership or migrate destination table identity.
+- If a table-sync worker decodes a DDL or publication-column change during
+  catch-up but receives no following relation before its handover boundary, it
+  cannot construct the complete decoder required by `SyncDone`. The DDL
+  message supplies the physical schema, but only the relation supplies the
+  exact publication and replica-identity masks for that WAL position. ETL
+  cannot safely reuse older masks or read newer catalog state, so this
+  correctness edge case fails the table sync closed. Retry or resynchronize
+  the table after schema activity has settled.
 - A drop and re-add is not treated as a rename. It becomes a drop plus an add
   because PostgreSQL assigns a new ordinal position to the new column.
 - DuckLake reserves only the exact generated tombstone shape
@@ -403,33 +518,17 @@ These behaviors are **not full destination DDL semantics** yet:
 - The trigger payload includes `current_query` for debugging only. It can
   contain literals and multiple statements, so it must not be treated as
   replayable DDL.
-- ClickHouse rejects stale schema snapshots instead of rewinding. When a
-  restart replays a relation event whose snapshot is older than the schema
-  already applied at the destination, executing the backwards diff would drop
-  newer columns and physically delete their data. ClickHouse has no ETL-owned
-  durable per-table watermark that would make replaying the following old
-  events safe, so the pipeline fails with a schema-rewind error and the
-  affected table must be resynchronized. This is not limited to exotic
-  replays: a single crash after a schema change was applied at the
-  destination but before the corresponding replication progress was
-  confirmed replays the stream from before the change and triggers the
-  same error. Replication mask changes carry no ordering, so a replayed
-  stale mask cannot be detected the same way.
-- Snowflake skips stale schema snapshots instead of rewinding. Before applying
-  schema DDL, Snowflake waits for all preceding row batches to become durable.
-  On restart, reopening the table's channel restores its committed offset, so
-  row events associated with an older relation snapshot are deduplicated. The
-  older relation is therefore already reflected in the destination, while
-  executing its backwards diff could drop newer columns and delete their data.
-  Replication mask changes carry no ordering, so a replayed stale mask cannot
-  be detected the same way.
+- BigQuery, ClickHouse, DuckLake, and Snowflake reject stale or ambiguously
+  ordered relation schemas instead of rewinding. An older snapshot could drive
+  reverse DDL that drops newer columns and their data. An equal snapshot with a
+  different replication mask is also rejected: supported publication
+  column-list changes always receive a new composite snapshot ID, so the
+  conflicting masks have no ordering with which to choose a safe winner. The
+  pipeline fails with a schema-rewind error and the affected table must be
+  resynchronized.
 - Sessions can set `supabase_etl.skip_ddl_log = 'true'` as an emergency
   opt-out while recovering a system. DDL executed with that setting enabled is
   not logged for ETL.
-
-Future work will implement broader behavior on top of the richer trigger
-payload, but the current contract is deliberately limited to safe column-level
-schema changes.
 
 ## Event Ordering
 

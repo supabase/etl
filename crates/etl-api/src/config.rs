@@ -52,6 +52,18 @@ pub struct ApiConfig {
 /// Kubernetes-specific API configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct K8sConfig {
+    /// Namespace where all per-replicator Kubernetes resources are created.
+    #[serde(default = "default_replicator_namespace")]
+    pub replicator_namespace: String,
+    /// ServiceAccount assigned to every replicator pod.
+    #[serde(default = "default_replicator_service_account_name")]
+    pub replicator_service_account_name: String,
+    /// Node selector applied to every replicator pod.
+    #[serde(default)]
+    pub replicator_node_selectors: Vec<NodeSelectorConfig>,
+    /// Tolerations applied to every replicator pod.
+    #[serde(default)]
+    pub replicator_tolerations: Vec<TolerationConfig>,
     /// Default request sizing for replicator workloads.
     ///
     /// This key remains `replicator_resources` in API configuration files. It
@@ -59,8 +71,43 @@ pub struct K8sConfig {
     /// replicator pod unless a destination-kind default or pipeline-level
     /// override supplies one of those request values.
     pub replicator_resources: DefaultReplicatorResourcesConfig,
+    /// Vector image used by the logging sidecar.
+    #[serde(default = "default_vector_image")]
+    pub vector_image: String,
     /// Default request sizing for the Vector sidecar.
     pub vector_resources: DefaultVectorResourcesConfig,
+}
+
+fn default_replicator_namespace() -> String {
+    "etl-data-plane".to_owned()
+}
+
+fn default_replicator_service_account_name() -> String {
+    "etl-replicator".to_owned()
+}
+
+fn default_vector_image() -> String {
+    "timberio/vector:0.55.0-distroless-libc".to_owned()
+}
+
+/// Simplified Kubernetes node selector configuration.
+///
+/// The ETL API passes these strings through without validation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct NodeSelectorConfig {
+    pub key: String,
+    pub value: String,
+}
+
+/// Simplified Kubernetes toleration configuration.
+///
+/// The ETL API passes these strings through without validation and emits an
+/// `Equal` toleration operator.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TolerationConfig {
+    pub key: String,
+    pub value: String,
+    pub effect: String,
 }
 
 /// Mandatory default request sizing for replicator workloads.
@@ -414,6 +461,64 @@ mod tests {
                 cpu_request_millicores: 500,
             }
         );
+    }
+
+    #[test]
+    fn replicator_scheduling_constraints_are_optional_and_independent() {
+        let unpinned: K8sConfig = serde_json::from_value(json!({
+            "replicator_resources": {
+                "memory_request_mib": 2000,
+                "cpu_request_millicores": 500
+            },
+            "vector_resources": {
+                "memory_request_mib": 192,
+                "cpu_request_millicores": 75
+            }
+        }))
+        .unwrap();
+        assert_eq!(unpinned.replicator_namespace, "etl-data-plane");
+        assert_eq!(unpinned.replicator_service_account_name, "etl-replicator");
+        assert!(unpinned.replicator_node_selectors.is_empty());
+        assert!(unpinned.replicator_tolerations.is_empty());
+        assert_eq!(unpinned.vector_image, "timberio/vector:0.55.0-distroless-libc");
+
+        let configured: K8sConfig = serde_json::from_value(json!({
+            "replicator_namespace": "custom-data-plane",
+            "replicator_service_account_name": "custom-replicator",
+            "replicator_node_selectors": [{
+                "key": "example.com/node-pool",
+                "value": "data"
+            }, {
+                "key": "kubernetes.io/arch",
+                "value": "arm64"
+            }],
+            "replicator_tolerations": [{
+                "key": "example.com/dedicated",
+                "value": "analytics",
+                "effect": "CustomEffect"
+            }],
+            "vector_image": "example.com/vector:custom",
+            "replicator_resources": {
+                "memory_request_mib": 2000,
+                "cpu_request_millicores": 500
+            },
+            "vector_resources": {
+                "memory_request_mib": 192,
+                "cpu_request_millicores": 75
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(configured.replicator_namespace, "custom-data-plane");
+        assert_eq!(configured.replicator_service_account_name, "custom-replicator");
+        assert_eq!(configured.replicator_node_selectors[0].key, "example.com/node-pool");
+        assert_eq!(configured.replicator_node_selectors[0].value, "data");
+        assert_eq!(configured.replicator_node_selectors[1].key, "kubernetes.io/arch");
+        assert_eq!(configured.replicator_node_selectors[1].value, "arm64");
+        assert_eq!(configured.replicator_tolerations[0].key, "example.com/dedicated");
+        assert_eq!(configured.replicator_tolerations[0].value, "analytics");
+        assert_eq!(configured.replicator_tolerations[0].effect, "CustomEffect");
+        assert_eq!(configured.vector_image, "example.com/vector:custom");
     }
 
     #[test]

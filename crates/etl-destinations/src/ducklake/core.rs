@@ -17,13 +17,19 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnModificationType, ColumnNameEquivalence, ColumnSchema, ReplicatedTableSchema,
-        ReplicationMask, SchemaDiff, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName,
-        TableSchema,
+        ColumnModificationType, ColumnNameEquivalence, ColumnPresenceChangeReason, ColumnSchema,
+        ReplicatedTableSchema, ReplicationMask, SchemaDiff, SchemaOperation, SchemaPlan,
+        SnapshotId, TableId, TableName, TableSchema,
     },
     store::{DestinationStore, TableStateType},
 };
-use etl_config::ducklake_catalog_metadata_connect_options;
+use etl_config::{
+    ducklake_catalog_metadata_connect_options,
+    shared::{
+        DuckLakeSortBy, DuckLakeSortColumn, DuckLakeSortDirection, DuckLakeSortNulls,
+        DuckLakeTableSortingConfig,
+    },
+};
 use metrics::gauge;
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
@@ -42,44 +48,49 @@ use tokio::{
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::ducklake::{
-    ATTACH_DATA_INLINING_ROW_LIMIT, COPY_DATA_INLINING_ROW_LIMIT, DuckLakeTableName, LAKE_CATALOG,
-    S3Config,
-    batches::{
-        TableMutation, TrackedTableMutation, TrackedTruncateEvent, apply_table_batch_with_retry,
-        apply_table_batches_with_retry, ensure_applied_batches_table_exists,
-        ensure_streaming_progress_table_exists, prepare_copy_complete_table_batch,
-        prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
-        read_table_streaming_progress_sequence_key, retain_mutations_after_sequence_key,
-        retain_truncates_after_sequence_key,
+use crate::{
+    ducklake::{
+        ATTACH_DATA_INLINING_ROW_LIMIT, COPY_DATA_INLINING_ROW_LIMIT, DuckLakeTableName,
+        LAKE_CATALOG, S3Config,
+        batches::{
+            TableMutation, TrackedTableMutation, TrackedTruncateEvent,
+            apply_table_batch_with_retry, apply_table_batches_with_retry,
+            ensure_applied_batches_table_exists, ensure_streaming_progress_table_exists,
+            prepare_copy_complete_table_batch, prepare_copy_table_batch,
+            prepare_mutation_table_batches, prepare_truncate_table_batch,
+            read_table_streaming_progress_sequence_key, retain_mutations_after_sequence_key,
+            retain_truncates_after_sequence_key,
+        },
+        client::{
+            DuckLakeConnectionManager, DuckLakeInterruptRegistry, build_warm_ducklake_pool,
+            format_query_error_detail, run_duckdb_blocking,
+        },
+        config::{
+            MAINTENANCE_TARGET_FILE_SIZE, MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, build_setup_plan,
+            current_duckdb_extension_strategy, maintenance_target_file_size_sql,
+            resolve_expire_snapshots_older_than, validate_expire_snapshots_older_than_sql,
+        },
+        external_maintenance::ExternalMaintenanceOperations,
+        inline_size::DuckLakePendingInlineSizeSampler,
+        metrics::{
+            DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
+            query_table_storage_metrics, register_metrics,
+            resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
+        },
+        replay_epoch::{
+            begin_table_replay_epoch_transition, complete_table_replay_epoch_transition,
+            ensure_replay_epoch_table_exists, read_table_replay_epoch,
+        },
+        schema::{
+            build_add_column_sql_ducklake, build_create_table_sql_ducklake,
+            build_disable_sort_on_insert_sql_ducklake, build_drop_column_sql_ducklake,
+            build_drop_default_sql_ducklake, build_rename_column_sql_ducklake,
+            build_reset_sorted_by_sql_ducklake, build_set_default_sql_ducklake,
+            build_set_sorted_by_sql_ducklake, supports_column_default_ducklake,
+        },
+        sql::{qualified_lake_table_name, quote_identifier},
     },
-    client::{
-        DuckLakeConnectionManager, DuckLakeInterruptRegistry, build_warm_ducklake_pool,
-        format_query_error_detail, run_duckdb_blocking,
-    },
-    config::{
-        MAINTENANCE_TARGET_FILE_SIZE, MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, build_setup_plan,
-        current_duckdb_extension_strategy, maintenance_target_file_size_sql,
-        resolve_expire_snapshots_older_than, validate_expire_snapshots_older_than_sql,
-    },
-    external_maintenance::ExternalMaintenanceOperations,
-    inline_size::DuckLakePendingInlineSizeSampler,
-    metrics::{
-        DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
-        query_table_storage_metrics, register_metrics, resolve_ducklake_metadata_schema_blocking,
-        spawn_ducklake_metrics_sampler,
-    },
-    replay_epoch::{
-        begin_table_replay_epoch_transition, complete_table_replay_epoch_transition,
-        ensure_replay_epoch_table_exists, read_table_replay_epoch,
-    },
-    schema::{
-        build_add_column_sql_ducklake, build_create_table_sql_ducklake,
-        build_drop_column_sql_ducklake, build_drop_default_sql_ducklake,
-        build_rename_column_sql_ducklake, build_set_default_sql_ducklake,
-        supports_column_default_ducklake,
-    },
-    sql::qualified_lake_table_name,
+    recovery::ensure_relation_schema_transition,
 };
 
 /// Shared Postgres metadata pool size for DuckLake background samplers.
@@ -184,6 +195,180 @@ fn should_request_file_maintenance(
     !copy_phase_active && active_data_files > rewrite_data_files_min_active_data_files
 }
 
+/// One active sort key read from the DuckLake metadata catalog.
+#[derive(Debug, PartialEq, Eq)]
+struct ActiveDuckLakeSortColumn {
+    expression: String,
+    direction: String,
+    null_order: String,
+}
+
+/// Validates and indexes configured DuckLake table sort orders.
+fn index_table_sorting_config(
+    config: DuckLakeTableSortingConfig,
+) -> EtlResult<HashMap<DuckLakeTableName, DuckLakeSortBy>> {
+    let mut table_sorting = HashMap::with_capacity(config.tables.len());
+
+    for table in config.tables {
+        if table.schema.is_empty() {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "DuckLake table sorting configuration is invalid",
+                "A table sorting schema name must not be empty"
+            ));
+        }
+        if table.table.is_empty() {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "DuckLake table sorting configuration is invalid",
+                format!("Table name must not be empty for schema `{}`", table.schema)
+            ));
+        }
+
+        if let DuckLakeSortBy::Columns { columns } = &table.sort_by {
+            if columns.is_empty() {
+                return Err(etl_error!(
+                    ErrorKind::ConfigError,
+                    "DuckLake table sorting configuration is invalid",
+                    format!(
+                        "Explicit sort columns must not be empty for `{}.{}`",
+                        table.schema, table.table
+                    )
+                ));
+            }
+
+            let mut column_names = HashSet::with_capacity(columns.len());
+            for column in columns {
+                if column.name.is_empty() {
+                    return Err(etl_error!(
+                        ErrorKind::ConfigError,
+                        "DuckLake table sorting configuration is invalid",
+                        format!(
+                            "Sort column names must not be empty for `{}.{}`",
+                            table.schema, table.table
+                        )
+                    ));
+                }
+                if !column_names.insert(column.name.as_str()) {
+                    return Err(etl_error!(
+                        ErrorKind::ConfigError,
+                        "DuckLake table sorting configuration is invalid",
+                        format!(
+                            "Sort column `{}` is configured more than once for `{}.{}`",
+                            column.name, table.schema, table.table
+                        )
+                    ));
+                }
+            }
+        }
+
+        let table_name = DuckLakeTableName::new(table.schema, table.table);
+        if table_sorting.insert(table_name.clone(), table.sort_by).is_some() {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "DuckLake table sorting configuration is invalid",
+                format!("Table `{table_name}` is configured more than once")
+            ));
+        }
+    }
+
+    Ok(table_sorting)
+}
+
+/// Resolves a configured selector against the current replicated table schema.
+fn resolve_table_sort_columns(
+    table_sorting: &HashMap<DuckLakeTableName, DuckLakeSortBy>,
+    table_name: &DuckLakeTableName,
+    table_schema: &ReplicatedTableSchema,
+) -> EtlResult<Option<Vec<DuckLakeSortColumn>>> {
+    let Some(sort_by) = table_sorting.get(table_name) else {
+        return Ok(None);
+    };
+
+    match sort_by {
+        DuckLakeSortBy::Columns { columns } => {
+            let replicated_columns: HashSet<_> =
+                table_schema.column_schemas().map(|column| column.name.as_str()).collect();
+            for column in columns {
+                if !replicated_columns.contains(column.name.as_str()) {
+                    return Err(etl_error!(
+                        ErrorKind::ConfigError,
+                        "DuckLake table sorting column is not replicated",
+                        format!("Table `{table_name}` does not replicate column `{}`", column.name)
+                    ));
+                }
+            }
+            Ok(Some(columns.clone()))
+        }
+        DuckLakeSortBy::PrimaryKey => {
+            if !table_schema.all_primary_key_columns_replicated() {
+                let columns = table_schema
+                    .unreplicated_primary_key_column_schemas()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(etl_error!(
+                    ErrorKind::ConfigError,
+                    "DuckLake primary-key sorting requires every primary-key column",
+                    format!(
+                        "Table `{table_name}` does not replicate primary-key columns: {columns}"
+                    )
+                ));
+            }
+
+            let mut columns = table_schema
+                .primary_key_column_schemas()
+                .filter_map(|column| {
+                    column.primary_key_ordinal_position.map(|ordinal| {
+                        (
+                            ordinal,
+                            DuckLakeSortColumn {
+                                name: column.name.clone(),
+                                direction: DuckLakeSortDirection::Asc,
+                                nulls: None,
+                            },
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            if columns.is_empty() {
+                return Err(etl_error!(
+                    ErrorKind::ConfigError,
+                    "DuckLake primary-key sorting requires a primary key",
+                    format!("Table `{table_name}` has no primary key")
+                ));
+            }
+            columns.sort_unstable_by_key(|(ordinal, _)| *ordinal);
+
+            Ok(Some(columns.into_iter().map(|(_, column)| column).collect()))
+        }
+    }
+}
+
+/// Returns whether catalog metadata matches the desired column sort order.
+fn active_sort_order_matches(
+    active: &[ActiveDuckLakeSortColumn],
+    desired: &[DuckLakeSortColumn],
+) -> bool {
+    active.len() == desired.len()
+        && active.iter().zip(desired).all(|(active, desired)| {
+            let expression_matches = active.expression == desired.name
+                || active.expression == quote_identifier(&desired.name);
+            let direction = match desired.direction {
+                DuckLakeSortDirection::Asc => "ASC",
+                DuckLakeSortDirection::Desc => "DESC",
+            };
+            let null_order = match desired.nulls.unwrap_or(DuckLakeSortNulls::Last) {
+                DuckLakeSortNulls::First => "NULLS_FIRST",
+                DuckLakeSortNulls::Last => "NULLS_LAST",
+            };
+
+            expression_matches
+                && active.direction.eq_ignore_ascii_case(direction)
+                && active.null_order.eq_ignore_ascii_case(null_order)
+        })
+}
+
 // ── destination
 // ───────────────────────────────────────────────────────────────
 
@@ -217,6 +402,8 @@ pub struct DuckLakeDestination<S> {
     metadata_schema: Arc<str>,
     expire_snapshots_older_than: Arc<str>,
     metadata_pg_pool: PgPool,
+    /// Desired per-table sort orders indexed by source schema and table.
+    table_sorting: Arc<HashMap<DuckLakeTableName, DuckLakeSortBy>>,
     table_creation_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     store: S,
@@ -394,7 +581,7 @@ where
 
         let destination = self.clone();
         self.tasks
-            .spawn(async move {
+            .spawn_with(move || async move {
                 let result = destination.write_events(events).await;
                 async_result.send(result.map(|_| DestinationWriteStatus::Durable));
             })
@@ -616,7 +803,7 @@ fn plan_ducklake_schema_ddl(
 ) -> EtlResult<DuckLakeSchemaDdlPlan> {
     let diff = plan.diff();
     let added_column_names: HashSet<_> =
-        diff.columns_to_add.iter().map(|column| column.name.as_str()).collect();
+        diff.columns_to_add.iter().map(|change| change.column_schema.name.as_str()).collect();
     let rename_target_names: HashSet<_> = diff
         .columns_to_modify
         .iter()
@@ -630,18 +817,18 @@ fn plan_ducklake_schema_ddl(
     let reused_dropped_column_names: HashSet<_> = diff
         .columns_to_drop
         .iter()
-        .filter(|column| {
-            added_column_names.contains(column.name.as_str())
-                || rename_target_names.contains(column.name.as_str())
+        .filter(|change| {
+            added_column_names.contains(change.column_schema.name.as_str())
+                || rename_target_names.contains(change.column_schema.name.as_str())
         })
-        .map(|column| column.name.as_str())
+        .map(|change| change.column_schema.name.as_str())
         .collect();
     let mut statements = Vec::new();
 
     // Preserve shared operation order while rendering replay-safe DuckLake DDL.
     for operation in plan.ordered_operations() {
         match operation {
-            SchemaOperation::DropColumn { column_schema }
+            SchemaOperation::DropColumn { column_schema, reason: _ }
                 if reused_dropped_column_names.contains(column_schema.name.as_str()) =>
             {
                 // Keep a dropped column under a deterministic tombstone name
@@ -692,7 +879,7 @@ fn plan_ducklake_schema_ddl(
                     }
                 }
             }
-            SchemaOperation::DropColumn { column_schema } => {
+            SchemaOperation::DropColumn { column_schema, reason: _ } => {
                 let Some(index) = find_ducklake_column(&column_names, &column_schema.name) else {
                     debug!(
                         table = %table_name,
@@ -793,7 +980,7 @@ fn plan_ducklake_schema_ddl(
                     column_name = %new_column_schema.name,
                     old_nullable = old_column_schema.nullable,
                     new_nullable = new_column_schema.nullable,
-                    "skipping source column nullability change for DuckLake"
+                    "skipping source column nullability change for ducklake"
                 );
             }
             SchemaOperation::ModifyColumn {
@@ -829,7 +1016,7 @@ fn plan_ducklake_schema_ddl(
                         warn!(
                             table_name = %table_name,
                             column_name = %new_column_schema.name,
-                            "skipping unsupported source column default for DuckLake"
+                            "skipping unsupported source column default for ducklake"
                         );
                         if old_default_was_supported {
                             statements.push(DuckLakeSchemaDdlStatement {
@@ -855,12 +1042,12 @@ fn plan_ducklake_schema_ddl(
                     warn!(
                         table_name = %table_name,
                         column_name = %new_column_schema.name,
-                        "skipping source column default drop for DuckLake because no supported \
+                        "skipping source column default drop for ducklake because no supported \
                          destination default was set"
                     );
                 }
             }
-            SchemaOperation::AddColumn { column_schema } => {
+            SchemaOperation::AddColumn { column_schema, reason } => {
                 if find_ducklake_column(&column_names, &column_schema.name).is_some() {
                     debug!(
                         table = %table_name,
@@ -868,7 +1055,15 @@ fn plan_ducklake_schema_ddl(
                         "ducklake add column skipped because destination column already exists"
                     );
 
-                    if let Some(default_expression) = column_schema.default_expression.as_deref() {
+                    if *reason == ColumnPresenceChangeReason::ReplicationMask {
+                        debug!(
+                            table = %table_name,
+                            column = %column_schema.name,
+                            "leaving publication-added ducklake column without a default"
+                        );
+                    } else if let Some(default_expression) =
+                        column_schema.default_expression.as_deref()
+                    {
                         let Some(sql) = build_set_default_sql_ducklake(
                             table_name,
                             &column_schema.name,
@@ -878,7 +1073,7 @@ fn plan_ducklake_schema_ddl(
                             warn!(
                                 table_name = %table_name,
                                 column_name = %column_schema.name,
-                                "skipping unsupported source column default for DuckLake"
+                                "skipping unsupported source column default for ducklake"
                             );
                             continue;
                         };
@@ -891,8 +1086,17 @@ fn plan_ducklake_schema_ddl(
                     continue;
                 }
 
+                let mut destination_column_schema = column_schema.clone();
+                if *reason == ColumnPresenceChangeReason::ReplicationMask {
+                    destination_column_schema.default_expression = None;
+                    debug!(
+                        table = %table_name,
+                        column = %column_schema.name,
+                        "leaving publication-added ducklake column without a default"
+                    );
+                }
                 statements.push(DuckLakeSchemaDdlStatement {
-                    sql: build_add_column_sql_ducklake(table_name, column_schema),
+                    sql: build_add_column_sql_ducklake(table_name, &destination_column_schema),
                     error_description: "DuckLake alter table add column failed",
                 });
                 column_names.push(column_schema.name.clone());
@@ -1155,6 +1359,36 @@ where
         external_maintenance: DuckLakeExternalMaintenanceConfig,
         store: S,
     ) -> EtlResult<Self> {
+        Self::new_with_table_sorting_and_external_maintenance(
+            catalog_url,
+            data_path,
+            pool_size,
+            s3,
+            metadata_schema,
+            maintenance_target_file_size,
+            expire_snapshots_older_than,
+            DuckLakeTableSortingConfig::default(),
+            external_maintenance,
+            store,
+        )
+        .await
+    }
+
+    /// Creates a new DuckLake destination with table sorting and external
+    /// maintenance configuration.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_table_sorting_and_external_maintenance(
+        catalog_url: Url,
+        data_path: Url,
+        pool_size: u32,
+        s3: Option<S3Config>,
+        metadata_schema: Option<String>,
+        maintenance_target_file_size: Option<String>,
+        expire_snapshots_older_than: Option<String>,
+        table_sorting: DuckLakeTableSortingConfig,
+        external_maintenance: DuckLakeExternalMaintenanceConfig,
+        store: S,
+    ) -> EtlResult<Self> {
         register_metrics();
 
         if !matches!(catalog_url.scheme(), "postgres" | "postgresql") {
@@ -1172,6 +1406,16 @@ where
                 "Pool size must be at least 1"
             ));
         }
+        if !table_sorting.is_empty()
+            && external_maintenance.mode == DuckLakeMaintenanceMode::Disabled
+        {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "DuckLake table sorting requires external maintenance",
+                "Set DuckLake maintenance_mode to `kubernetes` or `postgres`"
+            ));
+        }
+        let table_sorting = Arc::new(index_table_sorting_config(table_sorting)?);
 
         let extension_strategy = current_duckdb_extension_strategy()?;
         let disable_extension_autoload = extension_strategy.disables_autoload();
@@ -1333,6 +1577,7 @@ where
             metadata_schema: Arc::clone(&metadata_schema),
             expire_snapshots_older_than: Arc::clone(&expire_snapshots_older_than),
             metadata_pg_pool: metadata_pg_pool.clone(),
+            table_sorting,
             table_creation_slots,
             table_write_slots: Arc::default(),
             store,
@@ -1344,7 +1589,7 @@ where
         let shutdown_signal_manager = Arc::clone(&manager);
         destination
             .tasks
-            .spawn(async move {
+            .spawn_with(move || async move {
                 interrupt_duckdb_connections_on_process_shutdown(shutdown_signal_manager).await;
             })
             .await;
@@ -1366,7 +1611,7 @@ where
                 let watcher_destination = destination.clone();
                 destination
                     .tasks
-                    .spawn(async move {
+                    .spawn_with(move || async move {
                         if let Err(error) =
                             run_kubernetes_external_maintenance_watcher(watcher_destination).await
                         {
@@ -1386,7 +1631,7 @@ where
                 let pipeline_id = external_maintenance.pipeline_id as i64;
                 destination
                     .tasks
-                    .spawn(async move {
+                    .spawn_with(move || async move {
                         if let Err(error) = run_postgres_external_maintenance_watcher(
                             watcher_destination,
                             pipeline_id,
@@ -1615,11 +1860,23 @@ where
 
         let current_snapshot_id = metadata.snapshot_id;
         let current_replication_mask = metadata.replication_mask.clone();
-        if current_snapshot_id == new_snapshot_id
-            && current_replication_mask == new_replication_mask
-        {
+
+        // A relation carries no durable DML sequence key. Reject both schema
+        // rewind and an equal-snapshot mask conflict before either can drive
+        // DuckLake DDL or run ahead of streaming replay-watermark checks.
+        ensure_relation_schema_transition(
+            "DuckLake",
+            table_id,
+            current_snapshot_id,
+            &current_replication_mask,
+            new_snapshot_id,
+            &new_replication_mask,
+        )?;
+
+        if current_snapshot_id == new_snapshot_id {
             self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema)
                 .await?;
+            self.reconcile_table_sorting(&table_name, new_replicated_table_schema).await?;
             self.cleanup_tombstone_columns_after_applied(&table_name, new_replicated_table_schema)
                 .await;
             info!(
@@ -1677,6 +1934,7 @@ where
             return Err(error);
         }
         self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema).await?;
+        self.reconcile_table_sorting(&table_name, new_replicated_table_schema).await?;
 
         let applied_metadata = updated_metadata.to_applied();
         self.store.store_destination_table_metadata(table_id, applied_metadata).await?;
@@ -1761,6 +2019,85 @@ where
             }
 
             execute_ddl("commit", "DuckLake DDL transaction commit failed")
+        })
+        .await
+    }
+
+    /// Reconciles the configured sort order and maintenance-only insert policy.
+    async fn reconcile_table_sorting(
+        &self,
+        table_name: &DuckLakeTableName,
+        table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let desired =
+            resolve_table_sort_columns(self.table_sorting.as_ref(), table_name, table_schema)?;
+        let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
+
+        let sql = format!(
+            "select e.expression, e.sort_direction, e.null_order from {}.{} as e join {}.{} as i \
+             on i.sort_id = e.sort_id and i.table_id = e.table_id join {}.{} as t on t.table_id = \
+             i.table_id join {}.{} as s on s.schema_id = t.schema_id where s.schema_name = $1 and \
+             t.table_name = $2 and s.end_snapshot is null and t.end_snapshot is null and \
+             i.end_snapshot is null order by e.sort_key_index",
+            quote_postgres_identifier(self.metadata_schema.as_ref()),
+            quote_postgres_identifier("ducklake_sort_expression"),
+            quote_postgres_identifier(self.metadata_schema.as_ref()),
+            quote_postgres_identifier("ducklake_sort_info"),
+            quote_postgres_identifier(self.metadata_schema.as_ref()),
+            quote_postgres_identifier("ducklake_table"),
+            quote_postgres_identifier(self.metadata_schema.as_ref()),
+            quote_postgres_identifier("ducklake_schema")
+        );
+        let active: Vec<(String, String, String)> = sqlx::query_as(AssertSqlSafe(sql))
+            .bind(table_name.schema())
+            .bind(table_name.table())
+            .fetch_all(&self.metadata_pg_pool)
+            .await
+            .map_err(|source| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake table sort order query failed",
+                    format!("table={table_name}"),
+                    source: source
+                )
+            })?;
+        let active = active
+            .into_iter()
+            .map(|(expression, direction, null_order)| ActiveDuckLakeSortColumn {
+                expression,
+                direction,
+                null_order,
+            })
+            .collect::<Vec<_>>();
+
+        let ddl = match desired {
+            Some(columns) => {
+                let mut statements = Vec::with_capacity(2);
+                if !active_sort_order_matches(&active, &columns) {
+                    statements.push(build_set_sorted_by_sql_ducklake(table_name, &columns));
+                }
+                // Keep foreground insert latency unchanged. Flush and compaction
+                // still use the table's active sort order.
+                statements.push(build_disable_sort_on_insert_sql_ducklake(table_name));
+                statements.join(";\n")
+            }
+            None if !active.is_empty() => build_reset_sorted_by_sql_ducklake(table_name),
+            None => return Ok(()),
+        };
+        let table_name = table_name.clone();
+
+        run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), move |conn| {
+            conn.execute_batch(&ddl).map_err(|source| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake table sorting reconciliation failed",
+                    format_query_error_detail(&ddl),
+                    source: source
+                )
+            })?;
+            debug!(table = %table_name, "ducklake table sorting reconciled");
+            Ok(())
         })
         .await
     }
@@ -1911,6 +2248,7 @@ where
 
             self.issue_create_table_stmt(&table_name, &target_schema).await?;
             self.reconcile_missing_replicated_columns(&table_name, &target_schema).await?;
+            self.reconcile_table_sorting(&table_name, &target_schema).await?;
             self.cleanup_tombstone_columns_after_applied(&table_name, &target_schema).await;
             self.created_tables.lock().insert(table_name);
         }
@@ -1947,9 +2285,7 @@ where
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();
                         let mutation = TrackedTableMutation::new(
-                            insert.start_lsn,
-                            insert.commit_lsn,
-                            insert.tx_ordinal,
+                            insert.event_sequence_key(),
                             TableMutation::Insert(insert.table_row),
                         );
                         push_table_mutation_segment(
@@ -1963,6 +2299,7 @@ where
                             &update.replicated_table_schema,
                             "update",
                         )?;
+                        let sequence_key = update.event_sequence_key();
                         let table_id = update.replicated_table_schema.id();
                         let replicated_table_schema = update.replicated_table_schema;
                         let table_row = update.updated_table_row;
@@ -1970,9 +2307,7 @@ where
                         let segments = table_id_to_mutations.entry(table_id).or_default();
                         if let Some(old_row) = old_table_row {
                             let mutation = TrackedTableMutation::new(
-                                update.start_lsn,
-                                update.commit_lsn,
-                                update.tx_ordinal,
+                                sequence_key,
                                 TableMutation::Update { delete_row: old_row, new_row: table_row },
                             );
                             push_table_mutation_segment(
@@ -1988,9 +2323,7 @@ where
                                          identity from new row"
                                     );
                                     let mutation = TrackedTableMutation::new(
-                                        update.start_lsn,
-                                        update.commit_lsn,
-                                        update.tx_ordinal,
+                                        sequence_key,
                                         TableMutation::Replace(table_row),
                                     );
                                     push_table_mutation_segment(
@@ -2009,9 +2342,7 @@ where
                                          partial new row"
                                     );
                                     let mutation = TrackedTableMutation::new(
-                                        update.start_lsn,
-                                        update.commit_lsn,
-                                        update.tx_ordinal,
+                                        sequence_key,
                                         TableMutation::Update {
                                             delete_row: OldTableRow::Key(key_row),
                                             new_row: UpdatedTableRow::Partial(partial_row),
@@ -2031,6 +2362,7 @@ where
                             &delete.replicated_table_schema,
                             "delete",
                         )?;
+                        let sequence_key = delete.event_sequence_key();
                         let Some(old_row) = delete.old_table_row else {
                             return Err(etl_error!(
                                 ErrorKind::SourceReplicaIdentityError,
@@ -2043,12 +2375,8 @@ where
                             ));
                         };
                         let table_id = delete.replicated_table_schema.id();
-                        let mutation = TrackedTableMutation::new(
-                            delete.start_lsn,
-                            delete.commit_lsn,
-                            delete.tx_ordinal,
-                            TableMutation::Delete(old_row),
-                        );
+                        let mutation =
+                            TrackedTableMutation::new(sequence_key, TableMutation::Delete(old_row));
                         push_table_mutation_segment(
                             table_id_to_mutations.entry(table_id).or_default(),
                             delete.replicated_table_schema,
@@ -2165,18 +2493,14 @@ where
             > = HashMap::new();
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate)) = event_iter.next() {
+                    let sequence_key = truncate.event_sequence_key();
                     for replicated_table_schema in truncate.truncated_tables {
                         let table_id = replicated_table_schema.id();
                         let entry = truncate_table_ids
                             .entry(table_id)
                             .or_insert_with(|| (replicated_table_schema.clone(), Vec::new()));
                         entry.0 = replicated_table_schema;
-                        entry.1.push(TrackedTruncateEvent::new(
-                            truncate.start_lsn,
-                            truncate.commit_lsn,
-                            truncate.tx_ordinal,
-                            truncate.options,
-                        ));
+                        entry.1.push(TrackedTruncateEvent::new(sequence_key, truncate.options));
                     }
                 }
             }
@@ -2252,6 +2576,7 @@ where
 
         self.issue_create_table_stmt(table_name, replicated_table_schema).await?;
         self.reconcile_missing_replicated_columns(table_name, replicated_table_schema).await?;
+        self.reconcile_table_sorting(table_name, replicated_table_schema).await?;
 
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await
     }
@@ -2350,11 +2675,29 @@ where
         metadata: &DestinationTableMetadata,
         provided_target_schema: Option<&ReplicatedTableSchema>,
     ) -> EtlResult<ReplicatedTableSchema> {
-        if let Some(schema) = provided_target_schema
-            && schema.inner().snapshot_id == metadata.snapshot_id
-            && schema.replication_mask() == &metadata.replication_mask
-        {
-            return Ok(schema.clone());
+        if let Some(schema) = provided_target_schema {
+            let arriving_snapshot_id = schema.inner().snapshot_id;
+            let arriving_replication_mask = schema.replication_mask();
+            if arriving_snapshot_id == metadata.snapshot_id
+                && arriving_replication_mask == &metadata.replication_mask
+            {
+                return Ok(schema.clone());
+            }
+
+            return Err(etl_error!(
+                ErrorKind::DestinationSchemaRewind,
+                "DuckLake schema recovery received mismatched schema state",
+                format!(
+                    "Table {} has an interrupted destination operation targeting snapshot {} and \
+                     replication mask {}, but received snapshot {} and replication mask {}. \
+                     Resynchronize the table to recover.",
+                    table_id,
+                    metadata.snapshot_id,
+                    metadata.replication_mask,
+                    arriving_snapshot_id,
+                    arriving_replication_mask
+                )
+            ));
         }
 
         let target_table_schema = self
@@ -2420,6 +2763,7 @@ where
             }
         }
         self.reconcile_missing_replicated_columns(table_name, &target_schema).await?;
+        self.reconcile_table_sorting(table_name, &target_schema).await?;
 
         let metadata = metadata.to_applied();
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
@@ -2489,6 +2833,7 @@ where
                 self.issue_create_table_stmt(&table_name, replicated_table_schema).await?;
                 self.reconcile_missing_replicated_columns(&table_name, replicated_table_schema)
                     .await?;
+                self.reconcile_table_sorting(&table_name, replicated_table_schema).await?;
             }
         }
 
@@ -2879,7 +3224,7 @@ mod tests {
         config::{PgConnectionConfig, TcpKeepaliveConfig},
         data::{Cell, PartialTableRow, TableRow},
         schema::{
-            ColumnModification, ColumnModificationType, ColumnSchema, IdentityMask,
+            ColumnModification, ColumnModificationType, ColumnSchema, IdentityMask, PgLsn,
             ReplicationMask, SchemaDiff, SnapshotId, TableSchema, Type as PgType,
         },
         store::{MemoryStore, SchemaStore},
@@ -2930,6 +3275,114 @@ mod tests {
 
     fn ducklake_table_name() -> DuckLakeTableName {
         DuckLakeTableName::new("public", "users")
+    }
+
+    #[test]
+    fn primary_key_sorting_uses_key_definition_order() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), PgType::INT4, -1, 1, false)
+                    .with_primary_key(2),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 2, false).with_primary_key(1),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
+        let table_name = ducklake_table_name();
+        let sorting = index_table_sorting_config(DuckLakeTableSortingConfig {
+            tables: vec![etl_config::shared::DuckLakeTableSortConfig {
+                schema: "public".to_owned(),
+                table: "users".to_owned(),
+                sort_by: DuckLakeSortBy::PrimaryKey,
+            }],
+        })
+        .unwrap();
+
+        let columns = resolve_table_sort_columns(&sorting, &table_name, &replicated_table_schema)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+            vec!["id", "tenant_id"]
+        );
+        assert!(columns.iter().all(|column| {
+            column.direction == DuckLakeSortDirection::Asc && column.nulls.is_none()
+        }));
+    }
+
+    #[test]
+    fn explicit_sorting_rejects_unreplicated_columns() {
+        let table_schema = Arc::new(make_schema(1, "public", "users"));
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_mask(table_schema, ReplicationMask::from_bytes(vec![1, 0]));
+        let table_name = ducklake_table_name();
+        let sorting = index_table_sorting_config(DuckLakeTableSortingConfig {
+            tables: vec![etl_config::shared::DuckLakeTableSortConfig {
+                schema: "public".to_owned(),
+                table: "users".to_owned(),
+                sort_by: DuckLakeSortBy::Columns {
+                    columns: vec![DuckLakeSortColumn {
+                        name: "name".to_owned(),
+                        direction: DuckLakeSortDirection::Desc,
+                        nulls: Some(DuckLakeSortNulls::First),
+                    }],
+                },
+            }],
+        })
+        .unwrap();
+
+        let error = resolve_table_sort_columns(&sorting, &table_name, &replicated_table_schema)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
+        assert!(error.to_string().contains("not replicated"));
+    }
+
+    #[test]
+    fn active_sort_order_comparison_uses_ducklake_defaults() {
+        let active = vec![ActiveDuckLakeSortColumn {
+            expression: r#""id""#.to_owned(),
+            direction: "ASC".to_owned(),
+            null_order: "NULLS_LAST".to_owned(),
+        }];
+        let desired = vec![DuckLakeSortColumn {
+            name: "id".to_owned(),
+            direction: DuckLakeSortDirection::Asc,
+            nulls: None,
+        }];
+
+        assert!(active_sort_order_matches(&active, &desired));
+    }
+
+    #[tokio::test]
+    async fn table_sorting_requires_external_maintenance() {
+        let sorting = DuckLakeTableSortingConfig {
+            tables: vec![etl_config::shared::DuckLakeTableSortConfig {
+                schema: "public".to_owned(),
+                table: "users".to_owned(),
+                sort_by: DuckLakeSortBy::PrimaryKey,
+            }],
+        };
+
+        let error = DuckLakeDestination::new_with_table_sorting_and_external_maintenance(
+            Url::parse("postgres://localhost/ducklake").unwrap(),
+            Url::parse("file:///tmp/ducklake").unwrap(),
+            1,
+            None,
+            None,
+            None,
+            None,
+            sorting,
+            DuckLakeExternalMaintenanceConfig::disabled(),
+            MemoryStore::new(),
+        )
+        .await
+        .err()
+        .expect("Sorting without maintenance should fail");
+
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
     }
 
     fn make_alternative_identity_schema() -> ReplicatedTableSchema {
@@ -3512,7 +3965,7 @@ mod tests {
                 ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, true),
                 ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
             ],
-            SnapshotId::from(42_u64),
+            SnapshotId::at_lsn(PgLsn::from(42_u64)),
         );
         let target_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
 
@@ -3544,7 +3997,7 @@ mod tests {
                 ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
                 ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ],
-            SnapshotId::from(43_u64),
+            SnapshotId::at_lsn(PgLsn::from(43_u64)),
         );
         let target_mask = ReplicationMask::from_bytes(vec![1, 1]);
 

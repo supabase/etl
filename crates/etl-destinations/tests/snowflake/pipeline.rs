@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use etl::{
-    event::EventType,
+    event::{Event, EventType},
     pipeline::PipelineId,
     schema::TableName,
-    store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -19,12 +18,10 @@ use etl_destinations::snowflake::{
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use rand::random;
-use tokio::time::{Duration, sleep};
+use tokio::time::Duration;
 
 use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
 
-const QUERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const QUERY_MAX_ATTEMPTS: usize = 90;
 const DESTINATION_OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DESTINATION_OFFSET_MAX_ATTEMPTS: usize = 90;
 
@@ -50,66 +47,6 @@ async fn query_default_rows(
     )
     .await
     .expect("query for defaulted rows failed")
-}
-
-/// Queries the initial row copied before the source schema change.
-async fn query_initial_row(
-    sql: &SqlClient<AuthManager<HttpExchanger>>,
-    database: &str,
-    schema: &str,
-    table: &str,
-) -> Vec<Vec<serde_json::Value>> {
-    let fqn = format!("\"{database}\".\"{schema}\".\"{table}\"");
-    query_rows(sql, &format!("select \"id\"::varchar, \"name\" from {fqn} where \"id\" = '1'"))
-        .await
-        .expect("query for initial row failed")
-}
-
-/// Waits until the pre-existing source row is visible in Snowflake.
-async fn wait_for_initial_row(
-    sql: &SqlClient<AuthManager<HttpExchanger>>,
-    database: &str,
-    schema: &str,
-    table: &str,
-) -> Vec<Vec<serde_json::Value>> {
-    let expected = vec![vec![serde_json::json!("1"), serde_json::json!("Alice")]];
-    let mut last_rows = Vec::new();
-
-    for attempt in 0..QUERY_MAX_ATTEMPTS {
-        if attempt > 0 {
-            sleep(QUERY_POLL_INTERVAL).await;
-        }
-
-        last_rows = query_initial_row(sql, database, schema, table).await;
-        if last_rows == expected {
-            return last_rows;
-        }
-    }
-
-    last_rows
-}
-
-async fn wait_for_default_rows(
-    sql: &SqlClient<AuthManager<HttpExchanger>>,
-    database: &str,
-    schema: &str,
-    table: &str,
-    expected: &[Vec<serde_json::Value>],
-) -> Vec<Vec<serde_json::Value>> {
-    let mut last_rows = Vec::new();
-
-    for attempt in 0..QUERY_MAX_ATTEMPTS {
-        if attempt > 0 {
-            sleep(QUERY_POLL_INTERVAL).await;
-        }
-
-        last_rows = query_default_rows(sql, database, schema, table).await;
-        if last_rows == expected {
-            return last_rows;
-        }
-    }
-
-    last_rows
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -163,11 +100,10 @@ async fn schema_change_batched_operations() {
             store.clone(),
             destination.clone(),
         );
-        let table_ready_notify =
-            store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+        let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
         pipeline.start().await.unwrap();
-        table_ready_notify.notified().await;
+        table_sync_complete_notify.notified().await;
 
         let copy_offset = OffsetToken::new(0_u64.into(), 1);
         let committed = poll_destination_offset(
@@ -179,10 +115,6 @@ async fn schema_change_batched_operations() {
         )
         .await;
         assert_eq!(committed, Some(copy_offset), "initial data should commit before source DDL");
-
-        let initial_rows =
-            wait_for_initial_row(&sql, config.database(), config.schema(), &snowflake_table).await;
-        assert_eq!(initial_rows, vec![vec![serde_json::json!("1"), serde_json::json!("Alice")]]);
 
         let events_notify = destination
             .wait_for_events(vec![
@@ -219,7 +151,34 @@ async fn schema_change_batched_operations() {
             .expect("failed to insert defaulted source row");
 
         events_notify.notified().await;
+        let expected_offset = destination
+            .get_events()
+            .await
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                Event::Insert(event) if event.replicated_table_schema.id() == table_id => {
+                    Some(OffsetToken::new(event.commit_lsn, event.tx_ordinal))
+                }
+                _ => None,
+            })
+            .expect("expected a replicated insert event");
+
         pipeline.shutdown_and_wait().await.unwrap();
+
+        let committed = poll_destination_offset(
+            &destination_for_polling,
+            table_id,
+            &expected_offset,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
+        )
+        .await;
+        assert_eq!(
+            committed,
+            Some(expected_offset),
+            "defaulted row should commit before the final query"
+        );
 
         let expected = vec![
             vec![
@@ -237,14 +196,8 @@ async fn schema_change_batched_operations() {
                 serde_json::json!("true"),
             ],
         ];
-        let rows = wait_for_default_rows(
-            &sql,
-            config.database(),
-            config.schema(),
-            &snowflake_table,
-            &expected,
-        )
-        .await;
+        let rows =
+            query_default_rows(&sql, config.database(), config.schema(), &snowflake_table).await;
         assert_eq!(rows, expected);
     })
     .await;

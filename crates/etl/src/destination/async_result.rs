@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -14,6 +15,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     runtime::concurrency::{ShutdownResult, ShutdownRx},
+    schema::TableId,
     source_payload_metadata::StreamingPayloadMetadata,
 };
 
@@ -29,11 +31,11 @@ pub enum DestinationWriteStatus {
     /// For streaming writes through
     /// [`crate::destination::Destination::write_events`], ETL does not advance
     /// the batch's commit end LSN. It carries that LSN into the next streaming
-    /// write and advances durable progress only when a later cumulative
+    /// write and advances the last flush LSN only when a later cumulative
     /// [`DestinationWriteStatus::Durable`] result covers it. If no later write
     /// is dispatched before shutdown, ETL normally leaves progress at the last
-    /// durable checkpoint so restart can replay the accepted write. A terminal
-    /// table-sync catchup may instead issue an empty
+    /// persisted checkpoint so restart can replay the accepted write. A
+    /// terminal table-sync catchup may instead issue an empty
     /// [`WriteEventsDurability::RequireDurable`] write to settle this debt.
     ///
     /// For table-copy writes through
@@ -115,13 +117,14 @@ pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 
 /// Metadata carried by apply-loop event write completions.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Commit end LSN associated with the dispatched batch, if any.
     ///
-    /// For immediate destinations this becomes durable progress when the write
-    /// result returns [`DestinationWriteStatus::Durable`]. For deferred
-    /// destinations, the apply loop carries this LSN across
+    /// For immediate destinations this can advance the last flush LSN and
+    /// persisted checkpoint when the write returns
+    /// [`DestinationWriteStatus::Durable`]. For deferred destinations, the
+    /// apply loop carries this LSN across
     /// [`DestinationWriteStatus::Accepted`] results and advances only when a
     /// later cumulative durable result covers the carried LSN.
     pub commit_end_lsn: Option<PgLsn>,
@@ -129,6 +132,13 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     pub durability: WriteEventsDurability,
     /// Number of events in the dispatched batch.
     pub event_count: usize,
+    /// Tables whose schemas were communicated through relation events.
+    ///
+    /// A durable result confirms that the destination processed these
+    /// relations, making their tables likely candidates for obsolete schema
+    /// cleanup. Treating every relation as a candidate also reconstructs
+    /// cleanup work after restart without a separate persisted pending marker.
+    pub relation_table_ids: HashSet<TableId>,
     /// PostgreSQL tuple bytes accumulated for the dispatched event batch.
     pub streaming_payload_metadata: StreamingPayloadMetadata,
     /// Instant at which the event batch was handed off to the destination.
@@ -143,7 +153,7 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
 /// side immediately or later, depending on the method.
 #[derive(Debug)]
 pub struct AsyncResult<T> {
-    tx: Option<oneshot::Sender<EtlResult<T>>>,
+    tx: oneshot::Sender<(Instant, EtlResult<T>)>,
 }
 
 impl<T> AsyncResult<T> {
@@ -155,16 +165,14 @@ impl<T> AsyncResult<T> {
     pub(crate) fn new<M>(metadata: M) -> (Self, PendingAsyncResult<T, M>) {
         let (tx, rx) = oneshot::channel();
 
-        (Self { tx: Some(tx) }, PendingAsyncResult { metadata: Some(metadata), rx })
+        (Self { tx }, PendingAsyncResult { metadata: Some(metadata), rx })
     }
 
-    /// Sends the final result to the waiting receiver.
-    pub fn send(mut self, result: EtlResult<T>) {
-        let Some(tx) = self.tx.take() else {
-            return;
-        };
-
-        if tx.send(result).is_err() {
+    /// Sends the final result to the waiting receiver and records its
+    /// completion instant.
+    pub fn send(self, result: EtlResult<T>) {
+        let completed_at = Instant::now();
+        if self.tx.send((completed_at, result)).is_err() {
             debug!("async result receiver was already closed");
         }
     }
@@ -177,7 +185,7 @@ pin_project! {
     pub(crate) struct PendingAsyncResult<T, M> {
         metadata: Option<M>,
         #[pin]
-        rx: oneshot::Receiver<EtlResult<T>>,
+        rx: oneshot::Receiver<(Instant, EtlResult<T>)>,
     }
 }
 
@@ -188,11 +196,14 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
         let this = self.project();
 
         match this.rx.poll(cx) {
-            Poll::Ready(Ok(result)) => {
-                Poll::Ready(CompletedAsyncResult { metadata: this.metadata.take(), result })
-            }
+            Poll::Ready(Ok((completed_at, result))) => Poll::Ready(CompletedAsyncResult {
+                metadata: this.metadata.take(),
+                completed_at,
+                result,
+            }),
             Poll::Ready(Err(_)) => Poll::Ready(CompletedAsyncResult {
                 metadata: this.metadata.take(),
+                completed_at: Instant::now(),
                 result: Err(etl_error!(
                     ErrorKind::DestinationError,
                     "Async result channel closed before sending"
@@ -223,6 +234,9 @@ impl<T, M> PendingAsyncResult<T, M> {
 #[derive(Debug)]
 pub(crate) struct CompletedAsyncResult<T, M> {
     metadata: Option<M>,
+    /// Instant at which the sender reported completion.
+    completed_at: Instant,
+    /// Final operation result.
     result: EtlResult<T>,
 }
 
@@ -233,8 +247,14 @@ impl<T, M> CompletedAsyncResult<T, M> {
     }
 
     /// Returns the metadata and final result.
+    #[cfg(test)]
     pub(crate) fn into_parts(self) -> (Option<M>, EtlResult<T>) {
         (self.metadata, self.result)
+    }
+
+    /// Returns metadata, the completion instant, and the final result.
+    pub(crate) fn into_parts_with_completion(self) -> (Option<M>, Instant, EtlResult<T>) {
+        (self.metadata, self.completed_at, self.result)
     }
 }
 
@@ -249,6 +269,7 @@ mod tests {
             commit_end_lsn: Some(PgLsn::from(42)),
             durability: WriteEventsDurability::MayDefer,
             event_count: 1,
+            relation_table_ids: HashSet::from([TableId::new(7)]),
             streaming_payload_metadata: StreamingPayloadMetadata::insert(7),
             dispatched_at: Instant::now(),
         };
@@ -262,6 +283,7 @@ mod tests {
         let metadata = metadata.expect("metadata should be present");
         assert_eq!(metadata.commit_end_lsn, Some(PgLsn::from(42)));
         assert_eq!(metadata.durability, WriteEventsDurability::MayDefer);
+        assert_eq!(metadata.relation_table_ids, HashSet::from([TableId::new(7)]));
         assert_eq!(result.unwrap(), 7);
     }
 
@@ -281,7 +303,7 @@ mod tests {
         let mut pending_result =
             PendingAsyncResult::<u64, ApplyLoopAsyncResultMetadata> { metadata: None, rx };
 
-        result_tx.send(Ok(7)).unwrap();
+        result_tx.send((Instant::now(), Ok(7))).unwrap();
 
         let completed = std::future::poll_fn(|cx| Pin::new(&mut pending_result).poll(cx)).await;
         let (metadata, result) = completed.into_parts();
