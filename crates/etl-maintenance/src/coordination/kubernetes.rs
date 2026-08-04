@@ -65,9 +65,7 @@ impl KubernetesExternalMaintenanceStore {
         info!(
             ducklake_maintenance = %name,
             namespace,
-            "ducklake Kubernetes external maintenance store configured: ducklake_maintenance={}, namespace={}",
-            name,
-            namespace
+            "ducklake kubernetes external maintenance store configured"
         );
 
         Ok(Some(Self { api, name, timeout }))

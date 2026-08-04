@@ -241,18 +241,21 @@ Format: 0/16B3748 (segment/offset)
 
 ### LSNs in Events
 
-ETL events include two LSN fields:
+Sequenced ETL events include a commit LSN and transaction-local ordinal:
 
 | Field | Meaning |
 |-------|---------|
-| `start_lsn` | Where this event was recorded in the WAL |
 | `commit_lsn` | LSN of the commit message in the WAL |
+| `tx_ordinal` | Zero-based event order within the transaction |
 
-Multiple events in the same transaction share the same `commit_lsn` but have different `start_lsn` values.
+Multiple events in the same transaction share the same `commit_lsn`; their
+`tx_ordinal` values distinguish their order. Relation events are connection-local
+metadata and do not have an event sequence key.
 
 ## Why Persist State?
 
-ETL persists operational state - **table states, schemas, progress, and destination table metadata** - for recovery.
+ETL persists operational state - **table states, schemas, replication
+checkpoints, and destination table metadata** - for recovery.
 
 ### Without Persistence
 
@@ -269,7 +272,7 @@ ETL stores:
 | State | Purpose |
 |-------|---------|
 | Table state | Know whether to copy or stream for each table |
-| Durable replication progress | Resume workers from a safe flushed LSN |
+| Persisted replication checkpoint | Resume workers from a safe replay frontier |
 | Table schemas | Decode events against the correct versioned schema |
 | Destination table metadata | Track destination table IDs, applied schema snapshots, and replication masks |
 

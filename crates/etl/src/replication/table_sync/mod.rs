@@ -25,10 +25,7 @@ use crate::{
     etl_error,
     pipeline::PipelineId,
     postgres::{OutOfBandSourcePool, client::PgReplicationClient},
-    replication::{
-        state::{TableState, TableStateType},
-        table_cache::SharedTableCache,
-    },
+    replication::state::{TableState, TableStateType},
     runtime::{
         BatchBudgetController, MemoryMonitor, TableSyncWorkerState,
         concurrency::{ShutdownResult, ShutdownRx},
@@ -54,6 +51,9 @@ pub(crate) enum TableSyncResult {
         /// LSN position where continuous replication should begin for this
         /// table.
         start_lsn: PgLsn,
+        /// Initial row-decoding state captured by the consistent copy
+        /// transaction.
+        replicated_table_schema: ReplicatedTableSchema,
     },
 }
 
@@ -102,7 +102,6 @@ pub(crate) async fn start_table_sync<S, D>(
     table_sync_worker_state: TableSyncWorkerState,
     store: S,
     destination: D,
-    shared_table_cache: &SharedTableCache,
     out_of_band_source_pool: OutOfBandSourcePool,
     mut shutdown_rx: ShutdownRx,
     memory_monitor: MemoryMonitor,
@@ -178,7 +177,7 @@ where
     //   further `RELATION` message arrives.
     //
     // In case the state is any other state, we will return an error.
-    let start_lsn = match state_type {
+    let (start_lsn, replicated_table_schema) = match state_type {
         TableStateType::Init | TableStateType::DataSync | TableStateType::FinishedCopy => {
             // We must drop the destination table before starting a copy to avoid data
             // inconsistencies when there is a previous table.
@@ -224,13 +223,9 @@ where
             // successfully.
             replication_client.delete_slot_if_exists(&slot_name).await?;
 
-            // We prepare durable and in-memory table-copy state only after the
-            // destination drop succeeds. The shared cache removal is idempotent: a
-            // first copy has no cached state yet, while an in-process retry can still
-            // hold the previous ready runtime schema. The fresh `0/0` copy schema
-            // below is the only state allowed to repopulate the cache.
+            // Prepare durable table-copy state only after the destination drop
+            // succeeds.
             store.prepare_table_state_for_copy(table_id).await?;
-            shared_table_cache.remove_table(table_id).await;
             debug!(table_id = table_id.0, "prepared table state before copy");
 
             // We are ready to start copying table data, and we update the state
@@ -274,8 +269,12 @@ where
             let table_schema = store.store_table_schema(table_schema).await?;
 
             // Get the names of columns being replicated based on the publication's column
-            // filter. This must be done in the same transaction as
-            // `get_table_schema` for consistency.
+            // filter. This runs in the copy transaction, but PostgreSQL's
+            // publication-expansion helpers use catalog access that is not guaranteed to
+            // follow the imported MVCC snapshot. A concurrent publication change can
+            // therefore race this bootstrap read; mask/schema mismatches fail below, and
+            // later transactional DDL and Relation messages reconcile changes observed in
+            // the WAL.
             let replicated_column_names = replication_transaction
                 .get_replicated_column_names(table_id, &table_schema, &config.publication_name)
                 .await?;
@@ -388,19 +387,10 @@ where
                 inner.set_and_store(TableState::FinishedCopy, &store).await?;
             }
 
-            // After we finished copying, we mark this table as ready in the cache, so
-            // that we can start streaming and decoding immediately.
-            //
-            // This is needed, since it could be that the apply loop for the `Catchup` state
-            // might be idle and progress only via keepalives and in that case no `Relation`
-            // message will be received, so we want the apply worker to already be able to
-            // start decoding.
-            shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
-
             #[cfg(feature = "failpoints")]
             fail_point!(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
-            slot.consistent_point
+            (slot.consistent_point, replicated_table_schema)
         }
         _ => unreachable!("state type already validated above"),
     };
@@ -428,7 +418,7 @@ where
         return Ok(TableSyncResult::Stopped);
     }
 
-    info!(table_id = table_id.0, "table sync completed, starting streaming");
+    info!(table_id = table_id.0, "table copy completed, starting table sync catchup stream");
 
-    Ok(TableSyncResult::Completed { start_lsn })
+    Ok(TableSyncResult::Completed { start_lsn, replicated_table_schema })
 }

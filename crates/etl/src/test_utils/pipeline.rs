@@ -10,7 +10,6 @@ use uuid::Uuid;
 use crate::{
     destination::PipelineDestination,
     pipeline::{Pipeline, PipelineId},
-    replication::state::TableStateType,
     schema::{TableId, TableName},
     store::PipelineStore,
     test_utils::{
@@ -287,7 +286,9 @@ where
     .build()
 }
 
-pub async fn create_database_and_ready_pipeline_with_table(
+/// Creates an empty published table and waits for its pipeline to reach
+/// [`crate::replication::state::TableStateType::SyncDone`].
+pub async fn create_database_and_sync_done_pipeline_with_table(
     table_suffix: &str,
     columns: &[(&str, &str)],
 ) -> (
@@ -323,20 +324,11 @@ pub async fn create_database_and_ready_pipeline_with_table(
         destination.clone(),
     );
 
-    // We wait for ready so that we have the apply worker dealing with events, this
-    // is the common testing condition which ensures that the table is ready to
-    // be streamed from the main apply worker.
-    //
-    // The rationale for wanting to test ETL mainly on the apply worker is that it's
-    // really hard to test ETL in a state before `Ready` since the system will
-    // advance on its own. To properly test all the table sync worker states, we
-    // would need a way to programmatically drive execution, but we deemed
-    // it too much work compared to the benefit it brings.
-    let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
 
-    ready.notified().await;
+    table_sync_complete_notify.notified().await;
 
     (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication_name)
 }

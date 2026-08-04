@@ -298,7 +298,7 @@ impl<C: StreamClient> ChannelHandle<C> {
                     warn!(
                         table = %self.table,
                         channel = %self.channel,
-                        "waiting for Snowflake channel rows to commit before reopening"
+                        "waiting for snowflake channel rows to commit before reopening"
                     );
                     sleep(self.poll_interval).await;
                 }
@@ -333,7 +333,7 @@ impl<C: StreamClient> ChannelHandle<C> {
                     warn!(
                         table = %self.table,
                         channel = %self.channel,
-                        "waiting for Snowflake channel rows to commit before dropping"
+                        "waiting for snowflake channel rows to commit before dropping"
                     );
                     sleep(self.poll_interval).await;
                 }

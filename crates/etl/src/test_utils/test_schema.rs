@@ -392,7 +392,6 @@ pub fn build_expected_users_inserts(
 
     for (name, age) in expected_rows {
         events.push(Event::Insert(InsertEvent {
-            start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
             tx_ordinal: 0,
             replicated_table_schema: replicated_table_schema.clone(),
@@ -421,7 +420,6 @@ pub fn build_expected_orders_inserts(
 
     for name in expected_rows {
         events.push(Event::Insert(InsertEvent {
-            start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
             tx_ordinal: 0,
             replicated_table_schema: replicated_table_schema.clone(),

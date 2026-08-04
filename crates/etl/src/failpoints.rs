@@ -17,7 +17,7 @@ pub const START_TABLE_SYNC_DURING_DATA_SYNC_FP: &str = "start_table_sync.during_
 pub const START_TABLE_SYNC_AFTER_FINISHED_COPY_FP: &str = "start_table_sync.after_finished_copy_fp";
 pub const TABLE_SYNC_WORKER_BEFORE_STREAMING_FP: &str = "table_sync_worker.before_streaming_fp";
 pub const SEND_STATUS_UPDATE_FP: &str = "send_status_update_fp";
-pub const STORE_REPLICATION_PROGRESS_FP: &str = "store_replication_progress_fp";
+pub const STORE_REPLICATION_CHECKPOINT_FP: &str = "store_replication_checkpoint_fp";
 
 /// Executes a configurable failpoint for testing error scenarios.
 ///
@@ -57,4 +57,14 @@ pub fn etl_fail_point(name: &str) -> EtlResult<()> {
 /// A failpoint is considered active if it throws an error.
 pub fn etl_fail_point_active(name: &str) -> bool {
     etl_fail_point(name).is_err()
+}
+
+/// Returns whether a failpoint applies to the supplied parameter.
+///
+/// A failpoint configured without a return value applies universally. A
+/// failpoint configured with `return(value)` applies only when `value` matches
+/// `parameter`.
+pub fn etl_fail_point_active_for_parameter(name: &str, parameter: &str) -> bool {
+    fail::eval(name, |configured| configured.as_deref().is_none_or(|value| value == parameter))
+        .unwrap_or(false)
 }

@@ -218,7 +218,7 @@ impl<E: TokenExchanger> TokenProvider for AuthManager<E> {
             return Ok(token.access_token.clone());
         }
 
-        tracing::debug!("refreshing Snowflake scoped token");
+        tracing::debug!("refreshing snowflake scoped token");
 
         let jwt = self.generate_jwt()?;
         let scoped = self.exchanger.exchange(self.config.account_url(), &jwt).await?;

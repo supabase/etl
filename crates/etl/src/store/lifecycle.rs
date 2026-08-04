@@ -1,9 +1,9 @@
 //! Table state lifecycle store capability.
 //!
 //! Table state lifecycle operations are coordinated mutations over table state,
-//! durable progress, versioned schemas, destination metadata, and store caches.
-//! Each operation represents a supported lifecycle intent so callers do not
-//! need to compose ad hoc deletion steps.
+//! persisted replication checkpoints, versioned schemas, destination metadata,
+//! and store caches. Each operation represents a supported lifecycle intent so
+//! callers do not need to compose ad hoc deletion steps.
 
 use std::future::Future;
 
@@ -79,7 +79,7 @@ pub trait TableStateLifecycleStore: Sync {
     /// Removes destination table metadata, all stored table schemas, and
     /// durable table-sync progress while preserving the table state. This is
     /// used after the destination object has been dropped and
-    /// before a fresh `0/0` table-copy schema is stored. This is a convenience
+    /// before a fresh `0:0` table-copy schema is stored. This is a convenience
     /// wrapper around [`TableStateOperation::PrepareForCopy`].
     fn prepare_table_state_for_copy(
         &self,

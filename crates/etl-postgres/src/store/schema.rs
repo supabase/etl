@@ -1,12 +1,12 @@
 //! SQL accessors for versioned source table schemas.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use sqlx::{
     PgExecutor, PgPool, Row,
     postgres::{PgRow, types::Oid as SqlxTableId},
 };
-use tokio_postgres::types::{PgLsn, Type as PgType};
+use tokio_postgres::types::Type as PgType;
 
 use crate::schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
 
@@ -239,7 +239,7 @@ define_type_mappings! {
 ///
 /// Upserts table schema and replaces all column information in schema storage
 /// tables using a transaction to ensure atomicity. If a schema version already
-/// exists for the same (pipeline_id, table_id, snapshot_id), columns are
+/// exists for the same `(pipeline_id, table_id, snapshot_id)`, columns are
 /// deleted and re-inserted.
 pub async fn store_table_schema(
     pool: &PgPool,
@@ -252,7 +252,7 @@ pub async fn store_table_schema(
     let table_schema_id: i64 = sqlx::query(
         r#"
         insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name, snapshot_id)
-        values ($1, $2, $3, $4, $5::pg_lsn)
+        values ($1, $2, $3, $4, $5)
         on conflict (pipeline_id, table_id, snapshot_id)
         do update set
             schema_name = excluded.schema_name,
@@ -265,7 +265,7 @@ pub async fn store_table_schema(
     .bind(table_schema.id.into_inner() as i64)
     .bind(&table_schema.name.schema)
     .bind(&table_schema.name.name)
-    .bind(table_schema.snapshot_id.to_pg_lsn_string())
+    .bind(table_schema.snapshot_id.to_string())
     .fetch_one(&mut *tx)
     .await?
     .get(0);
@@ -308,7 +308,7 @@ pub async fn store_table_schema(
 ///
 /// Retrieves table schemas and columns from schema storage tables,
 /// reconstructing complete [`TableSchema`] objects. This is equivalent to
-/// calling [`load_table_schemas_at_snapshot`] with the maximum LSN value.
+/// calling [`load_table_schemas_at_snapshot`] with [`SnapshotId::max`].
 pub async fn load_table_schemas(
     pool: &PgPool,
     pipeline_id: i64,
@@ -316,8 +316,13 @@ pub async fn load_table_schemas(
     load_table_schemas_at_snapshot(pool, pipeline_id, SnapshotId::max()).await
 }
 
-/// Loads a single table schema with the largest snapshot_id <= the requested
-/// snapshot.
+/// Loads the newest table schema at or before the requested snapshot.
+///
+/// Snapshot IDs are stored as compact, variable-width decimal text. Text order
+/// is not numeric order (`10:2` sorts before `2:30` as text), so the query must
+/// split both components and compare the numeric `(commit_lsn, message_lsn)`
+/// tuple. The commit component establishes cross-transaction delivery and
+/// activation order; the message component only breaks ties within one commit.
 ///
 /// Returns `None` if no schema version exists for the table at or before the
 /// given snapshot.
@@ -333,7 +338,7 @@ pub async fn load_table_schema_at_snapshot(
             ts.table_id,
             ts.schema_name,
             ts.table_name,
-            ts.snapshot_id::text as snapshot_id,
+            ts.snapshot_id,
             tc.column_name,
             tc.column_type,
             tc.type_modifier,
@@ -345,8 +350,18 @@ pub async fn load_table_schema_at_snapshot(
         inner join etl.table_columns tc on ts.id = tc.table_schema_id
         where ts.id = (
             select id from etl.table_schemas
-            where pipeline_id = $1 and table_id = $2 and snapshot_id <= $3::pg_lsn
-            order by snapshot_id desc
+            where pipeline_id = $1
+              and table_id = $2
+              and (
+                  pg_catalog.split_part(snapshot_id, ':', 1)::pg_catalog.numeric,
+                  pg_catalog.split_part(snapshot_id, ':', 2)::pg_catalog.numeric
+              ) <= (
+                  pg_catalog.split_part($3, ':', 1)::pg_catalog.numeric,
+                  pg_catalog.split_part($3, ':', 2)::pg_catalog.numeric
+              )
+            order by
+                pg_catalog.split_part(snapshot_id, ':', 1)::pg_catalog.numeric desc,
+                pg_catalog.split_part(snapshot_id, ':', 2)::pg_catalog.numeric desc
             limit 1
         )
         order by tc.ordinal_position
@@ -354,7 +369,7 @@ pub async fn load_table_schema_at_snapshot(
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .bind(snapshot_id.to_pg_lsn_string())
+    .bind(snapshot_id.to_string())
     .fetch_all(pool)
     .await?;
 
@@ -368,8 +383,8 @@ pub async fn load_table_schema_at_snapshot(
     let schema_name: String = first_row.get("schema_name");
     let table_name: String = first_row.get("table_name");
     let snapshot_id_str: String = first_row.get("snapshot_id");
-    let snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str)
-        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let snapshot_id =
+        snapshot_id_str.parse::<SnapshotId>().map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
     let mut table_schema = TableSchema::with_snapshot_id(
         table_id,
@@ -387,17 +402,16 @@ pub async fn load_table_schema_at_snapshot(
 
 /// Loads all table schemas for a pipeline at a specific snapshot point.
 ///
-/// For each table, retrieves the schema version with the largest snapshot_id
-/// that is <= the requested snapshot_id. Tables without any schema version
-/// at or before the snapshot are excluded from the result.
+/// For each table, retrieves the newest schema version at or before the
+/// requested snapshot. Tables without an eligible schema version are excluded
+/// from the result.
 pub async fn load_table_schemas_at_snapshot(
     pool: &PgPool,
     pipeline_id: i64,
     snapshot_id: SnapshotId,
 ) -> Result<Vec<TableSchema>, sqlx::Error> {
-    // Use DISTINCT ON to efficiently find the latest schema version for each table.
-    // PostgreSQL optimizes DISTINCT ON with ORDER BY using index scans when
-    // possible.
+    // Use DISTINCT ON with numeric component ordering to select the latest
+    // eligible schema version for each table.
     let rows = sqlx::query(
         r#"
         with latest_schemas as (
@@ -409,14 +423,23 @@ pub async fn load_table_schemas_at_snapshot(
                 ts.snapshot_id
             from etl.table_schemas ts
             where ts.pipeline_id = $1
-              and ts.snapshot_id <= $2::pg_lsn
-            order by ts.table_id, ts.snapshot_id desc
+              and (
+                  pg_catalog.split_part(ts.snapshot_id, ':', 1)::pg_catalog.numeric,
+                  pg_catalog.split_part(ts.snapshot_id, ':', 2)::pg_catalog.numeric
+              ) <= (
+                  pg_catalog.split_part($2, ':', 1)::pg_catalog.numeric,
+                  pg_catalog.split_part($2, ':', 2)::pg_catalog.numeric
+              )
+            order by
+                ts.table_id,
+                pg_catalog.split_part(ts.snapshot_id, ':', 1)::pg_catalog.numeric desc,
+                pg_catalog.split_part(ts.snapshot_id, ':', 2)::pg_catalog.numeric desc
         )
         select
             ls.table_id,
             ls.schema_name,
             ls.table_name,
-            ls.snapshot_id::text as snapshot_id,
+            ls.snapshot_id,
             tc.column_name,
             tc.column_type,
             tc.type_modifier,
@@ -430,7 +453,7 @@ pub async fn load_table_schemas_at_snapshot(
         "#,
     )
     .bind(pipeline_id)
-    .bind(snapshot_id.to_pg_lsn_string())
+    .bind(snapshot_id.to_string())
     .fetch_all(pool)
     .await?;
 
@@ -442,7 +465,8 @@ pub async fn load_table_schemas_at_snapshot(
         let schema_name: String = row.get("schema_name");
         let table_name: String = row.get("table_name");
         let snapshot_id_str: String = row.get("snapshot_id");
-        let row_snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str)
+        let row_snapshot_id = snapshot_id_str
+            .parse::<SnapshotId>()
             .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
         let entry = table_schemas.entry(table_id).or_insert_with(|| {
@@ -513,55 +537,78 @@ where
 /// Deletes obsolete table schema versions for a pipeline.
 ///
 /// For each table, finds the newest schema version at or before that table's
-/// retention LSN and deletes older schema versions. Versions at or
-/// after that retained snapshot are left untouched. Column rows are removed by
-/// the `table_columns.table_schema_id` `ON DELETE CASCADE` constraint, and the
+/// retention boundary and deletes older schema versions. Versions at or after
+/// that retained snapshot are left untouched. Column rows are removed by the
+/// `table_columns.table_schema_id` `ON DELETE CASCADE` constraint, and the
 /// single `DELETE` statement is atomic in PostgreSQL.
+///
+/// The stored decimal components are parsed as `numeric` before comparison;
+/// comparing their variable-width text representation would not preserve the
+/// `(commit_lsn, message_lsn)` ordering defined by [`SnapshotId`]. Iterating
+/// the ordered retention map also builds the paired query arrays in table ID
+/// order.
 pub async fn delete_obsolete_table_schema_versions<'c, E>(
     executor: E,
     pipeline_id: i64,
-    retention_lsns: &HashMap<TableId, PgLsn>,
+    retention_snapshot_ids: &BTreeMap<TableId, SnapshotId>,
 ) -> Result<u64, sqlx::Error>
 where
     E: PgExecutor<'c>,
 {
-    if retention_lsns.is_empty() {
+    if retention_snapshot_ids.is_empty() {
         return Ok(0);
     }
 
-    let mut table_ids = Vec::with_capacity(retention_lsns.len());
-    let mut retention_lsn_values = Vec::with_capacity(retention_lsns.len());
-    for (table_id, retention_lsn) in retention_lsns {
+    let mut table_ids = Vec::with_capacity(retention_snapshot_ids.len());
+    let mut retention_snapshot_id_values = Vec::with_capacity(retention_snapshot_ids.len());
+    for (table_id, retention_snapshot_id) in retention_snapshot_ids {
         table_ids.push(SqlxTableId(table_id.into_inner()));
-        retention_lsn_values.push(retention_lsn.to_string());
+        retention_snapshot_id_values.push(retention_snapshot_id.to_string());
     }
 
     let result = sqlx::query(
         r#"
         with cleanup_retentions as (
-            select table_id, retention_lsn::pg_lsn as retention_lsn
+            select
+                table_id,
+                pg_catalog.split_part(retention_snapshot_id, ':', 1)::pg_catalog.numeric
+                    as commit_lsn,
+                pg_catalog.split_part(retention_snapshot_id, ':', 2)::pg_catalog.numeric
+                    as message_lsn
             from unnest($2::oid[], $3::text[])
-                as cleanup(table_id, retention_lsn)
+                as cleanup(table_id, retention_snapshot_id)
         ),
         retained_snapshots as (
-            select ts.table_id, max(ts.snapshot_id) as retained_snapshot_id
+            select distinct on (ts.table_id)
+                ts.table_id,
+                pg_catalog.split_part(ts.snapshot_id, ':', 1)::pg_catalog.numeric as commit_lsn,
+                pg_catalog.split_part(ts.snapshot_id, ':', 2)::pg_catalog.numeric as message_lsn
             from etl.table_schemas ts
             join cleanup_retentions cleanup
               on cleanup.table_id = ts.table_id
             where ts.pipeline_id = $1
-              and ts.snapshot_id <= cleanup.retention_lsn
-            group by ts.table_id
+              and (
+                  pg_catalog.split_part(ts.snapshot_id, ':', 1)::pg_catalog.numeric,
+                  pg_catalog.split_part(ts.snapshot_id, ':', 2)::pg_catalog.numeric
+              ) <= (cleanup.commit_lsn, cleanup.message_lsn)
+            order by
+                ts.table_id,
+                pg_catalog.split_part(ts.snapshot_id, ':', 1)::pg_catalog.numeric desc,
+                pg_catalog.split_part(ts.snapshot_id, ':', 2)::pg_catalog.numeric desc
         )
         delete from etl.table_schemas ts
         using retained_snapshots rs
         where ts.pipeline_id = $1
           and ts.table_id = rs.table_id
-          and ts.snapshot_id < rs.retained_snapshot_id
+          and (
+              pg_catalog.split_part(ts.snapshot_id, ':', 1)::pg_catalog.numeric,
+              pg_catalog.split_part(ts.snapshot_id, ':', 2)::pg_catalog.numeric
+          ) < (rs.commit_lsn, rs.message_lsn)
         "#,
     )
     .bind(pipeline_id)
     .bind(table_ids)
-    .bind(retention_lsn_values)
+    .bind(retention_snapshot_id_values)
     .execute(executor)
     .await?;
 

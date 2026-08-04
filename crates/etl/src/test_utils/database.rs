@@ -155,6 +155,31 @@ pub async fn replication_slot_state(client: &Client, slot_name: &str) -> (PgLsn,
     (row.get(0), row.get(1))
 }
 
+/// Waits until a replication slot has confirmed at least `expected_lsn`.
+///
+/// # Panics
+///
+/// Panics after [`DEFAULT_NOTIFY_TIMEOUT`] if the slot does not confirm the
+/// expected LSN.
+pub async fn wait_for_replication_slot_flush_lsn(
+    client: &Client,
+    slot_name: &str,
+    expected_lsn: PgLsn,
+) {
+    tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, async {
+        loop {
+            let (confirmed_flush_lsn, _) = replication_slot_state(client, slot_name).await;
+            if confirmed_flush_lsn >= expected_lsn {
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the replication slot to confirm the expected LSN");
+}
+
 /// Waits until the replication slot is served by a walsender other than
 /// `old_pid`.
 ///

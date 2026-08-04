@@ -2,7 +2,6 @@ use etl::{
     data::{Cell, TableRow},
     event::EventType,
     pipeline::PipelineId,
-    store::TableStateType,
     test_utils::{
         database::spawn_source_database,
         event::EventCondition,
@@ -101,17 +100,15 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     );
 
     // Register notifications for table copy completion.
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_ready_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let orders_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
 
     pipeline.start().await.unwrap();
 
-    users_ready_notify.notified().await;
-    orders_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -249,19 +246,17 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         destination.clone(),
     );
 
-    // Register notifications for table copy completion (Ready for both tables).
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_ready_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
+    // Register notifications for table copy completion.
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let orders_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
 
     pipeline.start().await.unwrap();
 
     // Wait until initial sync is done before producing CDC events.
-    users_ready_notify.notified().await;
-    orders_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     // === CDC INSERT EVENTS ===
     // We'll expect 2 inserts per table.
@@ -534,19 +529,17 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
         destination.clone(),
     );
 
-    // Register notifications for table copy completion (Ready for both tables).
-    let users_ready_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_ready_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
+    // Register notifications for table copy completion.
+    let users_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
+    let orders_sync_complete_notify =
+        store.notify_on_table_sync_complete(database_schema.orders_schema().id).await;
 
     pipeline.start().await.unwrap();
 
     // Wait until initial sync is done before producing CDC events.
-    users_ready_notify.notified().await;
-    orders_ready_notify.notified().await;
+    users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     // We'll expect 2 inserts per table.
     let events_notify = destination

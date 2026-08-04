@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Duration};
 use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{DestinationTableMetadata, DestinationWriteStatus, WriteEventsDurability},
+    error::ErrorKind,
     event::{DeleteEvent, Event, InsertEvent, RelationEvent, UpdateEvent},
     pipeline::PipelineId,
     schema::{
@@ -27,6 +28,11 @@ use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
 
 const DESTINATION_OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DESTINATION_OFFSET_MAX_ATTEMPTS: usize = 90;
+
+/// Creates a synthetic composite snapshot ID for tests.
+fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+    SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+}
 
 type SnowflakeTestDestination = Destination<
     NotifyingStore,
@@ -131,7 +137,7 @@ fn make_table_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
 fn status_default_schema(
     table_id: TableId,
     table: &str,
-    snapshot_lsn: Option<u64>,
+    snapshot_id: Option<SnapshotId>,
     default_expression: Option<&str>,
 ) -> TableSchema {
     let mut status_column = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, true);
@@ -145,13 +151,10 @@ fn status_default_schema(
     ];
     let table_name = TableName::new("public".to_owned(), table.to_owned());
 
-    match snapshot_lsn {
-        Some(snapshot_lsn) => TableSchema::with_snapshot_id(
-            table_id,
-            table_name,
-            columns,
-            SnapshotId::new(PgLsn::from(snapshot_lsn)),
-        ),
+    match snapshot_id {
+        Some(snapshot_id) => {
+            TableSchema::with_snapshot_id(table_id, table_name, columns, snapshot_id)
+        }
         None => TableSchema::new(table_id, table_name, columns),
     }
 }
@@ -160,18 +163,12 @@ fn status_default_schema(
 async fn apply_relation_event(
     destination: &SnowflakeTestDestination,
     replicated_table_schema: ReplicatedTableSchema,
-    lsn: u64,
     context: &str,
 ) {
     invoke_write_events(
         destination,
         WriteEventsDurability::MayDefer,
-        vec![Event::Relation(RelationEvent {
-            start_lsn: PgLsn::from(lsn),
-            commit_lsn: PgLsn::from(lsn),
-            tx_ordinal: 0,
-            replicated_table_schema,
-        })],
+        vec![Event::Relation(RelationEvent { replicated_table_schema })],
     )
     .await
     .unwrap_or_else(|error| panic!("write_events ({context}) failed: {error}"));
@@ -380,14 +377,12 @@ async fn write_events_insert_update_delete() {
             WriteEventsDurability::MayDefer,
             vec![
                 Event::Insert(InsertEvent {
-                    start_lsn: PgLsn::from(1u64),
                     commit_lsn: PgLsn::from(1u64),
                     tx_ordinal: 0,
                     replicated_table_schema: schema.clone(),
                     table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())]),
                 }),
                 Event::Update(UpdateEvent {
-                    start_lsn: PgLsn::from(2u64),
                     commit_lsn: PgLsn::from(2u64),
                     tx_ordinal: 0,
                     replicated_table_schema: schema.clone(),
@@ -401,7 +396,6 @@ async fn write_events_insert_update_delete() {
                     ]))),
                 }),
                 Event::Delete(DeleteEvent {
-                    start_lsn: PgLsn::from(3u64),
                     commit_lsn: PgLsn::from(3u64),
                     tx_ordinal: 0,
                     replicated_table_schema: schema.clone(),
@@ -456,7 +450,6 @@ async fn write_events_delete_key_only() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Delete(DeleteEvent {
-                start_lsn: PgLsn::from(1u64),
                 commit_lsn: PgLsn::from(1u64),
                 tx_ordinal: 0,
                 replicated_table_schema: schema.clone(),
@@ -478,11 +471,11 @@ async fn write_events_delete_key_only() {
     .await;
 }
 
-/// A restart replay must skip an older relation snapshot and its committed
-/// rows without executing reverse DDL.
+/// A restart replay must reject an older relation snapshot before reverse DDL
+/// or replayed rows can be applied.
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
-async fn schema_evolution_add_column_skips_stale_replay() {
+async fn schema_evolution_add_column_rejects_stale_replay() {
     let harness = TestHarness::new();
     let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
     let sf_table = snowflake_table_name("public", &src_table);
@@ -500,7 +493,7 @@ async fn schema_evolution_add_column_skips_stale_replay() {
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
 
-    let new_snapshot_id = SnapshotId::new(PgLsn::from(100u64));
+    let new_snapshot_id = test_snapshot_id(100u64, 100u64);
     let evolved_schema = TableSchema::with_snapshot_id(
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
@@ -538,7 +531,7 @@ async fn schema_evolution_add_column_skips_stale_replay() {
             DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
-        assert!(committed.is_some(), "initial data should commit before DDL");
+        assert!(committed.is_some());
 
         let initial_metadata = DestinationTableMetadata::new_applied(
             sf_table.clone(),
@@ -551,9 +544,6 @@ async fn schema_evolution_add_column_skips_stale_replay() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })],
         )
@@ -564,7 +554,6 @@ async fn schema_evolution_add_column_skips_stale_replay() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(101u64),
                 commit_lsn: PgLsn::from(101u64),
                 tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
@@ -587,40 +576,33 @@ async fn schema_evolution_add_column_skips_stale_replay() {
             DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
-        assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
+        assert_eq!(committed, Some(expected_offset));
 
         // Recreate the destination to restore the channel's durable offset,
-        // then replay the stream from before the schema change. Both rows are
-        // already committed, and the stale relation must not remove `email`.
+        // then replay the stream from before the schema change. The relation
+        // has no offset of its own, so the destination must reject it before
+        // considering whether the following rows were already committed.
         let restarted_destination = Destination::new(
             Client::new(build_auth(), PipelineId::from(1_u64)),
             harness.store.clone(),
         );
-        let replay_status = invoke_write_events(
+        let replay_error = invoke_write_events(
             &restarted_destination,
             WriteEventsDurability::MayDefer,
             vec![
                 Event::Relation(RelationEvent {
-                    start_lsn: PgLsn::from(0_u64),
-                    commit_lsn: PgLsn::from(0_u64),
-                    tx_ordinal: 0,
                     replicated_table_schema: initial_replicated.clone(),
                 }),
                 Event::Insert(InsertEvent {
-                    start_lsn: PgLsn::from(1_u64),
                     commit_lsn: PgLsn::from(1_u64),
                     tx_ordinal: 0,
                     replicated_table_schema: initial_replicated.clone(),
                     table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())]),
                 }),
                 Event::Relation(RelationEvent {
-                    start_lsn: PgLsn::from(100_u64),
-                    commit_lsn: PgLsn::from(100_u64),
-                    tx_ordinal: 0,
                     replicated_table_schema: evolved_replicated.clone(),
                 }),
                 Event::Insert(InsertEvent {
-                    start_lsn: PgLsn::from(101_u64),
                     commit_lsn: PgLsn::from(101_u64),
                     tx_ordinal: 0,
                     replicated_table_schema: evolved_replicated.clone(),
@@ -633,27 +615,8 @@ async fn schema_evolution_add_column_skips_stale_replay() {
             ],
         )
         .await
-        .expect("replayed events should be skipped");
-        assert_eq!(replay_status, DestinationWriteStatus::Durable);
-
-        let resumed_status = invoke_write_events(
-            &restarted_destination,
-            WriteEventsDurability::RequireDurable,
-            vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(102_u64),
-                commit_lsn: PgLsn::from(102_u64),
-                tx_ordinal: 0,
-                replicated_table_schema: evolved_replicated.clone(),
-                table_row: TableRow::new(vec![
-                    Cell::I32(3),
-                    Cell::String("Charlie".into()),
-                    Cell::String("charlie@example.com".into()),
-                ]),
-            })],
-        )
-        .await
-        .expect("streaming should resume after stale replay");
-        assert_eq!(resumed_status, DestinationWriteStatus::Durable);
+        .expect_err("a stale relation should fail closed");
+        assert_eq!(replay_error.kind(), ErrorKind::DestinationSchemaRewind);
 
         let fqn = format!(
             "\"{}\".\"{}\".\"{sf_table}\"",
@@ -667,21 +630,11 @@ async fn schema_evolution_add_column_skips_stale_replay() {
         .await
         .expect("query_rows after stale replay failed");
 
-        assert_eq!(rows.len(), 3, "replay must not duplicate committed rows");
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0][0], serde_json::Value::String("1".into()));
         assert_eq!(rows[0][1], serde_json::Value::Null);
         assert_eq!(rows[1][0], serde_json::Value::String("2".into()));
-        assert_eq!(
-            rows[1][1],
-            serde_json::Value::String("bob@example.com".into()),
-            "newer column data must survive stale replay"
-        );
-        assert_eq!(rows[2][0], serde_json::Value::String("3".into()));
-        assert_eq!(
-            rows[2][1],
-            serde_json::Value::String("charlie@example.com".into()),
-            "streaming must resume with the applied schema"
-        );
+        assert_eq!(rows[1][1], serde_json::Value::String("bob@example.com".into()));
 
         let final_metadata = harness
             .store
@@ -715,7 +668,7 @@ async fn schema_evolution_add_column_defaults() {
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
 
-    let new_snapshot_id = SnapshotId::new(PgLsn::from(100u64));
+    let new_snapshot_id = test_snapshot_id(100u64, 100u64);
     let evolved_schema = TableSchema::with_snapshot_id(
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
@@ -765,9 +718,6 @@ async fn schema_evolution_add_column_defaults() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })],
         )
@@ -778,7 +728,6 @@ async fn schema_evolution_add_column_defaults() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(101u64),
                 commit_lsn: PgLsn::from(101u64),
                 tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
@@ -852,25 +801,38 @@ async fn schema_evolution_existing_column_default_changes() {
     let initial_schema = status_default_schema(table_id, &src_table, None, None);
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
 
-    let set_default_schema =
-        status_default_schema(table_id, &src_table, Some(100), Some("'pending'::text"));
+    let set_default_schema = status_default_schema(
+        table_id,
+        &src_table,
+        Some(SnapshotId::new(PgLsn::from(100), PgLsn::from(10))),
+        Some("'pending'::text"),
+    );
     let set_default_replicated = ReplicatedTableSchema::all(Arc::new(set_default_schema.clone()));
 
     let unsupported_default_schema = status_default_schema(
         table_id,
         &src_table,
-        Some(200),
+        Some(SnapshotId::new(PgLsn::from(200), PgLsn::from(20))),
         Some("array['unsupported']::text[]"),
     );
     let unsupported_default_replicated =
         ReplicatedTableSchema::all(Arc::new(unsupported_default_schema.clone()));
 
-    let reset_default_schema =
-        status_default_schema(table_id, &src_table, Some(300), Some("'queued'::text"));
+    let reset_default_schema = status_default_schema(
+        table_id,
+        &src_table,
+        Some(SnapshotId::new(PgLsn::from(300), PgLsn::from(30))),
+        Some("'queued'::text"),
+    );
     let reset_default_replicated =
         ReplicatedTableSchema::all(Arc::new(reset_default_schema.clone()));
 
-    let drop_default_schema = status_default_schema(table_id, &src_table, Some(400), None);
+    let drop_default_schema = status_default_schema(
+        table_id,
+        &src_table,
+        Some(SnapshotId::new(PgLsn::from(400), PgLsn::from(40))),
+        None,
+    );
     let drop_default_replicated = ReplicatedTableSchema::all(Arc::new(drop_default_schema.clone()));
 
     harness.store.store_table_schema(initial_schema).await.unwrap();
@@ -891,26 +853,22 @@ async fn schema_evolution_existing_column_default_changes() {
             harness.config.schema()
         );
 
-        apply_relation_event(&harness.destination, set_default_replicated, 100, "set default")
-            .await;
+        apply_relation_event(&harness.destination, set_default_replicated, "set default").await;
         assert_status_default_absent(&harness.sql, &fqn, "after skipped set default").await;
 
         apply_relation_event(
             &harness.destination,
             unsupported_default_replicated,
-            200,
             "unsupported default",
         )
         .await;
         assert_status_default_absent(&harness.sql, &fqn, "after unsupported default is skipped")
             .await;
 
-        apply_relation_event(&harness.destination, reset_default_replicated, 300, "reset default")
-            .await;
+        apply_relation_event(&harness.destination, reset_default_replicated, "reset default").await;
         assert_status_default_absent(&harness.sql, &fqn, "after skipped reset default").await;
 
-        apply_relation_event(&harness.destination, drop_default_replicated, 400, "drop default")
-            .await;
+        apply_relation_event(&harness.destination, drop_default_replicated, "drop default").await;
         assert_status_default_absent(&harness.sql, &fqn, "after skipped drop default").await;
     })
     .await;
@@ -936,7 +894,7 @@ async fn schema_evolution_rename_column() {
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
 
-    let new_snapshot_id = SnapshotId::new(PgLsn::from(100u64));
+    let new_snapshot_id = test_snapshot_id(100u64, 100u64);
     let evolved_schema = TableSchema::with_snapshot_id(
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
@@ -982,9 +940,6 @@ async fn schema_evolution_rename_column() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })],
         )
@@ -995,7 +950,6 @@ async fn schema_evolution_rename_column() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(101u64),
                 commit_lsn: PgLsn::from(101u64),
                 tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
@@ -1061,7 +1015,7 @@ async fn schema_evolution_drop_column() {
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
 
-    let new_snapshot_id = SnapshotId::new(PgLsn::from(100u64));
+    let new_snapshot_id = test_snapshot_id(100u64, 100u64);
     let evolved_schema = TableSchema::with_snapshot_id(
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
@@ -1111,9 +1065,6 @@ async fn schema_evolution_drop_column() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
             })],
         )
@@ -1124,7 +1075,6 @@ async fn schema_evolution_drop_column() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(101u64),
                 commit_lsn: PgLsn::from(101u64),
                 tx_ordinal: 0,
                 replicated_table_schema: evolved_replicated.clone(),
@@ -1202,7 +1152,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
         ],
-        SnapshotId::new(PgLsn::from(100u64)),
+        test_snapshot_id(100u64, 100u64),
     );
     let replicated_v2 = ReplicatedTableSchema::all(Arc::new(schema_v2.clone()));
 
@@ -1215,7 +1165,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, true),
             ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, true),
         ],
-        SnapshotId::new(PgLsn::from(200u64)),
+        test_snapshot_id(200u64, 200u64),
     );
     let replicated_v3 = ReplicatedTableSchema::all(Arc::new(schema_v3.clone()));
 
@@ -1227,7 +1177,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, true),
         ],
-        SnapshotId::new(PgLsn::from(300u64)),
+        test_snapshot_id(300u64, 300u64),
     );
     let replicated_v4 = ReplicatedTableSchema::all(Arc::new(schema_v4.clone()));
 
@@ -1284,7 +1234,6 @@ async fn schema_evolution_interleaved_ddl_dml() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(1u64),
                 commit_lsn: PgLsn::from(1u64),
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_v1.clone(),
@@ -1298,12 +1247,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
         invoke_write_events(
             &harness.destination,
             WriteEventsDurability::MayDefer,
-            vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(100u64),
-                commit_lsn: PgLsn::from(100u64),
-                tx_ordinal: 0,
-                replicated_table_schema: replicated_v2.clone(),
-            })],
+            vec![Event::Relation(RelationEvent { replicated_table_schema: replicated_v2.clone() })],
         )
         .await
         .expect("write_events (Relation v2) failed");
@@ -1313,7 +1257,6 @@ async fn schema_evolution_interleaved_ddl_dml() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(101u64),
                 commit_lsn: PgLsn::from(101u64),
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_v2.clone(),
@@ -1331,12 +1274,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
         invoke_write_events(
             &harness.destination,
             WriteEventsDurability::MayDefer,
-            vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(200u64),
-                commit_lsn: PgLsn::from(200u64),
-                tx_ordinal: 0,
-                replicated_table_schema: replicated_v3.clone(),
-            })],
+            vec![Event::Relation(RelationEvent { replicated_table_schema: replicated_v3.clone() })],
         )
         .await
         .expect("write_events (Relation v3) failed");
@@ -1346,7 +1284,6 @@ async fn schema_evolution_interleaved_ddl_dml() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(201u64),
                 commit_lsn: PgLsn::from(201u64),
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_v3.clone(),
@@ -1364,12 +1301,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
         invoke_write_events(
             &harness.destination,
             WriteEventsDurability::MayDefer,
-            vec![Event::Relation(RelationEvent {
-                start_lsn: PgLsn::from(300u64),
-                commit_lsn: PgLsn::from(300u64),
-                tx_ordinal: 0,
-                replicated_table_schema: replicated_v4.clone(),
-            })],
+            vec![Event::Relation(RelationEvent { replicated_table_schema: replicated_v4.clone() })],
         )
         .await
         .expect("write_events (Relation v4) failed");
@@ -1379,7 +1311,6 @@ async fn schema_evolution_interleaved_ddl_dml() {
             &harness.destination,
             WriteEventsDurability::MayDefer,
             vec![Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(301u64),
                 commit_lsn: PgLsn::from(301u64),
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_v4.clone(),

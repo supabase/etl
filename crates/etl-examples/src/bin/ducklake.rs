@@ -238,7 +238,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     let mut pipeline = Pipeline::new(pipeline_config, store, ducklake_destination);
 
     info!(
-        "Starting DuckLake CDC pipeline - connecting to Postgres and initializing replication..."
+        "starting ducklake cdc pipeline - connecting to postgres and initializing replication..."
     );
 
     pipeline.start().await?;

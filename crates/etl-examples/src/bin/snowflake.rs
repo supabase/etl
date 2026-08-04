@@ -198,7 +198,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     let mut pipeline = Pipeline::new(pipeline_config, store, destination);
 
     info!(
-        "Starting Snowflake CDC pipeline - connecting to Postgres and initializing replication..."
+        "starting snowflake cdc pipeline - connecting to postgres and initializing replication..."
     );
 
     // Start the pipeline - this will:

@@ -236,6 +236,13 @@ impl IdentityMask {
         &self.0
     }
 
+    /// Returns the underlying mask as a vector of bytes.
+    ///
+    /// Used for serializing the mask into durable `SyncDone` decoding state.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.0.as_ref().clone()
+    }
+
     /// Returns the number of columns in the mask.
     pub fn len(&self) -> usize {
         self.0.len()

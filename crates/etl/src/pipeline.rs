@@ -19,7 +19,7 @@ use crate::{
     etl_error,
     observability::register_metrics,
     postgres::{OutOfBandSourcePool, client::PgReplicationClient, migrations},
-    replication::{SharedTableCache, state::TableState},
+    replication::state::TableState,
     runtime::{
         ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool,
         concurrency::create_shutdown_channel,
@@ -87,10 +87,9 @@ where
     /// Creates a new pipeline with the given configuration.
     ///
     /// The pipeline is initially in the not-started state and must be
-    /// explicitly started using [`Pipeline::start`]. The store is
-    /// used for tracking replication progress, table schemas, destination
-    /// table metadata, and table lifecycle state, while the destination
-    /// receives replicated data.
+    /// explicitly started using [`Pipeline::start`]. The store tracks persisted
+    /// replication checkpoints, table schemas, destination table metadata, and
+    /// table lifecycle state, while the destination receives replicated data.
     /// The pipeline ID is extracted from the configuration, ensuring
     /// consistency between pipeline identity and configuration settings.
     pub fn new(config: PipelineConfig, store: S, destination: D) -> Self {
@@ -159,7 +158,7 @@ where
         } else {
             warn!(
                 "skipping source migrations (run_source_migrations = false); the source schema \
-                 helpers and DDL event trigger must be installed out-of-band"
+                 helpers and ddl event trigger must be installed out-of-band"
             );
         }
 
@@ -201,11 +200,6 @@ where
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create the shared per-table protocol cache used by both the apply worker
-        // and table sync workers. It tracks the latest schema snapshot and
-        // replication mask for each table.
-        let shared_table_cache = SharedTableCache::new();
-
         // We create a shared lazy pool for low-frequency, out-of-band source
         // database queries that should not use the replication connection.
         let out_of_band_source_pool = OutOfBandSourcePool::new(
@@ -220,7 +214,6 @@ where
             Arc::clone(&pool),
             self.store.clone(),
             self.destination.clone(),
-            shared_table_cache,
             out_of_band_source_pool,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,

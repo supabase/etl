@@ -64,6 +64,11 @@ use crate::support::ducklake::{
 static DUCKLAKE_TEST_HOOKS_GUARD: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
+/// Creates a synthetic composite snapshot ID for tests.
+fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+    SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+}
+
 #[cfg(feature = "test-utils")]
 async fn acquire_ducklake_test_hook_guard() -> OwnedSemaphorePermit {
     Arc::clone(&DUCKLAKE_TEST_HOOKS_GUARD)
@@ -92,7 +97,7 @@ fn make_schema_with_email(previous_schema: &TableSchema, snapshot_id: u64) -> Ta
             ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
         ],
-        SnapshotId::from(snapshot_id),
+        test_snapshot_id(snapshot_id, snapshot_id),
     )
 }
 
@@ -1045,14 +1050,12 @@ async fn write_events() {
     destination
         .write_events(vec![
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_owned())]),
             }),
             Event::Update(UpdateEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_table_schema.clone(),
@@ -1063,14 +1066,12 @@ async fn write_events() {
                 old_table_row: None,
             }),
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
                 replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_owned())]),
             }),
             Event::Delete(DeleteEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
                 replicated_table_schema: replicated_table_schema.clone(),
@@ -1133,14 +1134,12 @@ async fn write_events_splits_same_table_batch_by_replicated_schema() {
     destination
         .write_events(vec![
             Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(100_u64),
                 commit_lsn: PgLsn::from(100_u64),
                 tx_ordinal: 0,
                 replicated_table_schema: old_replicated_table_schema,
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Before DDL".to_owned())]),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: PgLsn::from(201_u64),
                 commit_lsn: PgLsn::from(201_u64),
                 tx_ordinal: 0,
                 replicated_table_schema: new_replicated_table_schema,
@@ -1197,7 +1196,7 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
             ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
         ],
-        SnapshotId::from(42_u64),
+        test_snapshot_id(42_u64, 42_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -1244,13 +1243,9 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: new_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: new_replicated_table_schema.clone(),
@@ -1296,6 +1291,172 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
     );
 }
 
+/// Relation-driven `Applying` recovery requires the exact recorded target.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_rejects_mismatched_relation_before_applying_recovery() {
+    use etl::event::RelationEvent;
+
+    let lake =
+        create_test_lake("write_events_rejects_mismatched_relation_before_applying_recovery").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(57, "public", "mismatched_recovery_relation");
+    let target_schema = make_schema_with_email(&old_schema, 200);
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let target_replicated_table_schema = make_replicated_table_schema(&target_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(target_schema.clone()).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let applying_metadata = DestinationTableMetadata::new_applied(
+        table_name.to_metadata_id().unwrap(),
+        old_schema.snapshot_id,
+        old_replicated_table_schema.replication_mask().clone(),
+    )
+    .with_schema_change(
+        target_schema.snapshot_id,
+        target_replicated_table_schema.replication_mask().clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(old_schema.id, applying_metadata.clone()).await.unwrap();
+
+    let error = destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: old_replicated_table_schema,
+        })])
+        .await
+        .expect_err("a relation that does not match the recovery target should be rejected");
+    assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
+    assert_eq!(
+        store.get_destination_table_metadata(old_schema.id).await.unwrap(),
+        Some(applying_metadata)
+    );
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name"]);
+}
+
+/// `write_events` rejects a stale relation before it can reverse applied DDL.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_rejects_stale_relation_before_reverse_ddl() {
+    use etl::event::{InsertEvent, RelationEvent};
+
+    let lake = create_test_lake("write_events_rejects_stale_relation_before_reverse_ddl").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(56, "public", "stale_relation");
+    let new_schema = make_schema_with_email(&old_schema, 100);
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                replicated_table_schema: new_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(101_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Bob".to_owned()),
+                    Cell::String("bob@example.com".to_owned()),
+                ]),
+            }),
+        ])
+        .await
+        .expect("the newer schema and row should be applied");
+
+    let error = destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: old_replicated_table_schema,
+        })])
+        .await
+        .expect_err("a stale relation should be rejected");
+    assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
+
+    let metadata = store
+        .get_destination_table_metadata(old_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should remain available");
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, name, email from {} order by id",
+            qualified_lake_table_name(&table_name)
+        ))
+        .expect("failed to prepare stale-relation state query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })
+        .expect("failed to query stale-relation state")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read stale-relation rows");
+    assert_eq!(
+        rows,
+        vec![
+            (1, "Alice".to_owned(), None),
+            (2, "Bob".to_owned(), Some("bob@example.com".to_owned())),
+        ]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_applies_defaulted_schema_change() {
     use etl::event::{InsertEvent, RelationEvent};
@@ -1318,7 +1479,7 @@ async fn write_events_applies_defaulted_schema_change() {
             ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 5, true)
                 .with_default_expression("true".to_owned()),
         ],
-        SnapshotId::from(44_u64),
+        test_snapshot_id(44_u64, 44_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -1360,13 +1521,9 @@ async fn write_events_applies_defaulted_schema_change() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: new_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: new_replicated_table_schema.clone(),
@@ -1434,7 +1591,7 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
             ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
         ],
-        SnapshotId::from(43_u64),
+        test_snapshot_id(43_u64, 43_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -1476,13 +1633,9 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: new_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: new_replicated_table_schema.clone(),
@@ -1555,7 +1708,7 @@ async fn write_events_supports_drop_and_add_same_column_name() {
             ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 4, true),
         ],
-        SnapshotId::from(48_u64),
+        test_snapshot_id(48_u64, 48_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -1582,13 +1735,9 @@ async fn write_events_supports_drop_and_add_same_column_name() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: new_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: new_replicated_table_schema.clone(),
@@ -1650,7 +1799,7 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
             ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 3, true),
         ],
-        SnapshotId::from(50_u64),
+        test_snapshot_id(50_u64, 50_u64),
     );
     let final_text_schema = TableSchema::with_snapshot_id(
         text_schema.id,
@@ -1659,7 +1808,7 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
             ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 4, true),
         ],
-        SnapshotId::from(51_u64),
+        test_snapshot_id(51_u64, 51_u64),
     );
     let text_replicated_table_schema = make_replicated_table_schema(&text_schema);
     let int_replicated_table_schema = make_replicated_table_schema(&int_schema);
@@ -1684,13 +1833,9 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: int_lsn,
-                commit_lsn: int_lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: int_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: int_lsn,
                 commit_lsn: int_lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: int_replicated_table_schema.clone(),
@@ -1704,13 +1849,9 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: text_lsn,
-                commit_lsn: text_lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: final_text_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: text_lsn,
                 commit_lsn: text_lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: final_text_replicated_table_schema.clone(),
@@ -1760,7 +1901,7 @@ async fn write_events_drops_stale_tombstone_before_reusing_tombstone_name() {
             ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ColumnSchema::new(stale_tombstone_column.to_owned(), PgType::TEXT, -1, 3, true),
         ],
-        SnapshotId::from(53_u64),
+        test_snapshot_id(53_u64, 53_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -1796,13 +1937,9 @@ async fn write_events_drops_stale_tombstone_before_reusing_tombstone_name() {
     destination
         .write_events(vec![
             Event::Relation(RelationEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
                 replicated_table_schema: new_replicated_table_schema.clone(),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: new_replicated_table_schema.clone(),
@@ -2050,7 +2187,7 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
             ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("ddl_col_4_0".to_owned(), PgType::TEXT, -1, 4, true),
         ],
-        SnapshotId::from(54_u64),
+        test_snapshot_id(54_u64, 54_u64),
     );
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -2145,7 +2282,7 @@ async fn startup_after_restart_recovers_applying_schema_change_with_pruned_previ
     let data_url = lake.data_url.clone();
 
     let old_schema = make_schema(46, "public", "restart_pruned_previous_schema");
-    let missing_previous_snapshot_id = SnapshotId::from(47_u64);
+    let missing_previous_snapshot_id = test_snapshot_id(47_u64, 47_u64);
     let new_schema = make_schema_with_email(&old_schema, 48);
     let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
     let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
@@ -2263,7 +2400,6 @@ async fn write_events_small_batch_stays_inlined_after_return() {
     let lsn = PgLsn::from(700u64);
     destination
         .write_events(vec![Event::Insert(InsertEvent {
-            start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 0,
             replicated_table_schema: replicated_table_schema.clone(),
@@ -2319,14 +2455,12 @@ async fn write_events_with_old_row_update() {
     destination
         .write_events(vec![
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_owned())]),
             }),
             Event::Update(UpdateEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_table_schema.clone(),
@@ -2399,7 +2533,6 @@ async fn write_events_with_partial_updates() {
     destination
         .write_events(vec![
             Event::Update(UpdateEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_schema.clone(),
@@ -2411,7 +2544,6 @@ async fn write_events_with_partial_updates() {
                 old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
             }),
             Event::Update(UpdateEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_schema.clone(),
@@ -2486,7 +2618,6 @@ async fn write_events_without_replica_identity_rejects_mutations() {
     let update_lsn = PgLsn::from(450u64);
     let update_error = destination
         .write_events(vec![Event::Update(UpdateEvent {
-            start_lsn: update_lsn,
             commit_lsn: update_lsn,
             tx_ordinal: 0,
             replicated_table_schema: replicated_schema.clone(),
@@ -2504,7 +2635,6 @@ async fn write_events_without_replica_identity_rejects_mutations() {
     let delete_lsn = PgLsn::from(451u64);
     let delete_error = destination
         .write_events(vec![Event::Delete(DeleteEvent {
-            start_lsn: delete_lsn,
             commit_lsn: delete_lsn,
             tx_ordinal: 0,
             replicated_table_schema: replicated_schema.clone(),
@@ -2564,14 +2694,12 @@ async fn write_events_replay_is_idempotent() {
     let lsn = PgLsn::from(300u64);
     let batch = vec![
         Event::Insert(InsertEvent {
-            start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 0,
             replicated_table_schema: replicated_table_schema.clone(),
             table_row: TableRow::new(vec![Cell::I32(1), Cell::String("draft".to_owned())]),
         }),
         Event::Update(UpdateEvent {
-            start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 1,
             replicated_table_schema: replicated_table_schema.clone(),
@@ -2585,14 +2713,12 @@ async fn write_events_replay_is_idempotent() {
             ]))),
         }),
         Event::Insert(InsertEvent {
-            start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 2,
             replicated_table_schema: replicated_table_schema.clone(),
             table_row: TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_owned())]),
         }),
         Event::Delete(DeleteEvent {
-            start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 3,
             replicated_table_schema: replicated_table_schema.clone(),
@@ -2655,7 +2781,6 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
     let lsn = PgLsn::from(350u64);
     destination
         .write_events(vec![Event::Insert(InsertEvent {
-            start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 0,
             replicated_table_schema: replicated_table_schema.clone(),
@@ -2665,7 +2790,6 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
         .unwrap();
     destination
         .write_events(vec![Event::Update(UpdateEvent {
-            start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 1,
             replicated_table_schema: replicated_table_schema.clone(),
@@ -2731,7 +2855,6 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
                 .map(|idx| {
                     let lsn = PgLsn::from(400u64 + idx as u64);
                     Event::Insert(InsertEvent {
-                        start_lsn: lsn,
                         commit_lsn: lsn,
                         tx_ordinal: 0,
                         replicated_table_schema: replicated_table_schema.clone(),
@@ -2772,7 +2895,6 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
                 .map(|idx| {
                     let lsn = PgLsn::from(400u64 + idx as u64);
                     Event::Insert(InsertEvent {
-                        start_lsn: lsn,
                         commit_lsn: lsn,
                         tx_ordinal: 0,
                         replicated_table_schema: replicated_table_schema.clone(),
@@ -2845,14 +2967,12 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
     destination
         .write_events(vec![
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("before".to_owned())]),
             }),
             Event::Update(UpdateEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_table_schema.clone(),
@@ -2866,7 +2986,6 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
                 ]))),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
                 replicated_table_schema: replicated_table_schema.clone(),
@@ -2985,21 +3104,18 @@ async fn write_events_mixed_multi_table_batches() {
     destination
         .write_events(vec![
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_table_schema_a.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("a-one".to_owned())]),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_table_schema_b.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_owned())]),
             }),
             Event::Update(UpdateEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
                 replicated_table_schema: replicated_table_schema_a.clone(),
@@ -3013,14 +3129,12 @@ async fn write_events_mixed_multi_table_batches() {
                 ]))),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
                 replicated_table_schema: replicated_table_schema_b.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("b-two".to_owned())]),
             }),
             Event::Delete(DeleteEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 4,
                 replicated_table_schema: replicated_table_schema_b.clone(),
@@ -3126,14 +3240,12 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
     destination
         .write_events(vec![
             Event::Truncate(TruncateEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 options: 0,
                 truncated_tables: vec![replicated_table_schema.clone()],
             }),
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_table_schema.clone(),
@@ -3208,14 +3320,12 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
     destination
         .write_events(vec![
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_owned())]),
             }),
             Event::Update(UpdateEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_table_schema.clone(),
@@ -3229,14 +3339,12 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 ]))),
             }),
             Event::Insert(InsertEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
                 replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_owned())]),
             }),
             Event::Delete(DeleteEvent {
-                start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
                 replicated_table_schema: replicated_table_schema.clone(),

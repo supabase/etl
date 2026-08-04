@@ -6,7 +6,7 @@ use std::{
 };
 
 use etl_postgres::store::{
-    destination_table_metadata as pg_destination_table_metadata, progress, schema,
+    checkpoint, destination_table_metadata as pg_destination_table_metadata, schema,
     table_state as pg_table_state,
 };
 use metrics::gauge;
@@ -31,8 +31,8 @@ use crate::{
     },
     schema::{ReplicationMask, SnapshotId, TableId, TableSchema},
     store::{
-        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
-        TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,
+        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaSnapshots,
+        TableStateLifecycleStore, TableStateOperation, TableStates,
     },
 };
 
@@ -323,57 +323,60 @@ impl StateStore for PostgresStore {
         Ok(restored_state)
     }
 
-    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
-        progress::get_replication_progress(
-            &self.pool,
-            self.pipeline_id as i64,
-            worker_type.as_str(),
-            worker_type.progress_table_id(),
-        )
-        .await
-        .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Replication progress loading failed",
-                source: err
-            )
-        })
-    }
-
-    async fn upsert_replication_progress(
+    async fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
-        flush_lsn: PgLsn,
-    ) -> EtlResult<PgLsn> {
-        progress::upsert_replication_progress(
+    ) -> EtlResult<Option<PgLsn>> {
+        checkpoint::get_replication_checkpoint(
             &self.pool,
             self.pipeline_id as i64,
             worker_type.as_str(),
-            worker_type.progress_table_id(),
-            flush_lsn,
+            worker_type.checkpoint_table_id(),
         )
         .await
         .map_err(|err| {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
-                "Replication progress storage failed",
+                "Replication checkpoint loading failed",
                 source: err
             )
         })
     }
 
-    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
-        progress::delete_replication_progress(
+    async fn upsert_replication_checkpoint(
+        &self,
+        worker_type: WorkerType,
+        checkpoint_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
+        checkpoint::upsert_replication_checkpoint(
             &self.pool,
             self.pipeline_id as i64,
             worker_type.as_str(),
-            worker_type.progress_table_id(),
+            worker_type.checkpoint_table_id(),
+            checkpoint_lsn,
         )
         .await
         .map_err(|err| {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
-                "Replication progress deletion failed",
+                "Replication checkpoint storage failed",
+                source: err
+            )
+        })
+    }
+
+    async fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> EtlResult<()> {
+        checkpoint::delete_replication_checkpoint(
+            &self.pool,
+            self.pipeline_id as i64,
+            worker_type.as_str(),
+            worker_type.checkpoint_table_id(),
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Replication checkpoint deletion failed",
                 source: err
             )
         })?;
@@ -492,11 +495,10 @@ impl StateStore for PostgresStore {
 impl SchemaStore for PostgresStore {
     /// Retrieves a table schema at a specific snapshot point.
     ///
-    /// Returns the schema version with the largest snapshot_id <= the requested
-    /// snapshot_id. First checks the in-memory cache, then loads from the
-    /// database if not found. The loaded schema is cached for subsequent
-    /// requests. Note that the cache is optimized for active schemas, not
-    /// historical snapshots.
+    /// Returns the newest schema version at or before the requested snapshot.
+    /// First checks the in-memory cache, then loads from the database if not
+    /// found. The loaded schema is cached for subsequent requests. The cache is
+    /// optimized for active schemas, not historical snapshots.
     async fn get_table_schema(
         &self,
         table_id: &TableId,
@@ -584,7 +586,7 @@ impl SchemaStore for PostgresStore {
     /// Stores a table schema in both database and cache.
     ///
     /// This method persists a table schema to the database and updates the
-    /// in-memory cache atomically. The schema's snapshot_id determines which
+    /// in-memory cache atomically. The schema's `snapshot_id` determines which
     /// version this schema represents.
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         debug!(table_name = %table_schema.name, snapshot_id = %table_schema.snapshot_id, "storing table schema");
@@ -606,17 +608,13 @@ impl SchemaStore for PostgresStore {
 
     async fn prune_table_schemas(
         &self,
-        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+        retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.lock().await;
-        let retention_lsns = table_schema_retentions
-            .iter()
-            .map(|(table_id, retention)| (*table_id, retention.to_lsn()))
-            .collect::<HashMap<_, _>>();
         let deleted_count = schema::delete_obsolete_table_schema_versions(
             &self.pool,
             self.pipeline_id as i64,
-            &retention_lsns,
+            &retention_snapshot_ids,
         )
         .await
         .map_err(|err| {
@@ -627,14 +625,14 @@ impl SchemaStore for PostgresStore {
             )
         })?;
 
-        let cached_count = Arc::make_mut(&mut inner.table_schemas).prune(&table_schema_retentions);
+        let cached_count = Arc::make_mut(&mut inner.table_schemas).prune(&retention_snapshot_ids);
 
         if deleted_count > 0 || cached_count > 0 {
-            info!(
+            debug!(
                 deleted_count,
                 cached_count,
-                table_count = table_schema_retentions.len(),
-                "pruned obsolete table schema versions"
+                table_count = retention_snapshot_ids.len(),
+                "pruned obsolete table schema versions from postgres state store"
             );
         }
 
@@ -676,7 +674,7 @@ impl TableStateLifecycleStore for PostgresStore {
                         )
                     })?;
 
-                progress::delete_replication_progress_for_table(
+                checkpoint::delete_replication_checkpoint_for_table(
                     &mut *tx,
                     self.pipeline_id as i64,
                     table_id,
@@ -685,7 +683,7 @@ impl TableStateLifecycleStore for PostgresStore {
                 .map_err(|err| {
                     etl_error!(
                         ErrorKind::SourceQueryFailed,
-                        "Replication progress deletion failed",
+                        "Replication checkpoint deletion failed",
                         source: err
                     )
                 })?;
@@ -715,17 +713,17 @@ impl TableStateLifecycleStore for PostgresStore {
                     .await?;
                 }
 
-                progress::delete_replication_progress(
+                checkpoint::delete_replication_checkpoint(
                     &mut *tx,
                     self.pipeline_id as i64,
                     WorkerType::Apply.as_str(),
-                    WorkerType::Apply.progress_table_id(),
+                    WorkerType::Apply.checkpoint_table_id(),
                 )
                 .await
                 .map_err(|err| {
                     etl_error!(
                         ErrorKind::SourceQueryFailed,
-                        "Replication progress deletion failed",
+                        "Replication checkpoint deletion failed",
                         source: err
                     )
                 })?;
@@ -771,7 +769,7 @@ impl TableStateLifecycleStore for PostgresStore {
                 pg_table_state::delete_table_state(&mut *tx, self.pipeline_id as i64, table_id)
                     .await?;
 
-                progress::delete_replication_progress_for_table(
+                checkpoint::delete_replication_checkpoint_for_table(
                     &mut *tx,
                     self.pipeline_id as i64,
                     table_id,
@@ -780,7 +778,7 @@ impl TableStateLifecycleStore for PostgresStore {
                 .map_err(|err| {
                     etl_error!(
                         ErrorKind::SourceQueryFailed,
-                        "Replication progress deletion failed",
+                        "Replication checkpoint deletion failed",
                         source: err
                     )
                 })?;

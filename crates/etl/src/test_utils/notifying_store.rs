@@ -1,7 +1,10 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use tokio::sync::{Notify, RwLock};
@@ -17,8 +20,8 @@ use crate::{
     },
     schema::{SnapshotId, TableId, TableSchema},
     store::{
-        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
-        TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,
+        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaSnapshots,
+        TableStateLifecycleStore, TableStateOperation, TableStates,
     },
     test_utils::notify::TimedNotify,
 };
@@ -42,7 +45,7 @@ struct Inner {
     table_state_history: HashMap<TableId, Vec<TableState>>,
     table_schemas: Arc<TableSchemaSnapshots>,
     destination_tables_metadata: DestinationTablesMetadata,
-    replication_progress: HashMap<WorkerType, PgLsn>,
+    replication_checkpoints: HashMap<WorkerType, PgLsn>,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
     table_schema_count_conditions: Vec<TableSchemaCountCondition>,
@@ -114,7 +117,7 @@ impl NotifyingStore {
             table_state_history: HashMap::new(),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
             destination_tables_metadata: Arc::new(BTreeMap::new()),
-            replication_progress: HashMap::new(),
+            replication_checkpoints: HashMap::new(),
             table_state_type_conditions: Vec::new(),
             table_state_conditions: Vec::new(),
             table_schema_count_conditions: Vec::new(),
@@ -129,6 +132,12 @@ impl NotifyingStore {
     pub async fn get_table_states(&self) -> TableStates {
         let inner = self.inner.read().await;
         Arc::clone(&inner.table_states)
+    }
+
+    /// Returns the previously stored states for one table in update order.
+    pub async fn get_table_state_history(&self, table_id: TableId) -> Vec<TableState> {
+        let inner = self.inner.read().await;
+        inner.table_state_history.get(&table_id).cloned().unwrap_or_default()
     }
 
     /// Returns the latest schema snapshot stored for each table.
@@ -179,6 +188,40 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
         inner.table_state_type_conditions.push((table_id, expected_state, Arc::clone(&notify)));
+
+        TimedNotify::new(notify)
+    }
+
+    /// Registers a notification that fires on the next transition to a state
+    /// that completes table synchronization.
+    ///
+    /// This matches both [`TableState::SyncDone`] for copied tables and
+    /// [`TableState::Ready`] for tables whose copy was skipped.
+    ///
+    /// If the table is already in either state, the notification first waits
+    /// for an incomplete state. This allows callers to wait for a resync
+    /// without an unrelated store update satisfying the previous completion.
+    pub async fn notify_on_table_sync_complete(&self, table_id: TableId) -> TimedNotify {
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+        let starts_incomplete = inner
+            .table_states
+            .get(&table_id)
+            .is_none_or(|state| !state.as_type().has_completed_table_sync());
+        let saw_incomplete = AtomicBool::new(starts_incomplete);
+
+        inner.table_state_conditions.push((
+            table_id,
+            Arc::clone(&notify),
+            Box::new(move |state| {
+                if state.as_type().has_completed_table_sync() {
+                    saw_incomplete.load(Ordering::Relaxed)
+                } else {
+                    saw_incomplete.store(true, Ordering::Relaxed);
+                    false
+                }
+            }),
+        ));
 
         TimedNotify::new(notify)
     }
@@ -236,6 +279,7 @@ impl NotifyingStore {
         let states = Arc::make_mut(&mut inner.table_states);
         states.remove(&table_id);
         states.insert(table_id, TableState::Init);
+        inner.check_conditions();
 
         Ok(())
     }
@@ -320,34 +364,37 @@ impl StateStore for NotifyingStore {
         Ok(previous_state)
     }
 
-    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
-        let inner = self.inner.read().await;
-
-        Ok(inner.replication_progress.get(&worker_type).copied())
-    }
-
-    async fn upsert_replication_progress(
+    async fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
-        flush_lsn: PgLsn,
-    ) -> EtlResult<PgLsn> {
-        let mut inner = self.inner.write().await;
-        let stored_lsn = inner
-            .replication_progress
-            .entry(worker_type)
-            .and_modify(|stored_lsn| {
-                if flush_lsn > *stored_lsn {
-                    *stored_lsn = flush_lsn;
-                }
-            })
-            .or_insert(flush_lsn);
+    ) -> EtlResult<Option<PgLsn>> {
+        let inner = self.inner.read().await;
 
-        Ok(*stored_lsn)
+        Ok(inner.replication_checkpoints.get(&worker_type).copied())
     }
 
-    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
+    async fn upsert_replication_checkpoint(
+        &self,
+        worker_type: WorkerType,
+        checkpoint_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
         let mut inner = self.inner.write().await;
-        inner.replication_progress.remove(&worker_type);
+        let persisted_checkpoint_lsn = *inner
+            .replication_checkpoints
+            .entry(worker_type)
+            .and_modify(|persisted_checkpoint_lsn| {
+                if checkpoint_lsn > *persisted_checkpoint_lsn {
+                    *persisted_checkpoint_lsn = checkpoint_lsn;
+                }
+            })
+            .or_insert(checkpoint_lsn);
+
+        Ok(persisted_checkpoint_lsn)
+    }
+
+    async fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+        inner.replication_checkpoints.remove(&worker_type);
 
         Ok(())
     }
@@ -425,10 +472,10 @@ impl SchemaStore for NotifyingStore {
 
     async fn prune_table_schemas(
         &self,
-        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+        retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.write().await;
-        let removed_count = Arc::make_mut(&mut inner.table_schemas).prune(&table_schema_retentions);
+        let removed_count = Arc::make_mut(&mut inner.table_schemas).prune(&retention_snapshot_ids);
 
         if removed_count > 0 {
             for notify in std::mem::take(&mut inner.table_schema_prune_conditions) {
@@ -450,7 +497,7 @@ impl TableStateLifecycleStore for NotifyingStore {
                 let mut inner = self.inner.write().await;
                 Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-                inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+                inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
                 inner.check_conditions();
 
                 Ok(0)
@@ -475,7 +522,7 @@ impl TableStateLifecycleStore for NotifyingStore {
                     states.insert(table_id, TableState::Init);
                 }
 
-                inner.replication_progress.remove(&WorkerType::Apply);
+                inner.replication_checkpoints.remove(&WorkerType::Apply);
                 inner.check_conditions();
 
                 Ok(reset_count)
@@ -488,7 +535,7 @@ impl TableStateLifecycleStore for NotifyingStore {
                 inner.table_state_history.remove(&table_id);
                 Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-                inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+                inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
                 inner.check_conditions();
 
                 Ok(affected_table_count)
@@ -500,5 +547,33 @@ impl TableStateLifecycleStore for NotifyingStore {
 impl fmt::Debug for NotifyingStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NotifyingStore").finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures::FutureExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn table_sync_completion_waits_for_resync_when_already_complete() {
+        let store = NotifyingStore::new();
+        let table_id = TableId::new(1);
+        store.update_table_state(table_id, TableState::Ready).await.unwrap();
+
+        let sync_complete = store.notify_on_table_sync_complete(table_id).await;
+
+        // Repeating the completed state must not satisfy a wait for the next
+        // synchronization.
+        store.update_table_state(table_id, TableState::Ready).await.unwrap();
+        assert!(sync_complete.inner().notified().now_or_never().is_none());
+
+        store.reset_table_state(table_id).await.unwrap();
+        store.update_table_state(table_id, TableState::Ready).await.unwrap();
+
+        sync_complete.wait_for(Duration::from_secs(1)).notified().await;
     }
 }

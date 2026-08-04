@@ -6,7 +6,6 @@
 use etl::{
     event::EventType,
     pipeline::PipelineId,
-    store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -82,8 +81,7 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
             .await,
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database_1.config,
@@ -94,7 +92,7 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
     );
 
     pipeline.start().await.unwrap();
-    table_ready_notify.notified().await;
+    table_sync_complete_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 2)])

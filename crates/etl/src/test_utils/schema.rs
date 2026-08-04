@@ -182,43 +182,28 @@ pub fn assert_replicated_schema_column_names(
 /// Asserts that all columns in the replication mask are set to 1.
 fn assert_all_columns_replicated(schema: &ReplicatedTableSchema, expected_len: usize) {
     let mask = schema.replication_mask().as_slice();
-    assert_eq!(
-        mask.len(),
-        expected_len,
-        "replication mask length mismatch: got {}, expected {}",
-        mask.len(),
-        expected_len
-    );
-    assert!(
-        mask.iter().all(|&bit| bit == 1),
-        "expected all columns to be replicated, but mask is {mask:?}"
-    );
+    assert_eq!(mask.len(), expected_len);
+    assert!(mask.iter().all(|&bit| bit == 1));
 }
 
 /// Asserts that schema snapshots are in strictly increasing order by snapshot
 /// ID.
 ///
-/// If `first_is_zero` is true, the first snapshot ID must be 0.
-/// If `first_is_zero` is false, the first snapshot ID must be > 0.
-/// Each subsequent snapshot ID must be strictly greater than the previous one.
+/// If `first_is_initial` is true, the first snapshot ID must be
+/// [`SnapshotId::initial`]. Otherwise, the first snapshot ID must sort after
+/// [`SnapshotId::initial`]. Each subsequent snapshot ID must be strictly
+/// greater than the previous one.
 pub fn assert_schema_snapshots_ordering(
     snapshots: &[(SnapshotId, TableSchema)],
-    first_is_zero: bool,
+    first_is_initial: bool,
 ) {
-    assert!(!snapshots.is_empty(), "expected at least one schema snapshot");
+    assert!(!snapshots.is_empty());
 
     let (first_snapshot_id, _) = &snapshots[0];
-    if first_is_zero {
-        assert_eq!(
-            *first_snapshot_id,
-            SnapshotId::initial(),
-            "first snapshot_id is {first_snapshot_id}, expected 0"
-        );
+    if first_is_initial {
+        assert_eq!(*first_snapshot_id, SnapshotId::initial());
     } else {
-        assert!(
-            *first_snapshot_id > SnapshotId::initial(),
-            "first snapshot_id is {first_snapshot_id}, expected > 0"
-        );
+        assert!(*first_snapshot_id > SnapshotId::initial());
     }
 
     for i in 1..snapshots.len() {

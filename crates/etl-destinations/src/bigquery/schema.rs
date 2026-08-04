@@ -32,7 +32,7 @@ pub(super) fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
     } else if column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
-            "skipping unsupported source column default for BigQuery table creation"
+            "skipping unsupported source column default for bigquery table creation"
         );
     }
 

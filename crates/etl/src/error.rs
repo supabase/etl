@@ -1022,10 +1022,10 @@ impl From<SchemaError> for EtlError {
                 Some(Cow::Owned(unknown_replicated_columns_detail(&columns))),
                 None,
             ),
-            SchemaError::InvalidSnapshotId(lsn_str) => EtlError::from_components(
+            SchemaError::InvalidSnapshotId(snapshot_id_str) => EtlError::from_components(
                 ErrorKind::CorruptedTableSchema,
                 Cow::Borrowed("Invalid snapshot id"),
-                Some(Cow::Owned(format!("Failed to parse snapshot '{lsn_str}' as PgLsn."))),
+                Some(Cow::Owned(format!("Failed to parse snapshot id '{snapshot_id_str}'."))),
                 None,
             ),
         }
