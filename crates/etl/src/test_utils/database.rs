@@ -169,11 +169,13 @@ pub async fn replication_slot_state(client: &Client, slot_name: &str) -> (PgLsn,
 pub enum WalsenderTermination {
     /// The replication slot has no active walsender.
     Inactive,
+
     /// Postgres did not terminate the active walsender.
     NotTerminated {
         /// PID of the walsender that Postgres did not terminate.
         pid: i32,
     },
+
     /// Postgres terminated the active walsender.
     Terminated {
         /// PID of the terminated walsender.

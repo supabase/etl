@@ -214,8 +214,7 @@ impl<'a> WalsenderRouletteWorkload<'a> {
         }
     }
 
-    /// Terminates the active apply walsender and maps failures to the property
-    /// case.
+    /// Terminates the active apply walsender and maps failures.
     async fn terminate_apply_walsender(&self) -> Result<i32, TestCaseError> {
         let client = self.database.client.as_ref().unwrap();
         let termination =
@@ -234,7 +233,7 @@ impl<'a> WalsenderRouletteWorkload<'a> {
         }
     }
 
-    /// Waits for a new apply walsender within the roulette timeout.
+    /// Waits for a new apply walsender and maps failures.
     async fn wait_for_reconnect(&self, old_pid: i32) -> Result<(), TestCaseError> {
         let client = self.database.client.as_ref().unwrap();
         let reconnect =
