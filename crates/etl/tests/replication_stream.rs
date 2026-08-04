@@ -8,6 +8,7 @@ use etl::{
         database::{spawn_source_database, test_table_name},
         pipeline::test_slot_name,
         replication_stream::{parse_copy_row, parse_tuple},
+        test_schema::create_partitioned_table,
     },
 };
 use etl_postgres::{
@@ -1603,6 +1604,158 @@ async fn logical_replication_replays_multi_table_publication_column_filter_chang
             vec!["id".to_owned(), "a".to_owned(), "b".to_owned()],
         ),
         ExpectedStreamMarker::Insert(second_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_recursive_alter_partitioned_table_emits_no_leaf_ddl_messages() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let root_table = test_table_name("recursive_alter_partitioned_table");
+    let (_root_table_id, leaf_table_ids) = create_partitioned_table(
+        &database,
+        root_table.clone(),
+        &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+
+    let publication_name = "recursive_alter_partitioned_table_pub";
+    database
+        .create_publication_with_config(publication_name, std::slice::from_ref(&root_table), false)
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "recursive_alter_partitioned_table_slot",
+    )
+    .await;
+
+    database
+        .run_sql(&format!(
+            "alter table {} add column category text not null default 'default_category'",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key, category) values ('first', 50, 'category'), \
+             ('second', 150, 'category')",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // PostgreSQL reports only the explicitly altered partitioned parent to the
+    // event trigger. It does not enumerate the regular-table leaves changed by
+    // the recursive `alter table`, so the next leaf DML emits its updated
+    // relation without any preceding DDL message.
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[0].into_inner(),
+            vec![
+                "id".to_owned(),
+                "data".to_owned(),
+                "partition_key".to_owned(),
+                "category".to_owned(),
+            ],
+        ),
+        ExpectedStreamMarker::Insert(leaf_table_ids[0].into_inner()),
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[1].into_inner(),
+            vec![
+                "id".to_owned(),
+                "data".to_owned(),
+                "partition_key".to_owned(),
+                "category".to_owned(),
+            ],
+        ),
+        ExpectedStreamMarker::Insert(leaf_table_ids[1].into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_publication_add_table_schemas_in_oid_order() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let initial_table = test_table_name("publication_add_multiple_initial");
+    database
+        .create_table(initial_table.clone(), true, &[("initial_value", "integer not null")])
+        .await
+        .unwrap();
+    let first_added_table = test_table_name("publication_add_multiple_first");
+    let first_added_table_id = database
+        .create_table(first_added_table.clone(), true, &[("first_value", "integer not null")])
+        .await
+        .unwrap();
+    let second_added_table = test_table_name("publication_add_multiple_second");
+    let second_added_table_id = database
+        .create_table(second_added_table.clone(), true, &[("second_value", "text not null")])
+        .await
+        .unwrap();
+    assert!(first_added_table_id < second_added_table_id);
+
+    let publication_name = "publication_add_multiple_pub";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&initial_table))
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "publication_add_multiple_slot").await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} add table {}, {}",
+            quote_identifier(publication_name),
+            first_added_table.as_quoted_identifier(),
+            second_added_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            first_added_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "first_value".to_owned()],
+        ),
+        ExpectedStreamMarker::DdlMessage(
+            second_added_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "second_value".to_owned()],
+        ),
         ExpectedStreamMarker::Commit,
     ];
 

@@ -2743,11 +2743,7 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
         .await
         .unwrap();
 
-    assert_eq!(
-        clickhouse_db.column_names(&clickhouse_table_name).await,
-        vec!["id", "name"],
-        "recovery must remove the column excluded by the target mask"
-    );
+    assert_eq!(clickhouse_db.column_names(&clickhouse_table_name).await, vec!["id", "name"]);
     let recovered_metadata = store
         .get_applied_destination_table_metadata(table_id)
         .await
@@ -2759,9 +2755,5 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
     let rows: Vec<RecoveryMaskRow> = clickhouse_db
         .query(&format!("SELECT id, name FROM \"{clickhouse_table_name}\" ORDER BY id"))
         .await;
-    assert_eq!(
-        rows,
-        vec![RecoveryMaskRow { id: 1, name: Some("Alice".to_owned()) }],
-        "Recovery must retain values from columns that remain published"
-    );
+    assert_eq!(rows, vec![RecoveryMaskRow { id: 1, name: Some("Alice".to_owned()) }]);
 }

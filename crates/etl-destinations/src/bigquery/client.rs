@@ -310,7 +310,7 @@ fn log_query_retry(attempt: crate::retry::RetryAttempt<'_, BQError>) {
         max_retries = attempt.max_retries,
         sleep_ms = attempt.sleep_delay.as_millis(),
         error = %attempt.error,
-        "retrying transient BigQuery query error"
+        "retrying transient bigquery query error"
     );
 }
 
@@ -890,7 +890,7 @@ impl BigQueryClient {
         let full_view_name = self.full_table_name(dataset_id, view_name)?;
         let full_target_table_name = self.full_table_name(dataset_id, target_table_id)?;
 
-        info!(%full_view_name, %full_target_table_name, "creating/replacing view");
+        info!(%full_view_name, %full_target_table_name, "creating or replacing bigquery view");
 
         let query = format!(
             "create or replace view {full_view_name} as select * from {full_target_table_name}"
@@ -999,7 +999,13 @@ impl BigQueryClient {
         let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
         let column_type = postgres_to_bigquery_type(&column_schema.typ);
 
-        info!("adding column {column_name} ({column_type}) to table {full_table_name} in bigquery");
+        debug!(
+            %dataset_id,
+            %table_id,
+            column_name = %column_schema.name,
+            %column_type,
+            "adding bigquery table column"
+        );
 
         if !column_schema.nullable && !is_array_type(&column_schema.typ) {
             warn!(

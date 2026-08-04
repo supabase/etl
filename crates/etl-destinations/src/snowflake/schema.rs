@@ -76,7 +76,7 @@ pub(crate) fn default_clause(column_schema: &ColumnSchema) -> Option<String> {
     if default_clause.is_none() && column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
-            "skipping unsupported source column default for Snowflake"
+            "skipping unsupported source column default for snowflake"
         );
     }
 
@@ -96,7 +96,7 @@ pub(crate) fn add_column_default_clause(column_schema: &ColumnSchema) -> Option<
     if default_clause.is_none() && column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
-            "skipping source column default for Snowflake ADD COLUMN because Snowflake only \
+            "skipping source column default for snowflake add column because snowflake only \
              supports literal add-column defaults"
         );
     }

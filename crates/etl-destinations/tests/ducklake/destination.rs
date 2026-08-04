@@ -1353,16 +1353,11 @@ async fn write_events_rejects_mismatched_relation_before_applying_recovery() {
     assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
     assert_eq!(
         store.get_destination_table_metadata(old_schema.id).await.unwrap(),
-        Some(applying_metadata),
-        "mismatched recovery must not advance destination metadata"
+        Some(applying_metadata)
     );
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(
-        table_column_names(&conn, &table_name),
-        vec!["id", "name"],
-        "mismatched recovery must not apply the recorded target DDL"
-    );
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name"]);
 }
 
 /// `write_events` rejects a stale relation before it can reverse applied DDL.

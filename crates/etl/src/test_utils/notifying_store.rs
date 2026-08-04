@@ -39,7 +39,6 @@ type TableStateTypeCondition = (TableId, TableStateType, Arc<Notify>);
 type TableStateCondition = (TableId, Arc<Notify>, Box<dyn Fn(&TableState) -> bool + Send + Sync>);
 type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
 type TableSchemaPruneCondition = Arc<Notify>;
-type ReplicationCheckpointCondition = (WorkerType, PgLsn, Arc<Notify>);
 
 struct Inner {
     table_states: TableStates,
@@ -51,7 +50,6 @@ struct Inner {
     table_state_conditions: Vec<TableStateCondition>,
     table_schema_count_conditions: Vec<TableSchemaCountCondition>,
     table_schema_prune_conditions: Vec<TableSchemaPruneCondition>,
-    replication_checkpoint_conditions: Vec<ReplicationCheckpointCondition>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
 }
 
@@ -85,17 +83,6 @@ impl Inner {
         self.table_schema_count_conditions.retain(|(tid, expected_count, notify)| {
             let schemas_count = self.table_schemas.snapshots_count(*tid);
             let should_retain = schemas_count < *expected_count;
-            if !should_retain {
-                notify.notify_one();
-            }
-            should_retain
-        });
-
-        self.replication_checkpoint_conditions.retain(|(worker_type, expected_lsn, notify)| {
-            let should_retain = self
-                .replication_checkpoints
-                .get(worker_type)
-                .is_none_or(|persisted_checkpoint_lsn| persisted_checkpoint_lsn < expected_lsn);
             if !should_retain {
                 notify.notify_one();
             }
@@ -135,7 +122,6 @@ impl NotifyingStore {
             table_state_conditions: Vec::new(),
             table_schema_count_conditions: Vec::new(),
             table_schema_prune_conditions: Vec::new(),
-            replication_checkpoint_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
         };
 
@@ -284,24 +270,6 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when a future checkpoint write
-    /// reaches at least the expected LSN for a worker.
-    pub async fn notify_on_replication_checkpoint(
-        &self,
-        worker_type: WorkerType,
-        expected_lsn: PgLsn,
-    ) -> TimedNotify {
-        let notify = Arc::new(Notify::new());
-        let mut inner = self.inner.write().await;
-        inner.replication_checkpoint_conditions.push((
-            worker_type,
-            expected_lsn,
-            Arc::clone(&notify),
-        ));
-
-        TimedNotify::new(notify)
-    }
-
     /// Resets one table to [`TableState::Init`] and clears its state
     /// history.
     pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {
@@ -420,7 +388,6 @@ impl StateStore for NotifyingStore {
                 }
             })
             .or_insert(checkpoint_lsn);
-        inner.check_conditions();
 
         Ok(persisted_checkpoint_lsn)
     }
@@ -587,7 +554,7 @@ impl fmt::Debug for NotifyingStore {
 mod tests {
     use std::time::Duration;
 
-    use tokio::time::timeout;
+    use futures::FutureExt;
 
     use super::*;
 
@@ -599,12 +566,10 @@ mod tests {
 
         let sync_complete = store.notify_on_table_sync_complete(table_id).await;
 
-        // Re-evaluating conditions while the existing state is Ready must not
-        // satisfy a wait for the next synchronization.
-        store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(1)).await.unwrap();
-        assert!(
-            timeout(Duration::from_millis(50), sync_complete.inner().notified()).await.is_err()
-        );
+        // Repeating the completed state must not satisfy a wait for the next
+        // synchronization.
+        store.update_table_state(table_id, TableState::Ready).await.unwrap();
+        assert!(sync_complete.inner().notified().now_or_never().is_none());
 
         store.reset_table_state(table_id).await.unwrap();
         store.update_table_state(table_id, TableState::Ready).await.unwrap();

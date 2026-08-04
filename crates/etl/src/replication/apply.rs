@@ -538,7 +538,7 @@ impl ApplyLoopTasks {
 
                 let table_count = retention_snapshot_ids.len() as u64;
                 match schema_store.prune_table_schemas(retention_snapshot_ids).await {
-                    Ok(deleted_count) => {
+                    Ok(pruned_count) => {
                         counter!(
                             ETL_SCHEMA_CLEANUPS_TOTAL,
                             WORKER_TYPE_LABEL => worker_type.as_str(),
@@ -555,13 +555,13 @@ impl ApplyLoopTasks {
                             ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL,
                             WORKER_TYPE_LABEL => worker_type.as_str(),
                         )
-                        .increment(deleted_count);
+                        .increment(pruned_count);
 
-                        if deleted_count > 0 {
+                        if pruned_count > 0 {
                             info!(
                                 %worker_type,
-                                deleted_count,
-                                "completed obsolete table schema cleanup"
+                                pruned_count,
+                                "obsolete table schema cleanup completed"
                             );
                         }
                     }
@@ -2433,7 +2433,7 @@ where
         self.table_decoding_states
             .insert(table_id, TableDecodingState::WaitingForRelation { snapshot_id });
 
-        info!(
+        debug!(
             table_id = %table_id,
             table_name = %table_name,
             schema_name = %schema_name,
@@ -2455,7 +2455,6 @@ where
             return Err(err);
         }
 
-        let table_id_u32: u32 = table_id.into();
         counter!(
             ETL_DDL_SCHEMA_CHANGES_TOTAL,
             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
@@ -2472,9 +2471,13 @@ where
         .record(column_count as f64);
 
         info!(
-            table_id = table_id_u32,
+            table_id = %table_id,
+            table_name = %table_name,
+            schema_name = %schema_name,
+            event = %command_tag,
+            columns = column_count,
             %snapshot_id,
-            "stored new schema version from ddl message"
+            "stored schema snapshot from ddl message"
         );
 
         Ok(HandleMessageResult::no_event())
@@ -2609,11 +2612,13 @@ where
             )
             .await?;
 
-        info!(
+        debug!(
             table_id = %table_id,
+            snapshot_id = %replicated_table_schema.inner().snapshot_id,
+            replication_mask = %replicated_table_schema.replication_mask(),
             replicated_columns = %format_column_names(&replicated_columns),
             identity_columns = %format_column_names(&identity_columns),
-            "received relation message, building replication mask"
+            "materialized relation decoding state"
         );
 
         let relation_event = RelationEvent { replicated_table_schema };
@@ -2807,11 +2812,11 @@ where
                 }
 
                 if table_schema.snapshot_id != snapshot_upper_bound {
-                    info!(
+                    debug!(
                         table_id = %table_id,
-                        requested_snapshot_id = %snapshot_upper_bound,
+                        snapshot_upper_bound = %snapshot_upper_bound,
                         resolved_snapshot_id = %table_schema.snapshot_id,
-                        "bounded relation schema lookup resolved an older stored snapshot"
+                        "resolved relation schema below snapshot upper bound"
                     );
                 }
             }

@@ -716,21 +716,23 @@ where
         // The guard above proves that equal snapshots have equal masks.
         if current_snapshot_id == new_snapshot_id {
             // Schema hasn't changed, nothing to do.
-            info!(
-                "schema for table {} unchanged (snapshot_id: {}, replication_mask: {})",
-                table_id, new_snapshot_id, new_replication_mask
+            debug!(
+                table_id = %table_id,
+                snapshot_id = %new_snapshot_id,
+                replication_mask = %new_replication_mask,
+                "bigquery table schema unchanged"
             );
 
             return Ok(());
         }
 
         info!(
-            "schema change detected for table {}: snapshot_id {} -> {}, mask {} -> {}",
-            table_id,
-            current_snapshot_id,
-            new_snapshot_id,
-            current_replication_mask,
-            new_replication_mask
+            table_id = %table_id,
+            current_snapshot_id = %current_snapshot_id,
+            new_snapshot_id = %new_snapshot_id,
+            current_replication_mask = %current_replication_mask,
+            new_replication_mask = %new_replication_mask,
+            "bigquery table schema change detected"
         );
 
         // Get the current schema from the schema store to compute the diff.
@@ -783,8 +785,9 @@ where
             self.apply_schema_diff(&table_id, &sequenced_bigquery_table_id, &diff).await
         {
             warn!(
-                "schema change failed for table {}: {}. Manual intervention may be required.",
-                table_id, err
+                table_id = %table_id,
+                error = %err,
+                "bigquery table schema change failed; manual intervention may be required"
             );
             return Err(err);
         }
@@ -806,8 +809,9 @@ where
         self.client.invalidate_all_connections().await;
 
         info!(
-            "schema change completed for table {}: snapshot_id {} applied",
-            table_id, new_snapshot_id
+            table_id = %table_id,
+            snapshot_id = %new_snapshot_id,
+            "bigquery table schema change completed"
         );
 
         Ok(())
@@ -828,12 +832,13 @@ where
             return Ok(());
         }
 
-        info!(
-            "applying schema changes to table {}: {} additions, {} removals, {} column changes",
-            sequenced_bigquery_table_id,
-            diff.columns_to_add.len(),
-            diff.columns_to_remove.len(),
-            diff.columns_to_change.len()
+        debug!(
+            source_table_id = %table_id,
+            destination_table_id = %sequenced_bigquery_table_id,
+            added_column_count = diff.columns_to_add.len(),
+            removed_column_count = diff.columns_to_remove.len(),
+            changed_column_count = diff.columns_to_change.len(),
+            "applying bigquery table schema diff"
         );
 
         // Apply column additions first (safest operation).
@@ -953,7 +958,10 @@ where
                 .await?;
         }
 
-        info!("schema changes applied successfully to table {}", sequenced_bigquery_table_id);
+        debug!(
+            destination_table_id = %sequenced_bigquery_table_id,
+            "bigquery table schema diff applied"
+        );
 
         Ok(())
     }

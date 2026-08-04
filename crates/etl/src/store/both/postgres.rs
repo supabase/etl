@@ -628,11 +628,11 @@ impl SchemaStore for PostgresStore {
         let cached_count = Arc::make_mut(&mut inner.table_schemas).prune(&retention_snapshot_ids);
 
         if deleted_count > 0 || cached_count > 0 {
-            info!(
+            debug!(
                 deleted_count,
                 cached_count,
                 table_count = retention_snapshot_ids.len(),
-                "pruned obsolete table schema versions"
+                "pruned obsolete table schema versions from postgres state store"
             );
         }
 

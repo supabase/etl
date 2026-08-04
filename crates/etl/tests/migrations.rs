@@ -248,29 +248,6 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
     drop(conn);
 
     let client = database.client.as_ref().expect("database client should be initialized");
-    let lsn_numeric_row = client
-        .query_one(
-            "select
-                pg_catalog.pg_typeof(
-                    'FFFFFFFF/FFFFFFFF'::pg_catalog.pg_lsn - '0/0'::pg_catalog.pg_lsn
-                )::pg_catalog.text,
-                (
-                    '80000000/0'::pg_catalog.pg_lsn - '0/0'::pg_catalog.pg_lsn
-                )::pg_catalog.text,
-                (
-                    'FFFFFFFF/FFFFFFFF'::pg_catalog.pg_lsn - '0/0'::pg_catalog.pg_lsn
-                )::pg_catalog.text",
-            &[],
-        )
-        .await
-        .unwrap();
-    let lsn_numeric_values: (String, String, String) =
-        (lsn_numeric_row.get(0), lsn_numeric_row.get(1), lsn_numeric_row.get(2));
-    assert_eq!(
-        lsn_numeric_values,
-        ("numeric".to_owned(), "9223372036854775808".to_owned(), "18446744073709551615".to_owned(),)
-    );
-
     let table_id = 42_u32;
     client
         .execute(

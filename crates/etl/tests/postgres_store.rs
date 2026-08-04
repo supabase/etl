@@ -566,17 +566,11 @@ async fn schema_cache_eviction() {
         table_1_snapshots.contains(&test_snapshot_id(100u64, 100u64))
             && table_1_snapshots.contains(&test_snapshot_id(200u64, 200u64))
     );
-    assert!(
-        !table_1_snapshots.contains(&SnapshotId::initial()),
-        "Initial snapshot 0:0 should be evicted"
-    );
+    assert!(!table_1_snapshots.contains(&SnapshotId::initial()));
 
     let table_2_snapshots: Vec<SnapshotId> =
         cached_schemas.iter().filter(|s| s.id == table_id_2).map(|s| s.snapshot_id).collect();
-    assert!(
-        !table_2_snapshots.contains(&SnapshotId::initial()),
-        "Table 2 initial snapshot 0:0 should be evicted"
-    );
+    assert!(!table_2_snapshots.contains(&SnapshotId::initial()));
 
     // Evicted schemas remain loadable from the database.
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();

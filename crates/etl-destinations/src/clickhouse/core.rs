@@ -630,7 +630,7 @@ where
         schema: &ReplicatedTableSchema,
         metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
-        warn!("table {} has Applying metadata, recovering interrupted operation", table_id);
+        warn!("table {} has applying metadata, recovering interrupted operation", table_id);
 
         ensure_clickhouse_recovery_schema_matches(table_id, schema, &metadata)?;
 
@@ -826,13 +826,19 @@ where
         )?;
 
         if current_snapshot_id == new_snapshot_id {
-            info!("schema for table {} unchanged (snapshot_id: {})", table_id, new_snapshot_id);
+            debug!(
+                table_id = %table_id,
+                snapshot_id = %new_snapshot_id,
+                "clickhouse table schema unchanged"
+            );
             return Ok(());
         }
 
         info!(
-            "schema change detected for table {}: snapshot_id {} -> {}",
-            table_id, current_snapshot_id, new_snapshot_id
+            table_id = %table_id,
+            current_snapshot_id = %current_snapshot_id,
+            new_snapshot_id = %new_snapshot_id,
+            "clickhouse table schema change detected"
         );
 
         // Retrieve the old schema to compute the diff.
@@ -877,8 +883,9 @@ where
             self.apply_schema_diff(clickhouse_table_name, &diff, &current_schema, new_schema).await
         {
             warn!(
-                "schema change failed for table {}: {}. Manual intervention may be required.",
-                table_id, err
+                table_id = %table_id,
+                error = %err,
+                "clickhouse table schema change failed; manual intervention may be required"
             );
             return Err(err);
         }
@@ -895,8 +902,9 @@ where
         }
 
         info!(
-            "schema change completed for table {}: snapshot_id {} applied",
-            table_id, new_snapshot_id
+            table_id = %table_id,
+            snapshot_id = %new_snapshot_id,
+            "clickhouse table schema change completed"
         );
 
         Ok(())
@@ -987,7 +995,7 @@ where
                             column_name = %change.new_column.name,
                             old_nullable,
                             new_nullable,
-                            "skipping source column nullability change for ClickHouse"
+                            "skipping source column nullability change for clickhouse"
                         );
                     }
                     ColumnModification::Default { old_expression, new_expression } => {
@@ -1013,7 +1021,7 @@ where
                                 warn!(
                                     table_name = %clickhouse_table_name,
                                     column_name = %change.new_column.name,
-                                    "skipping unsupported source column default for ClickHouse"
+                                    "skipping unsupported source column default for clickhouse"
                                 );
                                 if old_default_was_supported {
                                     self.client
@@ -1032,7 +1040,7 @@ where
                             warn!(
                                 table_name = %clickhouse_table_name,
                                 column_name = %change.new_column.name,
-                                "skipping source column default removal for ClickHouse because no \
+                                "skipping source column default removal for clickhouse because no \
                                  supported destination default was set"
                             );
                         }

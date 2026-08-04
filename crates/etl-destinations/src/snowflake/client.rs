@@ -365,7 +365,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                             column_name = %change.new_column.name,
                             old_nullable,
                             new_nullable,
-                            "skipping source column nullability change for Snowflake"
+                            "skipping source column nullability change for snowflake"
                         );
                     }
                     ColumnModification::Default { old_expression, new_expression } => {
@@ -395,7 +395,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         warn!(
             table_name,
             column_name = %change.new_column.name,
-            "skipping source column default change for Snowflake because ALTER COLUMN SET DEFAULT \
+            "skipping source column default change for snowflake because alter column set default \
              is only supported for existing sequence defaults"
         );
     }
@@ -412,8 +412,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             warn!(
                 table_name,
                 column_name = %change.new_column.name,
-                "skipping source column default removal for Snowflake because defaults introduced \
-                 by ALTER TABLE ADD COLUMN cannot be dropped safely"
+                "skipping source column default removal for snowflake because defaults introduced \
+                 by alter table add column cannot be dropped safely"
             );
         }
     }

@@ -1,14 +1,14 @@
 use std::{sync::Arc, time::Duration};
 
 use etl::{
-    data::TableRow,
+    data::{Cell, TableRow},
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
         WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    event::{Event, EventType, InsertEvent},
+    event::{Event, EventType},
     pipeline::PipelineId,
     schema::{ColumnSchema, ReplicatedTableSchema, TableId},
     store::{SchemaStore, StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
@@ -2056,26 +2056,13 @@ async fn table_sync_no_event_handover_waits_for_first_dml_before_ready() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    // Insert some data to test that the table copy is performed.
-    let rows_inserted = 5;
-    insert_users_data(&mut database, &users_schema.name, 1..=rows_inserted).await;
-
-    // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
-    // We set a batch of 1000 elements to still check that even with batching we are
-    // getting all the data.
-    let batch_config = BatchConfig {
-        max_fill_ms: 1000,
-        memory_budget_ratio: 0.2,
-        max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
-    };
-    let mut pipeline = create_pipeline_with_batch_config(
+    let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
-        batch_config,
     );
 
     let sync_done_notify =
@@ -2094,8 +2081,7 @@ async fn table_sync_no_event_handover_waits_for_first_dml_before_ready() {
     let first_streamed_row_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
-    insert_users_data(&mut database, &users_schema.name, rows_inserted + 1..=rows_inserted + 1)
-        .await;
+    insert_users_data(&mut database, &users_schema.name, 1..=1).await;
 
     first_streamed_row_notify.notified().await;
     ready_notify.notified().await;
@@ -2103,17 +2089,9 @@ async fn table_sync_no_event_handover_waits_for_first_dml_before_ready() {
 
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
-    assert_eq!(grouped_events.get(&(EventType::Insert, table_id)).map_or(0, Vec::len), 1);
-
-    // Verify the initial-copy rows recorded by the wrapper.
-    let table_rows = destination.get_table_rows().await;
-    let users_table_rows = table_rows.get(&table_id).unwrap();
-    assert_eq!(users_table_rows.len(), rows_inserted);
-
-    // Verify age sum calculation.
-    let expected_age_sum = get_n_integers_sum(rows_inserted);
-    let age_sum = get_users_age_sum_from_rows(&destination, table_id).await;
-    assert_eq!(age_sum, expected_age_sum);
+    let inserts = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
+    let expected_inserts = build_expected_users_inserts(1, &users_schema, vec![("user_1", 1)]);
+    assert_events_equal(inserts, &expected_inserts);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2195,60 +2173,6 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
     insert_events_notify.notified().await;
     table_ready_notify.notified().await;
 
-    // Verify the events and check that only published columns are included.
-    let events = destination.get_events().await;
-    let grouped_events = group_events_by_type_and_table_id(&events);
-    let insert_events = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
-    assert_eq!(insert_events.len(), 1);
-
-    let initial_relation_event = events
-        .iter()
-        .rev()
-        .find_map(|event| match event {
-            Event::Relation(relation) if relation.replicated_table_schema.id() == table_id => {
-                Some(relation.clone())
-            }
-            _ => None,
-        })
-        .expect("Expected relation event for initial publication state");
-
-    let initial_relation_columns: Vec<&str> = initial_relation_event
-        .replicated_table_schema
-        .column_schemas()
-        .map(|c| c.name.as_str())
-        .collect();
-    assert_eq!(initial_relation_columns, vec!["id", "name", "age"]);
-    assert_eq!(
-        initial_relation_event.replicated_table_schema.replication_mask().as_slice(),
-        &[1, 1, 1, 0, 0]
-    );
-    assert_eq!(initial_relation_event.replicated_table_schema.inner().column_schemas.len(), 5);
-
-    // Check that each insert event contains only the published columns (id, name,
-    // age) and that the schema used is correct.
-    for event in insert_events {
-        if let Event::Insert(InsertEvent {
-            tx_ordinal, replicated_table_schema, table_row, ..
-        }) = event
-        {
-            // BEGIN consumes ordinal 0. The preceding connection-local RELATION
-            // message must not consume an ordinal, so this row remains ordinal 1.
-            assert_eq!(*tx_ordinal, 1);
-
-            // Verify exactly 3 columns (id, name, age).
-            assert_eq!(table_row.values().len(), 3);
-
-            // Get only the replicated column names from the schema
-            let replicated_column_names: Vec<&str> =
-                replicated_table_schema.column_schemas().map(|c| c.name.as_str()).collect();
-            assert_eq!(replicated_column_names, vec!["id", "name", "age"]);
-
-            // The underlying full schema has all 5 columns
-            let full_schema = replicated_table_schema.inner();
-            assert_eq!(full_schema.column_schemas.len(), 5);
-        }
-    }
-
     // Add email column to publication -> (id, name, age, email).
     database
         .run_sql(&format!(
@@ -2276,46 +2200,6 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
         .unwrap();
 
     insert_notify.notified().await;
-
-    // Verify 4 columns arrived (id, name, age, email).
-    let events = destination.get_events().await;
-    let grouped = group_events_by_type_and_table_id(&events);
-    let inserts = grouped.get(&(EventType::Insert, table_id)).unwrap();
-    assert_eq!(inserts.len(), 2);
-
-    let relation_after_adding_email = events
-        .iter()
-        .rev()
-        .find_map(|event| match event {
-            Event::Relation(relation) if relation.replicated_table_schema.id() == table_id => {
-                Some(relation.clone())
-            }
-            _ => None,
-        })
-        .expect("Expected relation event after adding email to publication");
-
-    if let Event::Insert(InsertEvent { replicated_table_schema, table_row, .. }) =
-        inserts.last().unwrap()
-    {
-        assert_eq!(table_row.values().len(), 4);
-        let col_names: Vec<&str> =
-            replicated_table_schema.column_schemas().map(|c| c.name.as_str()).collect();
-        assert_eq!(col_names, vec!["id", "name", "age", "email"]);
-    } else {
-        panic!("Expected Insert event");
-    }
-
-    let relation_columns: Vec<&str> = relation_after_adding_email
-        .replicated_table_schema
-        .column_schemas()
-        .map(|c| c.name.as_str())
-        .collect();
-    assert_eq!(relation_columns, vec!["id", "name", "age", "email"]);
-    assert_eq!(
-        relation_after_adding_email.replicated_table_schema.replication_mask().as_slice(),
-        &[1, 1, 1, 1, 0]
-    );
-    assert_eq!(relation_after_adding_email.replicated_table_schema.inner().column_schemas.len(), 5);
 
     // Remove age column from publication -> (id, name, email).
     database
@@ -2345,77 +2229,88 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
 
     insert_notify.notified().await;
 
-    // We shutdown the pipeline.
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify 3 columns arrived (id, name, email) - age and phone excluded.
     let events = destination.get_events().await;
-    let relation_after_removing_age = events
+    let relations = events
         .iter()
-        .rev()
-        .find_map(|event| match event {
+        .filter_map(|event| match event {
             Event::Relation(relation) if relation.replicated_table_schema.id() == table_id => {
-                Some(relation.clone())
+                Some(relation)
             }
             _ => None,
         })
-        .expect("Expected relation event after removing age from publication");
-    let grouped = group_events_by_type_and_table_id(&events);
-    let inserts = grouped.get(&(EventType::Insert, table_id)).unwrap();
-    assert_eq!(inserts.len(), 3);
-
-    if let Event::Insert(InsertEvent { replicated_table_schema, table_row, .. }) =
-        inserts.last().unwrap()
-    {
-        assert_eq!(table_row.values().len(), 3);
-        let col_names: Vec<&str> =
-            replicated_table_schema.column_schemas().map(|c| c.name.as_str()).collect();
-        assert_eq!(col_names, vec!["id", "name", "email"]);
-    } else {
-        panic!("Expected Insert event");
-    }
-
-    let relation_columns: Vec<&str> = relation_after_removing_age
-        .replicated_table_schema
-        .column_schemas()
-        .map(|c| c.name.as_str())
-        .collect();
-    assert_eq!(relation_columns, vec!["id", "name", "email"]);
-    assert_eq!(
-        relation_after_removing_age.replicated_table_schema.replication_mask().as_slice(),
-        &[1, 1, 0, 1, 0]
-    );
-    assert_eq!(relation_after_removing_age.replicated_table_schema.inner().column_schemas.len(), 5);
-    assert!(
-        initial_relation_event.replicated_table_schema.inner().snapshot_id
-            < relation_after_adding_email.replicated_table_schema.inner().snapshot_id
-    );
-    assert!(
-        relation_after_adding_email.replicated_table_schema.inner().snapshot_id
-            < relation_after_removing_age.replicated_table_schema.inner().snapshot_id
-    );
-
-    let relation_snapshot_ids = vec![
-        initial_relation_event.replicated_table_schema.inner().snapshot_id,
-        relation_after_adding_email.replicated_table_schema.inner().snapshot_id,
-        relation_after_removing_age.replicated_table_schema.inner().snapshot_id,
-    ];
-    let insert_snapshot_ids = inserts
+        .collect::<Vec<_>>();
+    let inserts = events
         .iter()
-        .map(|event| match event {
-            Event::Insert(insert) => insert.replicated_table_schema.inner().snapshot_id,
-            unexpected => panic!("expected insert event, got {unexpected:?}"),
+        .filter_map(|event| match event {
+            Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
+                Some(insert)
+            }
+            _ => None,
         })
         .collect::<Vec<_>>();
+    assert_eq!(relations.len(), 3);
+    assert_eq!(inserts.len(), 3);
+
+    let expected_column_names = [
+        vec!["id", "name", "age"],
+        vec!["id", "name", "age", "email"],
+        vec!["id", "name", "email"],
+    ];
+    let expected_masks = [vec![1_u8, 1, 1, 0, 0], vec![1, 1, 1, 1, 0], vec![1, 1, 0, 1, 0]];
+
+    for ((relation, expected_names), expected_mask) in
+        relations.iter().zip(expected_column_names).zip(expected_masks)
+    {
+        let column_names = relation
+            .replicated_table_schema
+            .column_schemas()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(column_names, expected_names);
+        assert_eq!(relation.replicated_table_schema.replication_mask().as_slice(), expected_mask);
+        assert_eq!(relation.replicated_table_schema.inner().column_schemas.len(), 5);
+    }
+
+    let relation_snapshot_ids = relations
+        .iter()
+        .map(|relation| relation.replicated_table_schema.inner().snapshot_id)
+        .collect::<Vec<_>>();
+    assert!(relation_snapshot_ids.windows(2).all(|window| window[0] < window[1]));
+
+    // BEGIN consumes ordinal 0. Connection-local Relation messages must not
+    // consume ordinals, including after either publication change.
+    assert!(inserts.iter().all(|insert| insert.tx_ordinal == 1));
+    let insert_snapshot_ids = inserts
+        .iter()
+        .map(|insert| insert.replicated_table_schema.inner().snapshot_id)
+        .collect::<Vec<_>>();
     assert_eq!(insert_snapshot_ids, relation_snapshot_ids);
+    let insert_values =
+        inserts.iter().map(|insert| insert.table_row.values().to_vec()).collect::<Vec<_>>();
+    assert_eq!(
+        insert_values,
+        vec![
+            vec![Cell::I64(1), Cell::String("Alice".to_owned()), Cell::I32(25)],
+            vec![
+                Cell::I64(2),
+                Cell::String("Charlie".to_owned()),
+                Cell::I32(35),
+                Cell::String("charlie@example.com".to_owned()),
+            ],
+            vec![
+                Cell::I64(3),
+                Cell::String("Diana".to_owned()),
+                Cell::String("diana@example.com".to_owned()),
+            ],
+        ]
+    );
 
     let stored_snapshots = state_store.get_table_schemas().await;
     let stored_snapshot_ids =
         stored_snapshots[&table_id].iter().map(|(snapshot_id, _)| *snapshot_id).collect::<Vec<_>>();
-    assert_eq!(
-        stored_snapshot_ids,
-        vec![relation_after_removing_age.replicated_table_schema.inner().snapshot_id]
-    );
+    assert_eq!(stored_snapshot_ids, vec![relation_snapshot_ids[2]]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

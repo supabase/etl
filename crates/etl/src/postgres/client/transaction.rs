@@ -544,10 +544,10 @@ impl<'a> PgReplicationTransactionCore<'a> {
                     get_row_value::<String>(&row, "has_generated", "pg_attribute")? == "t";
                 if has_generated_columns {
                     warn!(
-                        "Table {} contains generated columns that will NOT be replicated. \
-                         Generated columns are not supported in PostgreSQL logical replication \
-                         and will be excluded from the ETL schema. These columns will NOT appear \
-                         in the destination.",
+                        "table {} contains generated columns that will not be replicated. \
+                         generated columns are not supported in postgres logical replication and \
+                         will be excluded from the etl schema. these columns will not appear in \
+                         the destination.",
                         table_id
                     );
                 }

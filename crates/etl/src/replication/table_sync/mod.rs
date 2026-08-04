@@ -418,7 +418,7 @@ where
         return Ok(TableSyncResult::Stopped);
     }
 
-    info!(table_id = table_id.0, "table sync completed, starting streaming");
+    info!(table_id = table_id.0, "table copy completed, starting table sync catchup stream");
 
     Ok(TableSyncResult::Completed { start_lsn, replicated_table_schema })
 }

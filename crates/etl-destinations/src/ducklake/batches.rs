@@ -1742,7 +1742,7 @@ impl ReusableStagingTable {
             "insert into {target_table} ({column_list}) select {column_list} from {staging_table};"
         );
         conn.execute_batch(&sql).map_err(|err| {
-            tracing::error!(error = %err, "error INSERT INTO");
+            tracing::error!(error = %err, "error inserting rows");
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake INSERT SELECT failed",
@@ -1794,7 +1794,7 @@ impl ReusableStagingTable {
              select {column_list} from {target_table} limit 0;"
         ))
         .map_err(|error| {
-            tracing::error!(error = %error, "error CREATE TEMP TABLE");
+            tracing::error!(error = %error, "error creating temporary table");
 
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
@@ -1982,7 +1982,7 @@ fn apply_truncate_batch_action(
     let target_table = qualified_lake_table_name(table_name);
     let sql = format!("TRUNCATE TABLE {target_table};");
     conn.execute_batch(&sql).map_err(|error| {
-        tracing::error!(error = %error, "error TRUNCATE TABLE");
+        tracing::error!(error = %error, "error truncating table");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake TRUNCATE TABLE failed",
@@ -2089,7 +2089,7 @@ fn apply_delete_mutation(
                 ducklake_operation_id = operation_context.operation_id(),
                 ducklake_operation_kind = operation_context.operation_kind(),
                 ducklake_operation_timeout_ms = operation_context.timeout_ms(),
-                "error DELETE FROM"
+                "error deleting rows"
             );
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
@@ -2124,7 +2124,7 @@ fn apply_update_mutation(
     let target_table = qualified_lake_table_name(table_name);
     let sql_query = format!("UPDATE {target_table} SET {set_clause} WHERE {predicate};");
     conn.execute_batch(&sql_query).map_err(|_err| {
-        tracing::error!(error = %DuckDbSensitiveQueryError, "error UPDATE");
+        tracing::error!(error = %DuckDbSensitiveQueryError, "error updating rows");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake UPDATE failed",

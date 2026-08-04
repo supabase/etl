@@ -190,7 +190,7 @@ impl<T: TokenProvider> SqlClient<T> {
                     max = attempt.max_retries,
                     delay_ms = attempt.sleep_delay.as_millis(),
                     error = %attempt.error,
-                    "retrying SQL REST API request"
+                    "retrying sql rest api request"
                 );
             },
             || self.attempt_statement(&url, &body),
@@ -241,7 +241,7 @@ impl<T: TokenProvider> SqlClient<T> {
                 }
 
                 StatusCode::UNAUTHORIZED if !retried_auth => {
-                    warn!("received 401 from SQL REST API, invalidating cached token");
+                    warn!("received 401 from sql rest api, invalidating cached token");
                     self.auth.invalidate_token().await;
                     retried_auth = true;
                     continue;

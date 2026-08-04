@@ -182,17 +182,8 @@ pub fn assert_replicated_schema_column_names(
 /// Asserts that all columns in the replication mask are set to 1.
 fn assert_all_columns_replicated(schema: &ReplicatedTableSchema, expected_len: usize) {
     let mask = schema.replication_mask().as_slice();
-    assert_eq!(
-        mask.len(),
-        expected_len,
-        "replication mask length mismatch: got {}, expected {}",
-        mask.len(),
-        expected_len
-    );
-    assert!(
-        mask.iter().all(|&bit| bit == 1),
-        "expected all columns to be replicated, but mask is {mask:?}"
-    );
+    assert_eq!(mask.len(), expected_len);
+    assert!(mask.iter().all(|&bit| bit == 1));
 }
 
 /// Asserts that schema snapshots are in strictly increasing order by snapshot
@@ -206,20 +197,13 @@ pub fn assert_schema_snapshots_ordering(
     snapshots: &[(SnapshotId, TableSchema)],
     first_is_initial: bool,
 ) {
-    assert!(!snapshots.is_empty(), "expected at least one schema snapshot");
+    assert!(!snapshots.is_empty());
 
     let (first_snapshot_id, _) = &snapshots[0];
     if first_is_initial {
-        assert_eq!(
-            *first_snapshot_id,
-            SnapshotId::initial(),
-            "first snapshot ID is {first_snapshot_id}, expected initial snapshot 0:0"
-        );
+        assert_eq!(*first_snapshot_id, SnapshotId::initial());
     } else {
-        assert!(
-            *first_snapshot_id > SnapshotId::initial(),
-            "first snapshot ID is {first_snapshot_id}, expected it to sort after 0:0"
-        );
+        assert!(*first_snapshot_id > SnapshotId::initial());
     }
 
     for i in 1..snapshots.len() {

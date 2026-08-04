@@ -158,7 +158,7 @@ where
         } else {
             warn!(
                 "skipping source migrations (run_source_migrations = false); the source schema \
-                 helpers and DDL event trigger must be installed out-of-band"
+                 helpers and ddl event trigger must be installed out-of-band"
             );
         }
 

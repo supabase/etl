@@ -531,7 +531,7 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
             DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
-        assert!(committed.is_some(), "initial data should commit before DDL");
+        assert!(committed.is_some());
 
         let initial_metadata = DestinationTableMetadata::new_applied(
             sf_table.clone(),
@@ -576,7 +576,7 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
             DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
-        assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
+        assert_eq!(committed, Some(expected_offset));
 
         // Recreate the destination to restore the channel's durable offset,
         // then replay the stream from before the schema change. The relation
@@ -630,15 +630,11 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
         .await
         .expect("query_rows after stale replay failed");
 
-        assert_eq!(rows.len(), 2, "stale replay must not write any rows");
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0][0], serde_json::Value::String("1".into()));
         assert_eq!(rows[0][1], serde_json::Value::Null);
         assert_eq!(rows[1][0], serde_json::Value::String("2".into()));
-        assert_eq!(
-            rows[1][1],
-            serde_json::Value::String("bob@example.com".into()),
-            "newer column data must survive the rejected stale replay"
-        );
+        assert_eq!(rows[1][1], serde_json::Value::String("bob@example.com".into()));
 
         let final_metadata = harness
             .store
