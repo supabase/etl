@@ -1620,6 +1620,62 @@ async fn logical_replication_replays_multi_table_publication_column_filter_chang
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_filters_unpublished_transactions_by_server_version() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let published_table = test_table_name("filtered_transaction_published");
+    let published_table_id = database
+        .create_table(published_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let unpublished_table = test_table_name("filtered_transaction_unpublished");
+    database
+        .create_table(unpublished_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "filtered_transaction_pub";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&published_table))
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "filtered_transaction_slot").await;
+
+    database.insert_values(unpublished_table, &["value"], &[&1]).await.unwrap();
+    database.insert_values(published_table, &["value"], &[&2]).await.unwrap();
+
+    let mut expected = Vec::new();
+    // PostgreSQL 14 emits BEGIN/COMMIT when pgoutput filters every change in a
+    // transaction. PostgreSQL 15+ suppresses the empty transaction.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
+    }
+    expected.extend([
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            published_table_id.into_inner(),
+            vec!["id".to_owned(), "value".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(published_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ]);
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        expected.as_slice(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_recursive_alter_partitioned_table_emits_no_leaf_ddl_messages() {
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -1665,8 +1721,14 @@ async fn logical_replication_recursive_alter_partitioned_table_emits_no_leaf_ddl
     // PostgreSQL reports only the explicitly altered partitioned parent to the
     // event trigger. It does not enumerate the regular-table leaves changed by
     // the recursive `alter table`, so the next leaf DML emits its updated
-    // relation without any preceding DDL message.
-    let expected = [
+    // relation without any preceding DDL message. PostgreSQL 14 still emits an
+    // empty transaction for the filtered ALTER, while PostgreSQL 15+ suppresses
+    // it.
+    let mut expected = Vec::new();
+    if below_version!(database.server_version(), POSTGRES_15) {
+        expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
+    }
+    expected.extend([
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::Relation(
             leaf_table_ids[0].into_inner(),
@@ -1689,7 +1751,7 @@ async fn logical_replication_recursive_alter_partitioned_table_emits_no_leaf_ddl
         ),
         ExpectedStreamMarker::Insert(leaf_table_ids[1].into_inner()),
         ExpectedStreamMarker::Commit,
-    ];
+    ]);
 
     assert_stream_markers_and_replay(
         client,
@@ -1698,7 +1760,7 @@ async fn logical_replication_recursive_alter_partitioned_table_emits_no_leaf_ddl
         publication_name,
         &slot_name,
         start_lsn,
-        &expected,
+        expected.as_slice(),
     )
     .await;
 }
