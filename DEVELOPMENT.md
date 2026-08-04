@@ -467,10 +467,10 @@ Property tests built on the shared runner in `etl::test_utils::property`
 `crates/etl-destinations/tests/clickhouse/value_roundtrip.rs`) run
 randomly generated cases until a wall-clock budget elapses:
 
-| Variable                    | Description                                                                                   |
-|-----------------------------|-----------------------------------------------------------------------------------------------|
-| `PROPERTY_TEST_BUDGET_SECS` | Wall-clock budget per property in seconds (default `2`); raise it for deeper local or CI runs |
-| `PROPERTY_TEST_SEED`        | Pin the chunk RNG seed to replay a failing chunk; the failure panic prints the seed to use    |
+| Variable                    | Description                                                                                                                |
+|-----------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| `PROPERTY_TEST_BUDGET_SECS` | Override the wall-clock budget per property; cheap properties default to `2` seconds and expensive properties default to `32` seconds |
+| `PROPERTY_TEST_SEED`        | Pin the chunk RNG seed to replay a failing chunk; the failure panic prints the seed to use                                 |
 
 #### Test Output and Logging
 
