@@ -9,7 +9,8 @@ Schema-change support is in public beta and is being expanded incrementally. The
 current implementation is intentionally conservative: the source-side event
 trigger captures a rich PostgreSQL-shaped snapshot, while ETL currently models
 well-understood column changes: **adds, drops, renames, and column default
-and nullability changes**. A few known edge cases remain.
+and nullability changes**, plus publication column-list changes for tables the
+running pipeline already tracks. A few known edge cases remain.
 
 Built-in destination support varies by destination DDL capabilities.
 **BigQuery, ClickHouse, DuckLake, and Snowflake** apply supported schema changes
@@ -52,10 +53,13 @@ The function reads `TG_TAG` and the object addresses returned by
   no publication name because a physical table change applies to every
   publication containing that table.
 - For per-table `ALTER PUBLICATION` changes, the object address identifies a
-  `pg_publication_rel` row, which links the table to its publication.
-- For publication-wide option changes, the object address identifies a
-  `pg_publication` row, and the trigger expands its current effective table set
-  through `pg_publication_tables`.
+  surviving `pg_publication_rel` row, which links the explicitly named table to
+  its publication. This path does not expand a named partition root into its
+  effective leaves.
+- For publication-level `ALTER PUBLICATION` changes, the object address
+  identifies a `pg_publication` row. The trigger does not parse which parameter
+  changed; it expands the publication's complete post-command effective table
+  set through `pg_publication_tables`.
 
 The publication name is therefore optional in the payload for table DDL but
 required for publication DDL. Logical decoding exposes custom messages to a
@@ -96,6 +100,37 @@ their ordering. Multiple schema messages sharing one commit LSN are ordered by
 their message LSN. A newly published table that the running pipeline does not
 know is ignored until startup publication reconciliation creates its table
 state and initial copy.
+
+### `ALTER PUBLICATION` support boundary
+
+The trigger's ability to observe an `ALTER PUBLICATION` command is not the same
+as runtime support for that publication change. The trigger emits schema
+snapshots; it does not add or remove ETL table state, start an initial copy, or
+change which relation OIDs the running apply worker owns.
+
+| Publication change | Trigger behavior | Runtime behavior |
+| --- | --- | --- |
+| Change the column list of an already tracked table | Emits a snapshot scoped to that table and publication | Supported. The next `RELATION` message installs the new replication mask before following row events. |
+| `ADD TABLE` or a membership-changing `SET TABLE` | Emits snapshots for surviving, explicitly identified `pg_publication_rel` rows. A named partition root is not expanded into leaves on this path. | Newly effective relation OIDs are ignored until startup reconciliation initializes and copies them. |
+| `DROP TABLE` | Emits no snapshot because the `pg_publication_rel` row is gone at `ddl_command_end`. | Removed table state is purged during startup reconciliation. Destination data is not automatically removed. |
+| Add, set, or drop `TABLES IN SCHEMA` | The current trigger does not resolve `pg_publication_namespace` events into table snapshots. | Effective membership is loaded during startup reconciliation. |
+| Change a row filter | May emit a per-table snapshot, but row-filter mutation is not part of the supported live-update contract. | Do not rely on changing row filters while the pipeline is running. |
+| Change a publication-level setting such as `publish` | A `pg_publication` event expands to one snapshot for every post-command effective table, even if physical schemas did not change. | Publication settings are not a supported live schema-update interface. |
+| Change `publish_via_partition_root` | Emits snapshots for the complete post-change effective set: the root when enabled, or the leaves when disabled. | Unsupported while running. The new relation OIDs are not dynamically initialized, and the previous destination relation layout is not migrated. |
+| Rename the publication or change its owner | These are publication-level events and may expand across the effective table set. A rename scopes messages to the new name. | Not supported as live schema changes. A configured pipeline does not automatically adopt a new publication name. |
+
+At startup, ETL calls `pg_get_publication_tables()` to load the same effective
+relation identities PostgreSQL uses for pgoutput. New identities enter initial
+sync and identities no longer returned by PostgreSQL have their ETL state
+purged. This startup process does not rename, merge, or delete destination
+tables created for an earlier root or leaf identity.
+
+> **Warning:** Only publication column-list changes for already tracked tables
+> are supported while a pipeline is running. Other `ALTER PUBLICATION` changes
+> can produce skipped events, stale destination tables, or missing or duplicated
+> data. Plan a controlled change with source writes paused and the pipeline
+> stopped, followed by an explicit restart, table resynchronization, or new
+> pipeline instead of relying on live behavior.
 
 The important public boundary is:
 
@@ -325,6 +360,10 @@ These behaviors are **not full destination DDL semantics** yet:
 - Table create/drop/rename operations are outside the current schema-change
   contract. Publication membership and table cleanup remain separate pipeline
   lifecycle concerns.
+- Live publication membership, row-filter, operation-setting, publication-name,
+  and `publish_via_partition_root` changes are unsupported. Although the source
+  trigger may emit schema snapshots for some of these commands, it does not
+  dynamically reconcile table ownership or migrate destination table identity.
 - If a table-sync worker decodes a DDL or publication-column change during
   catch-up but receives no following relation before its handover boundary, it
   cannot construct the complete decoder required by `SyncDone`. The DDL

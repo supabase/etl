@@ -1776,6 +1776,360 @@ async fn logical_replication_recursive_alter_partitioned_table_emits_no_leaf_ddl
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_publication_add_partition_root_emits_snapshot_when_using_root() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let initial_table = test_table_name("publication_add_root_identity_initial");
+    database
+        .create_table(initial_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let root_table = test_table_name("publication_add_root_identity_root");
+    let (root_table_id, leaf_table_ids) = create_partitioned_table(
+        &database,
+        root_table.clone(),
+        &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+
+    let publication_name = "publication_add_root_identity_pub";
+    database
+        .create_publication_with_config(
+            publication_name,
+            std::slice::from_ref(&initial_table),
+            true,
+        )
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "publication_add_root_identity_slot")
+            .await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} add table {}",
+            quote_identifier(publication_name),
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('first', 50), ('second', 150)",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // pgoutput describes each physical leaf before publishing its tuple under
+    // the root relation identity.
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            root_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            root_table_id.into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[0].into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(root_table_id.into_inner()),
+        ExpectedStreamMarker::Relation(
+            root_table_id.into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[1].into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(root_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_publication_add_partition_root_emits_no_snapshot_when_using_leaves() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let initial_table = test_table_name("publication_add_partition_initial");
+    database
+        .create_table(initial_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let root_table = test_table_name("publication_add_partition_root");
+    let (_root_table_id, leaf_table_ids) = create_partitioned_table(
+        &database,
+        root_table.clone(),
+        &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+
+    let publication_name = "publication_add_partition_root_pub";
+    database
+        .create_publication_with_config(
+            publication_name,
+            std::slice::from_ref(&initial_table),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "publication_add_partition_root_slot")
+            .await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} add table {}",
+            quote_identifier(publication_name),
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('first', 50), ('second', 150)",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let mut expected = Vec::new();
+    // PostgreSQL reports the explicitly added partitioned root as the
+    // publication-relation event object, but pgoutput publishes its leaves when
+    // publish_via_partition_root is false. The trigger therefore emits no leaf
+    // schema snapshots. PostgreSQL 14 still exposes the empty transaction.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
+    }
+    expected.extend([
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[0].into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(leaf_table_ids[0].into_inner()),
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[1].into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(leaf_table_ids[1].into_inner()),
+        ExpectedStreamMarker::Commit,
+    ]);
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        expected.as_slice(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_publication_add_partition_leaf_emits_leaf_snapshot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let initial_table = test_table_name("publication_add_leaf_initial");
+    database
+        .create_table(initial_table.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let root_table = test_table_name("publication_add_leaf_root");
+    let (_root_table_id, leaf_table_ids) = create_partitioned_table(
+        &database,
+        root_table.clone(),
+        &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+    let leaf_table = TableName::new(root_table.schema, format!("{}_first", root_table.name));
+
+    let publication_name = "publication_add_leaf_pub";
+    // An explicitly named leaf stays the effective relation even when the
+    // publication otherwise uses partition-root identity.
+    database
+        .create_publication_with_config(
+            publication_name,
+            std::slice::from_ref(&initial_table),
+            true,
+        )
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "publication_add_leaf_slot").await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} add table {}",
+            quote_identifier(publication_name),
+            leaf_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database.insert_values(leaf_table, &["data", "partition_key"], &[&"first", &50]).await.unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            leaf_table_ids[0].into_inner(),
+            Some(publication_name.to_owned()),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            leaf_table_ids[0].into_inner(),
+            vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(leaf_table_ids[0].into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_publication_partition_root_option_changes_ddl_and_dml_identity() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let root_table = test_table_name("publication_partition_identity_root");
+    let (root_table_id, leaf_table_ids) = create_partitioned_table(
+        &database,
+        root_table.clone(),
+        &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+
+    let publication_name = "publication_partition_identity_pub";
+    database
+        .create_publication_with_config(publication_name, std::slice::from_ref(&root_table), false)
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "publication_partition_identity_slot")
+            .await;
+
+    let quoted_publication_name = quote_identifier(publication_name);
+    database
+        .run_sql(&format!(
+            "alter publication {quoted_publication_name} set (publish_via_partition_root = true)"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('root first', 50), ('root second', 150)",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter publication {quoted_publication_name} set (publish_via_partition_root = false)"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('leaf first', 50), ('leaf second', 150)",
+            root_table.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let columns = vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned()];
+    // Publication-wide option changes expand the post-command effective table
+    // set: first the root, then the two leaves in relation-OID order.
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            root_table_id.into_inner(),
+            Some(publication_name.to_owned()),
+            columns.clone(),
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(root_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Relation(leaf_table_ids[0].into_inner(), columns.clone()),
+        ExpectedStreamMarker::Insert(root_table_id.into_inner()),
+        ExpectedStreamMarker::Relation(root_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Relation(leaf_table_ids[1].into_inner(), columns.clone()),
+        ExpectedStreamMarker::Insert(root_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            leaf_table_ids[0].into_inner(),
+            Some(publication_name.to_owned()),
+            columns.clone(),
+        ),
+        ExpectedStreamMarker::DdlMessage(
+            leaf_table_ids[1].into_inner(),
+            Some(publication_name.to_owned()),
+            columns.clone(),
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(leaf_table_ids[0].into_inner(), columns.clone()),
+        ExpectedStreamMarker::Insert(leaf_table_ids[0].into_inner()),
+        ExpectedStreamMarker::Relation(leaf_table_ids[1].into_inner(), columns),
+        ExpectedStreamMarker::Insert(leaf_table_ids[1].into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_replays_publication_add_table_schemas_in_oid_order() {
     init_test_tracing();
     let database = spawn_source_database().await;

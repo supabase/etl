@@ -1,4 +1,4 @@
--- Schema snapshots for supported table and publication changes.
+-- Extend transactional schema snapshots to supported ALTER PUBLICATION events.
 
 drop event trigger if exists supabase_etl_ddl_message_trigger;
 
@@ -56,9 +56,11 @@ begin
         base as (
             -- ALTER TABLE identifies the relation directly and is intentionally
             -- unscoped: a table change applies to every publication containing
-            -- that table. Per-table ALTER PUBLICATION commands instead identify
-            -- a pg_publication_rel row, from which both relation and publication
-            -- are resolved.
+            -- that table. Per-table ALTER PUBLICATION events instead identify a
+            -- surviving pg_publication_rel row, from which both relation and
+            -- publication are resolved. This branch uses only the explicitly
+            -- identified relation; it does not expand partition roots into their
+            -- effective leaf relations.
             select
                 coalesce(pr.prrelid, d.objid) as table_oid,
                 d.classid,
@@ -83,9 +85,10 @@ begin
                   or pr.prrelid is not null
               )
             union all
-            -- Publication-wide option changes identify pg_publication itself.
-            -- Expand the publication's post-DDL effective table set so each
-            -- currently published table receives its own scoped snapshot.
+            -- Publication-level ALTER PUBLICATION events identify pg_publication
+            -- itself rather than a specific relation. The command parameters are
+            -- not inspected; every such event expands the publication's post-DDL
+            -- effective table set so each table receives a scoped snapshot.
             select
                 c.oid as table_oid,
                 d.classid,
@@ -154,11 +157,14 @@ begin
         where c.relkind in ('r', 'p')
           and c.relpersistence = 'p'
           and exists (
+              -- Keep only relations that are effective in at least one
+              -- publication in this transaction's post-command catalog state.
               select 1
               from pg_catalog.pg_publication_tables pt
               where pt.schemaname = n.nspname
                 and pt.tablename = c.relname
           )
+        -- Make multi-table schema-message order deterministic.
         order by c.oid
     loop
         select pg_catalog.jsonb_agg(
@@ -220,9 +226,22 @@ $fnc$;
 revoke all on function etl.emit_schema_change_messages() from public;
 
 comment on function etl.emit_schema_change_messages() is
-$$Event trigger function that emits one logical schema snapshot per affected
-published permanent table for ALTER TABLE and supported ALTER PUBLICATION
-statements.$$;
+$$Event trigger function that emits transactional logical schema snapshots for
+published permanent tables affected by supported ALTER TABLE and ALTER
+PUBLICATION events.
+
+ALTER TABLE events identify a relation directly and emit an unscoped snapshot.
+Surviving pg_publication_rel events resolve one explicitly identified relation
+and emit a snapshot scoped to that publication. Events identifying
+pg_publication itself expand the publication's post-command effective table set
+and emit one scoped snapshot per table. Other ALTER PUBLICATION catalog object
+types and removed pg_publication_rel rows emit no snapshots.
+
+The function inspects catalog state after each statement without parsing the
+client-submitted query text. Messages are transactional, disappear if the outer
+transaction rolls back, and retain statement order relative to relation and DML
+events. The function runs with its owner's privileges so table owners do not
+need direct execute access to ETL helper functions.$$;
 
 create event trigger supabase_etl_ddl_message_trigger
     on ddl_command_end

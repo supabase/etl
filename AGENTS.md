@@ -43,9 +43,12 @@
 - Do not add dependencies unless they are justified by the task.
 - If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
 - Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
-- Never modify migration files unless the user explicitly asks for a migration
-  change. This includes changing comments or other non-executable text inside
-  migration files.
+- Migration files already present in `main` are immutable. Never change their
+  SQL, comments, whitespace, filenames, or any other content; add a new
+  migration instead.
+- Never modify a migration that is not yet in `main` unless the user explicitly
+  asks for a migration change. This includes changing comments or other
+  non-executable text inside migration files.
 - Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `cargo x fmt` and `cargo x fmt --check`.
 - Treat `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics as the source of truth for enforceable style and correctness rules. Prefer adding or tightening static checks over adding prose rules here.
 - Run Clippy, builds, and tests intentionally when they are relevant: for example
