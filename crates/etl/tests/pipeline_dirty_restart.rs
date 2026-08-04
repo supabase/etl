@@ -355,18 +355,17 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
         store.clone(),
         first_destination.clone(),
     );
-    let users_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let users_sync_complete = store.notify_on_table_sync_complete(table_id).await;
 
     first_pipeline
         .start()
         .await
         .map_err(|error| TestCaseError::fail(format!("pipeline failed to start: {error}")))?;
-    wait_for_notification(&users_ready, "users table to become ready").await?;
+    wait_for_notification(&users_sync_complete, "users table synchronization to complete").await?;
 
-    // `Ready` is persisted by the apply worker while the table sync worker can
-    // still be cleaning up its progress row and replication slot. Wait for the
-    // slot removal so the crash below hits a state where only the apply worker
-    // serves the users table.
+    // Table sync completes before the worker deletes its progress row and
+    // replication slot. Wait for slot removal so the crash below hits a state
+    // where only the apply worker serves the users table.
     wait_for_sync_slot_removal(&database, &sync_slot_name).await?;
 
     for user_number in 1..case.crash_after {
