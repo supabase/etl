@@ -368,7 +368,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
 
     database
         .run_sql(&format!(
-            "UPDATE {} SET value = 'after' WHERE id = 1",
+            "UPDATE {} SET id = 2, value = 'after' WHERE id = 1",
             table_name.as_quoted_identifier(),
         ))
         .await
@@ -376,14 +376,14 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
 
     events_notify.notified().await;
 
+    pipeline.shutdown_and_wait().await.unwrap();
+
     let query = current_state_query(engine, UPDATE_FLOW_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
     let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
 
-    pipeline.shutdown_and_wait().await.unwrap();
-
     // --- THEN: current state shows the updated value ---
     assert_eq!(rows.len(), 1, "expected one current-state row after UPDATE");
-    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].id, 2);
     assert_eq!(rows[0].value, "after");
 }
 
