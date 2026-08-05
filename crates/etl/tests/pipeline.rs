@@ -14,13 +14,13 @@ use etl::{
     store::{SchemaStore, StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
         database::{
-            replication_slot_state, spawn_source_database, test_table_name, wait_for_new_walsender,
-            wait_for_replication_slot_flush_lsn,
+            replication_slot_state, spawn_source_database, terminate_walsender, test_table_name,
+            wait_for_new_walsender, wait_for_replication_slot_flush_lsn,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::{FaultAction, FaultyOp},
         memory_destination::MemoryDestination,
-        notify::TimedNotify,
+        notify::{DEFAULT_NOTIFY_TIMEOUT, TimedNotify},
         notifying_store::NotifyingStore,
         pipeline::{
             PipelineBuilder, create_pipeline, create_pipeline_with_batch_config,
@@ -1498,9 +1498,14 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
     .await
     .expect("timed out waiting for confirmed_flush_lsn to advance after flush");
 
-    client.query_one("select pg_terminate_backend($1)", &[&terminated_pid]).await.unwrap();
+    assert!(terminate_walsender(client, terminated_pid).await.unwrap());
 
-    wait_for_new_walsender(client, &apply_slot_name, terminated_pid).await;
+    assert!(
+        wait_for_new_walsender(client, &apply_slot_name, terminated_pid, DEFAULT_NOTIFY_TIMEOUT,)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     let second_insert_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(
