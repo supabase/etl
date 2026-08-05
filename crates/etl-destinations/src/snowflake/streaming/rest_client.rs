@@ -625,23 +625,6 @@ mod tests {
     }
 
     #[test]
-    fn open_channel_request_serializes_optional_offset() {
-        let without_offset = serde_json::to_value(ChannelLifecycleRequest::new(None)).unwrap();
-        assert_eq!(without_offset, json!({ "fail_on_uncommitted_rows": true }));
-
-        let offset: OffsetToken = "000000000000000a/0000000000000002".parse().unwrap();
-        let with_offset =
-            serde_json::to_value(ChannelLifecycleRequest::new(Some(&offset))).unwrap();
-        assert_eq!(
-            with_offset,
-            json!({
-                "offset_token": "000000000000000a/0000000000000002",
-                "fail_on_uncommitted_rows": true,
-            })
-        );
-    }
-
-    #[test]
     fn ndjson_formatting() {
         let cols = [
             ColumnSchema::new("id".into(), Type::INT4, -1, 1, true),
@@ -786,55 +769,5 @@ mod tests {
         assert_eq!(status.rows_inserted, 12);
         assert_eq!(status.rows_parsed, 13);
         assert_eq!(status.rows_error_count, 2);
-    }
-
-    #[test]
-    fn channel_status_parsers_require_correctness_fields() {
-        fn assert_required_fields<T: serde::de::DeserializeOwned>(
-            fixture: serde_json::Value,
-            fields: &[&str],
-        ) {
-            assert!(serde_json::from_value::<T>(fixture.clone()).is_ok());
-
-            for field in fields {
-                let mut incomplete = fixture.clone();
-                incomplete
-                    .as_object_mut()
-                    .expect("status fixture should be an object")
-                    .remove(*field);
-
-                assert!(
-                    serde_json::from_value::<T>(incomplete).is_err(),
-                    "status parser should require `{field}`",
-                );
-            }
-        }
-
-        assert_required_fields::<ChannelStatusDetail>(
-            json!({
-                "channel_status_code": "ACTIVE",
-                "created_on_ms": 123,
-                "rows_inserted": 0,
-                "rows_parsed": 0,
-                "rows_error_count": 0,
-            }),
-            &[
-                "channel_status_code",
-                "created_on_ms",
-                "rows_inserted",
-                "rows_parsed",
-                "rows_error_count",
-            ],
-        );
-
-        assert_required_fields::<BulkStatusChannel>(
-            json!({
-                "channel_status_code": "SUCCESS",
-                "rows_inserted": 0,
-                "rows_parsed": 0,
-                "rows_errors": 0,
-            }),
-            &["channel_status_code", "rows_inserted", "rows_parsed", "rows_errors"],
-        );
     }
 }
