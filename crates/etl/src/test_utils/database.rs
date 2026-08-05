@@ -142,17 +142,80 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
     database
 }
 
-/// Returns the replication slot's confirmed flush LSN and active walsender PID.
-pub async fn replication_slot_state(client: &Client, slot_name: &str) -> (PgLsn, Option<i32>) {
+/// Queries the replication slot's confirmed flush LSN and active walsender PID.
+async fn query_replication_slot_state(
+    client: &Client,
+    slot_name: &str,
+) -> Result<(PgLsn, Option<i32>), tokio_postgres::Error> {
     let row = client
         .query_one(
             "select confirmed_flush_lsn, active_pid from pg_replication_slots where slot_name = $1",
             &[&slot_name],
         )
-        .await
-        .unwrap();
+        .await?;
 
-    (row.get(0), row.get(1))
+    Ok((row.get(0), row.get(1)))
+}
+
+/// Returns the replication slot's confirmed flush LSN and active walsender PID.
+pub async fn replication_slot_state(client: &Client, slot_name: &str) -> (PgLsn, Option<i32>) {
+    query_replication_slot_state(client, slot_name)
+        .await
+        .expect("Failed to query replication slot state")
+}
+
+/// Result of trying to terminate the active walsender for a replication slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WalsenderTermination {
+    /// The replication slot has no active walsender.
+    Inactive,
+
+    /// Postgres did not terminate the active walsender.
+    NotTerminated {
+        /// PID of the walsender that Postgres did not terminate.
+        pid: i32,
+    },
+
+    /// Postgres terminated the active walsender.
+    Terminated {
+        /// PID of the terminated walsender.
+        pid: i32,
+    },
+}
+
+/// Requests termination of the walsender with `pid`.
+///
+/// Returns whether Postgres terminated the backend.
+///
+/// # Errors
+///
+/// Returns an error if Postgres cannot run the termination query.
+pub async fn terminate_walsender(client: &Client, pid: i32) -> Result<bool, tokio_postgres::Error> {
+    let row = client.query_one("select pg_terminate_backend($1)", &[&pid]).await?;
+
+    Ok(row.get(0))
+}
+
+/// Tries to terminate the active walsender for `slot_name`.
+///
+/// # Errors
+///
+/// Returns an error if Postgres cannot query the replication slot or run the
+/// termination query.
+pub async fn terminate_active_walsender(
+    client: &Client,
+    slot_name: &str,
+) -> Result<WalsenderTermination, tokio_postgres::Error> {
+    let (_, active_pid) = query_replication_slot_state(client, slot_name).await?;
+    let Some(pid) = active_pid else {
+        return Ok(WalsenderTermination::Inactive);
+    };
+
+    if terminate_walsender(client, pid).await? {
+        Ok(WalsenderTermination::Terminated { pid })
+    } else {
+        Ok(WalsenderTermination::NotTerminated { pid })
+    }
 }
 
 /// Waits until a replication slot has confirmed at least `expected_lsn`.
@@ -183,23 +246,34 @@ pub async fn wait_for_replication_slot_flush_lsn(
 /// Waits until the replication slot is served by a walsender other than
 /// `old_pid`.
 ///
-/// # Panics
+/// Returns the new walsender PID, or [`None`] if no new walsender becomes
+/// active within `timeout`.
 ///
-/// Panics after [`DEFAULT_NOTIFY_TIMEOUT`] if no new walsender becomes active,
-/// mirroring [`crate::test_utils::notify::TimedNotify`].
-pub async fn wait_for_new_walsender(client: &Client, slot_name: &str, old_pid: i32) {
-    tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, async {
+/// # Errors
+///
+/// Returns an error if Postgres cannot query the replication slot state.
+pub async fn wait_for_new_walsender(
+    client: &Client,
+    slot_name: &str,
+    old_pid: i32,
+    timeout: Duration,
+) -> Result<Option<i32>, tokio_postgres::Error> {
+    let result = tokio::time::timeout(timeout, async {
         loop {
-            let (_, active_pid) = replication_slot_state(client, slot_name).await;
+            let (_, active_pid) = query_replication_slot_state(client, slot_name).await?;
             if let Some(pid) = active_pid
                 && pid != old_pid
             {
-                return;
+                return Ok::<i32, tokio_postgres::Error>(pid);
             }
 
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
-    .await
-    .expect("timed out waiting for a new walsender to serve the replication slot");
+    .await;
+
+    match result {
+        Ok(result) => result.map(Some),
+        Err(_) => Ok(None),
+    }
 }
