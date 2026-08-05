@@ -32,7 +32,7 @@ const DEFAULT_CLICKHOUSE_PASSWORD: &str = "etl";
 /// Default Cargo integration test target.
 const DEFAULT_TEST_TARGET: &str = "main";
 /// Default Cargo integration test filter.
-const DEFAULT_TEST_NAME_FILTER: &str = "clickhouse_pipeline";
+const DEFAULT_TEST_NAME_FILTER: &str = "clickhouse::";
 /// Default Cargo package under test.
 const DEFAULT_CARGO_PACKAGE: &str = "etl-destinations";
 /// Default features for ClickHouse tests.
@@ -302,7 +302,7 @@ fn test_args(config: &TestClickhouseConfig) -> Vec<String> {
         args.push(config.test_name_filter.clone());
     }
 
-    args.extend(["--".to_owned(), "--nocapture".to_owned()]);
+    args.extend(["--".to_owned(), "--test-threads=1".to_owned(), "--nocapture".to_owned()]);
     args
 }
 
