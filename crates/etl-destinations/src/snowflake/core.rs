@@ -323,21 +323,28 @@ where
     }
 
     async fn apply_truncate_events(&self, iter: &mut EventIter) -> EtlResult<bool> {
-        // Collect and dedup tables to be truncated.
-        let mut truncated: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
+        // Collect consecutive truncate events by table.
+        // Keep the latest offset, for each table.
+        let mut truncated: HashMap<TableId, (ReplicatedTableSchema, OffsetToken)> = HashMap::new();
         while matches!(iter.peek(), Some(Event::Truncate(_))) {
-            if let Some(Event::Truncate(t)) = iter.next() {
-                for schema in t.truncated_tables {
-                    truncated.insert(schema.id(), schema);
+            if let Some(Event::Truncate(truncate)) = iter.next() {
+                let offset = OffsetToken::new(truncate.commit_lsn, truncate.tx_ordinal);
+                for schema in truncate.truncated_tables {
+                    // Keep each table's latest consecutive truncate boundary.
+                    truncated.insert(schema.id(), (schema, offset.clone()));
                 }
             }
         }
         let had_truncates = !truncated.is_empty();
 
         // Truncate tables.
-        for (_, schema) in truncated {
+        for (_, (schema, offset)) in truncated {
+            self.prepare_table_for_streaming(&schema).await?;
             let table_name = try_stringify_table_name(schema.name())?.to_uppercase();
-            self.client.truncate_table(schema.id(), &table_name).await.map_err(EtlError::from)?;
+            self.client
+                .truncate_table(schema.id(), &table_name, &offset)
+                .await
+                .map_err(EtlError::from)?;
         }
 
         Ok(had_truncates)

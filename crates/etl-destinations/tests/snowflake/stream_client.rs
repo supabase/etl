@@ -5,8 +5,8 @@ use etl::{
     schema::{ColumnSchema, Type},
 };
 use etl_destinations::snowflake::{
-    AuthManager, CdcMeta, CdcOperation, Config, HttpExchanger, OffsetToken, RestStreamClient,
-    RowBatch, RowBatchBuilder, SqlClient, StreamClient,
+    AuthManager, CdcMeta, CdcOperation, Config, Error, HttpExchanger, OffsetToken,
+    RestStreamClient, RowBatch, RowBatchBuilder, SnowpipeError, SqlClient, StreamClient,
     test_utils::{load_test_config, query_rows},
 };
 use tokio::time::Duration;
@@ -55,7 +55,7 @@ async fn channel_open_insert_status_drop() {
 
         // Open channel, no offset on fresh channel.
         let resp = stream
-            .open_channel(config.database(), config.schema(), &table, &channel)
+            .open_channel(config.database(), config.schema(), &table, &channel, None)
             .await
             .expect("open_channel failed");
         assert!(!resp.continuation_token.is_empty(), "expected non-empty continuation_token");
@@ -129,7 +129,7 @@ async fn channel_reopen_preserves_offset() {
 
         // Open and insert.
         let open_resp = stream
-            .open_channel(config.database(), config.schema(), &table, &channel)
+            .open_channel(config.database(), config.schema(), &table, &channel, None)
             .await
             .expect("open_channel failed");
 
@@ -170,7 +170,7 @@ async fn channel_reopen_preserves_offset() {
 
         // Reopen channel, idempotent, should return the committed offset.
         let reopen_resp = stream
-            .open_channel(config.database(), config.schema(), &table, &channel)
+            .open_channel(config.database(), config.schema(), &table, &channel, None)
             .await
             .expect("reopen channel failed");
         assert_eq!(
@@ -180,6 +180,248 @@ async fn channel_reopen_preserves_offset() {
         );
 
         let _ = stream.drop_channel(config.database(), config.schema(), &table, &channel).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn channel_reopen_prevents_previous_sequencer_from_committing() {
+    let config = load_test_config().clone_without_credentials();
+    let (stream, sql) = build_clients(&config);
+
+    let table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let channel = format!("etl_test_{}_ch0", uuid::Uuid::new_v4().simple());
+
+    with_table_cleanup(&sql, &[&table], || async {
+        sql.create_table_if_not_exists(&table, r#""id" NUMBER(10,0)"#)
+            .await
+            .expect("create table failed");
+
+        let first_open = stream
+            .open_channel(config.database(), config.schema(), &table, &channel, None)
+            .await
+            .expect("initial open failed");
+        let second_open = stream
+            .open_channel(config.database(), config.schema(), &table, &channel, None)
+            .await
+            .expect("reopen failed");
+
+        let columns = [ColumnSchema::new("id".into(), Type::INT4, -1, 1, true)];
+        let fenced_offset: OffsetToken = "0000000000000001/0000000000000000".parse().unwrap();
+        let current_offset: OffsetToken = "0000000000000001/0000000000000001".parse().unwrap();
+        let fenced_batch =
+            build_batch(&columns, &[TableRow::new(vec![Cell::I32(1)])], &fenced_offset);
+        let current_batch =
+            build_batch(&columns, &[TableRow::new(vec![Cell::I32(2)])], &current_offset);
+
+        // A fenced append may report a stale sequencer or be acknowledged as a no-op.
+        // Only durable status and table contents prove that its row could not commit.
+        match stream
+            .insert_rows(
+                config.database(),
+                config.schema(),
+                &table,
+                &channel,
+                &fenced_batch,
+                &first_open.continuation_token,
+            )
+            .await
+        {
+            Ok(_) | Err(Error::Snowpipe(SnowpipeError::StaleContinuation)) => {}
+            Err(error) => panic!("append with the fenced token failed unexpectedly: {error}"),
+        }
+
+        stream
+            .insert_rows(
+                config.database(),
+                config.schema(),
+                &table,
+                &channel,
+                &current_batch,
+                &second_open.continuation_token,
+            )
+            .await
+            .expect("append with the current token failed");
+
+        let committed = poll_stream_offset(
+            &stream,
+            &config,
+            &table,
+            &channel,
+            &current_offset,
+            Duration::from_secs(5),
+            18,
+        )
+        .await;
+        assert_eq!(committed, Some(current_offset));
+
+        // A successful drop proves no submitted batch remains in flight.
+        stream
+            .drop_channel(config.database(), config.schema(), &table, &channel)
+            .await
+            .expect("drop channel failed");
+
+        let fqn = format!("\"{}\".\"{}\".\"{table}\"", config.database(), config.schema());
+        let rows = query_rows(&sql, &format!("select \"id\" from {fqn}"))
+            .await
+            .expect("query rows failed");
+        assert_eq!(
+            rows,
+            vec![vec![serde_json::json!("2")]],
+            "only the current sequencer's row must commit"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn channel_reopen_can_rewind_offset() {
+    /// Waits for an offset and its row counters to reach the expected values.
+    async fn wait_for_progress(
+        stream: &RestStreamClient<AuthManager<HttpExchanger>>,
+        config: &Config,
+        table: &str,
+        channel: &str,
+        expected_offset: &OffsetToken,
+        expected_rows_inserted: u64,
+        expected_rows_parsed: u64,
+    ) -> (u64, u64, u64) {
+        let mut last_status = None;
+        for _ in 0..18 {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let status = stream
+                .channel_status(config.database(), config.schema(), table, channel)
+                .await
+                .expect("channel status failed");
+            if status.offset_token.as_ref() == Some(expected_offset)
+                && status.rows_inserted >= expected_rows_inserted
+                && status.rows_parsed >= expected_rows_parsed
+            {
+                return (status.rows_inserted, status.rows_parsed, status.rows_error_count);
+            }
+            last_status = Some(status);
+        }
+
+        panic!("channel progress did not converge within timeout; last status: {last_status:?}");
+    }
+
+    let config = load_test_config().clone_without_credentials();
+    let (stream, sql) = build_clients(&config);
+
+    let table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let channel = format!("etl_test_{}_ch0", uuid::Uuid::new_v4().simple());
+
+    with_table_cleanup(&sql, &[&table], || async {
+        sql.create_table_if_not_exists(&table, r#""id" NUMBER(10,0), "name" VARCHAR"#)
+            .await
+            .expect("create table failed");
+
+        let cols = [
+            ColumnSchema::new("id".into(), Type::INT4, -1, 1, true),
+            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, true),
+        ];
+        let truncate_offset: OffsetToken = "0000000000000001/0000000000000000".parse().unwrap();
+        let post_truncate_offset: OffsetToken =
+            "0000000000000001/0000000000000001".parse().unwrap();
+        let initial_batch = build_batch(
+            &cols,
+            &[TableRow::new(vec![Cell::I32(1), Cell::String("initial".into())])],
+            &post_truncate_offset,
+        );
+
+        let open = stream
+            .open_channel(config.database(), config.schema(), &table, &channel, None)
+            .await
+            .expect("open channel failed");
+        let created_on_ms = open.status.created_on_ms.expect("open response missing created_on_ms");
+        stream
+            .insert_rows(
+                config.database(),
+                config.schema(),
+                &table,
+                &channel,
+                &initial_batch,
+                &open.continuation_token,
+            )
+            .await
+            .expect("initial append failed");
+        let (initial_rows_inserted, initial_rows_parsed, initial_rows_error_count) =
+            wait_for_progress(&stream, &config, &table, &channel, &post_truncate_offset, 1, 1)
+                .await;
+        assert_eq!(initial_rows_inserted, 1);
+        assert_eq!(initial_rows_parsed, 1);
+        assert_eq!(initial_rows_error_count, 0);
+
+        let rewound = stream
+            .open_channel(
+                config.database(),
+                config.schema(),
+                &table,
+                &channel,
+                Some(&truncate_offset),
+            )
+            .await
+            .expect("reopen with earlier offset failed");
+        assert_eq!(
+            rewound.offset_token.as_ref(),
+            Some(&truncate_offset),
+            "reopen must move the committed offset to the requested boundary"
+        );
+        assert_eq!(
+            rewound.status.created_on_ms,
+            Some(created_on_ms),
+            "explicit rewind must preserve the observed creation timestamp"
+        );
+        assert_eq!(
+            rewound.status.rows_inserted, initial_rows_inserted,
+            "explicit rewind must preserve the inserted-row counter"
+        );
+        assert_eq!(
+            rewound.status.rows_parsed, initial_rows_parsed,
+            "explicit rewind must preserve the parsed-row counter"
+        );
+        assert_eq!(
+            rewound.status.rows_error_count, initial_rows_error_count,
+            "explicit rewind must preserve the rejected-row counter"
+        );
+
+        let replay_batch = build_batch(
+            &cols,
+            &[TableRow::new(vec![Cell::I32(2), Cell::String("replayed".into())])],
+            &post_truncate_offset,
+        );
+        stream
+            .insert_rows(
+                config.database(),
+                config.schema(),
+                &table,
+                &channel,
+                &replay_batch,
+                &rewound.continuation_token,
+            )
+            .await
+            .expect("append after offset rewind failed");
+
+        let (final_rows_inserted, final_rows_parsed, final_rows_error_count) = wait_for_progress(
+            &stream,
+            &config,
+            &table,
+            &channel,
+            &post_truncate_offset,
+            initial_rows_inserted + 1,
+            initial_rows_parsed + 1,
+        )
+        .await;
+        assert_eq!(final_rows_inserted, initial_rows_inserted + 1);
+        assert_eq!(final_rows_parsed, initial_rows_parsed + 1);
+        assert_eq!(final_rows_error_count, 0);
+
+        stream
+            .drop_channel(config.database(), config.schema(), &table, &channel)
+            .await
+            .expect("drop channel failed");
     })
     .await;
 }
@@ -238,7 +480,7 @@ async fn continuation_token() {
         }
 
         let resp = stream
-            .open_channel(config.database(), config.schema(), &table, &channel)
+            .open_channel(config.database(), config.schema(), &table, &channel, None)
             .await
             .expect("open_channel failed");
 

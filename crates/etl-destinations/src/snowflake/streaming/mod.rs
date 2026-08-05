@@ -9,7 +9,7 @@ use std::future::Future;
 pub use batch::{RowBatch, RowBatchBuilder};
 pub(crate) use channel::{
     AcceptedRowBatch, ChannelHandle, DEFAULT_COMMIT_POLL_INTERVAL, DEFAULT_COMMIT_WAIT_TIMEOUT,
-    PendingDurabilityTarget, validate_committed_status,
+    PendingDurabilityTarget,
 };
 pub use offset_token::OffsetToken;
 pub use rest_client::RestStreamClient;
@@ -52,6 +52,12 @@ pub struct ChannelStatusResponse {
     /// Last committed offset token, or `None` if no data has been committed.
     pub offset_token: Option<OffsetToken>,
 
+    /// Snowflake's channel creation timestamp, in milliseconds.
+    ///
+    /// `None` means the channel-status endpoint omitted this field.
+    /// Open-channel responses are required to include it.
+    pub created_on_ms: Option<u64>,
+
     /// Total rows successfully inserted through this channel.
     pub rows_inserted: u64,
 
@@ -80,13 +86,20 @@ pub trait StreamClient: Send + Sync + 'static {
 
     /// Open or reopen a channel.
     ///
-    /// Returns the continuation token and last committed offset token (if any).
+    /// `None` reuses the stored offset token. `Some(offset)` sets it to exactly
+    /// `offset`. Offset tokens are caller-owned checkpoint metadata, Snowflake
+    /// does not interpret their ordering or use them to prevent duplicate
+    /// ingestion.
+    ///
+    /// Implementations must reject the request rather than discard uncommitted
+    /// rows.
     fn open_channel(
         &self,
         database: &str,
         schema: &str,
         table: &str,
         channel: &str,
+        offset_token: Option<&OffsetToken>,
     ) -> impl Future<Output = Result<OpenChannelResponse>> + Send;
 
     /// Drop a channel.

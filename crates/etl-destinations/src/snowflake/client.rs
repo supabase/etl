@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc};
 
 use etl::{
     pipeline::PipelineId,
@@ -7,7 +7,7 @@ use etl::{
 use metrics::{counter, gauge, histogram};
 use tokio::{
     sync::{Mutex, RwLock},
-    time::sleep,
+    time::{Instant, sleep},
 };
 use tracing::warn;
 
@@ -26,7 +26,6 @@ use crate::snowflake::{
     streaming::{
         AcceptedRowBatch, ChannelHandle, DEFAULT_COMMIT_POLL_INTERVAL, DEFAULT_COMMIT_WAIT_TIMEOUT,
         OffsetToken, PendingDurabilityTarget, RestStreamClient, RowBatch, StreamClient,
-        validate_committed_status,
     },
 };
 
@@ -112,6 +111,11 @@ impl PendingDurabilityState {
     /// Returns whether there is no accepted-but-not-durable streaming work.
     fn is_empty(&self) -> bool {
         self.targets.is_empty()
+    }
+
+    /// Returns whether one table still has accepted-but-not-durable work.
+    fn has_target(&self, table_id: TableId) -> bool {
+        self.targets.contains_key(&table_id)
     }
 
     /// Clones the current pending targets for status polling.
@@ -418,12 +422,43 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         }
     }
 
-    /// Truncate the table and reset ingestion state so offsets restart.
-    pub async fn truncate_table(&self, table_id: TableId, table_name: &str) -> Result<()> {
-        self.wait_for_pending_durability().await?;
-        let mut guard = self.get_channel(table_id).await?.lock_owned().await;
-        self.sql_client.truncate_table(table_name).await?;
-        guard.reset().await
+    /// Applies a source truncate to Snowflake and positions the table's
+    /// Snowpipe channel at `truncate_offset`.
+    ///
+    /// Previously accepted rows are made durable first. The channel lock is
+    /// then held while the channel is opened at the truncate boundary, the
+    /// table is cleared, and the channel is reopened after DDL. This makes a
+    /// failed attempt safe to replay: earlier DML is covered by the channel
+    /// offset, while later DML remains eligible for replay.
+    pub async fn truncate_table(
+        &self,
+        table_id: TableId,
+        table_name: &str,
+        truncate_offset: &OffsetToken,
+    ) -> Result<()> {
+        loop {
+            self.wait_for_pending_durability().await?;
+            let mut guard = self.get_channel(table_id).await?.lock_owned().await;
+
+            // A sender holds this channel lock until it records any accepted batch
+            // in `pending_durability`. If a sender finished after the wait above,
+            // release the channel and drain its batch before truncating.
+            if self.pending_durability.lock().await.has_target(table_id) {
+                drop(guard);
+                continue;
+            }
+
+            // Open at the truncate offset before clearing the table. This waits for
+            // any in-flight rowset to commit and invalidates the previous owner's
+            // continuation token.
+            guard.open_at(truncate_offset).await?;
+            self.sql_client.truncate_table(table_name).await?;
+
+            // TRUNCATE may invalidate that token, so reopen at the same offset before
+            // allowing another sender to acquire the channel lock.
+            guard.open_at(truncate_offset).await?;
+            return Ok(());
+        }
     }
 
     /// Retires one table's process-local state before a fresh copy reset.
@@ -516,7 +551,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                 self.wait_for_pending_durability().await?;
             }
 
-            let accepted = channel.lock().await.accept_streaming_batches(vec![batch]).await?;
+            let mut channel = channel.lock().await;
+            let accepted = channel.accept_streaming_batches(vec![batch]).await?;
             for accepted_batch in accepted {
                 let mut pending = self.pending_durability.lock().await;
                 pending.record(table_id, accepted_batch)?;
@@ -576,15 +612,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             let mut committed = Vec::new();
             for (table_id, target) in targets {
                 let channel = self.get_channel(table_id).await?;
-                let status = channel.lock().await.refresh_status().await?;
-                let accepted_batch = target.as_accepted_batch();
-                validate_committed_status(&status, &accepted_batch)?;
-
-                if status
-                    .offset_token
-                    .as_ref()
-                    .is_some_and(|offset| offset >= &target.target_offset)
-                {
+                if channel.lock().await.check_durability(&target, deadline).await? {
                     committed.push((table_id, target.target_offset.clone()));
                 }
             }
@@ -646,7 +674,7 @@ mod tests {
             rows,
             bytes,
             baseline_rows_inserted: 100,
-            baseline_rows_error_count: 1,
+            channel_created_on_ms: 1,
         }
     }
 
@@ -684,7 +712,6 @@ mod tests {
         assert_eq!(target.rows, 5);
         assert_eq!(target.bytes, 50);
         assert_eq!(target.baseline_rows_inserted, 100);
-        assert_eq!(target.baseline_rows_error_count, 1);
     }
 
     #[test]

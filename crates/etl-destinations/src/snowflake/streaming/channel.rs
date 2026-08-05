@@ -23,10 +23,11 @@ use crate::snowflake::{
 /// between retries after Snowflake reports uncommitted channel data.
 pub(crate) const DEFAULT_COMMIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Total wall-clock budget for waiting until accepted rows become committed.
+/// Local polling and recovery budget for waiting until accepted rows commit.
 ///
-/// If this deadline is reached, the destination returns an error instead of
-/// reporting durability or reopening/dropping a channel destructively.
+/// Once this deadline is reached, the destination starts no new channel
+/// operation. An operation already in progress may finish its internal retries
+/// so an Open response and its continuation token are not abandoned.
 pub(crate) const DEFAULT_COMMIT_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Maximum pending table-copy row batches before a durability wait.
@@ -41,6 +42,13 @@ const COPY_PENDING_MAX_ROW_BATCHES: usize = 64;
 /// large batches. It is not a Snowflake service limit.
 const COPY_PENDING_MAX_BYTES: usize = 256 * 1024 * 1024;
 
+/// Maximum channel reopens attempted for one logical append.
+///
+/// Reopening refreshes transiently stale continuation state, but a competing
+/// writer can invalidate every retry. Bound recovery so a persistent ownership
+/// conflict fails closed instead of stalling replication indefinitely.
+const MAX_CHANNEL_RECOVERY_ATTEMPTS: usize = 3;
+
 /// Row batch accepted by a Snowpipe channel.
 #[derive(Debug, Clone)]
 pub(crate) struct AcceptedRowBatch {
@@ -52,15 +60,16 @@ pub(crate) struct AcceptedRowBatch {
     pub bytes: usize,
     /// Cumulative inserted rows before the pending range began.
     pub baseline_rows_inserted: u64,
-    /// Cumulative row errors before the pending range began.
-    pub baseline_rows_error_count: u64,
+    /// Snowflake's millisecond channel-creation timestamp captured when this
+    /// row batch was accepted.
+    pub channel_created_on_ms: u64,
 }
 
 impl AcceptedRowBatch {
     fn from_row_batch(
         batch: &RowBatch,
         baseline_rows_inserted: u64,
-        baseline_rows_error_count: u64,
+        channel_created_on_ms: u64,
     ) -> Result<Self> {
         Ok(Self {
             target_offset: batch.end_offset().clone(),
@@ -69,7 +78,7 @@ impl AcceptedRowBatch {
             })?,
             bytes: batch.size(),
             baseline_rows_inserted,
-            baseline_rows_error_count,
+            channel_created_on_ms,
         })
     }
 }
@@ -91,8 +100,9 @@ pub(crate) struct PendingDurabilityTarget {
     pub row_batches: usize,
     /// Cumulative inserted rows before the pending range began.
     pub baseline_rows_inserted: u64,
-    /// Cumulative row errors before the pending range began.
-    pub baseline_rows_error_count: u64,
+    /// Channel-creation timestamp shared by all accepted batches in this
+    /// target.
+    pub channel_created_on_ms: u64,
 }
 
 impl PendingDurabilityTarget {
@@ -104,13 +114,19 @@ impl PendingDurabilityTarget {
             bytes: batch.bytes,
             row_batches: 1,
             baseline_rows_inserted: batch.baseline_rows_inserted,
-            baseline_rows_error_count: batch.baseline_rows_error_count,
+            channel_created_on_ms: batch.channel_created_on_ms,
         }
     }
 
     /// Extends this target with a later batch from the same channel while
     /// preserving the original channel-status baseline.
     pub(crate) fn record(&mut self, batch: AcceptedRowBatch) -> Result<()> {
+        if self.channel_created_on_ms != batch.channel_created_on_ms {
+            return Err(Error::Channel(
+                "Snowflake channel lineage changed while durability was pending.".into(),
+            ));
+        }
+
         let rows = self
             .rows
             .checked_add(batch.rows)
@@ -140,45 +156,145 @@ impl PendingDurabilityTarget {
             || self.row_batches.saturating_add(1) > COPY_PENDING_MAX_ROW_BATCHES
             || self.bytes.saturating_add(batch_bytes) > COPY_PENDING_MAX_BYTES
     }
-
-    /// Returns aggregate batch metadata for validating this target against
-    /// channel status.
-    pub(crate) fn as_accepted_batch(&self) -> AcceptedRowBatch {
-        AcceptedRowBatch {
-            target_offset: self.target_offset.clone(),
-            rows: self.rows,
-            bytes: self.bytes,
-            baseline_rows_inserted: self.baseline_rows_inserted,
-            baseline_rows_error_count: self.baseline_rows_error_count,
-        }
-    }
 }
 
-/// Last durable status observed for a Snowflake channel.
+/// Validation policy and evidence for one channel-progress observation.
+#[derive(Clone, Copy)]
+enum ProgressObservation<'a> {
+    /// Ordinary open or status refresh, which must advance monotonically.
+    Monotonic,
+    /// Open at an explicit caller-owned offset, which may reposition progress.
+    ExplicitOffset(&'a OffsetToken),
+}
+
+/// Latest validated progress observed for a Snowflake channel.
 #[derive(Debug, Clone, Default)]
 struct ChannelProgress {
     /// Last committed offset reported by Snowflake.
     committed_offset: Option<OffsetToken>,
     /// Cumulative inserted rows reported by Snowflake.
     rows_inserted: u64,
+    /// Cumulative parsed rows reported by Snowflake.
+    rows_parsed: u64,
     /// Last cumulative row-error count observed in this process.
     rows_error_count: Option<u64>,
+    /// Last known channel creation timestamp, in milliseconds.
+    ///
+    /// A different timestamp indicates that the named channel was recreated.
+    /// Missing timestamps do not replace the last known value.
+    created_on_ms: Option<u64>,
 }
 
 impl ChannelProgress {
-    /// Updates progress from a channel status response.
-    fn observe(&mut self, status: &ChannelStatusResponse) {
-        if let Some(previous_rows_error_count) = self.rows_error_count
-            && let Some(rejected_rows) =
-                status.rows_error_count.checked_sub(previous_rows_error_count)
-            && rejected_rows > 0
-        {
-            counter!(ETL_SNOWFLAKE_REJECTED_ROWS_TOTAL).increment(rejected_rows);
+    /// Validates and records a channel-status observation.
+    ///
+    /// Monotonic observations must remain in the same lineage and advance.
+    ///
+    /// An explicit-offset observation may reposition progress and replace the
+    /// lineage. Counters may reset only when the lineage is known to have
+    /// changed.
+    ///
+    /// Rejected-row observations update only the cumulative error baseline
+    /// before returning an error so repeated polls do not recount the same
+    /// rows.
+    fn observe(
+        &mut self,
+        status: &ChannelStatusResponse,
+        observation: ProgressObservation<'_>,
+    ) -> Result<()> {
+        if status.rows_error_count > 0 {
+            if let Some(previous) = self.rows_error_count.replace(status.rows_error_count)
+                && let Some(rejected_rows) = status.rows_error_count.checked_sub(previous)
+                && rejected_rows > 0
+            {
+                counter!(ETL_SNOWFLAKE_REJECTED_ROWS_TOTAL).increment(rejected_rows);
+            }
+            let boundary = status
+                .last_error_offset_upper_bound
+                .as_ref()
+                .map(|offset| format!(" at or before offset {offset}"))
+                .unwrap_or_default();
+            return Err(Error::Channel(format!(
+                "Snowflake channel {} reports {} rejected rows{boundary}; reset or resync is \
+                 required.",
+                status.channel, status.rows_error_count
+            )));
+        }
+
+        // Snowflake does not document creation timestamps as unique.
+        // A changed value proves replacement, equal values still require the offset and
+        // counter checks below.
+        let lineage_changed = matches!(
+            (self.created_on_ms, status.created_on_ms),
+            (Some(previous), Some(current)) if previous != current
+        );
+
+        match observation {
+            ProgressObservation::Monotonic => {
+                if lineage_changed {
+                    return Err(Error::Channel(format!(
+                        "Snowflake channel {} changed lineage while writes may require replay.",
+                        status.channel
+                    )));
+                }
+                if let Some(previous) = self.committed_offset.as_ref()
+                    && status.offset_token.as_ref().is_none_or(|current| current < previous)
+                {
+                    return Err(Error::Channel(format!(
+                        "Snowflake channel {} committed offset moved backward during normal \
+                         recovery.",
+                        status.channel
+                    )));
+                }
+                if status.rows_inserted < self.rows_inserted {
+                    return Err(Error::Channel(format!(
+                        "Snowflake channel {} inserted-row counter moved backward.",
+                        status.channel
+                    )));
+                }
+                if status.rows_parsed < self.rows_parsed {
+                    return Err(Error::Channel(format!(
+                        "Snowflake channel {} parsed-row counter moved backward.",
+                        status.channel
+                    )));
+                }
+            }
+            ProgressObservation::ExplicitOffset(expected_offset) => {
+                if status.offset_token.as_ref() != Some(expected_offset) {
+                    return Err(Error::Channel(format!(
+                        "Snowflake reopened channel {} at offset {:?}, expected {expected_offset}.",
+                        status.channel, status.offset_token
+                    )));
+                }
+                if lineage_changed {
+                    if status.rows_inserted != 0 || status.rows_parsed != 0 {
+                        return Err(Error::Channel(format!(
+                            "Snowflake channel {} replacement lineage is not empty after opening \
+                             with an explicit offset.",
+                            status.channel
+                        )));
+                    }
+                } else if status.rows_inserted != self.rows_inserted
+                    || status.rows_parsed != self.rows_parsed
+                {
+                    return Err(Error::Channel(format!(
+                        "Snowflake channel {} row counters changed while opening with an explicit \
+                         offset.",
+                        status.channel
+                    )));
+                }
+            }
         }
 
         self.committed_offset = status.offset_token.clone();
         self.rows_inserted = status.rows_inserted;
+        self.rows_parsed = status.rows_parsed;
         self.rows_error_count = Some(status.rows_error_count);
+        if status.created_on_ms.is_some() {
+            self.created_on_ms = status.created_on_ms;
+        }
+
+        Ok(())
     }
 
     /// Returns whether `offset` has already committed.
@@ -192,8 +308,25 @@ impl ChannelProgress {
 enum BatchAcceptance {
     /// Snowflake accepted ownership of the batch.
     Accepted(AcceptedRowBatch),
+    /// Channel recovery found the batch's end offset committed after an
+    /// ambiguous append response.
+    ///
+    /// The batch must still participate in cumulative durability accounting:
+    /// another pending batch can otherwise make its row counter appear
+    /// satisfied before Snowflake has exposed all of this batch's rows.
+    Recovered(AcceptedRowBatch),
     /// The batch was already committed before the retry path resent it.
     AlreadyCommitted,
+}
+
+impl BatchAcceptance {
+    /// Returns metadata that must remain in pending durability accounting.
+    fn into_pending_batch(self) -> Option<AcceptedRowBatch> {
+        match self {
+            Self::Accepted(batch) | Self::Recovered(batch) => Some(batch),
+            Self::AlreadyCommitted => None,
+        }
+    }
 }
 
 /// Manages the state and lifecycle of a single Snowpipe Streaming channel.
@@ -216,7 +349,7 @@ pub(crate) struct ChannelHandle<C> {
     /// Derived channel name.
     channel: String,
 
-    /// Last durable status observed for this channel.
+    /// Latest validated progress observed for this channel.
     progress: ChannelProgress,
 
     /// Whether this handle has entered copy writes without completing the
@@ -275,18 +408,70 @@ impl<C: StreamClient> ChannelHandle<C> {
         }
     }
 
-    /// Open or reopen the channel without discarding uncommitted rows.
+    /// Opens or reopens the channel while preserving Snowflake's stored offset.
+    ///
+    /// Opening fences older continuation tokens. If rows are still in flight,
+    /// the request is retried rather than allowing Snowflake to discard them.
     pub async fn open(&mut self) -> Result<ChannelStatusResponse> {
-        let deadline = Instant::now() + self.wait_timeout;
+        self.open_with_deadline(None, Instant::now() + self.wait_timeout).await
+    }
+
+    /// Opens or reopens the channel at an explicit caller-owned offset.
+    ///
+    /// Snowflake replaces its stored token with the `offset`, it does not
+    /// compare token ordering, alter table rows, or prevent duplicate
+    /// ingestion. Callers must therefore coordinate this operation with their
+    /// source position and destination state. The returned offset is verified
+    /// against the requested value.
+    ///
+    /// Opening fences older continuation tokens. If rows are still in flight,
+    /// the request is retried rather than allowing Snowflake to discard them.
+    pub async fn open_at(&mut self, offset: &OffsetToken) -> Result<ChannelStatusResponse> {
+        self.open_with_deadline(Some(offset), Instant::now() + self.wait_timeout).await
+    }
+
+    /// Opens the channel within an existing operation deadline.
+    async fn open_with_deadline(
+        &mut self,
+        offset: Option<&OffsetToken>,
+        deadline: Instant,
+    ) -> Result<ChannelStatusResponse> {
+        let observation = match offset {
+            Some(expected) => ProgressObservation::ExplicitOffset(expected),
+            None => ProgressObservation::Monotonic,
+        };
 
         loop {
+            if Instant::now() >= deadline {
+                return Err(Error::Channel(format!(
+                    "Timed out waiting to open Snowflake channel {}.",
+                    self.channel
+                )));
+            }
+
             match self
                 .client
-                .open_channel(&self.database, &self.schema, &self.table, &self.channel)
+                .open_channel(&self.database, &self.schema, &self.table, &self.channel, offset)
                 .await
             {
                 Ok(response) => {
-                    self.progress.observe(&response.status);
+                    if response.status.created_on_ms.is_none() {
+                        return Err(Error::Channel(format!(
+                            "Snowflake open response for channel {} omitted its creation \
+                             timestamp.",
+                            self.channel
+                        )));
+                    }
+                    if response.status.rows_error_count == 0
+                        && response.status.rows_parsed != response.status.rows_inserted
+                    {
+                        return Err(Error::Channel(format!(
+                            "Snowflake channel {} returned inconsistent row counters after \
+                             opening.",
+                            self.channel
+                        )));
+                    }
+                    self.progress.observe(&response.status, observation)?;
                     self.continuation_token = Some(response.continuation_token);
                     return Ok(response.status);
                 }
@@ -342,31 +527,66 @@ impl<C: StreamClient> ChannelHandle<C> {
         }
     }
 
-    /// Drop and reopen the channel, resetting offsets.
-    pub async fn reset(&mut self) -> Result<()> {
-        self.drop_channel().await?;
-        self.open().await?;
-        Ok(())
-    }
-
     /// Returns whether `offset` has already been committed.
     pub fn is_offset_committed(&self, offset: &OffsetToken) -> bool {
         self.progress.is_committed(offset)
     }
 
-    /// Refreshes channel status and returns the latest status.
-    pub async fn refresh_status(&mut self) -> Result<ChannelStatusResponse> {
-        let status = self
+    /// Refreshes channel status within `deadline`.
+    async fn refresh_status(&mut self, deadline: Instant) -> Result<ChannelStatusResponse> {
+        if Instant::now() >= deadline {
+            return Err(Error::Channel(format!(
+                "Timed out waiting for Snowflake channel {} status.",
+                self.channel
+            )));
+        }
+
+        let status = match self
             .client
             .channel_status(&self.database, &self.schema, &self.table, &self.channel)
-            .await?;
-        self.progress.observe(&status);
+            .await
+        {
+            Ok(status) => status,
+            Err(Error::Snowpipe(error)) if error.is_reopenable_channel_error() => {
+                counter!(ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL).increment(1);
+                warn!(
+                    table = %self.table,
+                    channel = %self.channel,
+                    error = %error,
+                    "channel status requires reopen"
+                );
+                return self.open_with_deadline(None, deadline).await;
+            }
+            Err(error) => return Err(error),
+        };
+        self.progress.observe(&status, ProgressObservation::Monotonic)?;
         Ok(status)
+    }
+
+    /// Checks whether the latest channel status proves that `target` is
+    /// durable.
+    ///
+    /// An invalid channel is reopened for recovery before its status is
+    /// checked.
+    pub(crate) async fn check_durability(
+        &mut self,
+        target: &PendingDurabilityTarget,
+        deadline: Instant,
+    ) -> Result<bool> {
+        let status = self.refresh_status(deadline).await?;
+        if self.copy_barrier_pending
+            && let Some(committed) = status.offset_token.as_ref()
+        {
+            self.validate_copy_committed_offset(committed)?;
+        }
+
+        status_proves_durability(&status, target)
     }
 
     /// Fetches the latest committed offset and updates cached channel progress.
     pub async fn fetch_committed_offset(&mut self) -> Result<Option<OffsetToken>> {
-        self.refresh_status().await.map(|status| status.offset_token)
+        let deadline = Instant::now() + self.wait_timeout;
+        self.refresh_status(deadline).await.map(|status| status.offset_token)
     }
 
     /// Accepts table-copy batches into a bounded deferred-durability window.
@@ -388,7 +608,7 @@ impl<C: StreamClient> ChannelHandle<C> {
             let offset = self.reserve_copy_offset()?;
             let batch = batch.with_request_offset(offset);
 
-            if let BatchAcceptance::Accepted(accepted) = self.accept_batch(&batch).await? {
+            if let Some(accepted) = self.accept_batch(&batch).await?.into_pending_batch() {
                 match &mut self.copy_durability_target {
                     Some(target) => target.record(accepted)?,
                     None => {
@@ -446,9 +666,8 @@ impl<C: StreamClient> ChannelHandle<C> {
 
         let mut accepted = Vec::new();
         for batch in &batches {
-            match self.accept_batch(batch).await? {
-                BatchAcceptance::Accepted(batch) => accepted.push(batch),
-                BatchAcceptance::AlreadyCommitted => {}
+            if let Some(batch) = self.accept_batch(batch).await?.into_pending_batch() {
+                accepted.push(batch);
             }
         }
 
@@ -507,16 +726,9 @@ impl<C: StreamClient> ChannelHandle<C> {
             return Ok(());
         };
         let deadline = Instant::now() + self.wait_timeout;
-        let accepted = target.as_accepted_batch();
 
         loop {
-            let status = self.refresh_status().await?;
-            if let Some(committed) = status.offset_token.as_ref() {
-                self.validate_copy_committed_offset(committed)?;
-            }
-            validate_committed_status(&status, &accepted)?;
-
-            if status.offset_token.as_ref().is_some_and(|offset| offset >= &target.target_offset) {
+            if self.check_durability(&target, deadline).await? {
                 self.copy_durability_target = None;
                 return Ok(());
             }
@@ -557,7 +769,7 @@ impl<C: StreamClient> ChannelHandle<C> {
                 counter!(ETL_SNOWFLAKE_ACCEPTED_BATCHES_TOTAL).increment(1);
                 counter!(ETL_SNOWFLAKE_ACCEPTED_ROWS_TOTAL).increment(accepted.rows);
             }
-            Ok(BatchAcceptance::AlreadyCommitted) => {}
+            Ok(BatchAcceptance::Recovered(_) | BatchAcceptance::AlreadyCommitted) => {}
             Err(error) => {
                 counter!(
                     ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL,
@@ -582,73 +794,78 @@ impl<C: StreamClient> ChannelHandle<C> {
             )));
         }
 
-        let baseline_rows_inserted = self.progress.rows_inserted;
-        let baseline_rows_error_count = self.progress.rows_error_count.unwrap_or_default();
+        let original_accepted = self.accepted_batch_from_progress(batch)?;
+        let mut recovery_attempts = 0;
 
         histogram!(ETL_SNOWFLAKE_BATCH_SIZE).record(batch.row_count() as f64);
         histogram!(ETL_SNOWFLAKE_BATCH_BYTES).record(batch.size() as f64);
 
-        match self.append_batch(batch).await {
-            Ok(()) => Ok(BatchAcceptance::Accepted(AcceptedRowBatch::from_row_batch(
-                batch,
-                baseline_rows_inserted,
-                baseline_rows_error_count,
-            )?)),
-            Err(Error::Snowpipe(SnowpipeError::StaleContinuation)) => {
-                counter!(ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL).increment(1);
-                warn!(
-                    table = %self.table,
-                    channel = %self.channel,
-                    "channel was stale, reopening and retrying insert"
-                );
-                let status = self.open().await?;
+        loop {
+            let accepted = self.accepted_batch_from_progress(batch)?;
+            match self.append_batch(batch).await {
+                Ok(()) => return Ok(BatchAcceptance::Accepted(accepted)),
+                Err(Error::Snowpipe(error)) if error.is_reopenable_channel_error() => {
+                    if recovery_attempts >= MAX_CHANNEL_RECOVERY_ATTEMPTS {
+                        return Err(Error::Channel(format!(
+                            "Snowflake channel {} remained invalid after {} recovery attempts; \
+                             another writer may own the channel.",
+                            self.channel, MAX_CHANNEL_RECOVERY_ATTEMPTS
+                        )));
+                    }
+                    recovery_attempts += 1;
+                    counter!(ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL).increment(1);
+                    warn!(
+                        table = %self.table,
+                        channel = %self.channel,
+                        recovery_attempt = recovery_attempts,
+                        error = %error,
+                        "channel requires reopen before retrying insert"
+                    );
+                    let status = self.open().await?;
 
-                if self.copy_barrier_pending
-                    && let Some(committed) = status.offset_token.as_ref()
-                {
-                    self.validate_copy_committed_offset(committed)?;
+                    if self.copy_barrier_pending
+                        && let Some(committed) = status.offset_token.as_ref()
+                    {
+                        self.validate_copy_committed_offset(committed)?;
+                    }
+
+                    if status
+                        .offset_token
+                        .as_ref()
+                        .is_some_and(|committed| committed >= batch.end_offset())
+                    {
+                        return Ok(BatchAcceptance::Recovered(original_accepted));
+                    }
+
+                    if status
+                        .offset_token
+                        .as_ref()
+                        .is_some_and(|committed| committed >= batch.start_offset())
+                    {
+                        return Err(Error::Channel(format!(
+                            "Snowflake channel recovery found committed offset {:?} inside batch \
+                             {}..={}; failing closed for upstream replay.",
+                            self.progress.committed_offset,
+                            batch.start_offset(),
+                            batch.end_offset()
+                        )));
+                    }
                 }
-
-                if status
-                    .offset_token
-                    .as_ref()
-                    .is_some_and(|committed| committed >= batch.end_offset())
-                {
-                    let accepted = AcceptedRowBatch::from_row_batch(
-                        batch,
-                        baseline_rows_inserted,
-                        baseline_rows_error_count,
-                    )?;
-                    validate_committed_status(&status, &accepted)?;
-                    return Ok(BatchAcceptance::AlreadyCommitted);
-                }
-
-                if status
-                    .offset_token
-                    .as_ref()
-                    .is_some_and(|committed| committed >= batch.start_offset())
-                {
-                    return Err(Error::Channel(format!(
-                        "Snowflake stale-channel recovery found committed offset {:?} inside \
-                         batch {}..={}; failing closed for upstream replay.",
-                        self.progress.committed_offset,
-                        batch.start_offset(),
-                        batch.end_offset()
-                    )));
-                }
-
-                let baseline_rows_inserted = self.progress.rows_inserted;
-                let baseline_rows_error_count = self.progress.rows_error_count.unwrap_or_default();
-                self.append_batch(batch).await?;
-
-                Ok(BatchAcceptance::Accepted(AcceptedRowBatch::from_row_batch(
-                    batch,
-                    baseline_rows_inserted,
-                    baseline_rows_error_count,
-                )?))
+                Err(error) => return Err(error),
             }
-            Err(error) => Err(error),
         }
+    }
+
+    /// Builds durability metadata against the currently observed channel state.
+    fn accepted_batch_from_progress(&self, batch: &RowBatch) -> Result<AcceptedRowBatch> {
+        let channel_created_on_ms = self.progress.created_on_ms.ok_or_else(|| {
+            Error::Channel(format!(
+                "Snowflake channel {} has no observed creation timestamp.",
+                self.channel
+            ))
+        })?;
+
+        AcceptedRowBatch::from_row_batch(batch, self.progress.rows_inserted, channel_created_on_ms)
     }
 
     async fn append_batch(&mut self, batch: &RowBatch) -> Result<()> {
@@ -667,31 +884,36 @@ impl<C: StreamClient> ChannelHandle<C> {
     }
 }
 
-/// Validates that a channel status has not rejected rows for an accepted range.
-pub(crate) fn validate_committed_status(
+/// Returns whether channel status proves an accepted range is fully durable.
+///
+/// Snowflake may expose the committed offset before cumulative row counters
+/// converge. That state remains pending until a later status observation.
+fn status_proves_durability(
     status: &ChannelStatusResponse,
-    accepted: &AcceptedRowBatch,
-) -> Result<()> {
-    if status.rows_error_count > accepted.baseline_rows_error_count {
+    target: &PendingDurabilityTarget,
+) -> Result<bool> {
+    if status.created_on_ms.is_some_and(|observed| target.channel_created_on_ms != observed) {
         return Err(Error::Channel(format!(
-            "Snowflake channel {} rejected rows while committing offset {}.",
-            status.channel, accepted.target_offset
+            "Snowflake channel {} changed lineage while rows were awaiting durability.",
+            status.channel
         )));
     }
 
-    if status.offset_token.as_ref().is_some_and(|committed| committed >= &accepted.target_offset) {
-        let expected_rows_inserted =
-            accepted.baseline_rows_inserted.checked_add(accepted.rows).ok_or_else(|| {
-                Error::Channel("Snowflake expected inserted row count overflowed.".into())
-            })?;
-        if status.rows_inserted < expected_rows_inserted {
-            return Err(Error::Channel(format!(
-                "Snowflake channel {} committed offset {} without inserting all accepted rows: \
-                 expected at least {expected_rows_inserted}, got {}.",
-                status.channel, accepted.target_offset, status.rows_inserted
-            )));
-        }
+    if status.rows_error_count > 0 {
+        return Err(Error::Channel(format!(
+            "Snowflake channel {} rejected rows while committing offset {}.",
+            status.channel, target.target_offset
+        )));
     }
 
-    Ok(())
+    if status.offset_token.as_ref().is_none_or(|committed| committed < &target.target_offset) {
+        return Ok(false);
+    }
+
+    let expected_rows_inserted =
+        target.baseline_rows_inserted.checked_add(target.rows).ok_or_else(|| {
+            Error::Channel("Snowflake expected inserted row count overflowed.".into())
+        })?;
+
+    Ok(status.rows_inserted >= expected_rows_inserted)
 }

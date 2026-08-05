@@ -30,8 +30,8 @@ const USER_AGENT: &str = "supabase-etl/0.1.0";
 /// Discovers the ingest host on first use and caches it for the lifetime of the
 /// client.
 ///
-/// All mutating calls (open/drop channel, insert rows, channel status) are
-/// retried with exponential backoff.
+/// Snowpipe requests other than ingest-host discovery are retried with
+/// exponential backoff.
 pub struct RestStreamClient<T> {
     account_url: String,
     auth: Arc<T>,
@@ -101,12 +101,14 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         schema: &str,
         table: &str,
         channel: &str,
+        offset_token: Option<&OffsetToken>,
     ) -> Result<OpenChannelResponse> {
         let host = self.get_or_discover_host().await?;
         let url = channel_url(host, database, schema, table, channel);
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
+        let request_body = ChannelLifecycleRequest::new(offset_token);
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
@@ -125,6 +127,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                 let url = url.clone();
                 let auth = Arc::clone(&auth);
                 let http = http.clone();
+                let body = &request_body;
 
                 async move {
                     let token = auth.get_token().await?;
@@ -133,7 +136,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         .bearer_auth(&token)
                         .header("User-Agent", USER_AGENT)
                         .header("Content-Type", "application/json")
-                        .json(&ChannelLifecycleRequest::new())
+                        .json(body)
                         .send()
                         .await
                         .map_err(Error::HttpTransport)?;
@@ -152,18 +155,15 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         Error::Encoding(format!("failed to parse open_channel response: {e}"))
                     })?;
 
-                    let status = response.channel_status.ok_or_else(|| {
-                        Error::Encoding("open_channel response missing channel_status".into())
-                    })?;
+                    let status = response.channel_status;
 
-                    if let Some(ref code) = status.channel_status_code {
-                        let is_ok = code == "SUCCESS" || code == "ACTIVE" || code == "0";
-                        if !is_ok {
-                            let msg = format!("open_channel returned unexpected status: {code}");
-                            return Err(
-                                SnowpipeError::ApiStatus { status_code: 1, message: msg }.into()
-                            );
-                        }
+                    let code = &status.channel_status_code;
+                    let is_ok = code == "SUCCESS" || code == "ACTIVE" || code == "0";
+                    if !is_ok {
+                        let msg = format!("open_channel returned unexpected status: {code}");
+                        return Err(
+                            SnowpipeError::ApiStatus { status_code: 1, message: msg }.into()
+                        );
                     }
 
                     let status = status.into_channel_status(channel)?;
@@ -271,6 +271,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
+        let request_body = ChannelLifecycleRequest::new(None);
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
@@ -289,13 +290,14 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                 let url = url.clone();
                 let auth = Arc::clone(&auth);
                 let http = http.clone();
+                let body = &request_body;
                 async move {
                     let token = auth.get_token().await?;
                     let resp = http
                         .delete(&url)
                         .bearer_auth(&token)
                         .header("User-Agent", USER_AGENT)
-                        .json(&ChannelLifecycleRequest::new())
+                        .json(body)
                         .send()
                         .await
                         .map_err(Error::HttpTransport)?;
@@ -329,7 +331,8 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
-        let channel_names = vec![channel.to_owned()];
+        let requested_channel = channel.to_owned();
+        let channel_names = vec![requested_channel.clone()];
         let request_body = BulkStatusRequest { channel_names: &channel_names };
 
         retry_with_backoff(
@@ -350,6 +353,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                 let auth = Arc::clone(&auth);
                 let http = http.clone();
                 let body = &request_body;
+                let requested_channel = requested_channel.clone();
                 async move {
                     let token = auth.get_token().await?;
                     let resp = http
@@ -371,14 +375,20 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         return Err(SnowpipeError::from_response(status, body).into());
                     }
 
-                    let response: BulkStatusApiResponse = resp.json().await.map_err(|e| {
+                    let mut response: BulkStatusApiResponse = resp.json().await.map_err(|e| {
                         Error::Encoding(format!("failed to parse channel_status response: {e}"))
                     })?;
 
-                    response.channel_statuses.into_iter().next().map_or_else(
-                        || Err(Error::Channel("channel not found in status response".into())),
-                        |(name, ch)| ch.into_channel_status(&name),
-                    )
+                    let channel = response
+                        .channel_statuses
+                        .remove(&requested_channel)
+                        .ok_or(SnowpipeError::ChannelNotFound)?;
+                    let status = channel.into_channel_status(&requested_channel)?;
+                    if status.status_code == "SUCCESS" {
+                        Ok(status)
+                    } else {
+                        Err(SnowpipeError::ChannelInvalidated.into())
+                    }
                 }
             },
         )
@@ -422,6 +432,7 @@ fn should_retry(error: &Error) -> RetryDecision {
         Error::Snowpipe(error) => match error {
             SnowpipeError::AuthenticationExpired => RetryDecision::Retry,
             SnowpipeError::StaleContinuation
+            | SnowpipeError::ChannelInvalidated
             | SnowpipeError::ChannelHasUncommittedRows
             | SnowpipeError::ChannelNotFound => RetryDecision::Stop,
             SnowpipeError::ApiStatus { status_code, .. } => match *status_code {
@@ -455,36 +466,35 @@ struct HostnameResponse {
 }
 
 #[derive(Serialize)]
-struct ChannelLifecycleRequest {
+struct ChannelLifecycleRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offset_token: Option<&'a str>,
     fail_on_uncommitted_rows: bool,
 }
 
-impl ChannelLifecycleRequest {
-    fn new() -> Self {
-        Self { fail_on_uncommitted_rows: true }
+impl<'a> ChannelLifecycleRequest<'a> {
+    fn new(offset_token: Option<&'a OffsetToken>) -> Self {
+        Self { offset_token: offset_token.map(AsRef::as_ref), fail_on_uncommitted_rows: true }
     }
 }
 
 #[derive(Deserialize)]
 struct OpenChannelApiResponse {
     next_continuation_token: String,
-    #[serde(default)]
-    channel_status: Option<ChannelStatusDetail>,
+    channel_status: ChannelStatusDetail,
 }
 
 #[derive(Deserialize)]
 struct ChannelStatusDetail {
     #[serde(default)]
     channel_name: Option<String>,
-    #[serde(default)]
-    channel_status_code: Option<String>,
+    channel_status_code: String,
     #[serde(default)]
     last_committed_offset_token: Option<String>,
-    #[serde(default)]
+    created_on_ms: u64,
     rows_inserted: u64,
-    #[serde(default)]
     rows_parsed: u64,
-    #[serde(default, alias = "rows_errors")]
+    #[serde(alias = "rows_errors")]
     rows_error_count: u64,
     #[serde(default)]
     last_error_offset_upper_bound: Option<String>,
@@ -496,8 +506,9 @@ impl ChannelStatusDetail {
     fn into_channel_status(self, fallback_channel: &str) -> Result<ChannelStatusResponse> {
         Ok(ChannelStatusResponse {
             channel: self.channel_name.unwrap_or_else(|| fallback_channel.to_owned()),
-            status_code: self.channel_status_code.unwrap_or_default(),
+            status_code: self.channel_status_code,
             offset_token: parse_optional_offset_token(self.last_committed_offset_token)?,
+            created_on_ms: Some(self.created_on_ms),
             rows_inserted: self.rows_inserted,
             rows_parsed: self.rows_parsed,
             rows_error_count: self.rows_error_count,
@@ -527,17 +538,16 @@ struct BulkStatusApiResponse {
 
 #[derive(Deserialize)]
 struct BulkStatusChannel {
-    #[serde(default)]
-    channel_status_code: Option<String>,
+    channel_status_code: String,
     #[serde(default)]
     last_committed_offset_token: Option<String>,
     #[serde(default)]
     channel_name: Option<String>,
     #[serde(default)]
+    created_on_ms: Option<u64>,
     rows_inserted: u64,
-    #[serde(default)]
     rows_parsed: u64,
-    #[serde(default, alias = "rows_errors")]
+    #[serde(alias = "rows_errors")]
     rows_error_count: u64,
     #[serde(default)]
     last_error_offset_upper_bound: Option<String>,
@@ -549,8 +559,9 @@ impl BulkStatusChannel {
     fn into_channel_status(self, fallback_channel: &str) -> Result<ChannelStatusResponse> {
         Ok(ChannelStatusResponse {
             channel: self.channel_name.unwrap_or_else(|| fallback_channel.to_owned()),
-            status_code: self.channel_status_code.unwrap_or_default(),
+            status_code: self.channel_status_code,
             offset_token: parse_optional_offset_token(self.last_committed_offset_token)?,
+            created_on_ms: self.created_on_ms,
             rows_inserted: self.rows_inserted,
             rows_parsed: self.rows_parsed,
             rows_error_count: self.rows_error_count,
@@ -717,6 +728,7 @@ mod tests {
             "channel_name": "ch0",
             "channel_status_code": "ACTIVE",
             "last_committed_offset_token": "000000000000000a/0000000000000002",
+            "created_on_ms": 123,
             "rows_inserted": 12,
             "rows_parsed": 13,
             "rows_error_count": 1,
@@ -730,6 +742,7 @@ mod tests {
         assert_eq!(status.channel, "ch0");
         assert_eq!(status.status_code, "ACTIVE");
         assert_eq!(status.offset_token, Some("000000000000000a/0000000000000002".parse().unwrap()));
+        assert_eq!(status.created_on_ms, Some(123));
         assert_eq!(status.rows_inserted, 12);
         assert_eq!(status.rows_parsed, 13);
         assert_eq!(status.rows_error_count, 1);
@@ -741,6 +754,7 @@ mod tests {
 
         // Bulk Get Channel Status documents the same counter as `rows_errors`.
         let detail: BulkStatusChannel = serde_json::from_value(json!({
+            "channel_status_code": "SUCCESS",
             "last_committed_offset_token": "000000000000000a/0000000000000002",
             "rows_inserted": 12,
             "rows_parsed": 13,
@@ -751,6 +765,8 @@ mod tests {
         let status = detail.into_channel_status("fallback").unwrap();
 
         assert_eq!(status.channel, "fallback");
+        assert_eq!(status.status_code, "SUCCESS");
+        assert_eq!(status.created_on_ms, None);
         assert_eq!(status.rows_inserted, 12);
         assert_eq!(status.rows_parsed, 13);
         assert_eq!(status.rows_error_count, 2);
