@@ -286,10 +286,11 @@ fn run_clickhouse_tests(config: &TestClickhouseConfig, sccache: bool) -> Result<
     run_command(cmd, "Failed to run ClickHouse destination tests")
 }
 
-/// Builds Cargo test arguments.
+/// Builds cargo-nextest arguments.
 fn test_args(config: &TestClickhouseConfig) -> Vec<String> {
     let mut args = vec![
-        "test".to_owned(),
+        "nextest".to_owned(),
+        "run".to_owned(),
         "-p".to_owned(),
         config.cargo_package.clone(),
         "--features".to_owned(),
@@ -301,8 +302,6 @@ fn test_args(config: &TestClickhouseConfig) -> Vec<String> {
     if !config.test_name_filter.is_empty() {
         args.push(config.test_name_filter.clone());
     }
-
-    args.extend(["--".to_owned(), "--test-threads=1".to_owned(), "--nocapture".to_owned()]);
     args
 }
 
