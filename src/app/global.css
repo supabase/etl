@@ -474,6 +474,10 @@ button {
   --etl-lane-stagger: 70ms;
   /* How long each destination kind is held before the next takes its place. */
   --etl-destination-step: 3.2s;
+  /* The drum stays put well after the intro settles, so the first turn reads as
+     a deliberate change rather than part of the entrance. Its first rotation
+     lands at this delay plus one hold. */
+  --etl-t-drum: 5.4s;
   /* How long a packet spends inside the hub before it leaves the far side. */
   --etl-hub-dwell: 0.42s;
 
@@ -624,7 +628,11 @@ button {
   position: absolute;
   inset: 0;
   transform-style: preserve-3d;
-  animation: etl-destination-drum calc(var(--etl-destination-step) * 5) infinite;
+  /* Resting pose, also what shows during the start delay: the front face seated
+     at z = 0 so the perspective does not scale it up. */
+  transform: translateZ(calc(var(--drum-radius) * -1));
+  animation: etl-destination-drum calc(var(--etl-destination-step) * 5)
+    var(--etl-t-drum) infinite;
 }
 
 .etl-destination-face {
