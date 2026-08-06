@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Duration};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 use crate::{
     retry::{RetryDecision, RetryPolicy, retry_with_backoff},
@@ -69,8 +70,13 @@ impl<T: TokenProvider> SqlClient<T> {
     }
 
     /// Execute a DDL statement (runs on Cloud Services, no warehouse required).
+    ///
+    /// Generates one request ID for this invocation so Snowflake can reconcile
+    /// transport retries. A later invocation gets a new ID: recovery across
+    /// invocations requires an operation-specific caller-owned identity.
     pub async fn execute_ddl(&self, sql: &str) -> Result<()> {
-        self.execute_statement(sql).await?;
+        let request_id = Uuid::new_v4();
+        self.execute_statement_with_request_id(sql, request_id).await?;
         Ok(())
     }
 
@@ -88,9 +94,14 @@ impl<T: TokenProvider> SqlClient<T> {
     }
 
     /// Remove all rows from a table without dropping it.
-    pub async fn truncate_table(&self, table_name: &str) -> Result<()> {
+    ///
+    /// `request_id` must remain stable while one execution has an unknown
+    /// outcome and must change for each later physical truncate attempt.
+    pub async fn truncate_table(&self, table_name: &str, request_id: Uuid) -> Result<()> {
         let fqn = self.fully_qualified_name(table_name);
-        self.execute_ddl(&format!("TRUNCATE TABLE {fqn}")).await
+        self.execute_statement_with_request_id(&format!("TRUNCATE TABLE {fqn}"), request_id)
+            .await?;
+        Ok(())
     }
 
     /// Drop a table if it exists.
@@ -172,7 +183,26 @@ impl<T: TokenProvider> SqlClient<T> {
     /// - Other 4xx: non-retriable `Error::HttpStatus`.
     pub(crate) async fn execute_statement(&self, sql: &str) -> Result<StatementResponse> {
         let url = format!("{}/api/v2/statements", self.config.account_url());
+        self.execute_statement_at_url(sql, &url).await
+    }
 
+    /// Submit a retry-safe SQL statement with a caller-owned request ID.
+    async fn execute_statement_with_request_id(
+        &self,
+        sql: &str,
+        request_id: Uuid,
+    ) -> Result<StatementResponse> {
+        let url = self.statement_url_with_request_id(request_id);
+        self.execute_statement_at_url(sql, &url).await
+    }
+
+    /// Build the retry-safe SQL statement URL for one logical request.
+    fn statement_url_with_request_id(&self, request_id: Uuid) -> String {
+        format!("{}/api/v2/statements?requestId={request_id}&retry=true", self.config.account_url())
+    }
+
+    /// Submit a SQL statement to a prebuilt URL and reuse it across retries.
+    async fn execute_statement_at_url(&self, sql: &str, url: &str) -> Result<StatementResponse> {
         let body = StatementRequest {
             statement: sql,
             database: &self.config.database,
@@ -193,7 +223,7 @@ impl<T: TokenProvider> SqlClient<T> {
                     "retrying sql rest api request"
                 );
             },
-            || self.attempt_statement(&url, &body),
+            || self.attempt_statement(url, &body),
         )
         .await
         .map_err(|f| f.last_error)
@@ -350,6 +380,24 @@ fn classify_for_retry(error: &Error) -> RetryDecision {
 mod tests {
     use super::*;
 
+    /// Token provider used by hermetic SQL client tests.
+    struct TestTokenProvider;
+
+    impl TokenProvider for TestTokenProvider {
+        async fn get_token(&self) -> Result<String> {
+            Ok("test-token".to_owned())
+        }
+
+        async fn invalidate_token(&self) {}
+    }
+
+    /// Build a SQL client with deterministic, non-secret configuration.
+    fn test_client() -> SqlClient<TestTokenProvider> {
+        let config = Config::new("example-account", "test-user", "test-db", "test-schema")
+            .expect("test configuration should be valid");
+        SqlClient::new(config, Arc::new(TestTokenProvider), Client::new())
+    }
+
     #[test]
     fn classify_for_retry_cases() {
         let cases = [
@@ -377,5 +425,29 @@ mod tests {
         for (error, expected) in cases {
             assert_eq!(classify_for_retry(&error), expected, "error: {error:?}");
         }
+    }
+
+    /// Request-aware statement URLs carry Snowflake's retry parameters.
+    #[test]
+    fn statement_url_with_request_id_includes_retry_parameters() {
+        let client = test_client();
+        let request_id = Uuid::parse_str("67e55044-10b1-426f-9247-bb680e5fe0c8")
+            .expect("request ID should be valid");
+
+        let url = reqwest::Url::parse(&client.statement_url_with_request_id(request_id))
+            .expect("statement URL should be valid");
+        let query_pairs = url
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(url.path(), "/api/v2/statements");
+        assert_eq!(
+            query_pairs,
+            vec![
+                ("requestId".to_owned(), request_id.to_string()),
+                ("retry".to_owned(), "true".to_owned()),
+            ]
+        );
     }
 }

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use etl::{
     bail,
@@ -38,6 +42,27 @@ type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
 /// Maximum time allowed to drain Snowflake event tasks and retire local table
 /// state before a reset.
 const RESET_PREPARATION_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Takes consecutive truncate operations without collapsing distinct source
+/// boundaries. An outcome-unknown earlier truncate must be reconciled before a
+/// later boundary; otherwise it could finish late and erase rows restored after
+/// the later truncate. Duplicate tables are collapsed only within one event.
+fn take_truncate_operations(iter: &mut EventIter) -> Vec<(ReplicatedTableSchema, OffsetToken)> {
+    let mut operations = Vec::new();
+    while matches!(iter.peek(), Some(Event::Truncate(_))) {
+        if let Some(Event::Truncate(truncate)) = iter.next() {
+            let offset = OffsetToken::new(truncate.commit_lsn, truncate.tx_ordinal);
+            let mut table_ids = HashSet::new();
+            for schema in truncate.truncated_tables {
+                if table_ids.insert(schema.id()) {
+                    operations.push((schema, offset.clone()));
+                }
+            }
+        }
+    }
+
+    operations
+}
 
 /// Coordinates the initial Snowflake setup of each table.
 ///
@@ -333,22 +358,10 @@ where
     }
 
     async fn apply_truncate_events(&self, iter: &mut EventIter) -> EtlResult<bool> {
-        // Collect consecutive truncate events by table.
-        // Keep the latest offset, for each table.
-        let mut truncated: HashMap<TableId, (ReplicatedTableSchema, OffsetToken)> = HashMap::new();
-        while matches!(iter.peek(), Some(Event::Truncate(_))) {
-            if let Some(Event::Truncate(truncate)) = iter.next() {
-                let offset = OffsetToken::new(truncate.commit_lsn, truncate.tx_ordinal);
-                for schema in truncate.truncated_tables {
-                    // Keep each table's latest consecutive truncate boundary.
-                    truncated.insert(schema.id(), (schema, offset.clone()));
-                }
-            }
-        }
-        let had_truncates = !truncated.is_empty();
+        let operations = take_truncate_operations(iter);
+        let had_truncates = !operations.is_empty();
 
-        // Truncate tables.
-        for (_, (schema, offset)) in truncated {
+        for (schema, offset) in operations {
             self.prepare_table_for_streaming(&schema).await?;
             let table_name = try_stringify_table_name(schema.name())?.to_uppercase();
             self.client
@@ -776,7 +789,7 @@ mod tests {
 
     use etl::{
         data::{Cell, PartialTableRow},
-        event::RelationEvent,
+        event::{RelationEvent, TruncateEvent},
         pipeline::PipelineId,
         schema::{IdentityMask, PgLsn, ReplicationMask, SnapshotId, TableName, TableSchema, Type},
         store::StateStore,
@@ -840,6 +853,39 @@ mod tests {
         let identity_mask = IdentityMask::from_bytes(vec![1, 0]);
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    #[test]
+    fn truncate_operations_preserve_distinct_source_boundaries() {
+        let schema = replicated_schema();
+        let first_offset = OffsetToken::new(PgLsn::from(10_u64), 1);
+        let second_offset = OffsetToken::new(PgLsn::from(20_u64), 2);
+        let mut iter = vec![
+            Event::Truncate(TruncateEvent {
+                commit_lsn: PgLsn::from(10_u64),
+                tx_ordinal: 1,
+                options: 0,
+                truncated_tables: vec![schema.clone(), schema.clone()],
+            }),
+            Event::Truncate(TruncateEvent {
+                commit_lsn: PgLsn::from(20_u64),
+                tx_ordinal: 2,
+                options: 0,
+                truncated_tables: vec![schema.clone()],
+            }),
+            Event::Unsupported,
+        ]
+        .into_iter()
+        .peekable();
+
+        let operations = take_truncate_operations(&mut iter);
+
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0].0.id(), schema.id());
+        assert_eq!(operations[0].1, first_offset);
+        assert_eq!(operations[1].0.id(), schema.id());
+        assert_eq!(operations[1].1, second_offset);
+        assert!(matches!(iter.next(), Some(Event::Unsupported)));
     }
 
     #[tokio::test]

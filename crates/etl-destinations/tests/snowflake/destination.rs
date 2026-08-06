@@ -475,10 +475,10 @@ async fn whole_transaction_replay_restores_post_truncate_rows() {
         // before its source checkpoint advanced. The fresh destination must
         // therefore replay the whole transaction, including the first insert.
         let pipeline_id: PipelineId = 1;
-        let restarted_destination =
+        let first_restarted_destination =
             Destination::new(Client::new(build_auth(), pipeline_id), harness.store.clone());
         let replay_status = invoke_write_events(
-            &restarted_destination,
+            &first_restarted_destination,
             WriteEventsDurability::RequireDurable,
             truncate_replay_events(&schema),
         )
@@ -488,7 +488,37 @@ async fn whole_transaction_replay_restores_post_truncate_rows() {
 
         let post_truncate_offset = OffsetToken::new(PgLsn::from(20_u64), 3);
         let rows = poll_and_query_rows(
-            &restarted_destination,
+            &first_restarted_destination,
+            &harness,
+            table_id,
+            &sf_table,
+            &post_truncate_offset,
+        )
+        .await;
+        // The first replay must restore the later row exactly once before the
+        // next replay has a chance to repair it.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], serde_json::json!("2"));
+        assert_eq!(rows[0][1], serde_json::json!("after"));
+        assert_eq!(rows[0][3], serde_json::json!(post_truncate_offset.to_string()));
+
+        // Replay the same source range through another fresh process. The
+        // channel has advanced since the previous physical truncate, so this
+        // cycle must derive a new request ID and clear the previously restored
+        // row before inserting it again.
+        let second_restarted_destination =
+            Destination::new(Client::new(build_auth(), pipeline_id), harness.store.clone());
+        let second_replay_status = invoke_write_events(
+            &second_restarted_destination,
+            WriteEventsDurability::RequireDurable,
+            truncate_replay_events(&schema).into_iter().skip(1).collect(),
+        )
+        .await
+        .expect("second replayed truncate sequence failed");
+        assert_eq!(second_replay_status, DestinationWriteStatus::Durable);
+
+        let rows = poll_and_query_rows(
+            &second_restarted_destination,
             &harness,
             table_id,
             &sf_table,
