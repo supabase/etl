@@ -36,13 +36,17 @@ changes:
 | Set `NOT NULL` on a replicated column | Detected in the schema snapshot, but not applied to built-in destinations |
 | Publish an existing column | Add column because the replication mask expanded; add it nullable and without source default metadata so historical destination rows remain unbackfilled |
 | Stop publishing an existing column | Drop column because the replication mask contracted |
-| Several of the above in one statement | One final schema snapshot, diffed into a minimal ordered transition |
+| Several of the above in one statement | One after schema snapshot, diffed into a minimal ordered transition |
 
 When several attributes of the same logical column change at once, the diff
-records one column metadata change with the previous and target schemas. The
-planner then emits one ordered alteration for each changed field. For example,
-renaming a column and changing its default produces a rename followed by a
-default alteration against the renamed column.
+records one column metadata change with the before and after endpoint schemas.
+The planner then emits one ordered alteration for each changed field. Every
+alteration contains its own operation-local `before_column_schema` and
+`after_column_schema`: the after state of one operation is the before state of
+the next operation for that logical column. For example, renaming a column and
+changing its default produces a rename whose after schema has the after name but
+the before default, followed by a default alteration whose before schema already
+has that renamed state.
 
 ## How It Works
 
@@ -157,8 +161,8 @@ The DDL message contains the complete table schema after an `ALTER TABLE`
 statement finishes. ETL does not replicate the statement's individual
 subcommands. If several DDL statements occur without intervening DML, ETL may
 store each source snapshot, but pgoutput does not need to emit a `Relation`
-between them. The destination then compares its previously applied schema
-directly with the final schema preceding the next row event. If DML occurs
+between them. The destination then compares its before schema directly with the
+after schema preceding the next row event. If DML occurs
 between two DDL statements, pgoutput emits the intervening `Relation`, so that
 schema remains an observable destination boundary.
 
@@ -168,16 +172,17 @@ trying to reconstruct source DDL history. Columns are matched by PostgreSQL
 then maps both endpoint namespaces into the destination's canonical column-name
 space, rejects mapped collisions, and produces a `SchemaPlan` that:
 
-1. Drops columns absent from the final endpoint schema.
+1. Drops columns absent from the after endpoint schema.
 2. Applies rename chains from their free end toward their source.
 3. Uses one collision-checked `supabase_etl_ddl_tmp_column_` temporary name per
-   rename cycle, and only when that cycle has no free target.
-4. Adds columns present only in the final endpoint schema.
-5. Emits existing-column type, nullability, and default alterations using final
-   names. BigQuery, ClickHouse, DuckLake, and Snowflake currently warn and skip
-   type alterations.
+   rename cycle, and only when that cycle has no free after-name.
+4. Adds columns present only in the after endpoint schema.
+5. Emits existing-column type, nullability, and default alterations using the
+   state left by earlier operations. Each alteration changes only the field
+   identified by its kind. BigQuery, ClickHouse, DuckLake, and Snowflake
+   currently warn and skip type alterations.
 
-Consequently, transient add, drop, or rename operations absent from the final
+Consequently, transient add, drop, or rename operations absent from the after
 snapshot do not create destination DDL. Each changed column field normally
 produces one destination operation; a rename cycle requires exactly one extra
 temporary rename.
@@ -191,7 +196,7 @@ canonical `a`, so the no-op does not hide destination drift.
 
 Mapped endpoint collisions fail before any DDL. For example, changing source
 columns `a, c` to `a, A` is valid in PostgreSQL, but is rejected for BigQuery
-and DuckLake because both target names map to the physical name `a`. Real
+and DuckLake because both after names map to the physical name `a`. Real
 renames between distinct mapped names are dependency-ordered, and cycles use a
 temporary name that is checked against both mapped endpoints.
 
@@ -209,7 +214,7 @@ Column type and type-modifier changes remain in the exact diff and become
 ordered `AlterColumn` operations. BigQuery, ClickHouse, DuckLake, and Snowflake
 currently warn and skip those operations so future support can use the same
 diff and plan interfaces. Because destination metadata still advances to the
-target source schema, the physical destination type can diverge until the table
+after source schema, the physical destination type can diverge until the table
 is resynchronized.
 
 ### Why ETL Captures Schema State Instead of Replaying DDL
@@ -223,7 +228,7 @@ problems:
   from its currently applied schema to that source schema.
 
 Capturing operations would not eliminate the first problem. ETL would still
-need to apply every operation to a previous schema and materialize the resulting
+need to apply every operation to a before schema and materialize the resulting
 immutable schema versions for row decoding. That would make ETL reproduce
 PostgreSQL behavior such as `attnum` allocation, dropped-column tombstones,
 internal `ALTER TABLE` pass ordering, type and default resolution, cascades,
@@ -282,7 +287,7 @@ replicated column schema.
 
 BigQuery, ClickHouse, DuckLake, and Snowflake currently warn and skip PostgreSQL
 column type and type-modifier operations. The shared plan still advances its
-expected column state so later operations address the target name and metadata
+expected column state so later operations address the after name and metadata
 in a consistent order, but the destination's physical type remains unchanged.
 This can cause later writes or metadata operations to fail when the source and
 destination types are incompatible. Resynchronize the table if the destination

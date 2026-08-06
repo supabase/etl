@@ -18,7 +18,7 @@ use etl::{
     event::{Event, EventSequenceKey},
     pipeline::PipelineId,
     schema::{
-        ColumnAlteration, ColumnPresenceChangeReason, IdentityType, ReplicatedTableSchema,
+        ColumnAlterationKind, ColumnPresenceChangeReason, IdentityType, ReplicatedTableSchema,
         SchemaOperation, SchemaPlan, TableId, TableName,
     },
     store::DestinationStore,
@@ -851,143 +851,131 @@ where
         debug!(
             source_table_id = %table_id,
             destination_table_id = %sequenced_bigquery_table_id,
-            added_column_count = plan.diff().columns_to_add.len(),
-            removed_column_count = plan.diff().columns_to_drop.len(),
-            altered_column_count = plan.diff().columns_to_alter.len(),
+            added_column_count = plan.diff().added_columns.len(),
+            removed_column_count = plan.diff().dropped_columns.len(),
+            altered_column_count = plan.diff().altered_columns.len(),
             "applying bigquery table schema plan"
         );
 
         // Apply the shared plan without regrouping operations.
         for operation in plan.ordered_operations() {
             match operation {
-                SchemaOperation::DropColumn { column_schema, reason: _ } => {
+                SchemaOperation::DropColumn { before_column_schema, reason: _ } => {
                     self.client
                         .drop_column(
                             &self.dataset_id,
                             &sequenced_bigquery_table_id.to_string(),
-                            &column_schema.name,
+                            &before_column_schema.name,
                         )
                         .await?;
                 }
-                SchemaOperation::AlterColumn {
-                    column_schema,
-                    alteration: ColumnAlteration::Rename { new_name },
-                } => {
-                    self.client
-                        .rename_column(
-                            &self.dataset_id,
-                            &sequenced_bigquery_table_id.to_string(),
-                            &column_schema.name,
-                            new_name,
-                        )
-                        .await?;
-                }
-                SchemaOperation::AlterColumn {
-                    column_schema,
-                    alteration:
-                        ColumnAlteration::Type {
-                            previous_type,
-                            previous_modifier,
-                            target_type,
-                            target_modifier,
-                        },
-                } => {
-                    warn!(
-                        table_id = %table_id,
-                        destination_table_id = %sequenced_bigquery_table_id,
-                        column_name = %column_schema.name,
-                        previous_data_type = previous_type.name(),
-                        previous_type_modifier = previous_modifier,
-                        target_data_type = target_type.name(),
-                        target_type_modifier = target_modifier,
-                        "skipping unsupported bigquery column type change"
-                    );
-                }
-                SchemaOperation::AddColumn { column_schema, reason } => {
+                SchemaOperation::AddColumn { after_column_schema, reason } => {
                     self.client
                         .add_column(
                             &self.dataset_id,
                             &sequenced_bigquery_table_id.to_string(),
-                            column_schema,
+                            after_column_schema,
                         )
                         .await?;
 
                     if *reason == ColumnPresenceChangeReason::ReplicationMask {
                         debug!(
                             table_id = %table_id,
-                            column_name = %column_schema.name,
+                            column_name = %after_column_schema.name,
                             "leaving publication-added bigquery column without a default"
                         );
-                    } else if let Some(default_expression) = column_default_sql(column_schema) {
+                    } else if let Some(default_expression) = column_default_sql(after_column_schema)
+                    {
                         self.client
                             .set_column_default(
                                 &self.dataset_id,
                                 &sequenced_bigquery_table_id.to_string(),
-                                &column_schema.name,
+                                &after_column_schema.name,
                                 &default_expression,
                             )
                             .await?;
-                    } else if column_schema.default_expression.is_some() {
+                    } else if after_column_schema.default_expression.is_some() {
                         warn!(
                             table_id = %table_id,
-                            column_name = %column_schema.name,
+                            column_name = %after_column_schema.name,
                             "skipping unsupported source column default for bigquery"
                         );
                     }
                 }
-                SchemaOperation::AlterColumn {
-                    column_schema,
-                    alteration: ColumnAlteration::Nullability { previous_nullable, target_nullable },
-                } => {
-                    // Unsupported metadata changes can leave BigQuery intentionally
-                    // divergent, so later operations must tolerate that state.
-                    if !previous_nullable && *target_nullable {
-                        self.client
-                            .drop_column_not_null(
-                                &self.dataset_id,
-                                &sequenced_bigquery_table_id.to_string(),
-                                &column_schema.name,
-                            )
-                            .await?;
-                    } else {
-                        warn!(
-                            table_id = %table_id,
-                            column_name = %column_schema.name,
-                            "bigquery does not support setting not null on an existing column; \
-                             keeping the destination column nullable"
-                        );
-                    }
-                }
-                SchemaOperation::AlterColumn {
-                    column_schema,
-                    alteration: alteration @ ColumnAlteration::Default { .. },
-                } => {
-                    let target_column_schema = alteration.apply_to(column_schema);
-                    if let Some(default_expression) = column_default_sql(&target_column_schema) {
-                        self.client
-                            .set_column_default(
-                                &self.dataset_id,
-                                &sequenced_bigquery_table_id.to_string(),
-                                &column_schema.name,
-                                &default_expression,
-                            )
-                            .await?;
-                    } else {
-                        if target_column_schema.default_expression.is_some() {
+                SchemaOperation::AlterColumn { alteration } => {
+                    let before = alteration.before_column_schema();
+                    let after = alteration.after_column_schema();
+                    match alteration.kind() {
+                        ColumnAlterationKind::Rename => {
+                            self.client
+                                .rename_column(
+                                    &self.dataset_id,
+                                    &sequenced_bigquery_table_id.to_string(),
+                                    &before.name,
+                                    &after.name,
+                                )
+                                .await?;
+                        }
+                        ColumnAlterationKind::Type => {
                             warn!(
                                 table_id = %table_id,
-                                column_name = %column_schema.name,
-                                "skipping unsupported source column default for bigquery"
+                                destination_table_id = %sequenced_bigquery_table_id,
+                                column_name = %before.name,
+                                before_data_type = before.typ.name(),
+                                before_type_modifier = before.modifier,
+                                after_data_type = after.typ.name(),
+                                after_type_modifier = after.modifier,
+                                "skipping unsupported bigquery column type change"
                             );
                         }
+                        ColumnAlterationKind::Nullability => {
+                            // Unsupported metadata changes can leave BigQuery intentionally
+                            // divergent, so later operations must tolerate that state.
+                            if !before.nullable && after.nullable {
+                                self.client
+                                    .drop_column_not_null(
+                                        &self.dataset_id,
+                                        &sequenced_bigquery_table_id.to_string(),
+                                        &before.name,
+                                    )
+                                    .await?;
+                            } else {
+                                warn!(
+                                    table_id = %table_id,
+                                    column_name = %before.name,
+                                    "bigquery does not support setting not null on an existing \
+                                     column; keeping the destination column nullable"
+                                );
+                            }
+                        }
+                        ColumnAlterationKind::Default => {
+                            if let Some(default_expression) = column_default_sql(after) {
+                                self.client
+                                    .set_column_default(
+                                        &self.dataset_id,
+                                        &sequenced_bigquery_table_id.to_string(),
+                                        &before.name,
+                                        &default_expression,
+                                    )
+                                    .await?;
+                            } else {
+                                if after.default_expression.is_some() {
+                                    warn!(
+                                        table_id = %table_id,
+                                        column_name = %before.name,
+                                        "skipping unsupported source column default for bigquery"
+                                    );
+                                }
 
-                        self.client
-                            .clear_column_default(
-                                &self.dataset_id,
-                                &sequenced_bigquery_table_id.to_string(),
-                                &column_schema.name,
-                            )
-                            .await?;
+                                self.client
+                                    .clear_column_default(
+                                        &self.dataset_id,
+                                        &sequenced_bigquery_table_id.to_string(),
+                                        &before.name,
+                                    )
+                                    .await?;
+                            }
+                        }
                     }
                 }
             }

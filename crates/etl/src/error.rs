@@ -1053,11 +1053,11 @@ impl From<SchemaPlanError> for EtlError {
                     column_name_mapping.map_name(first_column_name)
                 )),
             ),
-            SchemaPlanError::BlockedRenameTarget { current_column_name, target_column_name } => (
+            SchemaPlanError::BlockedRenameAfterName { before_column_name, after_column_name } => (
                 ErrorKind::InvalidState,
                 Cow::Borrowed("Schema rename plan cannot make progress"),
                 Cow::Owned(format!(
-                    "The rename from '{current_column_name}' to '{target_column_name}' is blocked \
+                    "The rename from '{before_column_name}' to '{after_column_name}' is blocked \
                      by a column outside the pending rename set."
                 )),
             ),
@@ -1143,7 +1143,7 @@ mod tests {
     #[test]
     fn destination_column_name_collision_is_a_source_schema_error() {
         let err = EtlError::from(SchemaPlanError::DestinationColumnNameCollision {
-            endpoint: SchemaEndpoint::Target,
+            endpoint: SchemaEndpoint::After,
             column_name_mapping: crate::schema::ColumnNameMapping::AsciiLowercase,
             first_column_name: "a".to_owned(),
             second_column_name: "A".to_owned(),

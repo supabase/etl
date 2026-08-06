@@ -20,9 +20,13 @@ ETL delivers data to destinations in **two phases**:
 
 Schema changes are surfaced through `Event::Relation`. If your destination
 keeps physical schemas, flush pending writes before handling a relation event,
-compare the previously applied and target schemas, build a destination-aware
-schema plan, and apply its supported operations in order before processing
-following row events. BigQuery, ClickHouse, DuckLake, and Snowflake apply column
+compare the before and after schemas, build a destination-aware schema plan,
+and apply its supported operations in order before processing following row
+events. Add operations provide the complete after column schema, drops provide
+the complete before column schema, and each alteration provides adjacent before
+and after column schemas. Apply operations in order: for a logical column, one
+alteration's after schema is the next alteration's before schema. BigQuery,
+ClickHouse, DuckLake, and Snowflake apply column
 adds, drops, renames, and supported default changes. BigQuery also relaxes
 existing required columns to nullable; other shared-planner nullability changes
 and all shared-planner type alterations are currently skipped. Default
