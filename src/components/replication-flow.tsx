@@ -108,7 +108,11 @@ const FLOW_LANES = buildLanes();
 const FLOW_START_DELAY = 2.95;
 
 function destinationSlot(index: number): CSSProperties {
-  return { '--destination-index': index } as CSSProperties;
+  /* Analytics is already visible before the animation starts. Begin its exit
+     with Search's entrance so the first handoff does not reveal Analytics twice. */
+  const cycleIndex = index === 0 ? 1 : index;
+
+  return { '--destination-index': cycleIndex } as CSSProperties;
 }
 
 function FlowConnection({ direction }: { direction: 'source' | 'destination' }) {

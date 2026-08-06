@@ -45,7 +45,7 @@ export function HomeNav() {
             <GitHubMark />
             <span>GitHub</span>
           </a>
-          <ThemeSwitch className="etl-home-theme-switch" />
+          <ThemeSwitch className="etl-home-theme-switch" mode="light-dark-system" />
         </div>
       </nav>
     </header>

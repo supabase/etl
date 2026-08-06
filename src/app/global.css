@@ -627,9 +627,11 @@ button {
   animation-delay: calc(var(--etl-t-drum) + var(--destination-index) * var(--etl-destination-step));
 }
 
-/* Visible immediately, matching the entrance, while the rest wait their turn. */
+/* Visible immediately, matching the entrance. Its separate cycle fades it out
+   with Search, then brings it back between Data lake and the next Search. */
 .etl-destination-face:first-child {
   opacity: 1;
+  animation-name: etl-destination-first-cycle;
 }
 
 .etl-destination-face:not(:first-child) {
@@ -1152,6 +1154,25 @@ button {
   100% {
     opacity: 0;
     filter: blur(6px);
+  }
+}
+
+@keyframes etl-destination-first-cycle {
+  0%,
+  100% {
+    opacity: 1;
+    filter: blur(0);
+  }
+
+  2%,
+  78% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+
+  80% {
+    opacity: 1;
+    filter: blur(0);
   }
 }
 
