@@ -917,3 +917,516 @@ fn status_proves_durability(
 
     Ok(status.rows_inserted >= expected_rows_inserted)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Deterministic tests for Snowpipe Streaming channel state transitions.
+
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
+
+    use etl::{
+        data::{Cell, TableRow},
+        schema::{ColumnSchema, Type},
+    };
+
+    use super::*;
+    use crate::snowflake::{
+        CdcMeta, CdcOperation,
+        streaming::{InsertRowsResponse, OpenChannelResponse, RowBatchBuilder},
+    };
+
+    /// One expected interaction with a [`StreamClient`].
+    #[derive(Debug)]
+    enum ExpectedCall {
+        /// Opens a channel at the expected offset.
+        Open {
+            /// Offset that the caller must request.
+            offset: Option<OffsetToken>,
+            /// Result returned to the caller.
+            result: Result<OpenChannelResponse>,
+        },
+        /// Inserts a batch with the expected sequencer state.
+        Insert {
+            /// Continuation token that the caller must provide.
+            continuation_token: String,
+            /// Final batch offset that the caller must provide.
+            end_offset: OffsetToken,
+            /// Result returned to the caller.
+            result: Result<InsertRowsResponse>,
+        },
+        /// Fetches channel status.
+        Status {
+            /// Result returned to the caller.
+            result: Result<ChannelStatusResponse>,
+        },
+    }
+
+    /// [`StreamClient`] that consumes a strict sequence of expected calls.
+    struct ScriptedStreamClient {
+        /// Calls that have not yet been observed.
+        calls: Mutex<VecDeque<ExpectedCall>>,
+    }
+
+    impl ScriptedStreamClient {
+        /// Creates a client from calls in their required order.
+        fn new(calls: impl IntoIterator<Item = ExpectedCall>) -> Self {
+            Self { calls: Mutex::new(calls.into_iter().collect()) }
+        }
+
+        /// Asserts that every scripted call was observed.
+        fn assert_finished(&self) {
+            let calls = self.calls.lock().expect("scripted stream client lock poisoned");
+            assert!(calls.is_empty(), "remaining calls: {calls:?}");
+        }
+
+        /// Removes the next expected call.
+        fn take_call(&self, operation: &str) -> ExpectedCall {
+            self.calls
+                .lock()
+                .expect("scripted stream client lock poisoned")
+                .pop_front()
+                .unwrap_or_else(|| panic!("unexpected Snowpipe Streaming {operation} call"))
+        }
+    }
+
+    impl StreamClient for ScriptedStreamClient {
+        async fn discover_ingest_host(&self) -> Result<String> {
+            panic!("unexpected Snowpipe Streaming host-discovery call")
+        }
+
+        async fn open_channel(
+            &self,
+            _database: &str,
+            _schema: &str,
+            _table: &str,
+            _channel: &str,
+            offset_token: Option<&OffsetToken>,
+        ) -> Result<OpenChannelResponse> {
+            let ExpectedCall::Open { offset, result } = self.take_call("Open") else {
+                panic!("expected a different Snowpipe Streaming call before Open")
+            };
+            assert_eq!(offset_token, offset.as_ref());
+            result
+        }
+
+        async fn drop_channel(
+            &self,
+            _database: &str,
+            _schema: &str,
+            _table: &str,
+            _channel: &str,
+        ) -> Result<()> {
+            panic!("unexpected Snowpipe Streaming Drop call")
+        }
+
+        async fn insert_rows(
+            &self,
+            _database: &str,
+            _schema: &str,
+            _table: &str,
+            _channel: &str,
+            batch: &RowBatch,
+            continuation_token: &str,
+        ) -> Result<InsertRowsResponse> {
+            let ExpectedCall::Insert { continuation_token: expected, end_offset, result } =
+                self.take_call("Insert")
+            else {
+                panic!("expected a different Snowpipe Streaming call before Insert")
+            };
+            assert_eq!(continuation_token, expected);
+            assert_eq!(batch.end_offset(), &end_offset);
+            result
+        }
+
+        async fn channel_status(
+            &self,
+            _database: &str,
+            _schema: &str,
+            _table: &str,
+            _channel: &str,
+        ) -> Result<ChannelStatusResponse> {
+            let ExpectedCall::Status { result } = self.take_call("Status") else {
+                panic!("expected a different Snowpipe Streaming call before Status")
+            };
+            result
+        }
+    }
+
+    const CHANNEL_CREATED_ON_MS: u64 = 100;
+
+    /// Creates a successful channel status at `offset`.
+    fn channel_status(offset: Option<OffsetToken>, rows_inserted: u64) -> ChannelStatusResponse {
+        ChannelStatusResponse {
+            channel: "test-channel".to_owned(),
+            status_code: "SUCCESS".to_owned(),
+            offset_token: offset,
+            created_on_ms: Some(CHANNEL_CREATED_ON_MS),
+            rows_inserted,
+            rows_parsed: rows_inserted,
+            rows_error_count: 0,
+            last_error_offset_upper_bound: None,
+            last_error_message: None,
+        }
+    }
+
+    /// Creates an expected normal Open call and its successful response.
+    fn normal_open_call(
+        continuation_token: impl Into<String>,
+        committed_offset: Option<OffsetToken>,
+        rows_inserted: u64,
+    ) -> ExpectedCall {
+        let status = channel_status(committed_offset.clone(), rows_inserted);
+        ExpectedCall::Open {
+            offset: None,
+            result: Ok(OpenChannelResponse {
+                continuation_token: continuation_token.into(),
+                offset_token: committed_offset,
+                status,
+            }),
+        }
+    }
+
+    /// Creates an expected Insert call.
+    fn insert_call(
+        continuation_token: impl Into<String>,
+        end_offset: OffsetToken,
+        result: Result<InsertRowsResponse>,
+    ) -> ExpectedCall {
+        ExpectedCall::Insert { continuation_token: continuation_token.into(), end_offset, result }
+    }
+
+    /// Creates one encoded row batch at `offset`.
+    fn one_row_batches(offset: &OffsetToken) -> Vec<RowBatch> {
+        let columns = [ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)];
+        let mut builder = RowBatchBuilder::new();
+        builder
+            .push_row(
+                &columns,
+                &TableRow::new(vec![Cell::I32(1)]),
+                CdcMeta::new(CdcOperation::Insert, offset.as_ref()),
+                offset,
+            )
+            .unwrap();
+        builder.finish().unwrap()
+    }
+
+    /// Creates a channel backed by `client`.
+    fn test_channel(client: Arc<ScriptedStreamClient>) -> ChannelHandle<ScriptedStreamClient> {
+        ChannelHandle::new(
+            client,
+            PipelineId::from(1_u64),
+            "db".to_owned(),
+            "schema".to_owned(),
+            "table".to_owned(),
+        )
+    }
+
+    /// Creates the standard pending durability target.
+    fn durability_target() -> PendingDurabilityTarget {
+        PendingDurabilityTarget::new(AcceptedRowBatch {
+            target_offset: OffsetToken::new(PgLsn::from(10_u64), 2),
+            rows: 3,
+            bytes: 30,
+            baseline_rows_inserted: 7,
+            channel_created_on_ms: CHANNEL_CREATED_ON_MS,
+        })
+    }
+
+    #[tokio::test]
+    async fn open_at_forwards_offset_and_adopts_response() {
+        let initial_offset = OffsetToken::new(PgLsn::from(9_u64), 1);
+        let explicit_offset = OffsetToken::new(PgLsn::from(10_u64), 1);
+        let explicit_status = channel_status(Some(explicit_offset.clone()), 5);
+        let client = Arc::new(ScriptedStreamClient::new([
+            normal_open_call("continuation-0", Some(initial_offset), 5),
+            ExpectedCall::Open {
+                offset: Some(explicit_offset.clone()),
+                result: Ok(OpenChannelResponse {
+                    continuation_token: "continuation-1".to_owned(),
+                    offset_token: Some(explicit_offset.clone()),
+                    status: explicit_status.clone(),
+                }),
+            },
+        ]));
+        let mut channel = test_channel(Arc::clone(&client));
+        channel.open().await.unwrap();
+
+        let status = channel.open_at(&explicit_offset).await.unwrap();
+
+        assert_eq!(status.offset_token, Some(explicit_offset.clone()));
+        assert_eq!(status.rows_inserted, 5);
+        assert_eq!(channel.progress.committed_offset, Some(explicit_offset));
+        assert_eq!(channel.continuation_token.as_deref(), Some("continuation-1"));
+        client.assert_finished();
+    }
+
+    #[tokio::test]
+    async fn reopenable_append_errors_recover_within_bound() {
+        let offset = OffsetToken::new(PgLsn::from(10_u64), 1);
+        let first_recovery_offset = OffsetToken::new(PgLsn::from(9_u64), 1);
+        let second_recovery_offset = OffsetToken::new(PgLsn::from(9_u64), 2);
+        let client = Arc::new(ScriptedStreamClient::new([
+            normal_open_call("continuation-0", None, 0),
+            insert_call(
+                "continuation-0",
+                offset.clone(),
+                Err(SnowpipeError::StaleContinuation.into()),
+            ),
+            normal_open_call("continuation-1", Some(first_recovery_offset), 5),
+            insert_call(
+                "continuation-1",
+                offset.clone(),
+                Err(SnowpipeError::ChannelInvalidated.into()),
+            ),
+            normal_open_call("continuation-2", Some(second_recovery_offset), 7),
+            insert_call(
+                "continuation-2",
+                offset.clone(),
+                Ok(InsertRowsResponse { continuation_token: "continuation-3".to_owned() }),
+            ),
+        ]));
+        let mut channel = test_channel(Arc::clone(&client));
+        channel.open().await.unwrap();
+
+        let accepted = channel.accept_streaming_batches(one_row_batches(&offset)).await.unwrap();
+
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].baseline_rows_inserted, 7);
+        client.assert_finished();
+    }
+
+    #[tokio::test]
+    async fn repeated_channel_invalidations_stop_at_recovery_bound() {
+        let offset = OffsetToken::new(PgLsn::from(10_u64), 1);
+        let mut calls = vec![normal_open_call("continuation-0", None, 0)];
+        for attempt in 0..=MAX_CHANNEL_RECOVERY_ATTEMPTS {
+            calls.push(insert_call(
+                format!("continuation-{attempt}"),
+                offset.clone(),
+                Err(SnowpipeError::ChannelInvalidated.into()),
+            ));
+            if attempt < MAX_CHANNEL_RECOVERY_ATTEMPTS {
+                calls.push(normal_open_call(format!("continuation-{}", attempt + 1), None, 0));
+            }
+        }
+        let client = Arc::new(ScriptedStreamClient::new(calls));
+        let mut channel = test_channel(Arc::clone(&client));
+        channel.open().await.unwrap();
+
+        let error = channel
+            .accept_streaming_batches(one_row_batches(&offset))
+            .await
+            .expect_err("recovery exhaustion should not accept the batch");
+
+        assert!(matches!(
+            error,
+            Error::Channel(message)
+                if message.contains("remained invalid after 3 recovery attempts")
+        ));
+        client.assert_finished();
+    }
+
+    #[tokio::test]
+    async fn status_recovery_reopens_an_invalidated_channel() {
+        let offset = OffsetToken::new(PgLsn::from(10_u64), 1);
+        let initial_offset = OffsetToken::new(PgLsn::from(9_u64), 1);
+        let client = Arc::new(ScriptedStreamClient::new([
+            normal_open_call("continuation-0", Some(initial_offset), 5),
+            ExpectedCall::Status { result: Err(SnowpipeError::ChannelInvalidated.into()) },
+            normal_open_call("continuation-1", Some(offset.clone()), 6),
+        ]));
+        let mut channel = test_channel(Arc::clone(&client));
+        channel.open().await.unwrap();
+
+        let committed = channel.fetch_committed_offset().await.unwrap();
+
+        assert_eq!(committed, Some(offset));
+        client.assert_finished();
+    }
+
+    #[tokio::test]
+    async fn recovered_append_remains_pending_until_row_counters_converge() {
+        let offset = OffsetToken::new(PgLsn::from(10_u64), 2);
+        let client = Arc::new(ScriptedStreamClient::new([
+            normal_open_call("continuation-0", None, 0),
+            insert_call(
+                "continuation-0",
+                offset.clone(),
+                Err(SnowpipeError::StaleContinuation.into()),
+            ),
+            normal_open_call("continuation-1", Some(offset.clone()), 0),
+            ExpectedCall::Status { result: Ok(channel_status(Some(offset.clone()), 0)) },
+            ExpectedCall::Status { result: Ok(channel_status(Some(offset.clone()), 1)) },
+        ]));
+        let mut channel = test_channel(Arc::clone(&client));
+        channel.open().await.unwrap();
+
+        let accepted = channel.accept_streaming_batches(one_row_batches(&offset)).await.unwrap();
+
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].target_offset, offset);
+        assert_eq!(accepted[0].baseline_rows_inserted, 0);
+        assert_eq!(accepted[0].rows, 1);
+        let target = PendingDurabilityTarget::new(accepted[0].clone());
+        assert!(
+            !channel
+                .check_durability(&target, Instant::now() + Duration::from_secs(1))
+                .await
+                .unwrap()
+        );
+        assert!(
+            channel
+                .check_durability(&target, Instant::now() + Duration::from_secs(1))
+                .await
+                .unwrap()
+        );
+        client.assert_finished();
+    }
+
+    #[test]
+    fn durability_proof_requires_complete_matching_status() {
+        let target = durability_target();
+
+        let mut without_creation_timestamp = channel_status(Some(target.target_offset.clone()), 10);
+        without_creation_timestamp.created_on_ms = None;
+        let cases = [
+            ("offset absent", channel_status(None, 10), false),
+            (
+                "offset behind",
+                channel_status(Some(OffsetToken::new(PgLsn::from(10_u64), 1)), 10),
+                false,
+            ),
+            ("rows behind", channel_status(Some(target.target_offset.clone()), 9), false),
+            ("complete status", channel_status(Some(target.target_offset.clone()), 10), true),
+            ("status without creation timestamp", without_creation_timestamp, true),
+        ];
+
+        for (case, status, expected) in cases {
+            assert_eq!(
+                status_proves_durability(&status, &target).unwrap(),
+                expected,
+                "case: {case}"
+            );
+        }
+
+        let mut rejected = channel_status(Some(target.target_offset.clone()), 10);
+        rejected.rows_error_count = 1;
+        let error = status_proves_durability(&rejected, &target).unwrap_err();
+        assert!(error.to_string().contains("rejected rows"));
+
+        let mut replaced = channel_status(Some(target.target_offset.clone()), 10);
+        replaced.created_on_ms = Some(CHANNEL_CREATED_ON_MS + 1);
+        let error = status_proves_durability(&replaced, &target).unwrap_err();
+        assert!(error.to_string().contains("changed lineage"));
+    }
+
+    #[test]
+    fn normal_observations_preserve_lineage_and_reject_invalid_progress() {
+        let target = durability_target();
+        let mut progress = ChannelProgress::default();
+        progress
+            .observe(
+                &channel_status(Some(target.target_offset.clone()), 7),
+                ProgressObservation::Monotonic,
+            )
+            .unwrap();
+
+        let mut bulk_status = channel_status(Some(target.target_offset.clone()), 10);
+        bulk_status.created_on_ms = None;
+
+        progress.observe(&bulk_status, ProgressObservation::Monotonic).unwrap();
+
+        assert_eq!(progress.created_on_ms, Some(CHANNEL_CREATED_ON_MS));
+        let mut parsed_regressed = channel_status(Some(target.target_offset.clone()), 10);
+        parsed_regressed.rows_parsed = 9;
+        let regressions = [
+            (
+                channel_status(Some(OffsetToken::new(PgLsn::from(10_u64), 1)), 10),
+                "offset moved backward",
+            ),
+            (
+                channel_status(Some(target.target_offset.clone()), 9),
+                "inserted-row counter moved backward",
+            ),
+            (parsed_regressed, "parsed-row counter moved backward"),
+        ];
+        for (status, expected_error) in regressions {
+            let error = progress
+                .clone()
+                .observe(&status, ProgressObservation::Monotonic)
+                .expect_err("regressing channel progress must fail");
+            assert!(
+                error.to_string().contains(expected_error),
+                "expected fragment: {expected_error:?}; error: {error}"
+            );
+        }
+
+        let mut rejected_progress = progress.clone();
+        let cases = [
+            ("first rejection", 1),
+            ("unchanged rejection count", 1),
+            ("increased rejection count", 3),
+        ];
+        for (case, error_count) in cases {
+            let mut rejected = channel_status(Some(target.target_offset.clone()), 10);
+            rejected.rows_error_count = error_count;
+
+            let error =
+                rejected_progress.observe(&rejected, ProgressObservation::Monotonic).unwrap_err();
+            assert!(
+                error.to_string().contains("reset or resync is required"),
+                "case: {case}; error: {error}"
+            );
+            assert_eq!(rejected_progress.rows_error_count, Some(error_count), "case: {case}");
+        }
+    }
+
+    #[test]
+    fn explicit_offset_rejects_concurrent_rows() {
+        let target = durability_target();
+        let mut progress = ChannelProgress::default();
+        progress
+            .observe(
+                &channel_status(Some(target.target_offset), 10),
+                ProgressObservation::Monotonic,
+            )
+            .unwrap();
+
+        let explicit_offset = OffsetToken::new(PgLsn::from(10_u64), 1);
+        let same_lineage = channel_status(Some(explicit_offset.clone()), 11);
+        let unexpected_offset = OffsetToken::new(PgLsn::from(10_u64), 0);
+        let error = progress
+            .clone()
+            .observe(&same_lineage, ProgressObservation::ExplicitOffset(&unexpected_offset))
+            .unwrap_err();
+        assert!(error.to_string().contains("expected"));
+
+        let error = progress
+            .clone()
+            .observe(&same_lineage, ProgressObservation::ExplicitOffset(&explicit_offset))
+            .unwrap_err();
+        assert!(error.to_string().contains("row counters changed"));
+
+        let mut nonempty_replacement = same_lineage;
+        nonempty_replacement.created_on_ms = Some(CHANNEL_CREATED_ON_MS + 1);
+        let error = progress
+            .clone()
+            .observe(&nonempty_replacement, ProgressObservation::ExplicitOffset(&explicit_offset))
+            .unwrap_err();
+        assert!(error.to_string().contains("replacement lineage is not empty"));
+
+        let mut explicit_replacement = nonempty_replacement;
+        explicit_replacement.rows_inserted = 0;
+        explicit_replacement.rows_parsed = 0;
+        progress
+            .observe(&explicit_replacement, ProgressObservation::ExplicitOffset(&explicit_offset))
+            .unwrap();
+        assert_eq!(progress.committed_offset, explicit_replacement.offset_token);
+        assert_eq!(progress.rows_inserted, 0);
+        assert_eq!(progress.rows_parsed, 0);
+        assert_eq!(progress.created_on_ms, explicit_replacement.created_on_ms);
+    }
+}
