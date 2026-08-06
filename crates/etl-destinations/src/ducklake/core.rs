@@ -3752,10 +3752,7 @@ mod tests {
             SchemaDiff::new(
                 Vec::new(),
                 Vec::new(),
-                vec![
-                    rename_change("name", "full_name", 2),
-                    rename_change("email", "name", 3),
-                ],
+                vec![rename_change("name", "full_name", 2), rename_change("email", "name", 3)],
             ),
             ["id", "name", "email"],
             ["id", "full_name", "name"],

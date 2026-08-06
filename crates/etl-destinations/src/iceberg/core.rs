@@ -461,8 +461,7 @@ where
         inner: &mut Inner,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<(String, IcebergTableName)> {
-        replicated_table_schema
-            .validate_destination_column_names(ICEBERG_COLUMN_NAME_MAPPING)?;
+        replicated_table_schema.validate_destination_column_names(ICEBERG_COLUMN_NAME_MAPPING)?;
         let table_id = replicated_table_schema.id();
         let table_name = replicated_table_schema.name();
         let snapshot_id = replicated_table_schema.inner().snapshot_id;
@@ -858,8 +857,7 @@ mod tests {
         .into_applied()
         .unwrap();
 
-        ensure_iceberg_relation_is_unchanged(&metadata, &schema)
-            .unwrap();
+        ensure_iceberg_relation_is_unchanged(&metadata, &schema).unwrap();
 
         let newer_table_schema = Arc::new(TableSchema::with_snapshot_id(
             schema.id(),
@@ -868,8 +866,8 @@ mod tests {
             test_snapshot_id(1_u64, 1_u64),
         ));
         let newer_schema = ReplicatedTableSchema::all(newer_table_schema);
-        let newer_error = ensure_iceberg_relation_is_unchanged(&metadata, &newer_schema)
-            .unwrap_err();
+        let newer_error =
+            ensure_iceberg_relation_is_unchanged(&metadata, &newer_schema).unwrap_err();
         assert_eq!(newer_error.kind(), ErrorKind::CorruptedTableSchema);
 
         let newer_metadata: AppliedDestinationTableMetadata =
@@ -880,8 +878,8 @@ mod tests {
             )
             .into_applied()
             .unwrap();
-        let stale_error = ensure_iceberg_relation_is_unchanged(&newer_metadata, &schema)
-            .unwrap_err();
+        let stale_error =
+            ensure_iceberg_relation_is_unchanged(&newer_metadata, &schema).unwrap_err();
         assert_eq!(stale_error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 

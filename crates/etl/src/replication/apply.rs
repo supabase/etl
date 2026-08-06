@@ -56,8 +56,8 @@ use crate::{
         ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL,
         ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
-        ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
-        ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
+        ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL,
+        WORKER_TYPE_LABEL,
     },
     pipeline::PipelineId,
     postgres::{
@@ -864,7 +864,6 @@ impl ApplyLoopState {
             replication_progress,
             replication_lag_metrics,
             event_batch: EventBatch::default(),
-            current_tx_begin_ts: None,
             current_tx_events: 0,
             next_tx_ordinal: 0,
             draining_for_shutdown: false,
@@ -2487,7 +2486,6 @@ where
         self.state.remote_final_lsn = Some(final_lsn);
 
         // When a new transaction begins, we want to reset the accumulating state.
-        self.state.current_tx_begin_ts = Some(Instant::now());
         self.state.current_tx_events = 0;
         self.state.reset_tx_ordinal();
 

@@ -152,11 +152,7 @@ fn query_user_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<(i6
     let mut result = Vec::new();
 
     while let Some(row) = rows.next().unwrap() {
-        result.push((
-            row.get(0).unwrap(),
-            row.get(1).unwrap(),
-            row.get(2).unwrap(),
-        ));
+        result.push((row.get(0).unwrap(), row.get(1).unwrap(), row.get(2).unwrap()));
     }
 
     result
@@ -176,10 +172,7 @@ fn query_order_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<(i
     let mut result = Vec::new();
 
     while let Some(row) = rows.next().unwrap() {
-        result.push((
-            row.get(0).unwrap(),
-            row.get(1).unwrap(),
-        ));
+        result.push((row.get(0).unwrap(), row.get(1).unwrap()));
     }
 
     result
@@ -418,11 +411,10 @@ async fn table_copy_and_streaming_with_restart() {
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
-    let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
-        .unwrap();
+    let users_table_name =
+        table_name_to_ducklake_table_name(&database_schema.users_schema().name).unwrap();
     let orders_table_name =
-        table_name_to_ducklake_table_name(&database_schema.orders_schema().name)
-            .unwrap();
+        table_name_to_ducklake_table_name(&database_schema.orders_schema().name).unwrap();
 
     insert_mock_data(
         &mut database,
@@ -537,8 +529,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     let data_url = lake.data_url.clone();
 
     let users_schema = database_schema.users_schema();
-    let users_table_name = table_name_to_ducklake_table_name(&users_schema.name)
-        .unwrap();
+    let users_table_name = table_name_to_ducklake_table_name(&users_schema.name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
 
@@ -626,11 +617,10 @@ async fn table_copy_and_streaming_without_restart() {
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
-    let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
-        .unwrap();
+    let users_table_name =
+        table_name_to_ducklake_table_name(&database_schema.users_schema().name).unwrap();
     let orders_table_name =
-        table_name_to_ducklake_table_name(&database_schema.orders_schema().name)
-            .unwrap();
+        table_name_to_ducklake_table_name(&database_schema.orders_schema().name).unwrap();
 
     insert_mock_data(
         &mut database,
@@ -716,8 +706,8 @@ async fn table_insert_update_delete() {
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
-    let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
-        .unwrap();
+    let users_table_name =
+        table_name_to_ducklake_table_name(&database_schema.users_schema().name).unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -842,11 +832,10 @@ async fn cdc_streaming_with_truncate() {
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
-    let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
-        .unwrap();
+    let users_table_name =
+        table_name_to_ducklake_table_name(&database_schema.users_schema().name).unwrap();
     let orders_table_name =
-        table_name_to_ducklake_table_name(&database_schema.orders_schema().name)
-            .unwrap();
+        table_name_to_ducklake_table_name(&database_schema.orders_schema().name).unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -948,10 +937,7 @@ async fn schema_change_add_column() {
         .await
         .unwrap();
     let publication_name = "test_pub_ducklake_schema_add";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, age) values ('Alice', 25)",
@@ -963,8 +949,7 @@ async fn schema_change_add_column() {
     let lake = create_test_lake("schema_change_add_column").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
-        .unwrap();
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -1431,10 +1416,7 @@ async fn schema_change_then_update_and_delete() {
         .await
         .unwrap();
     let publication_name = "test_pub_ducklake_schema_mutation";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, visits) values ('Alice', 1)",
@@ -1446,8 +1428,7 @@ async fn schema_change_then_update_and_delete() {
     let lake = create_test_lake("schema_change_then_update_and_delete").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
-        .unwrap();
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -1541,16 +1522,12 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         .await
         .unwrap();
     let publication_name = "test_pub_ducklake_schema_simulator_rotation";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     let lake = create_test_lake("schema_change_matches_simulator_generated_column_rotation").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
-        .unwrap();
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -1687,16 +1664,12 @@ async fn schema_change_matches_simulator_generated_column_types() {
         .await
         .unwrap();
     let publication_name = "test_pub_ducklake_schema_simulator_types";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     let lake = create_test_lake("schema_change_matches_simulator_generated_column_types").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
-        .unwrap();
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;

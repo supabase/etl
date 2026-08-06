@@ -85,13 +85,10 @@ async fn write_table_copy_and_wait(
 ) {
     assert!(!rows.is_empty(), "table-copy test batch should not be empty");
 
-    let status =
-        invoke_write_table_rows(destination, schema, rows).await.unwrap();
+    let status = invoke_write_table_rows(destination, schema, rows).await.unwrap();
     assert_eq!(status, DestinationWriteStatus::Accepted);
 
-    let barrier = invoke_write_table_rows(destination, schema, vec![])
-        .await
-        .unwrap();
+    let barrier = invoke_write_table_rows(destination, schema, vec![]).await.unwrap();
     assert_eq!(barrier, DestinationWriteStatus::Durable);
 }
 
@@ -208,12 +205,7 @@ async fn column_names(sql: &SqlClient<AuthManager<HttpExchanger>>, fqn: &str) ->
         .await
         .unwrap()
         .into_iter()
-        .map(|row| {
-            row.get(2)
-                .and_then(serde_json::Value::as_str)
-                .unwrap()
-                .to_owned()
-        })
+        .map(|row| row.get(2).and_then(serde_json::Value::as_str).unwrap().to_owned())
         .collect()
 }
 
@@ -286,9 +278,7 @@ async fn create_table_with_simulator_defaults() {
     harness.store.store_table_schema(table_schema).await.unwrap();
 
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
-        let status = invoke_write_table_rows(&harness.destination, &schema, vec![])
-            .await
-            .unwrap();
+        let status = invoke_write_table_rows(&harness.destination, &schema, vec![]).await.unwrap();
         assert_eq!(status, DestinationWriteStatus::Durable);
 
         let exists = harness.sql.table_exists(&sf_table).await.unwrap();
@@ -324,20 +314,14 @@ async fn write_table_rows_basic() {
         .unwrap();
         assert_eq!(status, DestinationWriteStatus::Accepted);
 
-        let metadata = harness
-            .store
-            .get_destination_table_metadata(table_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let metadata =
+            harness.store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
         assert!(metadata.is_applied());
         assert_eq!(metadata.snapshot_id, schema.inner().snapshot_id);
         assert_eq!(&metadata.replication_mask, schema.replication_mask());
 
         // The empty write is the table-wide durability barrier.
-        let status = invoke_write_table_rows(&harness.destination, &schema, vec![])
-            .await
-            .unwrap();
+        let status = invoke_write_table_rows(&harness.destination, &schema, vec![]).await.unwrap();
         assert_eq!(status, DestinationWriteStatus::Durable);
 
         let copy_offset = first_copy_request_offset();
@@ -375,9 +359,7 @@ async fn write_table_rows_empty() {
 
     // An empty copy initializes the table and is immediately durable.
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
-        let status = invoke_write_table_rows(&harness.destination, &schema, vec![])
-            .await
-            .unwrap();
+        let status = invoke_write_table_rows(&harness.destination, &schema, vec![]).await.unwrap();
         assert_eq!(status, DestinationWriteStatus::Durable);
 
         let exists = harness.sql.table_exists(&sf_table).await.unwrap();
@@ -739,12 +721,8 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
         assert_eq!(rows[1][0], serde_json::Value::String("2".into()));
         assert_eq!(rows[1][1], serde_json::Value::String("bob@example.com".into()));
 
-        let final_metadata = harness
-            .store
-            .get_applied_destination_table_metadata(table_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let final_metadata =
+            harness.store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
         assert_eq!(final_metadata.snapshot_id, new_snapshot_id);
         assert_eq!(final_metadata.replication_mask, *evolved_replicated.replication_mask());
     })

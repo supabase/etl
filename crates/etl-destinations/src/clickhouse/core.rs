@@ -833,8 +833,7 @@ where
                     })
                     .collect();
                 let has_reused_endpoint_name = schema.column_schemas().any(|target_column| {
-                    let target_name =
-                        CLICKHOUSE_COLUMN_NAME_MAPPING.map_name(&target_column.name);
+                    let target_name = CLICKHOUSE_COLUMN_NAME_MAPPING.map_name(&target_column.name);
                     old_ordinal_by_name
                         .get(&target_name)
                         .is_some_and(|ordinal| *ordinal != target_column.ordinal_position)
@@ -1626,14 +1625,11 @@ fn validate_clickhouse_schema_capabilities(
     engine: ClickHouseEngine,
 ) -> EtlResult<()> {
     let trailing_column_names = trailing_cdc_column_names(engine);
-    if let Some(column) = replicated_table_schema
-        .column_schemas()
-        .find(|column| {
-            trailing_column_names.iter().any(|trailing_name| {
-                CLICKHOUSE_COLUMN_NAME_MAPPING.equivalent(&column.name, trailing_name)
-            })
+    if let Some(column) = replicated_table_schema.column_schemas().find(|column| {
+        trailing_column_names.iter().any(|trailing_name| {
+            CLICKHOUSE_COLUMN_NAME_MAPPING.equivalent(&column.name, trailing_name)
         })
-    {
+    }) {
         return Err(etl_error!(
             ErrorKind::SourceSchemaError,
             "ClickHouse source column collides with an ETL column",
@@ -2286,11 +2282,8 @@ mod tests {
     #[test]
     fn reject_pk_alters_under_replacing_merge_tree_allows_non_pk_rename() {
         let schema = replicated_schema_for_pk_alters();
-        let diff = SchemaDiff::new(
-            Vec::new(),
-            Vec::new(),
-            vec![rename_change("value", "payload", 3)],
-        );
+        let diff =
+            SchemaDiff::new(Vec::new(), Vec::new(), vec![rename_change("value", "payload", 3)]);
         reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
             &diff,
@@ -2303,8 +2296,7 @@ mod tests {
     #[test]
     fn reject_pk_alters_under_replacing_merge_tree_rejects_pk_rename() {
         let schema = replicated_schema_for_pk_alters();
-        let diff =
-            SchemaDiff::new(Vec::new(), Vec::new(), vec![rename_change("id", "row_id", 2)]);
+        let diff = SchemaDiff::new(Vec::new(), Vec::new(), vec![rename_change("id", "row_id", 2)]);
         let err = reject_pk_alters_under_replacing_merge_tree(
             "public_replacing_merge_tree__alter",
             &diff,
@@ -2320,11 +2312,8 @@ mod tests {
     #[test]
     fn reject_pk_alters_under_replacing_merge_tree_rejects_pk_membership_and_order_changes() {
         let current_schema = replicated_schema_for_pk_alters();
-        for (tenant_key_position, id_key_position, value_key_position) in [
-            (Some(2), Some(1), None),
-            (Some(1), Some(2), Some(3)),
-            (Some(1), None, None),
-        ]
+        for (tenant_key_position, id_key_position, value_key_position) in
+            [(Some(2), Some(1), None), (Some(1), Some(2), Some(3)), (Some(1), None, None)]
         {
             let new_table_schema = Arc::new(TableSchema::new(
                 TableId::new(7),

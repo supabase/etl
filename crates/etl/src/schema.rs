@@ -1268,7 +1268,8 @@ impl fmt::Display for SchemaPlanError {
 
 impl std::error::Error for SchemaPlanError {}
 
-/// A destination-validated schema transition with physical operations in safe order.
+/// A destination-validated schema transition with physical operations in safe
+/// order.
 ///
 /// The exact endpoint facts remain available through [`SchemaPlan::diff`]. The
 /// generated operation sequence uses mapped destination names and may contain

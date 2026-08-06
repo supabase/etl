@@ -153,10 +153,7 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     let publication_name = "test_pub_clickhouse";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     // Row 1: empty arrays.  With the old encoding bug, this accidentally
     //        produced valid RowBinary because `0x00` (null-indicator) ==
@@ -328,10 +325,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     let publication_name = "test_pub_clickhouse_updates";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -447,10 +441,7 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     let publication_name = "test_pub_ch_boundary";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     // Row 1: all nullable columns are NULL, arrays are empty.
     database
@@ -632,10 +623,7 @@ async fn pre_1970_and_far_future_dates_round_trip_inner(engine: ClickHouseEngine
         .unwrap();
 
     let publication_name = "test_pub_ch_date_boundaries";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     for date_literal in ["1900-01-01", "1969-12-31", "1970-01-01", "2024-01-15", "2299-12-31"] {
         database
@@ -745,10 +733,7 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     let publication_name = "test_pub_clickhouse_deletes";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -847,10 +832,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     let publication_name = "test_pub_clickhouse_restart";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -956,10 +938,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
         .unwrap();
 
     let publication_name = "test_pub_clickhouse_reset_copy";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -1067,10 +1046,7 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
         .unwrap();
 
     let publication_name = "test_pub_clickhouse_truncate";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -1111,10 +1087,7 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
         .wait_for_events(vec![EventCondition::TableCount(EventType::Truncate, table_id, 1)])
         .await;
 
-    database
-        .truncate_table(table_name.clone())
-        .await
-        .unwrap();
+    database.truncate_table(table_name.clone()).await.unwrap();
 
     truncate_notify.notified().await;
 
@@ -1171,10 +1144,7 @@ async fn intermediate_flush_preserves_all_rows_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     let publication_name = "test_pub_clickhouse_flush";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     let row_count = 10;
     let values: Vec<String> = (1..=row_count).map(|i| format!("('row_{i}')")).collect();
@@ -1269,15 +1239,11 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
     let table_a = test_table_name("multi_a");
     let table_b = test_table_name("multi_b");
 
-    let table_a_id = database
-        .create_table(table_a.clone(), true, &[("value", "text not null")])
-        .await
-        .unwrap();
+    let table_a_id =
+        database.create_table(table_a.clone(), true, &[("value", "text not null")]).await.unwrap();
 
-    let table_b_id = database
-        .create_table(table_b.clone(), true, &[("value", "text not null")])
-        .await
-        .unwrap();
+    let table_b_id =
+        database.create_table(table_b.clone(), true, &[("value", "text not null")]).await.unwrap();
 
     let publication_name = "test_pub_clickhouse_multi";
     database
@@ -1451,10 +1417,7 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
     // Deliberately NOT setting REPLICA IDENTITY FULL -- default (PK only).
 
     let publication_name = "test_pub_ch_default_ident";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -1597,10 +1560,7 @@ async fn exclusive_large_batch_table_copy_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     let publication_name = "test_pub_clickhouse_large_batch";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     let row_count: usize = 1024;
     let values: Vec<String> = (1..=row_count).map(|i| format!("('val_{i:04}')")).collect();
@@ -1814,11 +1774,8 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(final_columns, vec!["id", "name", "age", "email", "score"]);
 
-    let final_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let final_metadata =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(final_metadata.snapshot_id > initial_snapshot_id);
 
     let final_column_types = clickhouse_db.column_types(clickhouse_table_name).await;
@@ -1869,10 +1826,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
         .unwrap();
 
     let publication_name = "test_pub_ch_defaults_schema";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
     database
         .run_sql(&format!(
             "INSERT INTO {} (name) VALUES ('Alice')",
@@ -2205,10 +2159,7 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     let publication_name = "test_pub_ch_stale_replay";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -2238,17 +2189,11 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
     pipeline.start().await.unwrap();
     table_sync_complete.notified().await;
 
-    let initial_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let initial_metadata =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
     let initial_snapshot_id = initial_metadata.snapshot_id;
-    let stale_table_schema = store
-        .get_table_schema(&table_id, initial_snapshot_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let stale_table_schema =
+        store.get_table_schema(&table_id, initial_snapshot_id).await.unwrap().unwrap();
     let stale_schema = ReplicatedTableSchema::from_mask(
         stale_table_schema,
         initial_metadata.replication_mask.clone(),
@@ -2279,11 +2224,8 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let applied_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let applied_metadata =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
     let applied_snapshot_id = applied_metadata.snapshot_id;
     assert!(
         applied_snapshot_id > initial_snapshot_id,
@@ -2321,11 +2263,8 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         "newer column data must survive the stale replay"
     );
 
-    let final_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let final_metadata =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert_eq!(
         final_metadata.snapshot_id, applied_snapshot_id,
         "metadata must stay at the newer snapshot"
@@ -2513,11 +2452,8 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
 
     // Simulate a crash after the change was recorded as `Applying` but before
     // the DDL completed.
-    let applied_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let applied_metadata =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
     let clickhouse_table_name = applied_metadata.destination_table_id.clone();
     let interrupted_metadata = DestinationTableMetadata::new_applied(
         clickhouse_table_name.clone(),
@@ -2544,11 +2480,8 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
     assert_eq!(columns, vec!["id", "name", "email"], "recovery must add the interrupted column");
 
-    let recovered_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let recovered_metadata =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert_eq!(
         recovered_metadata.snapshot_id,
         test_snapshot_id(200_u64, 200_u64),
@@ -2610,11 +2543,8 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
     let target_schema =
         ReplicatedTableSchema::from_mask(Arc::clone(&target_table_schema), target_mask.clone());
 
-    let applied_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let applied_metadata =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
     let clickhouse_table_name = applied_metadata.destination_table_id.clone();
     let interrupted_metadata = DestinationTableMetadata::new_applied(
         clickhouse_table_name.clone(),
@@ -2639,11 +2569,8 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
         .unwrap();
 
     assert_eq!(clickhouse_db.column_names(&clickhouse_table_name).await, vec!["id", "name"]);
-    let recovered_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let recovered_metadata =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert_eq!(recovered_metadata.snapshot_id, target_table_schema.snapshot_id);
     assert_eq!(recovered_metadata.replication_mask, target_mask);
 

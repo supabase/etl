@@ -71,10 +71,7 @@ fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
 
 #[cfg(feature = "test-utils")]
 async fn acquire_ducklake_test_hook_guard() -> OwnedSemaphorePermit {
-    Arc::clone(&DUCKLAKE_TEST_HOOKS_GUARD)
-        .acquire_owned()
-        .await
-        .unwrap()
+    Arc::clone(&DUCKLAKE_TEST_HOOKS_GUARD).acquire_owned().await.unwrap()
 }
 
 fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
@@ -451,8 +448,7 @@ async fn ducklake_rejects_zero_pool_size() {
     std::fs::create_dir_all(&data_dir).unwrap();
 
     let err = DuckLakeDestination::new(
-        Url::parse("postgres://ducklake@localhost/test_catalog")
-            .unwrap(),
+        Url::parse("postgres://ducklake@localhost/test_catalog").unwrap(),
         path_to_file_url(&data_dir),
         0,
         None,
@@ -902,10 +898,7 @@ async fn write_table_rows_empty_creates_table() {
     )
     .await
     .unwrap();
-    destination
-        .write_table_rows(&replicated_table_schema, vec![])
-        .await
-        .unwrap();
+    destination.write_table_rows(&replicated_table_schema, vec![]).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 0, "table should exist but be empty");
@@ -1259,11 +1252,7 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
         .await
         .unwrap();
 
-    let metadata = store
-        .get_destination_table_metadata(old_schema.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
@@ -1426,11 +1415,7 @@ async fn write_events_rejects_stale_relation_before_reverse_ddl() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
 
-    let metadata = store
-        .get_destination_table_metadata(old_schema.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
@@ -1649,11 +1634,7 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
         .await
         .unwrap();
 
-    let metadata = store
-        .get_destination_table_metadata(old_schema.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
@@ -2054,11 +2035,7 @@ async fn startup_after_restart_recovers_applying_schema_change() {
     let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     restarted_destination.startup().await.unwrap();
 
-    let metadata = store
-        .get_destination_table_metadata(old_schema.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
@@ -2148,11 +2125,7 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
         .await
         .unwrap();
 
-    let metadata = store
-        .get_destination_table_metadata(old_schema.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
@@ -2224,11 +2197,7 @@ async fn startup_after_restart_rejects_applying_schema_change_with_pruned_previo
     assert_eq!(error.kind(), ErrorKind::InvalidState);
     assert!(error.to_string().contains("DuckLake schema recovery previous schema not found"));
 
-    let metadata = store
-        .get_destination_table_metadata(old_schema.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applying());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
     assert_eq!(metadata.previous_snapshot_id, Some(missing_previous_snapshot_id));
@@ -2262,11 +2231,7 @@ async fn startup_after_restart_recovers_initial_applying_metadata() {
     let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     restarted_destination.startup().await.unwrap();
 
-    let metadata = store
-        .get_destination_table_metadata(schema.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let metadata = store.get_destination_table_metadata(schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, schema.snapshot_id);
 
