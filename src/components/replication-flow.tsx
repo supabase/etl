@@ -1,15 +1,44 @@
 import { EtlMark } from '@/components/brand';
-import { ChartNoAxesColumnIncreasing } from 'lucide-react';
+import {
+  ChartNoAxesColumnIncreasing,
+  Search,
+  Warehouse,
+  Waves,
+  Zap,
+  type LucideIcon,
+} from 'lucide-react';
 import type { CSSProperties, SVGProps } from 'react';
 
+/* The Supabase design system's own `postgres` custom icon. Lucide has no
+   Postgres mark, and the system says to reach for a custom icon in exactly that
+   case. Rendered at the custom-icon stroke weight of 1. */
 function PostgresMark(props: SVGProps<SVGSVGElement>) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" {...props}>
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...props}
+    >
       <path d="M11.5466 3.23108C11.2704 3.23108 11.0466 3.45494 11.0466 3.73108C11.0466 4.00722 11.2704 4.23108 11.5466 4.23108V3.23108ZM20.6569 19.5046C20.6569 19.2285 20.433 19.0046 20.1569 19.0046C19.8808 19.0046 19.6569 19.2285 19.6569 19.5046H20.6569ZM19.6569 15.9656C19.6569 16.2417 19.8808 16.4656 20.1569 16.4656C20.433 16.4656 20.6569 16.2417 20.6569 15.9656H19.6569ZM13.0119 19.5536C12.959 19.2826 12.6964 19.1058 12.4254 19.1586C12.1544 19.2115 11.9775 19.4741 12.0304 19.7452L13.0119 19.5536ZM9.87381 18.8565L9.37381 18.8565V18.8565H9.87381ZM4.20721 5.29932L3.73784 5.12699L3.73784 5.127L4.20721 5.29932ZM2.52527 9.88046L2.0559 9.70814L2.0559 9.70814L2.52527 9.88046ZM3.24922 12.6873L2.92176 13.0651L2.92176 13.0651L3.24922 12.6873ZM4.40334 13.6875L4.07588 14.0653L4.07588 14.0653L4.40334 13.6875ZM5.00971 15.0154L4.50971 15.0154L4.50971 15.0154L5.00971 15.0154ZM5.00969 16.8536L5.50969 16.8536L5.50969 16.8536L5.00969 16.8536ZM9.87385 10.6661L9.37385 10.6661L9.37385 10.6661L9.87385 10.6661ZM11.9399 6.90783C12.136 6.71339 12.1373 6.39681 11.9429 6.20073C11.7484 6.00464 11.4319 6.00331 11.2358 6.19774L11.9399 6.90783ZM17.841 18.7506L17.8409 18.2506L17.8409 18.2506L17.841 18.7506ZM23.0676 19.2506C23.3437 19.2506 23.5676 19.0267 23.5675 18.7506C23.5675 18.4744 23.3437 18.2506 23.0675 18.2506L23.0676 19.2506ZM13.0171 15.2446C12.8955 14.9967 12.5959 14.8943 12.348 15.016C12.1001 15.1376 11.9978 15.4372 12.1194 15.6851L13.0171 15.2446ZM11.5466 4.23108H12.608V3.23108H11.5466V4.23108ZM19.6569 19.5046C19.6569 21.0264 18.2467 22.2606 16.3033 22.2606V23.2606C18.6165 23.2606 20.6569 21.7449 20.6569 19.5046H19.6569ZM12.608 4.23108C16.501 4.23108 19.6569 7.38698 19.6569 11.28H20.6569C20.6569 6.8347 17.0533 3.23108 12.608 3.23108V4.23108ZM19.6569 11.28V15.9656H20.6569V11.28H19.6569ZM16.3033 22.2606C14.6727 22.2606 13.313 21.0964 13.0119 19.5536L12.0304 19.7452C12.4214 21.7485 14.1852 23.2606 16.3033 23.2606V22.2606ZM11.6552 3.22339H6.46459V4.22339H11.6552V3.22339ZM3.73784 5.127L2.0559 9.70814L2.99464 10.0528L4.67658 5.47164L3.73784 5.127ZM2.92176 13.0651L4.07588 14.0653L4.7308 13.3096L3.57668 12.3094L2.92176 13.0651ZM4.50971 15.0154L4.50969 16.8536L5.50969 16.8536L5.50971 15.0154L4.50971 15.0154ZM10.3739 10.6661C10.3739 9.25463 10.9376 7.90166 11.9399 6.90783L11.2358 6.19774C10.0442 7.37934 9.37387 8.98795 9.37385 10.6661L10.3739 10.6661ZM2.0559 9.70814C1.61893 10.8983 1.96363 12.2348 2.92176 13.0651L3.57668 12.3094C2.9326 11.7512 2.70089 10.8529 2.99464 10.0528L2.0559 9.70814ZM8.44319 20.7872C9.50944 20.7872 10.3738 19.9228 10.3738 18.8565H9.37381C9.37381 19.3705 8.95716 19.7872 8.44319 19.7872V20.7872ZM8.44319 19.7872C6.82305 19.7872 5.50967 18.4738 5.50969 16.8536L4.50969 16.8536C4.50966 19.026 6.27075 20.7872 8.44319 20.7872V19.7872ZM4.07588 14.0653C4.35142 14.3041 4.50972 14.6508 4.50971 15.0154L5.50971 15.0154C5.50972 14.3608 5.22552 13.7384 4.7308 13.3096L4.07588 14.0653ZM6.46459 3.22339C5.24643 3.22339 4.15768 3.98347 3.73784 5.12699L4.67658 5.47164C4.95188 4.7218 5.66581 4.22339 6.46459 4.22339V3.22339ZM17.841 19.2506L23.0676 19.2506L23.0675 18.2506L17.8409 18.2506L17.841 19.2506ZM12.1194 15.6851C13.1905 17.8676 15.4098 19.2507 17.841 19.2506L17.8409 18.2506C15.7913 18.2507 13.9201 17.0846 13.0171 15.2446L12.1194 15.6851ZM10.3738 18.8565L10.3739 10.6661L9.37385 10.6661L9.37381 18.8565L10.3738 18.8565Z" />
       <path d="M15.7151 11.2056C15.7151 11.6257 16.0556 11.9663 16.4758 11.9663C16.8959 11.9663 17.2365 11.6257 17.2365 11.2056C17.2365 10.7854 16.8959 10.4448 16.4758 10.4448C16.0556 10.4448 15.7151 10.7854 15.7151 11.2056Z" />
     </svg>
   );
 }
+
+/* ETL writes to arbitrary destinations, so the node cycles through the kinds of
+   system a pipeline feeds rather than naming any one vendor. */
+const DESTINATIONS: { label: string; Icon: LucideIcon }[] = [
+  { label: 'Analytics', Icon: ChartNoAxesColumnIncreasing },
+  { label: 'Search', Icon: Search },
+  { label: 'Cache', Icon: Zap },
+  { label: 'Warehouse', Icon: Warehouse },
+  { label: 'Data lake', Icon: Waves },
+];
 
 type PacketShape = 'circle' | 'square' | 'squircle' | 'triangle';
 
@@ -78,6 +107,10 @@ const FLOW_LANES = buildLanes();
    reaching outward. Keep in step with --etl-t-pipe in the stylesheet. */
 const FLOW_START_DELAY = 2.95;
 
+function destinationSlot(index: number): CSSProperties {
+  return { '--destination-index': index } as CSSProperties;
+}
+
 function FlowConnection({ direction }: { direction: 'source' | 'destination' }) {
   return (
     <div className={`etl-flow-conduit etl-flow-conduit-${direction}`}>
@@ -121,7 +154,7 @@ export function ReplicationFlow() {
         <div className="etl-flow-node etl-flow-node-source">
           <span className="etl-flow-node-kicker">Source</span>
           <span className="etl-flow-node-icon">
-            <PostgresMark className="etl-postgres-mark" strokeWidth={1.5} />
+            <PostgresMark className="etl-postgres-mark" />
           </span>
           <span className="etl-flow-node-label">Postgres</span>
         </div>
@@ -139,11 +172,17 @@ export function ReplicationFlow() {
         <FlowConnection direction="destination" />
 
         <div className="etl-flow-node etl-flow-node-destination">
-          <span className="etl-flow-node-kicker">Destination</span>
-          <span className="etl-flow-node-icon">
-            <ChartNoAxesColumnIncreasing strokeWidth={1.5} />
-          </span>
-          <span className="etl-flow-node-label">Analytics</span>
+          <div className="etl-destination-drum">
+            {DESTINATIONS.map(({ label, Icon }, index) => (
+              <div className="etl-destination-face" key={label} style={destinationSlot(index)}>
+                <span className="etl-flow-node-kicker">Destination</span>
+                <span className="etl-flow-node-icon">
+                  <Icon strokeWidth={1.5} />
+                </span>
+                <span className="etl-flow-node-label">{label}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 

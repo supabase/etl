@@ -63,7 +63,7 @@
   --etl-metal-sheen: rgba(255, 255, 255, 1);
   --etl-metal-edge-light: rgba(255, 255, 255, 1);
   --etl-metal-edge-dark: rgba(10, 10, 10, 0.1);
-  --etl-metal-rim: rgba(10, 10, 10, 0.15);
+  --etl-metal-rim: rgba(10, 10, 10, 0.17);
   --etl-metal-cast: rgba(10, 10, 10, 0.2);
   --etl-port-top: oklch(0.917 0 0);
   --etl-port-bottom: oklch(0.972 0 0);
@@ -104,7 +104,7 @@
   --etl-metal-sheen: rgba(255, 255, 255, 0.1);
   --etl-metal-edge-light: rgba(255, 255, 255, 0.14);
   --etl-metal-edge-dark: rgba(0, 0, 0, 0.55);
-  --etl-metal-rim: rgba(255, 255, 255, 0.1);
+  --etl-metal-rim: rgba(255, 255, 255, 0.135);
   --etl-metal-cast: rgba(0, 0, 0, 0.72);
   --etl-port-top: oklch(0.128 0 0);
   --etl-port-bottom: oklch(0.208 0 0);
@@ -472,6 +472,8 @@ button {
   --etl-t-flanks: 1500ms;
   --etl-t-pipe: 2150ms;
   --etl-lane-stagger: 70ms;
+  /* How long each destination kind is held before the next takes its place. */
+  --etl-destination-step: 3.2s;
   /* How long a packet spends inside the hub before it leaves the far side. */
   --etl-hub-dwell: 0.42s;
 
@@ -524,23 +526,27 @@ button {
   transform: translate(-50%, -50%);
 }
 
-.etl-flow-node {
-  --node-enter-delay: 0ms;
-
-  position: relative;
-  z-index: 4;
+/* Panel layout, shared by the static housings and by each face of the
+   destination drum. */
+.etl-flow-node,
+.etl-destination-face {
   display: flex;
-  min-height: 11.75rem;
+  min-height: var(--panel-height);
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1rem;
+  gap: var(--panel-gap);
+  padding: var(--panel-padding);
+  color: var(--color-fd-foreground);
+}
+
+/* Machined panel: a specular band along the top face, a fine brush across the
+   body, and the body itself falling off toward the bottom. */
+.etl-flow-node-source,
+.etl-flow-node-core,
+.etl-flow-node-destination {
   border: 1px solid var(--etl-metal-rim);
   border-radius: 1.15rem;
-  padding: 1.6rem 1.4rem;
-  color: var(--color-fd-foreground);
-  /* Machined panel: a specular band along the top face, a fine brush across the
-     body, and the body itself falling off toward the bottom. */
   background:
     linear-gradient(180deg, var(--etl-metal-sheen), transparent 20%),
     repeating-linear-gradient(
@@ -553,11 +559,23 @@ button {
     inset 0 1px 0 var(--etl-metal-edge-light),
     inset 1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 40%, transparent),
     inset -1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 40%, transparent),
-    inset 0 -1.5px 0 var(--etl-metal-edge-dark),
-    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 55%, transparent),
+    inset 0 -1px 0 var(--etl-metal-edge-dark),
+    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 70%, transparent),
     0 2px 3px -1px color-mix(in srgb, var(--etl-metal-cast) 50%, transparent),
     0 14px 24px -12px color-mix(in srgb, var(--etl-metal-cast) 80%, transparent),
     0 32px 68px -26px var(--etl-metal-cast);
+}
+
+.etl-flow-node {
+  --node-enter-delay: 0ms;
+  /* Panel metrics live here so the drum faces, which are children, inherit the
+     same values as the static housings at every breakpoint. */
+  --panel-height: 11.75rem;
+  --panel-gap: 1rem;
+  --panel-padding: 1.6rem 1.4rem;
+
+  position: relative;
+  z-index: 4;
   animation: etl-node-enter 850ms cubic-bezier(0.22, 1, 0.36, 1) both;
   animation-delay: var(--node-enter-delay);
 }
@@ -586,8 +604,47 @@ button {
   animation-duration: 950ms;
 }
 
-.etl-flow-node-destination {
+/* The destination is a rotating drum: ETL writes to arbitrary systems, so the
+   module turns to present a different one every few seconds. */
+/* The destination is a drum turning behind a fixed window: ETL writes to
+   arbitrary systems, so the module presents a different one every few seconds.
+   Doubled selector so the per-breakpoint .etl-flow-node padding cannot win. */
+.etl-flow-node.etl-flow-node-destination {
   --node-enter-delay: var(--etl-t-flanks);
+  /* Apothem of a regular pentagonal prism whose faces are the panel height:
+     height / (2 * tan(180deg / 5)). */
+  --drum-radius: calc(var(--panel-height) / 1.45309);
+
+  padding: 0;
+  overflow: hidden;
+  perspective: 62rem;
+}
+
+.etl-destination-drum {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  animation: etl-destination-drum calc(var(--etl-destination-step) * 5) infinite;
+}
+
+.etl-destination-face {
+  position: absolute;
+  inset: 0;
+  /* Identical material to the static housings so the three panels read as one
+     set; the frame's own surface is hidden behind whichever face is front. */
+  background:
+    linear-gradient(180deg, var(--etl-metal-sheen), transparent 20%),
+    repeating-linear-gradient(
+      90deg,
+      var(--etl-metal-texture) 0 1px,
+      transparent 1px 3px
+    ),
+    linear-gradient(180deg, var(--etl-metal-top), var(--etl-metal-bottom));
+  box-shadow:
+    inset 0 1px 0 var(--etl-metal-edge-light),
+    inset 0 -1px 0 var(--etl-metal-edge-dark);
+  backface-visibility: hidden;
+  transform: rotateX(calc(var(--destination-index) * -72deg)) translateZ(var(--drum-radius));
 }
 
 .etl-flow-node-kicker {
@@ -622,6 +679,10 @@ button {
     0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 70%, transparent);
 }
 
+.etl-postgres-mark {
+  display: block;
+}
+
 .etl-flow-node-icon svg {
   width: 2.3rem;
   height: 2.3rem;
@@ -654,9 +715,6 @@ button {
   white-space: nowrap;
 }
 
-.etl-postgres-mark {
-  display: block;
-}
 
 .etl-flow-conduit {
   position: relative;
@@ -1087,6 +1145,41 @@ button {
 /* clip-path rather than scaleX so the bore, walls and end shadows keep their
    proportions as the pipe extends. */
 /* Reaches away from the hub: rightward on the destination side. */
+/* Steps a fifth of a turn at a time, holding each face square to the viewer. */
+/* Steps a fifth of a turn at a time, holding each face square to the viewer.
+   The leading translateZ seats the front face at z = 0, so it is not scaled up
+   by the perspective relative to the static panels. */
+@keyframes etl-destination-drum {
+  0%,
+  16% {
+    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(0deg);
+  }
+
+  20%,
+  36% {
+    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(72deg);
+  }
+
+  40%,
+  56% {
+    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(144deg);
+  }
+
+  60%,
+  76% {
+    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(216deg);
+  }
+
+  80%,
+  96% {
+    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(288deg);
+  }
+
+  100% {
+    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(360deg);
+  }
+}
+
 @keyframes etl-lane-reach {
   from {
     clip-path: inset(0 100% 0 0);
@@ -1168,9 +1261,9 @@ button {
   }
 
   .etl-flow-node {
-    min-height: 10.25rem;
-    gap: 0.8rem;
-    padding: 1.2rem 1rem;
+    --panel-height: 10.25rem;
+    --panel-gap: 0.8rem;
+    --panel-padding: 1.2rem 1rem;
   }
 
   .etl-flow-node-icon {
@@ -1179,7 +1272,11 @@ button {
     border-radius: 0.85rem;
   }
 
-  .etl-flow-node-icon svg {
+  .etl-postgres-mark {
+  display: block;
+}
+
+.etl-flow-node-icon svg {
     width: 1.85rem;
     height: 1.85rem;
   }
@@ -1612,10 +1709,11 @@ button {
   }
 
   .etl-flow-node {
-    min-height: 6.9rem;
-    gap: 0.5rem;
+    --panel-height: 6.9rem;
+    --panel-gap: 0.5rem;
+    --panel-padding: 0.7rem 0.4rem;
+
     border-radius: 0.78rem;
-    padding: 0.7rem 0.4rem;
   }
 
   .etl-flow-node-kicker {
@@ -1629,7 +1727,11 @@ button {
     border-radius: 0.55rem;
   }
 
-  .etl-flow-node-icon svg {
+  .etl-postgres-mark {
+  display: block;
+}
+
+.etl-flow-node-icon svg {
     width: 1.15rem;
     height: 1.15rem;
   }
@@ -1829,5 +1931,11 @@ button {
     clip-path: none !important;
     opacity: 1;
     transform: none;
+  }
+
+  /* Park the drum square on its first face instead of snapping mid-turn. */
+  .etl-destination-drum {
+    animation: none !important;
+    transform: translateZ(calc(var(--drum-radius) * -1));
   }
 }
