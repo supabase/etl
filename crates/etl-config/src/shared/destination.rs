@@ -17,7 +17,8 @@ const fn default_ducklake_pool_size() -> u32 {
 ///
 /// `ReplacingMergeTree` (default) gives current-state reads via `FINAL` and
 /// reclaims deleted rows on `OPTIMIZE ... FINAL CLEANUP`. `MergeTree` is an
-/// append-only event-log layout retained for PK-less source tables.
+/// append-only event-log layout retained for PK-less source tables. It stores
+/// source ordering in `cdc_lsn` and `cdc_tx_ordinal`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ClickHouseEngine {

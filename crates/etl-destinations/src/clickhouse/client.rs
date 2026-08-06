@@ -462,9 +462,8 @@ impl ClickHouseClient {
     ///
     /// `after_column` controls placement: `Some(name)` inserts the new column
     /// immediately AFTER `name`, `None` inserts it FIRST (used when the table
-    /// has no user columns yet). Either way the new column lands before the
-    /// trailing CDC columns (`cdc_operation`, `cdc_lsn`), which is required
-    /// because RowBinary encoding is positional.
+    /// has no user columns yet). Either placement keeps it before the trailing
+    /// CDC columns, which RowBinary encoding requires.
     pub(crate) async fn add_column(
         &self,
         table_name: &str,

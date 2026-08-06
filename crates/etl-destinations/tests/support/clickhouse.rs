@@ -69,10 +69,10 @@ pub(crate) struct DateBoundariesRow {
 /// engine-specific dedup + tombstone filter and applies the caller's
 /// `ORDER BY` for deterministic test reads.
 ///
-/// MergeTree path: take the latest event per PK with `LIMIT 1 BY`, then drop
-/// any whose latest event is a DELETE. The drop-DELETE filter must come
-/// AFTER the dedup, otherwise a deleted PK whose latest event is a DELETE
-/// would surface its prior INSERT instead of being absent.
+/// MergeTree path: take the latest event per PK with `LIMIT 1 BY`, ordered by
+/// commit LSN and transaction ordinal, then drop any latest DELETE. The
+/// drop-DELETE filter must come after deduplication, or a deleted PK would
+/// surface its prior row.
 ///
 /// ReplacingMergeTree path: `FINAL` + `_etl_deleted = 0`.
 pub(crate) fn current_state_query(
@@ -84,8 +84,9 @@ pub(crate) fn current_state_query(
 ) -> String {
     match engine {
         ClickHouseEngine::MergeTree => format!(
-            "SELECT {projection} FROM (SELECT * FROM \"{table}\" ORDER BY cdc_lsn DESC LIMIT 1 BY \
-             ({pks})) AS current WHERE cdc_operation != 'DELETE' ORDER BY {order_by}",
+            "SELECT {projection} FROM (SELECT * FROM \"{table}\" ORDER BY cdc_lsn DESC, \
+             cdc_tx_ordinal DESC LIMIT 1 BY ({pks})) AS current WHERE cdc_operation != 'DELETE' \
+             ORDER BY {order_by}",
             pks = pk_cols.join(", ")
         ),
         ClickHouseEngine::ReplacingMergeTree => format!(

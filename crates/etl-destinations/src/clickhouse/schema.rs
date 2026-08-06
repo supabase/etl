@@ -12,6 +12,9 @@ use crate::clickhouse::sql::quote_identifier;
 pub(crate) const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
 /// (For MergeTree engine) CDC LSN column (commit_lsn).
 pub(crate) const CDC_LSN_COLUMN_NAME: &str = "cdc_lsn";
+/// (For MergeTree engine) zero-based source event ordinal within its
+/// transaction.
+pub(crate) const CDC_TX_ORDINAL_COLUMN_NAME: &str = "cdc_tx_ordinal";
 /// (For ReplacingMergeTree engine) version column. Holds the packed
 /// `EventSequenceKey` (commit_lsn in the high 64 bits, tx_ordinal in the
 /// low 64 bits) as a UInt128, giving ReplacingMergeTree a total order across
@@ -208,7 +211,9 @@ fn quote_numeric_literal_as_string(expression: &str) -> String {
 /// Trailing CDC column names appended to each replicated row, by engine.
 pub(super) fn trailing_cdc_column_names(engine: ClickHouseEngine) -> &'static [&'static str] {
     match engine {
-        ClickHouseEngine::MergeTree => &[CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME],
+        ClickHouseEngine::MergeTree => {
+            &[CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME]
+        }
         ClickHouseEngine::ReplacingMergeTree => &[ETL_VERSION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME],
     }
 }
@@ -231,15 +236,15 @@ where
     }
 }
 
-/// `MergeTree` DDL: appends `cdc_operation String` and `cdc_lsn UInt64`,
-/// `ORDER BY tuple()`.
+/// `MergeTree` DDL: appends `cdc_operation String`, `cdc_lsn UInt64`, and
+/// `cdc_tx_ordinal UInt64`, then uses `ORDER BY tuple()`.
 pub(super) fn create_merge_tree_sql<'a, I>(table_name: &str, column_schemas: I) -> String
 where
     I: IntoIterator<Item = &'a ColumnSchema>,
     I::IntoIter: ExactSizeIterator,
 {
     let iter = column_schemas.into_iter();
-    let mut cols = Vec::with_capacity(iter.len() + 2);
+    let mut cols = Vec::with_capacity(iter.len() + 3);
 
     for col in iter {
         let col_type = clickhouse_column_type(col, false);
@@ -249,12 +254,23 @@ where
 
     cols.push(format!("  {} String", quote_identifier(CDC_OPERATION_COLUMN_NAME)));
     cols.push(format!("  {} UInt64", quote_identifier(CDC_LSN_COLUMN_NAME)));
+    cols.push(format!("  {} UInt64 DEFAULT 0", quote_identifier(CDC_TX_ORDINAL_COLUMN_NAME)));
 
     let col_defs = cols.join(",\n");
     let quoted_table_name = quote_identifier(table_name);
     format!(
         "CREATE TABLE IF NOT EXISTS {quoted_table_name} (\n{col_defs}\n) ENGINE = \
          MergeTree()\nORDER BY tuple()"
+    )
+}
+
+/// Adds the transaction ordinal to a legacy MergeTree table.
+pub(super) fn add_merge_tree_tx_ordinal_column_sql(table_name: &str) -> String {
+    format!(
+        "alter table {} add column if not exists {} UInt64 default 0 after {}",
+        quote_identifier(table_name),
+        quote_identifier(CDC_TX_ORDINAL_COLUMN_NAME),
+        quote_identifier(CDC_LSN_COLUMN_NAME),
     )
 }
 
@@ -548,8 +564,20 @@ mod tests {
         let sql = create_merge_tree_sql("public_t", &schemas);
         assert!(sql.contains("\"cdc_operation\" String"), "cdc_operation should be non-nullable");
         assert!(sql.contains("\"cdc_lsn\" UInt64"), "cdc_lsn should be non-nullable UInt64");
+        assert!(sql.contains("\"cdc_tx_ordinal\" UInt64 DEFAULT 0"));
         assert!(sql.contains("ENGINE = MergeTree()"));
         assert!(sql.contains("ORDER BY tuple()"));
+    }
+
+    #[test]
+    fn add_merge_tree_tx_ordinal_column_sql_is_idempotent() {
+        let sql = add_merge_tree_tx_ordinal_column_sql("public_us\"ers");
+
+        assert_eq!(
+            sql,
+            "alter table \"public_us\\\"ers\" add column if not exists \"cdc_tx_ordinal\" UInt64 \
+             default 0 after \"cdc_lsn\""
+        );
     }
 
     #[test]
@@ -728,7 +756,7 @@ mod tests {
     fn trailing_cdc_column_names_by_engine() {
         assert_eq!(
             trailing_cdc_column_names(ClickHouseEngine::MergeTree),
-            &[CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME]
+            &[CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,]
         );
         assert_eq!(
             trailing_cdc_column_names(ClickHouseEngine::ReplacingMergeTree),

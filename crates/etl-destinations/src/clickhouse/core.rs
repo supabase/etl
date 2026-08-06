@@ -32,6 +32,7 @@ use crate::{
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
         metrics::register_metrics,
         schema::{
+            CDC_TX_ORDINAL_COLUMN_NAME, add_merge_tree_tx_ordinal_column_sql,
             create_current_view_sql, create_table_sql, drop_current_view_sql,
             supports_column_default, trailing_cdc_column_names,
         },
@@ -73,9 +74,9 @@ struct PendingRow {
     /// CDC op kind. Drives both the MergeTree `cdc_operation` string and the
     /// ReplacingMergeTree `_etl_deleted` tombstone flag.
     operation: CdcOperation,
-    /// Source ordering for this DML event. MergeTree exposes its commit LSN in
-    /// `cdc_lsn`; ReplacingMergeTree stores the complete packed key in
-    /// `_etl_version`.
+    /// Source ordering for this DML event. MergeTree exposes the LSN and
+    /// transaction ordinal separately; ReplacingMergeTree stores the packed
+    /// key in `_etl_version`.
     sequence_key: EventSequenceKey,
     /// User column values in source schema order. The trailing CDC columns
     /// are appended at encode time and are not present here.
@@ -98,9 +99,10 @@ fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
 
 /// Appends the trailing engine-specific CDC columns to the row encoding.
 ///
-/// MergeTree: `cdc_operation` (String), `cdc_lsn` (UInt64 commit LSN).
-/// ReplacingMergeTree: `_etl_version` (UInt128 packed `EventSequenceKey`),
-/// `_etl_deleted` (UInt8 tombstone flag).
+/// MergeTree: `cdc_operation` (String), `cdc_lsn` (UInt64 commit LSN), and
+/// `cdc_tx_ordinal` (UInt64 transaction ordinal). ReplacingMergeTree:
+/// `_etl_version` (UInt128 packed `EventSequenceKey`) and `_etl_deleted` (UInt8
+/// tombstone flag).
 fn append_cdc_columns(
     values: &mut Vec<ClickHouseValue>,
     operation: CdcOperation,
@@ -111,6 +113,7 @@ fn append_cdc_columns(
         ClickHouseEngine::MergeTree => {
             values.push(ClickHouseValue::String(operation.to_string()));
             values.push(cdc_lsn_to_clickhouse_value(sequence_key.commit_lsn));
+            values.push(ClickHouseValue::UInt64(sequence_key.tx_ordinal));
         }
         ClickHouseEngine::ReplacingMergeTree => {
             let version = sequence_key.as_u128();
@@ -491,6 +494,24 @@ where
         ))
     }
 
+    /// Adds missing CDC ordering metadata to legacy MergeTree tables.
+    async fn table_columns_with_merge_tree_compatibility(
+        &self,
+        clickhouse_table_name: &str,
+    ) -> EtlResult<Vec<ClickHouseTableColumn>> {
+        let mut actual_columns = self.client.table_columns(clickhouse_table_name).await?;
+        let needs_tx_ordinal = matches!(self.inserter_config.engine, ClickHouseEngine::MergeTree)
+            && !actual_columns.iter().any(|column| column.name == CDC_TX_ORDINAL_COLUMN_NAME);
+
+        if needs_tx_ordinal {
+            let ddl = add_merge_tree_tx_ordinal_column_sql(clickhouse_table_name);
+            self.client.execute_ddl(DdlKind::AddColumn, &ddl).await?;
+            actual_columns = self.client.table_columns(clickhouse_table_name).await?;
+        }
+
+        Ok(actual_columns)
+    }
+
     /// Issues the engine-correct `CREATE TABLE`, and under ReplacingMergeTree
     /// also the companion `CREATE VIEW "<table>__current"`. Both statements
     /// are `IF NOT EXISTS`, so retries on the recovery path are idempotent.
@@ -605,7 +626,8 @@ where
         // `ALTER TABLE ADD COLUMN`: ClickHouse scalar columns are forced to
         // `Nullable(T)` even when the Postgres column is `NOT NULL`, so RowBinary must
         // include the nullable marker byte ClickHouse expects.
-        let actual_columns = self.client.table_columns(&clickhouse_table_name).await?;
+        let actual_columns =
+            self.table_columns_with_merge_tree_compatibility(&clickhouse_table_name).await?;
         let expected_column_names =
             expected_clickhouse_column_names(schema, self.inserter_config.engine);
         let nullable_flags = nullable_flags_from_clickhouse_columns(
@@ -687,7 +709,8 @@ where
             }
         }
 
-        let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
+        let actual_columns =
+            self.table_columns_with_merge_tree_compatibility(clickhouse_table_name).await?;
         let expected_column_names =
             expected_clickhouse_column_names(schema, self.inserter_config.engine);
         nullable_flags_from_clickhouse_columns(
@@ -926,7 +949,8 @@ where
     /// New columns are placed AFTER the last existing user column (before the
     /// CDC columns) using ClickHouse's `AFTER` clause. This is critical because
     /// RowBinary encoding is positional -- without explicit placement, ADD
-    /// COLUMN appends after `cdc_lsn`, misaligning the encoding.
+    /// COLUMN appends after the trailing CDC columns and misaligns the
+    /// encoding.
     ///
     /// Schema changes create an inherently inconsistent window: rows written
     /// before the ALTER were encoded with the old column set, while rows
@@ -2178,6 +2202,7 @@ mod tests {
             "tags".to_owned(),
             CDC_OPERATION_COLUMN_NAME.to_owned(),
             CDC_LSN_COLUMN_NAME.to_owned(),
+            CDC_TX_ORDINAL_COLUMN_NAME.to_owned(),
         ];
         let actual_columns = vec![
             clickhouse_column("id", "Int64"),
@@ -2185,13 +2210,14 @@ mod tests {
             clickhouse_column("tags", "Array(Nullable(String))"),
             clickhouse_column(CDC_OPERATION_COLUMN_NAME, "String"),
             clickhouse_column(CDC_LSN_COLUMN_NAME, "UInt64"),
+            clickhouse_column(CDC_TX_ORDINAL_COLUMN_NAME, "UInt64"),
         ];
 
         let flags =
             nullable_flags_from_clickhouse_columns("test_table", &expected_names, &actual_columns)
                 .unwrap();
 
-        assert_eq!(flags.as_ref(), [false, true, false, false, false]);
+        assert_eq!(flags.as_ref(), [false, true, false, false, false, false]);
     }
 
     #[test]

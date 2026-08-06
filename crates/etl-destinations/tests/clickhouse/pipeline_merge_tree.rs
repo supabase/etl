@@ -1,6 +1,6 @@
 //! MergeTree-only integration tests. These verify event-log semantics
-//! (`cdc_operation` + `cdc_lsn`) that exist only on the MergeTree engine; the
-//! parameterized spine in `pipeline.rs` covers current-state behavior on
+//! (`cdc_operation` + `cdc_lsn` + `cdc_tx_ordinal`) on the MergeTree engine;
+//! the parameterized spine in `pipeline.rs` covers current-state behavior on
 //! both engines.
 
 use etl::{
@@ -19,7 +19,7 @@ use etl_destinations::clickhouse::test_utils::setup_clickhouse_database;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
-use crate::support::crypto::install_crypto_provider;
+use crate::support::{clickhouse::current_state_query, crypto::install_crypto_provider};
 
 /// MergeTree event-log row: includes CDC metadata. All three operations in this
 /// test target the same source row, so `id` is asserted on alongside the
@@ -140,4 +140,141 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
     assert_eq!(rows[2].value, "update_b");
     assert_eq!(rows[2].cdc_operation, "UPDATE");
     assert!(rows[2].cdc_lsn > rows[1].cdc_lsn, "update_b must have a higher LSN than update_a");
+}
+
+/// MergeTree event-log row with the complete source event ordering pair.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct SequencedEventLogRow {
+    id: i64,
+    value: String,
+    cdc_operation: String,
+    cdc_lsn: u64,
+    cdc_tx_ordinal: u64,
+}
+
+/// Current user row projected from MergeTree event history.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct CurrentRow {
+    id: i64,
+    value: String,
+}
+
+/// MergeTree preserves same-transaction order when a later update changes the
+/// primary key.
+#[tokio::test(flavor = "multi_thread")]
+async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let mut database = spawn_source_database().await;
+    let table_name = test_table_name("same_tx_pk_change");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create same_tx_pk_change test table");
+
+    let publication_name = "test_pub_clickhouse_same_tx_pk_change";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create same_tx_pk_change publication");
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('original')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert initial same_tx_pk_change row");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    clickhouse_db
+        .db_client()
+        .query(
+            "create table \"test_same__tx__pk__change\" (
+                \"id\" Int32,
+                \"value\" String,
+                \"cdc_operation\" String,
+                \"cdc_lsn\" UInt64
+            ) engine = MergeTree() order by tuple()",
+        )
+        .execute()
+        .await
+        .expect("Failed to create legacy MergeTree table");
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db
+            .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+            .await,
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store,
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 2)])
+        .await;
+    let tx = database.begin_transaction().await;
+    tx.run_sql(&format!(
+        "UPDATE {} SET value = 'intermediate' WHERE id = 1",
+        table_name.as_quoted_identifier(),
+    ))
+    .await
+    .expect("Failed to update the value");
+    tx.run_sql(&format!(
+        "UPDATE {} SET id = 2, value = 'final' WHERE id = 1",
+        table_name.as_quoted_identifier(),
+    ))
+    .await
+    .expect("Failed to update the primary key");
+    tx.commit_transaction().await;
+
+    events_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let event_rows: Vec<SequencedEventLogRow> = clickhouse_db
+        .query(
+            "SELECT id, value, cdc_operation, cdc_lsn, cdc_tx_ordinal FROM \
+             \"test_same__tx__pk__change\" ORDER BY cdc_lsn, cdc_tx_ordinal, id, cdc_operation",
+        )
+        .await;
+    let current_rows: Vec<CurrentRow> = clickhouse_db
+        .query(&current_state_query(
+            ClickHouseEngine::MergeTree,
+            "test_same__tx__pk__change",
+            "id, value",
+            &["id"],
+            "id",
+        ))
+        .await;
+
+    assert_eq!(event_rows.len(), 4);
+    assert_eq!(event_rows[0].cdc_operation, "INSERT");
+    assert_eq!(event_rows[0].cdc_lsn, 0);
+    assert_eq!(event_rows[0].cdc_tx_ordinal, 0);
+
+    assert_eq!(event_rows[1].id, 1);
+    assert_eq!(event_rows[1].value, "intermediate");
+    assert_eq!(event_rows[1].cdc_operation, "UPDATE");
+    assert_eq!(event_rows[1].cdc_lsn, event_rows[2].cdc_lsn);
+    assert!(event_rows[1].cdc_tx_ordinal < event_rows[2].cdc_tx_ordinal);
+
+    assert_eq!(event_rows[2].id, 1);
+    assert_eq!(event_rows[2].cdc_operation, "DELETE");
+    assert_eq!(event_rows[2].cdc_tx_ordinal, event_rows[3].cdc_tx_ordinal);
+
+    assert_eq!(event_rows[3].id, 2);
+    assert_eq!(event_rows[3].value, "final");
+    assert_eq!(event_rows[3].cdc_operation, "UPDATE");
+
+    assert_eq!(current_rows.len(), 1);
+    assert_eq!(current_rows[0].id, 2);
+    assert_eq!(current_rows[0].value, "final");
 }
