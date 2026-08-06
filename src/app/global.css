@@ -45,15 +45,28 @@
   --color-fd-primary: var(--etl-brand-600);
   --etl-ink: #0a0a0a;
   --etl-grid: rgba(10, 10, 10, 0.05);
-  --etl-tube-bore: rgba(10, 10, 10, 0.075);
-  --etl-tube-wall: rgba(10, 10, 10, 0.14);
-  --etl-tube-shade: rgba(10, 10, 10, 0.26);
+  /* Explicit tones down the bore rather than white washes, so the channel reads
+     as a curved recess instead of a flat bar. */
+  --etl-tube-top: oklch(0.858 0 0);
+  --etl-tube-mid: oklch(0.924 0 0);
+  --etl-tube-gloss: oklch(0.988 0 0);
+  --etl-tube-bottom: oklch(0.948 0 0);
+  --etl-tube-wall: rgba(10, 10, 10, 0.17);
+  --etl-tube-shade: rgba(10, 10, 10, 0.38);
   --etl-packet: var(--etl-brand-500);
-  --etl-tube-sheen: rgba(255, 255, 255, 0.9);
-  --etl-metal-sheen: rgba(255, 255, 255, 0.92);
-  --etl-metal-edge-light: rgba(255, 255, 255, 0.95);
-  --etl-metal-edge-dark: rgba(10, 10, 10, 0.11);
-  --etl-metal-cast: rgba(10, 10, 10, 0.16);
+  --etl-tube-sheen: rgba(255, 255, 255, 1);
+  /* The panel body is off-white so highlights have somewhere to sit; on a light
+     theme form is carved by shadow, not by adding more white. */
+  --etl-metal-top: oklch(0.995 0 0);
+  --etl-metal-bottom: oklch(0.943 0 0);
+  --etl-metal-texture: rgba(10, 10, 10, 0.032);
+  --etl-metal-sheen: rgba(255, 255, 255, 1);
+  --etl-metal-edge-light: rgba(255, 255, 255, 1);
+  --etl-metal-edge-dark: rgba(10, 10, 10, 0.1);
+  --etl-metal-rim: rgba(10, 10, 10, 0.15);
+  --etl-metal-cast: rgba(10, 10, 10, 0.2);
+  --etl-port-top: oklch(0.917 0 0);
+  --etl-port-bottom: oklch(0.972 0 0);
 }
 
 .dark {
@@ -77,15 +90,24 @@
   --etl-green-strong: var(--etl-brand-default);
   --etl-green-soft: color-mix(in srgb, var(--etl-brand-default) 14%, transparent);
   --etl-grid: rgba(255, 255, 255, 0.045);
-  --etl-tube-bore: rgba(0, 0, 0, 0.34);
-  --etl-tube-wall: rgba(255, 255, 255, 0.14);
-  --etl-tube-shade: rgba(0, 0, 0, 0.62);
-  --etl-tube-sheen: rgba(255, 255, 255, 0.11);
+  --etl-tube-top: oklch(0.093 0 0);
+  --etl-tube-mid: oklch(0.134 0 0);
+  --etl-tube-gloss: oklch(0.258 0 0);
+  --etl-tube-bottom: oklch(0.183 0 0);
+  --etl-tube-wall: rgba(255, 255, 255, 0.12);
+  --etl-tube-shade: rgba(0, 0, 0, 0.7);
+  --etl-tube-sheen: rgba(255, 255, 255, 0.13);
   --etl-packet: var(--etl-brand-default);
-  --etl-metal-sheen: rgba(255, 255, 255, 0.075);
-  --etl-metal-edge-light: rgba(255, 255, 255, 0.1);
-  --etl-metal-edge-dark: rgba(0, 0, 0, 0.5);
-  --etl-metal-cast: rgba(0, 0, 0, 0.66);
+  --etl-metal-top: oklch(0.222 0 0);
+  --etl-metal-bottom: oklch(0.152 0 0);
+  --etl-metal-texture: rgba(255, 255, 255, 0.024);
+  --etl-metal-sheen: rgba(255, 255, 255, 0.1);
+  --etl-metal-edge-light: rgba(255, 255, 255, 0.14);
+  --etl-metal-edge-dark: rgba(0, 0, 0, 0.55);
+  --etl-metal-rim: rgba(255, 255, 255, 0.1);
+  --etl-metal-cast: rgba(0, 0, 0, 0.72);
+  --etl-port-top: oklch(0.128 0 0);
+  --etl-port-bottom: oklch(0.208 0 0);
 }
 
 * {
@@ -324,6 +346,9 @@ button {
   width: auto;
   height: 0.94em;
   flex: none;
+  /* A root <svg> clips to its viewBox by default, which shaves the glyph's
+     antialiased edge rows at small sizes. */
+  overflow: visible;
   color: var(--etl-brand);
 }
 
@@ -510,38 +535,29 @@ button {
   align-items: center;
   justify-content: center;
   gap: 1rem;
-  border: 1px solid color-mix(in srgb, var(--color-fd-border) 74%, var(--etl-green) 26%);
+  border: 1px solid var(--etl-metal-rim);
   border-radius: 1.15rem;
   padding: 1.6rem 1.4rem;
   color: var(--color-fd-foreground);
-  /* Machined housing: a sheen catching the top edge over a brushed body. */
+  /* Machined panel: a specular band along the top face, a fine brush across the
+     body, and the body itself falling off toward the bottom. */
   background:
-    linear-gradient(180deg, color-mix(in srgb, var(--etl-metal-sheen) 80%, transparent), transparent 22%),
-    radial-gradient(
-      ellipse at 22% -10%,
-      color-mix(in srgb, var(--etl-metal-sheen) 60%, transparent),
-      transparent 58%
-    ),
+    linear-gradient(180deg, var(--etl-metal-sheen), transparent 20%),
     repeating-linear-gradient(
       90deg,
-      color-mix(in srgb, var(--etl-metal-sheen) 11%, transparent) 0 1px,
+      var(--etl-metal-texture) 0 1px,
       transparent 1px 3px
     ),
-    linear-gradient(
-      172deg,
-      color-mix(in srgb, var(--color-fd-card) 90%, var(--etl-green) 5%) 0%,
-      var(--color-fd-card) 48%,
-      color-mix(in srgb, var(--color-fd-card) 88%, var(--etl-ink)) 100%
-    );
+    linear-gradient(180deg, var(--etl-metal-top), var(--etl-metal-bottom));
   box-shadow:
     inset 0 1px 0 var(--etl-metal-edge-light),
-    inset 1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 45%, transparent),
-    inset -1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 45%, transparent),
+    inset 1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 40%, transparent),
+    inset -1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 40%, transparent),
     inset 0 -1.5px 0 var(--etl-metal-edge-dark),
-    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 40%, transparent),
-    0 2px 4px -1px color-mix(in srgb, var(--etl-metal-cast) 55%, transparent),
-    0 16px 28px -12px color-mix(in srgb, var(--etl-metal-cast) 85%, transparent),
-    0 34px 76px -24px var(--etl-metal-cast);
+    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 55%, transparent),
+    0 2px 3px -1px color-mix(in srgb, var(--etl-metal-cast) 50%, transparent),
+    0 14px 24px -12px color-mix(in srgb, var(--etl-metal-cast) 80%, transparent),
+    0 32px 68px -26px var(--etl-metal-cast);
   animation: etl-node-enter 850ms cubic-bezier(0.22, 1, 0.36, 1) both;
   animation-delay: var(--node-enter-delay);
 }
@@ -553,21 +569,21 @@ button {
 .etl-flow-node-core {
   --node-enter-delay: var(--etl-t-hub);
 
-  animation-name: etl-hub-enter;
-  animation-duration: 950ms;
-
-  border-color: color-mix(in srgb, var(--color-fd-border) 46%, var(--etl-green) 54%);
+  /* The hub is the emphasis element, so it is the only panel that carries a
+     brand-tinted rim and a faint bloom. */
+  border-color: color-mix(in srgb, var(--etl-metal-rim) 40%, var(--etl-green) 60%);
   box-shadow:
     inset 0 1px 0 var(--etl-metal-edge-light),
-    inset 1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 45%, transparent),
-    inset -1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 45%, transparent),
+    inset 1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 40%, transparent),
+    inset -1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 40%, transparent),
     inset 0 -1.5px 0 var(--etl-metal-edge-dark),
-    0 0 0 1px color-mix(in srgb, var(--etl-green) 12%, transparent),
-    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 45%, transparent),
-    0 2px 4px -1px color-mix(in srgb, var(--etl-metal-cast) 55%, transparent),
-    0 18px 32px -12px color-mix(in srgb, var(--etl-metal-cast) 90%, transparent),
-    0 40px 88px -24px var(--etl-metal-cast),
-    0 0 44px -8px color-mix(in srgb, var(--etl-green) 16%, transparent);
+    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 55%, transparent),
+    0 2px 3px -1px color-mix(in srgb, var(--etl-metal-cast) 50%, transparent),
+    0 16px 28px -12px color-mix(in srgb, var(--etl-metal-cast) 85%, transparent),
+    0 38px 78px -26px var(--etl-metal-cast),
+    0 0 40px -6px color-mix(in srgb, var(--etl-green) 22%, transparent);
+  animation-name: etl-hub-enter;
+  animation-duration: 950ms;
 }
 
 .etl-flow-node-destination {
@@ -582,6 +598,7 @@ button {
   line-height: 1;
   letter-spacing: 0.14em;
   text-align: center;
+  text-shadow: 0 1px 0 var(--etl-metal-edge-light);
   text-transform: uppercase;
 }
 
@@ -593,20 +610,16 @@ button {
   flex: none;
   align-items: center;
   justify-content: center;
-  border: 1px solid color-mix(in srgb, var(--etl-green) 26%, var(--color-fd-border));
+  border: 1px solid color-mix(in srgb, var(--etl-metal-rim) 80%, transparent);
   border-radius: 1rem;
   color: var(--etl-green);
-  /* Recessed plate, lit from above like the pipe bore. */
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--etl-tube-shade) 42%, var(--color-fd-muted)) 0%,
-    color-mix(in srgb, var(--etl-green) 7%, var(--color-fd-muted)) 52%,
-    color-mix(in srgb, var(--etl-tube-sheen) 16%, var(--color-fd-muted)) 100%
-  );
+  /* A port milled into the panel: dark under the near wall, catching bounce
+     light at the bottom. Same lighting model as the pipe bore. */
+  background: linear-gradient(180deg, var(--etl-port-top), var(--etl-port-bottom));
   box-shadow:
     inset 0 2px 4px -1px var(--etl-tube-shade),
-    inset 0 -1px 0 color-mix(in srgb, var(--etl-tube-sheen) 55%, transparent),
-    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 65%, transparent);
+    inset 0 -1px 0 color-mix(in srgb, var(--etl-tube-sheen) 60%, transparent),
+    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 70%, transparent);
 }
 
 .etl-flow-node-icon svg {
@@ -618,16 +631,17 @@ button {
   display: block;
   width: 2.9rem;
   height: auto;
+  overflow: visible;
 }
 
 .etl-flow-node-core .etl-flow-node-icon {
-  border-color: color-mix(in srgb, var(--etl-green) 42%, var(--color-fd-border));
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--etl-tube-shade) 46%, var(--color-fd-muted)) 0%,
-    color-mix(in srgb, var(--etl-green) 13%, var(--color-fd-muted)) 52%,
-    color-mix(in srgb, var(--etl-tube-sheen) 18%, var(--color-fd-muted)) 100%
-  );
+  border-color: color-mix(in srgb, var(--etl-metal-rim) 55%, var(--etl-green) 45%);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--etl-port-top) 88%, var(--etl-green)),
+      color-mix(in srgb, var(--etl-port-bottom) 90%, var(--etl-green))
+    );
 }
 
 .etl-flow-node-label {
@@ -636,6 +650,7 @@ button {
   line-height: 1;
   letter-spacing: -0.02em;
   text-align: center;
+  text-shadow: 0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 70%, transparent);
   white-space: nowrap;
 }
 
@@ -654,8 +669,9 @@ button {
   margin-inline: -1.35rem;
 }
 
-/* A lane reads as a length of pipe: a recessed bore, a shaded upper wall and a
-   lit lower wall, so packets travel through it rather than over it. */
+/* A lane reads as a length of pipe: the bore falls into shadow under the top
+   wall, then brightens across the lower wall where it faces the light, with a
+   soft gloss band rather than a drawn highlight. */
 .etl-flow-lane {
   position: relative;
   display: block;
@@ -663,19 +679,16 @@ button {
   border: 1px solid var(--etl-tube-wall);
   border-block-width: 1px;
   border-inline-width: 0;
-  background:
-    linear-gradient(
-      to bottom,
-      var(--etl-tube-shade) 0%,
-      color-mix(in srgb, var(--etl-tube-shade) 52%, var(--etl-tube-bore)) 24%,
-      var(--etl-tube-bore) 56%,
-      color-mix(in srgb, var(--etl-tube-sheen) 14%, var(--etl-tube-bore)) 84%,
-      color-mix(in srgb, var(--etl-tube-sheen) 34%, transparent) 100%
-    );
+  background: linear-gradient(
+    180deg,
+    var(--etl-tube-top) 0%,
+    var(--etl-tube-mid) 34%,
+    var(--etl-tube-gloss) 74%,
+    var(--etl-tube-bottom) 100%
+  );
   box-shadow:
-    inset 0 2px 3px -1px var(--etl-tube-shade),
-    inset 0 -1.5px 1.5px color-mix(in srgb, var(--etl-tube-sheen) 50%, transparent),
-    0 1px 0 color-mix(in srgb, var(--etl-tube-sheen) 20%, transparent);
+    inset 0 1.5px 2px -0.5px var(--etl-tube-shade),
+    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 60%, transparent);
   container-type: inline-size;
   overflow: hidden;
   animation: etl-lane-reach 620ms cubic-bezier(0.33, 0.9, 0.35, 1) both;
@@ -687,23 +700,15 @@ button {
   animation-name: etl-lane-reach-start;
 }
 
-/* Specular streak running along the top of the bore. */
-.etl-flow-lane::before {
+/* The bore falls into shadow where it enters a housing. */
+.etl-flow-lane::after {
   position: absolute;
-  z-index: 1;
-  top: 2px;
-  right: 0;
-  left: 0;
-  height: 2px;
+  z-index: 2;
+  inset: 0;
   content: '';
-  background: linear-gradient(
-    90deg,
-    transparent,
-    color-mix(in srgb, var(--etl-tube-sheen) 85%, transparent) 14%,
-    color-mix(in srgb, var(--etl-tube-sheen) 85%, transparent) 86%,
-    transparent
-  );
-  filter: blur(0.4px);
+  box-shadow:
+    inset 1.1rem 0 0.9rem -0.85rem var(--etl-tube-shade),
+    inset -1.1rem 0 0.9rem -0.85rem var(--etl-tube-shade);
   pointer-events: none;
 }
 
@@ -763,11 +768,14 @@ button {
     to bottom,
     color-mix(in srgb, white 40%, var(--etl-packet)),
     var(--etl-packet) 52%,
-    color-mix(in srgb, var(--etl-packet) 74%, var(--etl-ink))
+    color-mix(in srgb, var(--etl-packet) 88%, var(--etl-ink))
   );
-  box-shadow:
-    0 0 0.7rem color-mix(in srgb, var(--etl-packet) 72%, transparent),
-    0 1px 1.5px color-mix(in srgb, var(--etl-ink) 45%, transparent);
+  /* drop-shadow rather than box-shadow: it follows the rendered alpha, so the
+     clip-path shapes get a shadow too. box-shadow is painted outside the border
+     box, which clip-path then removes. */
+  filter:
+    drop-shadow(0 1.5px 1.5px color-mix(in srgb, var(--etl-ink) 48%, transparent))
+    drop-shadow(0 0 0.5rem color-mix(in srgb, var(--etl-packet) 70%, transparent));
   transform: translate(-50%, -50%);
 }
 
@@ -1641,11 +1649,6 @@ button {
 
   .etl-flow-lane {
     height: 0.66rem;
-  }
-
-  .etl-flow-lane::before {
-    top: 1px;
-    height: 1px;
   }
 
   .etl-flow-lane::after {
