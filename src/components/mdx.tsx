@@ -16,7 +16,7 @@ function DocPathIcon({ name }: { name: string }) {
   if (name === 'Pipelines') return <PipelinesMark className="doc-path-pipelines-icon" />;
 
   const Icon = docPathIcons[name];
-  return Icon ? <Icon aria-hidden="true" /> : null;
+  return Icon ? <Icon aria-hidden="true" strokeWidth={1.5} /> : null;
 }
 
 export function getMDXComponents(components?: MDXComponents) {

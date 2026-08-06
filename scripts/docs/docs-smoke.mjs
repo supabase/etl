@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { readFile, readdir } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
 
@@ -14,6 +16,54 @@ function assert(condition, message) {
 
 function withoutFencedCode(markdown) {
   return markdown.replace(/```[\s\S]*?```/g, '');
+}
+
+async function checkSourceCodeFences() {
+  const documentationDirectory = resolve('docs/src/content/docs');
+  const documentationFiles = (await readdir(documentationDirectory, { recursive: true }))
+    .filter((path) => /\.(?:md|mdx)$/.test(path))
+    .map((path) => resolve(documentationDirectory, path));
+  const files = [resolve('README.md'), ...documentationFiles];
+  const allowedLanguages = new Set(['bash', 'ini', 'mermaid', 'rust', 'sql', 'text', 'toml']);
+  const titleLanguages = [
+    [/title="[^"]+\.rs"/, 'rust'],
+    [/title="Cargo\.toml"/, 'toml'],
+    [/title="Terminal"/, 'bash'],
+    [/title="psql"/, 'sql'],
+    [/title="postgresql\.conf(?: \(standby\))?"/, 'ini'],
+  ];
+  const failures = [];
+
+  for (const file of files) {
+    const lines = (await readFile(file, 'utf8')).split('\n');
+    let inFence = false;
+
+    for (const [index, line] of lines.entries()) {
+      if (!line.startsWith('```')) continue;
+      if (inFence) {
+        inFence = false;
+        continue;
+      }
+
+      inFence = true;
+      const info = line.slice(3).trim();
+      const language = info.split(/\s+/, 1)[0];
+      if (!allowedLanguages.has(language)) {
+        failures.push(`${file}:${index + 1} has missing or unsupported language: ${line}`);
+        continue;
+      }
+
+      for (const [titlePattern, expectedLanguage] of titleLanguages) {
+        if (titlePattern.test(info) && language !== expectedLanguage) {
+          failures.push(
+            `${file}:${index + 1} uses ${language} for a ${expectedLanguage} code block: ${line}`,
+          );
+        }
+      }
+    }
+  }
+
+  assert(failures.length === 0, `Invalid documentation code fences:\n${failures.join('\n')}`);
 }
 
 async function waitForPreview() {
@@ -76,9 +126,22 @@ async function checkSeoEndpoints() {
   );
 
   assert((await robots.text()).includes('/etl/sitemap.xml'), 'robots.txt does not name the sitemap.');
-  assert((await sitemap.text()).includes('/etl/guides/first-pipeline'), 'Sitemap is missing a guide.');
+  const sitemapText = await sitemap.text();
+  assert(
+    sitemapText.includes(
+      '<loc>https://supabase.github.io/etl/guides/first-pipeline/</loc>',
+    ) &&
+      !sitemapText.includes(
+        '<loc>https://supabase.github.io/etl/guides/first-pipeline</loc>',
+      ),
+    'Sitemap HTML locations do not use canonical trailing slashes.',
+  );
   const llmsText = await llms.text();
   assert(llmsText.includes('Supabase ETL'), 'llms.txt is missing the product name.');
+  assert(
+    llmsText.includes('high-performance Postgres replication engine written in Rust'),
+    'llms.txt does not use the canonical product positioning.',
+  );
   assert(llmsText.includes('/etl/guides/first-pipeline.md'), 'llms.txt is missing stable Markdown URLs.');
   assert(!llmsText.includes('/llms.mdx/'), 'llms.txt exposes an internal generation route.');
   assert((await search.json()).type === 'advanced', 'Static search index is malformed.');
@@ -93,6 +156,10 @@ async function checkSeoEndpoints() {
 
   const agentData = await agentManifest.json();
   assert(agentData.schema_version === '1.0', 'Agent manifest schema is missing.');
+  assert(
+    agentData.description.includes('high-performance Postgres replication engine written in Rust'),
+    'Agent manifest does not use the canonical product positioning.',
+  );
   assert(agentData.pages.length === 9, 'Agent manifest does not include every documentation page.');
   assert(
     agentData.terminology.replication_phases[1] === 'ongoing replication',
@@ -102,8 +169,25 @@ async function checkSeoEndpoints() {
     agentData.terminology.primary_verb === 'replicate',
     'Agent manifest does not identify replication as the primary action.',
   );
+  assert(
+    agentData.pages.every(
+      (page) =>
+        new URL(page.html_url).pathname.endsWith('/') &&
+        new URL(page.markdown_url).pathname.endsWith('.md'),
+    ),
+    'Agent manifest page URLs do not distinguish HTML routes from Markdown files.',
+  );
+  assert(
+    agentData.discovery.search_index === 'https://supabase.github.io/etl/api/search' &&
+      agentData.discovery.llms_txt === 'https://supabase.github.io/etl/llms.txt',
+    'Static agent endpoints received an invalid trailing slash.',
+  );
 
   const homeText = markdownTexts[0];
+  assert(
+    homeText.includes('high-performance Postgres replication engine written in Rust'),
+    'Homepage Markdown does not use the canonical product positioning.',
+  );
   assert(homeText.includes('## Documentation map'), 'Homepage Markdown lacks its documentation map.');
   assert(
     homeText.includes('## Replication phases') && homeText.includes('Streaming describes a transfer mode'),
@@ -111,9 +195,22 @@ async function checkSeoEndpoints() {
   );
   assert(!homeText.includes('<div'), 'Homepage Markdown contains presentation-only HTML.');
   assert(!homeText.includes('PipelinesMark'), 'Homepage Markdown contains a UI component name.');
+  const canonicalHtmlUrls = [
+    'https://supabase.github.io/etl/',
+    'https://supabase.github.io/etl/guides/first-pipeline/',
+    'https://supabase.github.io/etl/guides/configure-postgres/',
+    'https://supabase.github.io/etl/guides/custom-implementations/',
+    'https://supabase.github.io/etl/explanation/concepts/',
+    'https://supabase.github.io/etl/explanation/architecture/',
+    'https://supabase.github.io/etl/explanation/schema-changes/',
+    'https://supabase.github.io/etl/explanation/events/',
+    'https://supabase.github.io/etl/explanation/traits/',
+  ];
   assert(
-    markdownTexts.every((text) => text.includes('Canonical HTML:')),
-    'A per-page Markdown file lacks canonical provenance.',
+    markdownTexts.every((text, index) =>
+      text.includes(`Canonical HTML: ${canonicalHtmlUrls[index]}`),
+    ),
+    'A per-page Markdown file lacks its canonical trailing-slash HTML URL.',
   );
   assert(
     markdownTexts.every(
@@ -136,6 +233,10 @@ async function checkSeoEndpoints() {
   assert(
     markdownTexts.every((text) => !text.includes('<Callout')),
     'Agent-readable Markdown contains presentation-only callout markup.',
+  );
+  assert(
+    markdownTexts[1].includes('Supabase ETL is currently under active development'),
+    'First Pipeline does not carry the active-development notice.',
   );
 }
 
@@ -170,25 +271,220 @@ async function crawlInternalLinks(page) {
 }
 
 async function checkDesktop(page) {
-  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.setViewportSize({ width: 2048, height: 1152 });
   await page.goto(`${baseUrl}/`, { waitUntil: 'networkidle' });
   await assertNoHorizontalOverflow(page);
+  const wideHeroAlignment = await page.evaluate(() => {
+    const title = document.querySelector('.etl-landing h1');
+    const summary = document.querySelector('.etl-landing-summary');
+    const headerBrand = document.querySelector('.etl-home-nav-brand');
+    const headerLinks = document.querySelector('.etl-home-nav-links');
+    const footerText = document.querySelector('.etl-home-footer p');
+    const footerLinks = document.querySelector('.etl-home-footer nav');
+    if (
+      !(title instanceof HTMLElement) ||
+      !(summary instanceof HTMLElement) ||
+      !(headerBrand instanceof HTMLElement) ||
+      !(headerLinks instanceof HTMLElement) ||
+      !(footerText instanceof HTMLElement) ||
+      !(footerLinks instanceof HTMLElement)
+    ) return null;
+    const titleRect = title.getBoundingClientRect();
+    const summaryRect = summary.getBoundingClientRect();
+    const headerBrandRect = headerBrand.getBoundingClientRect();
+    const headerLinksRect = headerLinks.getBoundingClientRect();
+    const footerTextRect = footerText.getBoundingClientRect();
+    const footerLinksRect = footerLinks.getBoundingClientRect();
+    const style = getComputedStyle(title);
+    return {
+      horizontalGap: summaryRect.left - titleRect.right,
+      titleLines: Math.round(titleRect.height / Number.parseFloat(style.lineHeight)),
+      shellEdgeDelta: Math.max(
+        Math.abs(headerBrandRect.left - footerTextRect.left),
+        Math.abs(headerLinksRect.right - footerLinksRect.right),
+      ),
+      bodyFont: getComputedStyle(document.body).fontFamily,
+      headingFont: style.fontFamily,
+      navFontSize: Number.parseFloat(
+        getComputedStyle(headerLinks.querySelector('a')).fontSize,
+      ),
+    };
+  });
+  assert(
+    wideHeroAlignment !== null &&
+      wideHeroAlignment.horizontalGap >= 48 &&
+      wideHeroAlignment.titleLines === 2 &&
+      wideHeroAlignment.shellEdgeDelta <= 1 &&
+      wideHeroAlignment.bodyFont.includes('Geist') &&
+      wideHeroAlignment.headingFont.includes('Manrope') &&
+      wideHeroAlignment.navFontSize >= 14,
+    'The wide homepage headline overlaps or misaligns with the supporting copy.',
+  );
 
-  assert((await page.locator('.doc-path-card').count()) === 6, 'Expected six homepage path cards.');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${baseUrl}/`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(1500);
+  await assertNoHorizontalOverflow(page);
+
   assert(
-    (await page.locator('.doc-path-symbol svg').count()) === 6,
-    'Every homepage path card should use a vector icon.',
-  );
-  const iconSizes = await page.locator('.doc-path-symbol').evaluateAll((icons) =>
-    icons.map((icon) => {
-      const rect = icon.getBoundingClientRect();
-      return [rect.width, rect.height];
-    }),
+    (await page.locator('.etl-home-nav .etl-brand').innerText()) === 'Supabase ETL',
+    'The homepage navigation does not use the full Supabase ETL name.',
   );
   assert(
-    iconSizes.every(([width, height]) => width === iconSizes[0][0] && height === iconSizes[0][1]),
-    'Homepage path-card icon containers are not uniformly sized.',
+    !(await page.locator('main').innerText()).includes('under active development'),
+    'The homepage still exposes the active-development notice.',
   );
+  assert(
+    (await page.locator('#nd-docs-layout').count()) === 0,
+    'The product homepage is still rendered inside the documentation shell.',
+  );
+  assert(
+    (await page.locator('.etl-flow-connection').count()) === 2 &&
+      (await page.locator('.etl-data-packet').count()) === 8,
+    'The homepage data-flow scene is missing its replication connections or packets.',
+  );
+  const flowGeometry = await page.evaluate(() => {
+    const selectors = ['.etl-flow-source', '.etl-flow-core', '.etl-flow-destinations'];
+    const nodes = selectors.map((selector) => document.querySelector(selector));
+    const headerItems = [
+      document.querySelector('.etl-home-nav-brand'),
+      document.querySelector('.etl-home-search'),
+      document.querySelector('.etl-home-nav-links'),
+    ];
+    if (
+      nodes.some((node) => !(node instanceof HTMLElement)) ||
+      headerItems.some((item) => !(item instanceof HTMLElement))
+    ) {
+      return null;
+    }
+    const nodeRects = nodes.map((node) => node.getBoundingClientRect());
+    const headerRects = headerItems.map((item) => item.getBoundingClientRect());
+    const centers = nodeRects.map((rect) => rect.top + rect.height / 2);
+    const headerCenters = headerRects.map((rect) => rect.top + rect.height / 2);
+    return {
+      ordered:
+        nodeRects[0].right < nodeRects[1].left && nodeRects[1].right < nodeRects[2].left,
+      centerDelta: Math.max(...centers) - Math.min(...centers),
+      headerCenterDelta: Math.max(...headerCenters) - Math.min(...headerCenters),
+    };
+  });
+  assert(
+    flowGeometry?.ordered &&
+      flowGeometry.centerDelta <= 2 &&
+      flowGeometry.headerCenterDelta <= 2,
+    `The homepage flow or header is not aligned: ${JSON.stringify(flowGeometry)}.`,
+  );
+  const flowSourceText = (await page.locator('.etl-flow-source').innerText())
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  const flowCoreText = (await page.locator('.etl-flow-core').innerText())
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  const flowDestinationText = (await page.locator('.etl-flow-destinations').innerText()).replace(
+    /\s+/g,
+    ' ',
+  ).toLowerCase();
+  assert(
+    flowSourceText.includes('source postgres') &&
+      flowCoreText.includes('supabase etl replicate changes') &&
+      flowDestinationText.includes('destinations') &&
+      !flowDestinationText.includes('analytics') &&
+      (await page.locator('.etl-analytics-system').count()) === 3,
+    'The data-flow scene does not explain source, ETL, and destinations.',
+  );
+  assert(
+    (await page.locator('h1').innerText()).replace(/\s+/g, ' ') ===
+      'Postgres replication in Rust.',
+    'Homepage heading changed unexpectedly.',
+  );
+  const heroTitleLines = await page.locator('h1').evaluate((title) => {
+    const style = getComputedStyle(title);
+    return Math.round(title.getBoundingClientRect().height / Number.parseFloat(style.lineHeight));
+  });
+  assert(heroTitleLines === 2, 'Homepage heading does not use the intended two-line lockup.');
+  assert(
+    (await page.locator('link[rel="canonical"]').getAttribute('href')) ===
+      'https://supabase.github.io/etl/',
+    'Homepage canonical URL is incorrect.',
+  );
+  assert(
+    (await page.locator('script[type="application/ld+json"]').count()) === 1,
+    'Homepage structured data is missing.',
+  );
+  assert(
+    (await page.locator('link[rel="icon"]').getAttribute('href')) ===
+      '/etl/assets/etl-favicon.svg',
+    'Homepage favicon is incorrect.',
+  );
+  assert(
+    (await page.locator('link[rel="alternate"][type="text/markdown"]').getAttribute('href')) ===
+      'https://supabase.github.io/etl/index.md',
+    'Homepage does not advertise its agent-readable Markdown.',
+  );
+  assert(
+    (await page.locator('link[rel="alternate"][type="text/plain"]').count()) === 2,
+    'Global LLM discovery links are missing.',
+  );
+  assert(
+    (await page.locator('link[rel="alternate"][type="application/json"]').count()) === 1,
+    'Agent manifest discovery link is missing.',
+  );
+
+  await page.getByRole('button', { name: 'Search Supabase ETL documentation' }).click();
+  const searchInput = page.getByRole('textbox', { name: 'Search Supabase ETL documentation' });
+  await searchInput.fill('replica identity');
+  const searchInputFocusStyle = await searchInput.evaluate((input) => {
+    const style = getComputedStyle(input);
+    return {
+      active: document.activeElement === input,
+      outlineStyle: style.outlineStyle,
+      boxShadow: style.boxShadow,
+    };
+  });
+  assert(
+    searchInputFocusStyle.active &&
+      searchInputFocusStyle.outlineStyle === 'none' &&
+      searchInputFocusStyle.boxShadow === 'none',
+    `The focused search input has an unwanted selection rectangle: ${JSON.stringify(searchInputFocusStyle)}.`,
+  );
+  await page.getByRole('button', { name: /Logical Replication/ }).first().waitFor();
+  const searchPanelMetrics = await page.locator('#fd-search-dialog-content').evaluate((panel) => {
+    const rect = panel.getBoundingClientRect();
+    const style = getComputedStyle(panel);
+    return {
+      width: rect.width,
+      top: rect.top,
+      borderRadius: Number.parseFloat(style.borderRadius),
+      horizontalMargin: Math.min(rect.left, window.innerWidth - rect.right),
+    };
+  });
+  assert(
+    searchPanelMetrics.width <= 562 &&
+      searchPanelMetrics.top >= 64 &&
+      searchPanelMetrics.borderRadius >= 15 &&
+      searchPanelMetrics.horizontalMargin >= 16,
+    'The search panel sizing, margin, or border radius is not aligned with the homepage.',
+  );
+  await searchInput.press('Escape');
+
+  const homeChatGptHref = await page.getByRole('link', { name: 'Ask ChatGPT' }).getAttribute('href');
+  const homeClaudeHref = await page.getByRole('link', { name: 'Ask Claude' }).getAttribute('href');
+  assert(
+    new URL(homeChatGptHref).searchParams.get('q')?.includes('https://supabase.github.io/etl/') &&
+      new URL(homeClaudeHref).searchParams.get('q')?.includes('https://supabase.github.io/etl/'),
+    'Homepage agent actions do not use the canonical deployment URL.',
+  );
+  const homeCopyResponsePromise = page.waitForResponse(
+    (response) => response.url() === `${baseUrl}/index.md`,
+  );
+  await page.getByRole('button', { name: 'Copy Markdown' }).click();
+  const homeCopyResponse = await homeCopyResponsePromise;
+  assert(
+    homeCopyResponse.ok() && homeCopyResponse.headers()['content-type']?.includes('text/markdown'),
+    'Homepage Copy Markdown does not fetch the generated Markdown page.',
+  );
+
+  await page.goto(`${baseUrl}/guides/first-pipeline/`, { waitUntil: 'networkidle' });
   assert(
     (await page.locator('.etl-brand:visible').first().innerText()) === 'Supabase ETL',
     'The documentation navigation does not use the full Supabase ETL name.',
@@ -222,7 +518,6 @@ async function checkDesktop(page) {
   );
   const sidebarText = await page.locator('#nd-sidebar').innerText();
   for (const label of [
-    'Home',
     'Get started',
     'First Pipeline',
     'Guides',
@@ -238,6 +533,7 @@ async function checkDesktop(page) {
   ]) {
     assert(sidebarText.includes(label), `Sidebar is missing the concise label: ${label}.`);
   }
+  assert(!sidebarText.includes('Home'), 'The docs sidebar should begin with First Pipeline.');
   for (const oldLabel of [
     'Build Your First ETL Pipeline',
     'Configure Postgres for Replication',
@@ -247,37 +543,6 @@ async function checkDesktop(page) {
   ]) {
     assert(!sidebarText.includes(oldLabel), `Sidebar still contains the long label: ${oldLabel}.`);
   }
-  assert(
-    (await page.locator('h1').innerText()) === 'Postgres replication for Rust.',
-    'Homepage heading changed unexpectedly.',
-  );
-  assert(
-    (await page.locator('link[rel="canonical"]').getAttribute('href')) ===
-      'https://supabase.github.io/etl/',
-    'Homepage canonical URL is incorrect.',
-  );
-  assert(
-    (await page.locator('script[type="application/ld+json"]').count()) === 1,
-    'Homepage structured data is missing.',
-  );
-  assert(
-    (await page.locator('link[rel="icon"]').getAttribute('href')) ===
-      '/etl/assets/etl-favicon.svg',
-    'Homepage favicon is incorrect.',
-  );
-  assert(
-    (await page.locator('link[rel="alternate"][type="text/markdown"]').getAttribute('href')) ===
-      'https://supabase.github.io/etl/index.md',
-    'Homepage does not advertise its agent-readable Markdown.',
-  );
-  assert(
-    (await page.locator('link[rel="alternate"][type="text/plain"]').count()) === 2,
-    'Global LLM discovery links are missing.',
-  );
-  assert(
-    (await page.locator('link[rel="alternate"][type="application/json"]').count()) === 1,
-    'Agent manifest discovery link is missing.',
-  );
   const actionBarSpacing = await page.locator('.etl-page-actions').evaluate((actions) => {
     const firstControl = actions.firstElementChild;
     if (!(firstControl instanceof HTMLElement)) return null;
@@ -292,38 +557,32 @@ async function checkDesktop(page) {
     actionBarSpacing !== null && Math.abs(actionBarSpacing.top - actionBarSpacing.bottom) <= 2,
     'The page-action dividers do not have even vertical spacing.',
   );
-  const pageNavigationGap = await page.evaluate(() => {
-    const content = document.querySelector('#nd-page > .prose');
-    const navigation = content?.nextElementSibling;
-    if (!(content instanceof HTMLElement) || !(navigation instanceof HTMLElement)) return 0;
-    return navigation.getBoundingClientRect().top - content.getBoundingClientRect().bottom;
-  });
+  const guideChatGptHref = await page.getByRole('link', { name: 'Ask ChatGPT' }).getAttribute('href');
+  const guideClaudeHref = await page.getByRole('link', { name: 'Ask Claude' }).getAttribute('href');
   assert(
-    pageNavigationGap >= 32,
-    `Expected at least 32px above the page navigation, found ${pageNavigationGap}px.`,
+    new URL(guideChatGptHref).searchParams
+      .get('q')
+      ?.includes('https://supabase.github.io/etl/guides/first-pipeline/') &&
+      new URL(guideClaudeHref).searchParams
+        .get('q')
+        ?.includes('https://supabase.github.io/etl/guides/first-pipeline/'),
+    'Guide agent actions do not use the canonical page URL.',
   );
-
-  await page.getByRole('button', { name: 'Search Supabase ETL documentation' }).click();
-  const searchInput = page.getByRole('textbox', { name: 'Search Supabase ETL documentation' });
-  await searchInput.fill('replica identity');
-  await page.getByRole('button', { name: /Logical Replication/ }).first().waitFor();
-  await searchInput.press('Escape');
-
-  await page.goto(`${baseUrl}/guides/first-pipeline/`, { waitUntil: 'networkidle' });
-  await page.getByRole('button', { name: 'Open', exact: true }).click();
-  const viewMarkdownLink = page.getByRole('link', { name: /View as Markdown/ });
-  const viewMarkdownHref = await viewMarkdownLink.getAttribute('href');
   assert(
-    viewMarkdownHref === '/etl/guides/first-pipeline.md',
-    'View as Markdown does not use the deployment-aware page URL.',
+    (await page.locator('link[rel="canonical"]').getAttribute('href')) ===
+      'https://supabase.github.io/etl/guides/first-pipeline/',
+    'Guide metadata does not use the canonical trailing-slash URL.',
   );
-  const openMarkdownResponse = await page.request.get(new URL(viewMarkdownHref, origin).toString());
+  const guideStructuredData = JSON.parse(
+    await page.locator('script[type="application/ld+json"]').textContent(),
+  );
   assert(
-    openMarkdownResponse.ok() &&
-      openMarkdownResponse.headers()['content-type']?.includes('text/markdown'),
-    'View as Markdown does not resolve to generated Markdown.',
+    guideStructuredData.url ===
+      'https://supabase.github.io/etl/guides/first-pipeline/' &&
+      guideStructuredData.mainEntityOfPage ===
+        'https://supabase.github.io/etl/guides/first-pipeline/',
+    'Guide structured data does not use the canonical trailing-slash URL.',
   );
-  await page.keyboard.press('Escape');
 
   const copyMarkdownResponsePromise = page.waitForResponse(
     (response) => response.url() === `${baseUrl}/guides/first-pipeline.md`,
@@ -334,6 +593,17 @@ async function checkDesktop(page) {
     copyMarkdownResponse.ok() &&
       copyMarkdownResponse.headers()['content-type']?.includes('text/markdown'),
     'Copy Markdown does not fetch the generated Markdown page.',
+  );
+
+  const pageNavigationGap = await page.evaluate(() => {
+    const content = document.querySelector('#nd-page > .prose');
+    const navigation = content?.nextElementSibling;
+    if (!(content instanceof HTMLElement) || !(navigation instanceof HTMLElement)) return 0;
+    return navigation.getBoundingClientRect().top - content.getBoundingClientRect().bottom;
+  });
+  assert(
+    pageNavigationGap >= 32,
+    `Expected at least 32px above the page navigation, found ${pageNavigationGap}px.`,
   );
 
   assert(
@@ -379,18 +649,57 @@ async function checkDesktop(page) {
 async function checkMobile(page) {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${baseUrl}/`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(1500);
   await assertNoHorizontalOverflow(page);
   assert(
-    (await page.locator('.doc-path-card').count()) === 6,
-    'Mobile homepage is missing path cards.',
+    (await page.locator('.etl-flow-source').count()) === 1 &&
+      (await page.locator('.etl-flow-core').count()) === 1 &&
+      (await page.locator('.etl-flow-destinations').count()) === 1,
+    'The mobile homepage is missing the replication scene.',
   );
-  const mobileCardsFit = await page.locator('.doc-path-card').evaluateAll((cards) =>
-    cards.every((card) => {
-      const rect = card.getBoundingClientRect();
-      return rect.left >= 0 && rect.right <= window.innerWidth && card.scrollWidth <= card.clientWidth;
-    }),
+  const mobileFlowGeometry = await page
+    .locator('.etl-flow-stage')
+    .evaluate((stage) => {
+      const nodes = [
+        stage.querySelector('.etl-flow-source'),
+        stage.querySelector('.etl-flow-core'),
+        stage.querySelector('.etl-flow-destinations'),
+      ];
+      if (nodes.some((node) => !(node instanceof HTMLElement))) return null;
+      const rects = nodes.map((node) => node.getBoundingClientRect());
+      const centers = rects.map((rect) => rect.top + rect.height / 2);
+      return {
+        ordered: rects[0].right < rects[1].left && rects[1].right < rects[2].left,
+        centerDelta: Math.max(...centers) - Math.min(...centers),
+      };
+    });
+  assert(
+    mobileFlowGeometry?.ordered && mobileFlowGeometry.centerDelta <= 2,
+    `The mobile replication flow is not aligned: ${JSON.stringify(mobileFlowGeometry)}.`,
   );
-  assert(mobileCardsFit, 'A mobile homepage card is clipped or overflows the viewport.');
+  const mobileHeroFit = await page.locator('.etl-landing-content').evaluate((content) => {
+    const rect = content.getBoundingClientRect();
+    const actions = [...content.querySelectorAll('a, button')];
+    return (
+      rect.left >= 0 &&
+      rect.right <= window.innerWidth &&
+      actions.every((action) => {
+        const actionRect = action.getBoundingClientRect();
+        return actionRect.left >= 0 && actionRect.right <= window.innerWidth;
+      })
+    );
+  });
+  assert(mobileHeroFit, 'A mobile homepage action is clipped or overflows the viewport.');
+  assert(
+    (await page.locator('.etl-home-search-compact').isVisible()) &&
+      !(await page.locator('.etl-home-search-full').isVisible()),
+    'The homepage search control does not adapt to mobile.',
+  );
+  assert(
+    (await page.locator('.etl-landing h1').innerText()).replace(/\s+/g, ' ') ===
+      'Postgres replication in Rust.',
+    'The mobile homepage changed the product statement.',
+  );
 
   await page.goto(`${baseUrl}/guides/first-pipeline/`, { waitUntil: 'networkidle' });
   await assertNoHorizontalOverflow(page);
@@ -406,15 +715,34 @@ async function checkMobile(page) {
   const mobilePipelinesStyle = await mobilePipelinesLink.evaluate((link) => {
     const footer = link.parentElement;
     const rect = link.getBoundingClientRect();
+    const sidebar = document.querySelector('#nd-sidebar-mobile');
+    const activeLink = sidebar?.querySelector('a[data-active="true"]');
+    const sidebarRect = sidebar?.getBoundingClientRect();
+    const activeLinkRect = activeLink?.getBoundingClientRect();
 
     return {
       footerBorderTop: footer ? getComputedStyle(footer).borderTopWidth : null,
       fitsViewport: rect.left >= 0 && rect.right <= window.innerWidth,
+      sidebarRect: sidebarRect
+        ? { left: sidebarRect.left, right: sidebarRect.right, width: sidebarRect.width }
+        : null,
+      activeLinkRect: activeLinkRect
+        ? { left: activeLinkRect.left, right: activeLinkRect.right, width: activeLinkRect.width }
+        : null,
+      contentAligned:
+        sidebarRect && activeLinkRect
+          ? activeLinkRect.left - sidebarRect.left <= 24 &&
+            sidebarRect.right - activeLinkRect.right <= 24 &&
+            rect.left - sidebarRect.left <= 24 &&
+            sidebarRect.right - rect.right <= 24
+          : false,
     };
   });
   assert(
-    mobilePipelinesStyle.footerBorderTop === '0px' && mobilePipelinesStyle.fitsViewport,
-    'The mobile Pipelines card divider or sizing is incorrect.',
+    mobilePipelinesStyle.footerBorderTop === '0px' &&
+      mobilePipelinesStyle.fitsViewport &&
+      mobilePipelinesStyle.contentAligned,
+    `The mobile sidebar alignment, Pipelines divider, or sizing is incorrect: ${JSON.stringify(mobilePipelinesStyle)}.`,
   );
   await page
     .locator('#nd-sidebar-mobile')
@@ -428,6 +756,25 @@ async function checkMobile(page) {
   await searchInput.fill('schema changes');
   await page.getByRole('button', { name: /Schema Changes/ }).first().waitFor();
   await searchInput.press('Escape');
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto(`${baseUrl}/`, { waitUntil: 'networkidle' });
+  const reducedMotion = await page.locator('.etl-data-packet').first().evaluate((packet) => {
+    const style = getComputedStyle(packet);
+    const duration = Number.parseFloat(style.animationDuration);
+    return {
+      durationMs: style.animationDuration.endsWith('ms') ? duration : duration * 1000,
+      animationName: style.animationName,
+      opacity: Number.parseFloat(style.opacity),
+    };
+  });
+  assert(
+    reducedMotion.durationMs <= 0.01 &&
+      reducedMotion.animationName === 'none' &&
+      reducedMotion.opacity >= 0.8,
+    'The replication scene does not provide a reduced-motion presentation.',
+  );
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
 }
 
 const preview = spawn('npm', ['run', 'preview', '--', '--host', host, '--port', String(port)], {
@@ -468,6 +815,7 @@ async function stopPreview() {
 }
 
 try {
+  await checkSourceCodeFences();
   await waitForPreview();
   await checkSeoEndpoints();
 
@@ -483,7 +831,7 @@ try {
 
   assert(pageErrors.length === 0, `Browser errors:\n${pageErrors.join('\n')}`);
   console.log(
-    'Docs smoke checks passed: SEO, agent feeds, page actions, search, diagrams, responsive UI, and links.',
+    'Docs smoke checks passed: code languages, landing motion, SEO, agent feeds, page actions, search, diagrams, responsive UI, and links.',
   );
 } finally {
   if (browser) await Promise.race([browser.close(), delay(cleanupTimeoutMs)]);

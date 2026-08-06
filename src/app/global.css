@@ -1,16 +1,20 @@
-@import '@fontsource-variable/inter/index.css';
+@import '@fontsource-variable/geist/index.css';
 @import '@fontsource-variable/jetbrains-mono/index.css';
+@import '@fontsource-variable/manrope/index.css';
 @import 'tailwindcss';
 @import 'fumadocs-ui/css/neutral.css';
 @import 'fumadocs-ui/css/preset.css';
 
 @theme {
-  --font-sans: 'Inter Variable', Inter, ui-sans-serif, system-ui, sans-serif;
+  --font-sans: 'Geist Variable', Geist, ui-sans-serif, system-ui, sans-serif;
+  --font-heading: 'Manrope Variable', Manrope, ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono Variable', 'SFMono-Regular', Consolas, monospace;
 }
 
 :root {
   --fd-layout-width: 1500px;
+  --etl-shell-width: 1500px;
+  --etl-page-gutter: clamp(1.5rem, 4vw, 4rem);
   --color-fd-background: hsl(150 20% 99%);
   --color-fd-foreground: hsl(153 18% 12%);
   --color-fd-muted: hsl(150 18% 96%);
@@ -77,6 +81,15 @@ body {
   letter-spacing: -0.008em;
 }
 
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-heading);
+}
+
 ::selection {
   color: #07120d;
   background: color-mix(in srgb, var(--etl-green) 74%, white);
@@ -102,6 +115,13 @@ button {
   border-color: color-mix(in srgb, var(--color-fd-border) 82%, var(--etl-green) 18%);
 }
 
+@media (min-width: 768px) {
+  #nd-sidebar {
+    width: var(--fd-sidebar-width);
+    align-items: stretch;
+  }
+}
+
 #nd-sidebar a[aria-label='GitHub'] {
   gap: 0.45rem;
   padding-inline: 0.7rem;
@@ -117,6 +137,68 @@ button {
   color: var(--color-fd-accent-foreground);
   background: var(--color-fd-accent);
   font-weight: 620;
+}
+
+#fd-search-dialog-content {
+  top: clamp(4.75rem, 14vh, 8rem) !important;
+  width: min(calc(100% - 2rem), 35rem) !important;
+  max-width: none !important;
+  border-color: color-mix(in srgb, var(--color-fd-border) 72%, var(--etl-green) 28%) !important;
+  border-radius: 1rem !important;
+  background:
+    linear-gradient(160deg, color-mix(in srgb, var(--color-fd-popover) 94%, var(--etl-green) 6%), var(--color-fd-popover)) !important;
+  box-shadow:
+    0 24px 90px color-mix(in srgb, var(--etl-ink) 24%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--etl-green) 5%, transparent) !important;
+}
+
+#fd-search-dialog-content > div:nth-of-type(1) {
+  min-height: 3.5rem;
+  gap: 0.65rem;
+  padding: 0.72rem 0.8rem;
+  border-bottom-color: color-mix(in srgb, var(--color-fd-border) 78%, transparent);
+}
+
+#fd-search-dialog-content [data-fd-search-dialog-input] {
+  font-size: 0.94rem;
+  letter-spacing: -0.012em;
+  caret-color: var(--color-fd-primary);
+}
+
+#fd-search-dialog-content [data-fd-search-dialog-input]:focus,
+#fd-search-dialog-content [data-fd-search-dialog-input]:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+#fd-search-dialog-content button[aria-label='Close Search'] {
+  border-color: color-mix(in srgb, var(--color-fd-border) 78%, transparent);
+  border-radius: 0.52rem;
+  background: color-mix(in srgb, var(--color-fd-muted) 58%, transparent);
+  font-size: 0.62rem;
+}
+
+#fd-search-dialog-content > div:nth-of-type(2) {
+  min-height: 7rem;
+}
+
+#fd-search-dialog-content > div:nth-of-type(2) > div {
+  max-height: min(52vh, 23rem);
+  padding: 0.35rem;
+}
+
+#fd-search-dialog-content > div:nth-of-type(2) > div > div:only-child {
+  padding-block: 2.5rem;
+  font-size: 0.78rem;
+}
+
+#fd-search-dialog-content > div:last-child {
+  padding: 0.65rem 0.85rem;
+  color: var(--color-fd-muted-foreground);
+  background: color-mix(in srgb, var(--color-fd-muted) 52%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.01em;
 }
 
 .etl-sidebar-pipelines {
@@ -195,10 +277,6 @@ button {
   margin-bottom: clamp(2rem, 4vw, 3rem);
 }
 
-.etl-home-page#nd-page {
-  max-width: 900px;
-}
-
 .etl-brand {
   display: inline-flex;
   align-items: center;
@@ -214,102 +292,587 @@ button {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--etl-green) 30%, transparent);
 }
 
-.etl-hero {
+.etl-landing {
   position: relative;
-  margin: 0;
-  padding: clamp(1rem, 3vw, 2.1rem) 0 clamp(2rem, 4vw, 3rem);
+  isolation: isolate;
+  height: max(100svh, 760px);
+  min-height: 760px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 18%, color-mix(in srgb, var(--etl-green) 9%, transparent), transparent 34rem),
+    var(--color-fd-background);
 }
 
-.etl-eyebrow {
+.etl-home-header {
+  position: absolute;
+  z-index: 50;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 4.25rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-fd-border) 86%, transparent);
+  background: color-mix(in srgb, var(--color-fd-background) 72%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.etl-home-nav {
+  display: grid;
+  width: 100%;
+  max-width: var(--etl-shell-width);
+  height: 100%;
+  grid-template-columns: minmax(12rem, 1fr) minmax(16rem, 22rem) minmax(12rem, 1fr);
+  align-items: center;
+  gap: 1.5rem;
+  margin-inline: auto;
+  padding-inline: var(--etl-page-gutter);
+}
+
+.etl-home-nav-brand {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-self: start;
+  text-decoration: none;
+}
+
+.etl-home-nav .etl-brand {
+  gap: 0.68rem;
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.etl-home-nav .etl-brand img {
+  width: 2.05rem;
+  height: 2.05rem;
+}
+
+.etl-home-search {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+.etl-home-search-full {
+  width: 100%;
+  min-height: 2.5rem;
+  border-color: color-mix(in srgb, var(--color-fd-border) 86%, transparent) !important;
+  border-radius: 999px !important;
+  background: color-mix(in srgb, var(--color-fd-muted) 64%, transparent) !important;
+}
+
+.etl-home-search-compact {
+  display: none !important;
+}
+
+.etl-home-nav-links {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-self: end;
+  gap: 1.25rem;
+}
+
+.etl-home-nav-links > a {
   display: inline-flex;
   align-items: center;
-  gap: 0.48rem;
-  margin-bottom: 1.3rem;
+  gap: 0.4rem;
+  color: var(--color-fd-foreground);
+  font-size: 0.875rem;
+  font-weight: 650;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.etl-home-nav-links > a:hover {
   color: var(--color-fd-primary);
-  font-size: 0.72rem;
-  font-weight: 720;
-  letter-spacing: 0.095em;
+}
+
+.etl-home-nav-links > a svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.etl-home-theme-switch {
+  min-height: 2.35rem;
+  border-color: color-mix(in srgb, var(--color-fd-border) 86%, transparent) !important;
+  background: color-mix(in srgb, var(--color-fd-muted) 64%, transparent);
+}
+
+.etl-flow-scene {
+  position: absolute;
+  z-index: 0;
+  inset: 4.25rem 0 0;
+  overflow: hidden;
+}
+
+.etl-flow-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(circle, color-mix(in srgb, var(--etl-green) 20%, transparent) 1px, transparent 1.5px),
+    linear-gradient(to right, var(--etl-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--etl-grid) 1px, transparent 1px);
+  background-size: 5.25rem 5.25rem, 5.25rem 5.25rem, 5.25rem 5.25rem;
+  mask-image: linear-gradient(to bottom, black 0%, black 58%, transparent 84%);
+  animation: etl-grid-reveal 1s 100ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  transform-origin: center;
+}
+
+.etl-flow-glow {
+  position: absolute;
+  top: 36%;
+  left: 50%;
+  width: min(72rem, 82vw);
+  height: 22rem;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, color-mix(in srgb, var(--etl-green) 11%, transparent), transparent 66%);
+  filter: blur(16px);
+  transform: translate(-50%, -50%);
+  animation: etl-scene-reveal 1.25s 100ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.etl-flow-stage {
+  position: absolute;
+  z-index: 3;
+  top: 36%;
+  left: 50%;
+  display: grid;
+  width: min(calc(100% - 6.25rem), 92rem);
+  grid-template-columns: 16rem minmax(4.5rem, 1fr) 20rem minmax(4.5rem, 1fr) 16rem;
+  align-items: center;
+  animation: etl-stage-settle 4s 1.1s cubic-bezier(0.4, 0, 0.2, 1) both;
+  transform: translate(-50%, -50%);
+  transform-origin: center;
+}
+
+.etl-flow-node,
+.etl-flow-core,
+.etl-flow-destinations {
+  position: relative;
+  z-index: 3;
+  border: 1.5px solid color-mix(in srgb, var(--color-fd-border) 62%, var(--etl-green) 38%);
+  border-radius: 1.08rem;
+  color: var(--color-fd-foreground);
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--color-fd-card) 92%, var(--etl-green) 8%),
+    color-mix(in srgb, var(--color-fd-card) 98%, var(--color-fd-background) 2%)
+  );
+  box-shadow:
+    0 1px 0 color-mix(in srgb, white 5%, transparent),
+    0 22px 70px color-mix(in srgb, var(--etl-ink) 16%, transparent),
+    inset 0 1px color-mix(in srgb, white 7%, transparent),
+    inset 0 -1px color-mix(in srgb, var(--color-fd-foreground) 4%, transparent);
+  backdrop-filter: blur(16px);
+}
+
+.etl-flow-source {
+  display: grid;
+  min-height: 9.4rem;
+  grid-template-columns: 3.65rem 1fr;
+  align-content: center;
+  align-items: center;
+  gap: 0.18rem 0.85rem;
+  padding: 1.25rem 1.3rem;
+  animation: etl-node-enter 900ms 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.etl-flow-node-kicker {
+  display: block;
+  grid-column: 1 / -1;
+  margin-bottom: 0.8rem;
+  color: var(--color-fd-muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
-.etl-pulse {
+.etl-flow-node-icon {
+  display: flex;
+  width: 3.65rem;
+  height: 3.65rem;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid color-mix(in srgb, var(--etl-green) 38%, var(--color-fd-border));
+  border-radius: 0.82rem;
+  color: var(--etl-green);
+  background: color-mix(in srgb, var(--etl-green) 7%, var(--color-fd-muted));
+}
+
+.etl-flow-node-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.28rem;
+}
+
+.etl-flow-source strong,
+.etl-flow-core strong {
+  font-size: 1.08rem;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+.etl-flow-source small,
+.etl-flow-core small,
+.etl-flow-destinations small {
+  color: var(--color-fd-muted-foreground);
+  font-size: 0.68rem;
+}
+
+.etl-postgres-mark {
+  display: block;
+  width: 2.1rem;
+  height: 2.1rem;
+}
+
+.etl-flow-core {
+  display: grid;
+  min-height: 9.4rem;
+  grid-template-columns: 3.65rem 1fr;
+  align-content: center;
+  align-items: center;
+  gap: 0.18rem 1.1rem;
+  padding: 1.2rem 1.4rem;
+  animation: etl-core-enter 1s 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.etl-flow-core::before,
+.etl-flow-core::after {
+  position: absolute;
+  z-index: -1;
+  inset: -1rem;
+  border: 1px solid color-mix(in srgb, var(--etl-green) 13%, transparent);
+  border-radius: 1.55rem;
+  content: '';
+  animation: etl-core-ring 5.2s cubic-bezier(0.45, 0, 0.2, 1) infinite;
+  transform-origin: center;
+}
+
+.etl-flow-core::after {
+  inset: -2rem;
+  border-color: color-mix(in srgb, var(--etl-green) 7%, transparent);
+  border-radius: 2.1rem;
+  animation-delay: -2.6s;
+}
+
+.etl-flow-core img {
+  width: 3.65rem;
+  height: 3.65rem;
+  border: 1.5px solid color-mix(in srgb, var(--etl-green) 45%, transparent);
+  border-radius: 0.82rem;
+}
+
+.etl-flow-core-impact {
+  position: absolute;
+  z-index: 0;
+  inset: -1px;
+  border: 1px solid color-mix(in srgb, var(--etl-green) 68%, transparent);
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--etl-green) 14%, transparent),
+    transparent 24%
+  );
+  opacity: 0;
+  box-shadow: inset 0.35rem 0 1.4rem color-mix(in srgb, var(--etl-green) 13%, transparent);
+  animation: etl-core-impact 900ms cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  pointer-events: none;
+}
+
+.etl-flow-core > img,
+.etl-flow-core > .etl-flow-node-copy {
+  position: relative;
+  z-index: 1;
+}
+
+.etl-flow-core small {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.etl-flow-destinations {
+  display: flex;
+  min-height: 9.4rem;
+  flex-direction: column;
+  justify-content: center;
+  padding: 1.25rem 1.3rem;
+  animation: etl-node-enter 900ms 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.etl-analytics-stack {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.48rem;
+}
+
+.etl-analytics-system {
+  display: flex;
+  height: 3.65rem;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid color-mix(in srgb, var(--color-fd-border) 74%, transparent);
+  border-radius: 0.78rem;
+  padding: 0.7rem;
+  color: var(--color-fd-primary);
+  background: color-mix(in srgb, var(--color-fd-muted) 66%, transparent);
+}
+
+.etl-analytics-system svg {
+  width: 1.3rem;
+  height: 1.3rem;
+}
+
+.etl-flow-connection {
+  position: relative;
+  z-index: 2;
+  height: 2.5rem;
+  container-type: inline-size;
+  overflow: hidden;
+}
+
+.etl-flow-track,
+.etl-flow-track::before,
+.etl-flow-track::after {
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 1px;
+  content: '';
+  background: color-mix(in srgb, var(--etl-green) 38%, var(--color-fd-border));
+}
+
+.etl-flow-track {
+  top: 50%;
+  opacity: 0.72;
+}
+
+.etl-flow-track::before {
+  top: -0.52rem;
+  opacity: 0.32;
+}
+
+.etl-flow-track::after {
+  top: 0.52rem;
+  opacity: 0.32;
+}
+
+.etl-data-packet {
+  --packet-y: 50%;
+
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  left: -0.6rem;
+  width: 0.6rem;
+  animation: etl-data-packet 3.6s linear infinite;
+  will-change: transform, opacity;
+}
+
+.etl-data-packet::before {
+  position: absolute;
+  top: var(--packet-y);
+  left: 50%;
+  width: 4.2rem;
+  height: 1.15rem;
+  content: '';
+  background: radial-gradient(
+    ellipse,
+    color-mix(in srgb, var(--etl-green) 58%, transparent),
+    color-mix(in srgb, var(--etl-green) 20%, transparent) 34%,
+    transparent 72%
+  );
+  filter: blur(2px);
+  opacity: 0.8;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.etl-data-packet i {
+  position: absolute;
+  top: var(--packet-y);
+  left: 50%;
+  display: block;
   width: 0.48rem;
   height: 0.48rem;
-  border-radius: 50%;
+  border: 0;
   background: var(--etl-green);
-  box-shadow: 0 0 0 0.28rem color-mix(in srgb, var(--etl-green) 13%, transparent);
+  box-shadow: 0 0 0.85rem color-mix(in srgb, var(--etl-green) 64%, transparent);
+  transform: translate(-50%, -50%);
 }
 
-.etl-hero-brand {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 1.7rem;
+.etl-data-packet-circle {
+  animation-delay: 0s;
 }
 
-.etl-hero-brand img {
-  border: 1px solid color-mix(in srgb, var(--etl-green) 30%, transparent);
-  border-radius: 0.55rem;
+.etl-data-packet-circle i {
+  border-radius: 50%;
 }
 
-.etl-hero-brand > div {
-  display: flex;
-  flex-direction: column;
-  gap: 0.08rem;
+.etl-data-packet-square {
+  --packet-y: calc(50% - 0.52rem);
+
+  animation-delay: -0.9s;
 }
 
-.etl-hero-brand strong {
-  color: var(--color-fd-foreground);
-  font-size: 0.88rem;
-  font-weight: 680;
+.etl-data-packet-square i {
+  border-radius: 0.06rem;
 }
 
-.etl-hero-brand span {
-  color: var(--color-fd-muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 0.65rem;
-  letter-spacing: 0.02em;
+.etl-data-packet-squircle {
+  --packet-y: calc(50% + 0.52rem);
+
+  animation-delay: -1.8s;
 }
 
-.etl-hero-title {
-  max-width: 16ch;
+.etl-data-packet-squircle i {
+  border-radius: 42%;
+}
+
+.etl-data-packet-triangle {
+  animation-delay: -2.7s;
+}
+
+.etl-data-packet-triangle i {
+  border: 0;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+.etl-flow-fade,
+.etl-flow-vignette {
+  position: absolute;
+  z-index: 8;
+  pointer-events: none;
+}
+
+.etl-flow-fade {
+  inset: 68% 0 0;
+  background: linear-gradient(to bottom, transparent, var(--color-fd-background) 96%);
+}
+
+.etl-flow-vignette {
+  inset: 0;
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--color-fd-background) 16%, transparent),
+      transparent 18%,
+      transparent 60%,
+      color-mix(in srgb, var(--color-fd-background) 82%, transparent)
+    ),
+    radial-gradient(
+      ellipse at 50% 38%,
+      transparent 24%,
+      color-mix(in srgb, var(--color-fd-background) 28%, transparent) 58%,
+      color-mix(in srgb, var(--color-fd-background) 92%, transparent) 100%
+    );
+}
+
+.etl-landing-content {
+  position: absolute;
+  z-index: 20;
+  isolation: isolate;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding: 1rem var(--etl-page-gutter) clamp(3.2rem, 7vh, 5.2rem);
+}
+
+.etl-landing-content::before {
+  position: absolute;
+  z-index: -1;
+  inset: -3rem 0 0;
+  content: '';
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--color-fd-background) 72%, transparent) 5rem,
+    var(--color-fd-background) 10rem
+  );
+  pointer-events: none;
+}
+
+.etl-landing-grid {
+  display: grid;
+  width: 100%;
+  max-width: var(--etl-shell-width);
+  grid-template-columns: minmax(0, 1fr) minmax(20rem, 24rem);
+  gap: 1.15rem clamp(4rem, 7vw, 8rem);
+  align-items: end;
+  margin-inline: auto;
+}
+
+.etl-landing-primary {
+  min-width: 0;
+  animation: etl-content-enter 1s 120ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.etl-landing h1 {
   margin: 0;
-  font-size: clamp(2.05rem, 4.3vw, 3.2rem);
-  font-weight: 620;
-  line-height: 1.02;
-  letter-spacing: -0.05em;
-  text-wrap: balance;
+  color: var(--color-fd-foreground);
+  font-size: clamp(3.35rem, 5vw, 5rem);
+  font-weight: 590;
+  line-height: 0.91;
+  letter-spacing: -0.062em;
+  white-space: normal;
 }
 
-.etl-hero-description {
-  max-width: 620px;
-  margin: 1rem 0 0;
+.etl-landing h1 span {
+  display: block;
+}
+
+.etl-landing h1 span:last-child {
+  color: color-mix(in srgb, var(--color-fd-muted-foreground) 82%, var(--color-fd-foreground));
+}
+
+.etl-landing-summary {
+  padding-bottom: 0.2rem;
+  animation: etl-content-enter 1s 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.etl-landing-summary p {
+  max-width: 32rem;
+  margin: 0;
   color: var(--color-fd-muted-foreground);
-  font-size: 1.02rem;
-  line-height: 1.68;
+  font-size: clamp(1rem, 1.3vw, 1.125rem);
+  line-height: 1.65;
 }
 
-.etl-hero-actions {
+.etl-landing-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.7rem;
-  margin-top: 1.45rem;
+  gap: 0.65rem;
+  grid-column: 1;
+  animation: etl-content-enter 1s 280ms cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 .etl-primary-action,
 .etl-secondary-action {
   display: inline-flex;
-  min-height: 2.5rem;
+  min-height: 2.8rem;
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
   border-radius: 0.6rem;
-  padding: 0.58rem 0.9rem;
-  font-size: 0.84rem;
+  padding: 0.68rem 1rem;
+  font-size: 0.92rem;
   font-weight: 650;
   text-decoration: none;
   transition: 160ms ease;
   transition-property: background, border-color, box-shadow, color, transform;
+}
+
+.etl-landing-actions svg {
+  width: 1rem;
+  height: 1rem;
 }
 
 .etl-primary-action {
@@ -337,24 +900,240 @@ button {
   transform: translateY(-1px);
 }
 
-.etl-development-note {
-  display: inline-flex;
+.etl-agent-actions {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.55rem;
-  margin-top: 1.25rem;
-  color: var(--color-fd-muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.025em;
+  gap: 0.45rem;
+  min-height: 2.2rem;
 }
 
-.etl-development-note::before {
-  width: 0.45rem;
-  height: 0.45rem;
-  border-radius: 999px;
-  background: var(--etl-green);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--etl-green) 12%, transparent);
-  content: '';
+.etl-landing-grid > .etl-agent-actions {
+  grid-column: 1;
+  padding-top: 0.3rem;
+  animation: etl-content-enter 1s 360ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.etl-agent-actions > a,
+.etl-agent-actions > button {
+  display: inline-flex;
+  min-height: 2rem;
+  align-items: center;
+  gap: 0.42rem;
+  border: 1px solid transparent;
+  border-radius: 0.55rem;
+  padding: 0.42rem 0.65rem;
+  color: var(--color-fd-muted-foreground);
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 580;
+  text-decoration: none;
+}
+
+.etl-agent-actions > button:first-child {
+  border-color: color-mix(in srgb, var(--color-fd-border) 82%, transparent);
+  color: var(--color-fd-foreground);
+  background: color-mix(in srgb, var(--color-fd-muted) 62%, transparent);
+}
+
+.etl-agent-actions > a:hover,
+.etl-agent-actions > button:hover {
+  color: var(--color-fd-primary);
+  background: color-mix(in srgb, var(--color-fd-accent) 68%, transparent);
+}
+
+.etl-agent-actions svg {
+  width: 0.86rem;
+  height: 0.86rem;
+}
+
+.etl-home-footer {
+  min-height: 5.25rem;
+  border-top: 1px solid var(--color-fd-border);
+  color: var(--color-fd-muted-foreground);
+  background: var(--color-fd-background);
+  font-size: 0.8125rem;
+}
+
+.etl-home-footer-inner {
+  display: flex;
+  width: 100%;
+  max-width: var(--etl-shell-width);
+  min-height: inherit;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+  margin-inline: auto;
+  padding: 1.5rem var(--etl-page-gutter);
+}
+
+.etl-home-footer p {
+  margin: 0;
+}
+
+.etl-home-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.2rem;
+}
+
+.etl-home-footer a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.etl-home-footer a:hover {
+  color: var(--color-fd-primary);
+}
+
+@keyframes etl-data-packet {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(0.8);
+  }
+
+  12%,
+  84% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate3d(calc(100cqw + 0.9rem), 0, 0) scale(1);
+  }
+}
+
+@keyframes etl-scene-reveal {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes etl-grid-reveal {
+  from {
+    opacity: 0;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes etl-stage-settle {
+  from {
+    opacity: 0.82;
+    transform: translate(-50%, -48%) scale(1.07);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes etl-node-enter {
+  from {
+    opacity: 0;
+    transform: translateY(1rem) scale(0.96);
+  }
+}
+
+@keyframes etl-core-enter {
+  from {
+    opacity: 0;
+    transform: translateY(1rem) scale(0.94);
+  }
+}
+
+@keyframes etl-content-enter {
+  from {
+    opacity: 0;
+    transform: translateY(1.5rem);
+  }
+}
+
+@keyframes etl-core-ring {
+  0%,
+  100% {
+    opacity: 0.48;
+    transform: scale(0.985);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.035);
+  }
+}
+
+@keyframes etl-core-impact {
+  0% {
+    opacity: 0.72;
+    transform: scale(0.995);
+  }
+
+  72%,
+  100% {
+    opacity: 0;
+    transform: scale(1.025);
+  }
+}
+
+@media (max-width: 1100px) {
+  .etl-home-nav {
+    grid-template-columns: 1fr minmax(10rem, 15rem) 1fr;
+  }
+
+  .etl-landing-grid {
+    grid-template-columns: 1fr;
+    gap: 0.9rem;
+  }
+
+  .etl-flow-stage {
+    width: calc(100% - 5.5rem);
+    grid-template-columns: 11.25rem minmax(2rem, 1fr) 14.5rem minmax(2rem, 1fr) 11.25rem;
+  }
+
+  .etl-flow-source,
+  .etl-flow-core,
+  .etl-flow-destinations {
+    min-height: 7.6rem;
+  }
+
+  .etl-flow-source,
+  .etl-flow-destinations {
+    padding: 0.95rem;
+  }
+
+  .etl-flow-core {
+    grid-template-columns: 2.75rem 1fr;
+    padding: 0.95rem 1rem;
+  }
+
+  .etl-flow-core img {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+
+  .etl-flow-source {
+    grid-template-columns: 2.75rem 1fr;
+  }
+
+  .etl-flow-node-icon {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+
+  .etl-analytics-system {
+    height: 2.75rem;
+  }
+
+  .etl-landing-summary {
+    max-width: 42rem;
+  }
+
+  .etl-landing-actions,
+  .etl-agent-actions {
+    grid-column: 1;
+  }
+
 }
 
 .etl-page-heading {
@@ -674,9 +1453,310 @@ button {
 }
 
 @media (max-width: 767px) {
+  :root {
+    --etl-page-gutter: 1rem;
+  }
+
+  #fd-search-dialog-content {
+    top: 4rem !important;
+    width: calc(100% - 1rem) !important;
+    border-radius: 0.85rem !important;
+  }
+
+  #fd-search-dialog-content > div:last-child {
+    font-size: 0.57rem;
+  }
+
+  .etl-landing {
+    height: max(100svh, 820px);
+    min-height: 820px;
+  }
+
+  .etl-home-header {
+    height: 3.75rem;
+  }
+
+  .etl-home-nav {
+    grid-template-columns: 1fr auto auto;
+    gap: 0.7rem;
+    padding-inline: var(--etl-page-gutter);
+  }
+
+  .etl-home-nav .etl-brand {
+    gap: 0.5rem;
+    font-size: 0.87rem;
+  }
+
+  .etl-home-nav .etl-brand img {
+    width: 1.65rem;
+    height: 1.65rem;
+  }
+
+  .etl-home-search {
+    grid-column: 2;
+  }
+
+  .etl-home-search-full {
+    display: none !important;
+  }
+
+  .etl-home-search-compact {
+    display: inline-flex !important;
+  }
+
+  .etl-home-nav-links {
+    gap: 0.65rem;
+  }
+
+  .etl-home-nav-links > a {
+    font-size: 0.75rem;
+  }
+
+  .etl-home-nav-links > a:nth-child(2) {
+    display: none;
+  }
+
+  .etl-home-theme-switch {
+    padding: 0.15rem !important;
+  }
+
+  .etl-home-theme-switch svg {
+    width: 1.25rem !important;
+    height: 1.25rem !important;
+  }
+
+  .etl-flow-scene {
+    inset-block-start: 3.75rem;
+  }
+
+  .etl-flow-grid {
+    background-size: 4rem 4rem;
+  }
+
+  .etl-flow-glow {
+    top: 25%;
+    width: 112vw;
+    height: 14rem;
+  }
+
+  .etl-flow-stage {
+    top: 25%;
+    width: calc(100% - 1rem);
+    grid-template-columns: 5.65rem minmax(0.8rem, 1fr) 7.5rem minmax(0.8rem, 1fr) 5.65rem;
+  }
+
+  .etl-flow-source,
+  .etl-flow-core,
+  .etl-flow-destinations {
+    min-height: 5.8rem;
+    border-radius: 0.72rem;
+    padding: 0.52rem;
+  }
+
+  .etl-flow-source {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.32rem;
+    text-align: center;
+  }
+
+  .etl-flow-node-kicker {
+    margin-bottom: 0.05rem;
+    font-size: 0.43rem;
+    letter-spacing: 0.1em;
+  }
+
+  .etl-flow-node-icon {
+    width: 1.7rem;
+    height: 1.7rem;
+    border-radius: 0.48rem;
+  }
+
+  .etl-postgres-mark {
+    width: 1.05rem;
+    height: 1.05rem;
+  }
+
+  .etl-flow-source .etl-flow-node-copy {
+    gap: 0;
+  }
+
+  .etl-flow-source strong,
+  .etl-flow-core strong {
+    font-size: 0.62rem;
+  }
+
+  .etl-flow-source small {
+    display: none;
+  }
+
+  .etl-flow-core {
+    grid-template-columns: 1.7rem 1fr;
+    gap: 0.45rem;
+    padding: 0.6rem;
+  }
+
+  .etl-flow-core::before {
+    inset: -0.42rem;
+    border-radius: 0.95rem;
+  }
+
+  .etl-flow-core::after {
+    display: none;
+  }
+
+  .etl-flow-core img {
+    width: 1.7rem;
+    height: 1.7rem;
+    border-radius: 0.48rem;
+  }
+
+  .etl-flow-core small {
+    font-size: 0.44rem;
+    line-height: 1.25;
+    white-space: normal;
+  }
+
+  .etl-flow-destinations {
+    gap: 0.35rem;
+  }
+
+  .etl-analytics-stack {
+    gap: 0.2rem;
+  }
+
+  .etl-analytics-system {
+    height: 1.7rem;
+    border-radius: 0.38rem;
+    padding: 0.2rem;
+  }
+
+  .etl-analytics-system svg {
+    width: 0.72rem;
+    height: 0.72rem;
+  }
+
+  .etl-flow-destinations small {
+    margin-top: 0;
+    font-size: 0.46rem;
+  }
+
+  .etl-flow-connection {
+    height: 1.6rem;
+  }
+
+  .etl-flow-track::before {
+    top: -0.35rem;
+  }
+
+  .etl-flow-track::after {
+    top: 0.35rem;
+  }
+
+  .etl-data-packet {
+    top: 0;
+    width: 0.45rem;
+    height: auto;
+  }
+
+  .etl-data-packet::before {
+    width: 2.4rem;
+    height: 0.82rem;
+  }
+
+  .etl-data-packet i {
+    width: 0.34rem;
+    height: 0.34rem;
+  }
+
+  .etl-data-packet-square {
+    --packet-y: calc(50% - 0.35rem);
+  }
+
+  .etl-data-packet-squircle {
+    --packet-y: calc(50% + 0.35rem);
+  }
+
+  .etl-flow-fade {
+    inset-block-start: 40%;
+    background: linear-gradient(to bottom, transparent, var(--color-fd-background) 82%);
+  }
+
+  .etl-landing-content {
+    padding: 1rem var(--etl-page-gutter) 2.4rem;
+  }
+
+  .etl-landing-grid {
+    gap: 0.82rem;
+  }
+
+  .etl-landing h1 {
+    max-width: 100%;
+    font-size: clamp(2.35rem, 10vw, 2.6rem);
+    line-height: 0.92;
+    white-space: normal;
+  }
+
+  .etl-landing-summary p {
+    max-width: 35rem;
+    font-size: 0.9rem;
+    line-height: 1.55;
+  }
+
+  .etl-landing-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+
+  .etl-landing-actions > * {
+    min-width: 0;
+    min-height: 2.5rem;
+    padding-inline: 0.65rem;
+    font-size: 0.75rem;
+  }
+
+  .etl-agent-actions {
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+
+  .etl-agent-actions > a,
+  .etl-agent-actions > button {
+    min-height: 1.9rem;
+    font-size: 0.65rem;
+  }
+
+  .etl-home-footer {
+    min-height: 0;
+  }
+
+  .etl-home-footer-inner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+    padding: 1.5rem var(--etl-page-gutter);
+  }
+
   #nd-sidebar-mobile > div:has(> .etl-sidebar-pipelines) {
     border-top: 0;
     padding: 0.8rem 1rem 1.1rem;
+  }
+
+  #nd-sidebar-mobile {
+    align-items: stretch;
+  }
+
+  #nd-sidebar-mobile > * {
+    width: 100%;
+    max-width: none;
+    align-self: stretch;
+    margin-inline: 0;
+  }
+
+  #nd-sidebar-mobile [data-search-full] {
+    width: 100%;
   }
 
   #nd-sidebar-mobile .etl-sidebar-pipelines {
@@ -708,18 +1788,6 @@ button {
     padding-top: 1.1rem;
   }
 
-  .etl-hero {
-    padding-top: 0.65rem;
-  }
-
-  .etl-hero-title {
-    font-size: clamp(2rem, 9vw, 2.5rem);
-  }
-
-  .etl-hero-actions > * {
-    width: 100%;
-  }
-
   .doc-path-grid {
     grid-template-columns: 1fr;
     gap: 0.72rem;
@@ -747,7 +1815,32 @@ button {
   *::after {
     scroll-behavior: auto !important;
     animation-duration: 0.01ms !important;
+    animation-delay: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .etl-data-packet {
+    left: 18%;
+    opacity: 0.82;
+    animation: none !important;
+    transform: none;
+  }
+
+  .etl-data-packet-square {
+    left: 38%;
+  }
+
+  .etl-data-packet-squircle {
+    left: 62%;
+  }
+
+  .etl-data-packet-triangle {
+    left: 82%;
+  }
+
+  .etl-flow-core-impact {
+    opacity: 0.14;
+    animation: none !important;
   }
 }

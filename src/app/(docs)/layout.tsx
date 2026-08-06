@@ -15,6 +15,7 @@ export default function DocumentationLayout({ children }: { children: ReactNode 
         sm: { 'aria-label': 'Search Supabase ETL documentation' },
       }}
       sidebar={{
+        collapsible: false,
         defaultOpenLevel: 1,
         footer: (
           <a

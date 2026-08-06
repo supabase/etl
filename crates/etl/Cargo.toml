@@ -1,6 +1,7 @@
 [package]
 name = "etl"
 version = "0.1.0"
+description = "High-performance Postgres replication engine written in Rust."
 edition.workspace = true
 license.workspace = true
 autotests = false

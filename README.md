@@ -8,9 +8,13 @@
 <h1 align="center">Supabase ETL</h1>
 
 <p align="center">
-  Postgres replication for Rust.
+  High-performance Postgres replication, written in Rust.
   <br />
-  Perform an initial sync of Postgres tables, then replicate changes to destinations.
+  Embed it as a library or run it as a standalone binary.
+</p>
+
+<p align="center">
+  A project by <a href="https://supabase.com">Supabase</a>.
 </p>
 
 <p align="center">
@@ -34,10 +38,10 @@
 > [!IMPORTANT]
 > Supabase ETL is under active development.
 
-Supabase ETL is Supabase's open-source Rust framework for Postgres change data
-capture. For each published table, it first performs an initial sync of existing
-rows. It then replicates changes and delivers them to a built-in or
-custom destination.
+Supabase ETL is a high-performance Postgres replication engine written in Rust.
+Embed it in your Rust application or run it as a standalone binary. For each
+published table, it performs an initial sync of existing rows, then replicates
+changes to a built-in or custom destination.
 
 This repository contains the framework, destination modules, standalone
 replicator, examples, and documentation. For the managed product in the
@@ -84,13 +88,13 @@ tokio = { version = "1", features = ["full"] }
 
 ## Why Supabase ETL?
 
-- **Small operational footprint:** Run one Rust process without Kafka, Flink,
-  Debezium, or another coordination service.
+- **Library or standalone binary:** Embed the engine in a Rust application or
+  run the ready-made replicator.
+- **High performance, small footprint:** Run one Rust process without Kafka,
+  Flink, Debezium, or another coordination service.
 - **Postgres-native selection:** Use publications to select tables, columns,
   rows, and operation types.
-- **Initial sync and ongoing replication:** Copy existing data, then replicate
-  subsequent changes through one pipeline.
-- **Extensible runtime:** Implement custom destinations and durable stores with
+- **Flexible by design:** Implement custom destinations and durable stores with
   typed Rust APIs.
 - **Recovery-aware:** Persist checkpoints and table state for safe restarts and
   at-least-once delivery.
@@ -133,9 +137,3 @@ and long-term demand can be evaluated first.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
-
----
-
-<p align="center">
-  Made with ❤️ by the <a href="https://supabase.com">Supabase</a> team
-</p>

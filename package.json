@@ -1,6 +1,7 @@
 {
   "name": "@supabase/etl-docs",
   "version": "0.0.0",
+  "description": "Documentation for Supabase ETL, a high-performance Postgres replication engine written in Rust.",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,8 +16,9 @@
     "check:tutorials": "node scripts/docs/check-rust-tutorials.mjs"
   },
   "dependencies": {
-    "@fontsource-variable/inter": "5.2.8",
+    "@fontsource-variable/geist": "5.2.8",
     "@fontsource-variable/jetbrains-mono": "5.2.8",
+    "@fontsource-variable/manrope": "5.2.8",
     "cnfast": "^0.1.0",
     "fumadocs-core": "16.14.0",
     "fumadocs-mdx": "15.2.2",

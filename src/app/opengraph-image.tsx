@@ -1,6 +1,6 @@
 import { ImageResponse } from 'next/og';
 
-export const alt = 'Supabase ETL — Postgres change data capture for Rust';
+export const alt = 'Supabase ETL — High-performance Postgres replication in Rust';
 export const size = { width: 1200, height: 630 };
 export const contentType = 'image/png';
 export const dynamic = 'force-static';
@@ -32,11 +32,11 @@ export default function OpenGraphImage() {
           letterSpacing: -3,
         }}
       >
-        <span>Postgres replication,</span>
-        <span>built for Rust.</span>
+        <span>Postgres replication</span>
+        <span>in Rust.</span>
       </div>
       <div style={{ color: '#a8b9b1', fontSize: 28, marginTop: 38 }}>
-        Open-source change data capture from Supabase.
+        Embed it as a library or run it as a standalone binary.
       </div>
     </div>,
     size,

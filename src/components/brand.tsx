@@ -29,7 +29,7 @@ export function HeroBrand() {
       <Image src={icon} alt="" width={40} height={40} priority />
       <div>
         <strong>Supabase ETL</strong>
-        <span>Open-source Postgres CDC</span>
+        <span>High-performance Postgres replication</span>
       </div>
     </div>
   );

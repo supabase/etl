@@ -1,7 +1,6 @@
 {
   "title": "Supabase ETL",
   "pages": [
-    "index",
     "---Get started---",
     "./guides/first-pipeline",
     "---Guides---",

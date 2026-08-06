@@ -122,8 +122,8 @@ consistent and queryable at all times.
 
 1. The pipeline connects to Postgres and performs an initial bulk copy of every
    table covered by the publication.
-2. It then streams real-time INSERT / UPDATE / DELETE changes using logical
-   replication.
+2. It then replicates subsequent `INSERT`, `UPDATE`, and `DELETE` changes using
+   logical replication.
 3. Every Postgres table becomes a DuckLake table. The name is derived from the
    source schema and table name:
 

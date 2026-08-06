@@ -1,4 +1,4 @@
-import { HeroBrand } from '@/components/brand';
+import { AgentActions } from '@/components/agent-actions';
 import { getMDXComponents } from '@/components/mdx';
 import { getPageImageUrl, getPageMarkdownUrl, source } from '@/lib/source';
 import { absoluteUrl, siteConfig } from '@/lib/site';
@@ -8,16 +8,12 @@ import {
   DocsDescription,
   DocsPage,
   DocsTitle,
-  MarkdownCopyButton,
-  ViewOptionsPopover,
 } from 'fumadocs-ui/layouts/docs/page';
-import { ArrowRight, CodeXml } from 'lucide-react';
 import type { Metadata } from 'next';
-import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 type PageRouteProps = {
-  params: Promise<{ slug?: string[] }>;
+  params: Promise<{ slug: string[] }>;
 };
 
 export default async function Page({ params }: PageRouteProps) {
@@ -26,49 +22,24 @@ export default async function Page({ params }: PageRouteProps) {
   if (!page) notFound();
 
   const MDX = page.data.body;
-  const isHome = page.slugs.length === 0;
   const markdownUrl = getPageMarkdownUrl(page).url;
-  const githubUrl = `${siteConfig.repository}/blob/main/docs/src/content/docs/${page.path}`;
   const jsonLd = buildStructuredData(page);
 
   return (
-    <DocsPage
-      toc={page.data.toc}
-      full={page.data.full}
-      breadcrumb={{ enabled: !isHome }}
-      className={isHome ? 'etl-home-page' : undefined}
-    >
+    <DocsPage toc={page.data.toc} full={page.data.full}>
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd).replaceAll('<', '\\u003c') }}
       />
-      {isHome ? (
-        <header className="etl-hero">
-          <HeroBrand />
-          <DocsTitle className="etl-hero-title">Postgres replication for Rust.</DocsTitle>
-          <DocsDescription className="etl-hero-description">{page.data.description}</DocsDescription>
-          <div className="etl-hero-actions">
-            <Link className="etl-primary-action" href="/guides/first-pipeline/">
-              Build your first pipeline <ArrowRight size={16} />
-            </Link>
-            <a className="etl-secondary-action" href={siteConfig.repository}>
-              <CodeXml size={16} /> View on GitHub
-            </a>
-          </div>
-          <div className="etl-development-note">Under active development</div>
-        </header>
-      ) : (
-        <header className="etl-page-heading">
-          <div className="etl-eyebrow">Supabase ETL documentation</div>
-          <DocsTitle>{page.data.title}</DocsTitle>
-          <DocsDescription>{page.data.description}</DocsDescription>
-        </header>
-      )}
+      <header className="etl-page-heading">
+        <div className="etl-eyebrow">Supabase ETL documentation</div>
+        <DocsTitle>{page.data.title}</DocsTitle>
+        <DocsDescription>{page.data.description}</DocsDescription>
+      </header>
       <div className="etl-page-actions">
-        <MarkdownCopyButton markdownUrl={markdownUrl} />
-        <ViewOptionsPopover markdownUrl={markdownUrl} githubUrl={githubUrl} />
+        <AgentActions markdownUrl={markdownUrl} pagePath={page.url} />
       </div>
-      <DocsBody className={isHome ? 'etl-home-content' : undefined}>
+      <DocsBody>
         <MDX components={getMDXComponents({ a: createRelativeLink(source, page) })} />
       </DocsBody>
     </DocsPage>
@@ -76,7 +47,10 @@ export default async function Page({ params }: PageRouteProps) {
 }
 
 export function generateStaticParams() {
-  return source.generateParams();
+  return source
+    .getPages()
+    .filter((page) => page.slugs.length > 0)
+    .map((page) => ({ slug: page.slugs }));
 }
 
 export async function generateMetadata({ params }: PageRouteProps): Promise<Metadata> {
@@ -86,11 +60,9 @@ export async function generateMetadata({ params }: PageRouteProps): Promise<Meta
 
   const canonical = absoluteUrl(page.url);
   const image = absoluteUrl(getPageImageUrl(page).url);
-  const isHome = page.slugs.length === 0;
-  const title = isHome ? siteConfig.title : page.data.title;
 
   return {
-    title: isHome ? { absolute: siteConfig.title } : page.data.title,
+    title: page.data.title,
     description: page.data.description,
     keywords: [page.data.title, 'Supabase ETL', 'Postgres CDC', 'Rust data pipeline'],
     alternates: {
@@ -101,13 +73,13 @@ export async function generateMetadata({ params }: PageRouteProps): Promise<Meta
       type: 'article',
       url: canonical,
       siteName: siteConfig.name,
-      title,
+      title: page.data.title,
       description: page.data.description,
-      images: [{ url: image, width: 1200, height: 630, alt: title }],
+      images: [{ url: image, width: 1200, height: 630, alt: page.data.title }],
     },
     twitter: {
       card: 'summary_large_image',
-      title,
+      title: page.data.title,
       description: page.data.description,
       images: [image],
     },
@@ -116,11 +88,11 @@ export async function generateMetadata({ params }: PageRouteProps): Promise<Meta
 
 function buildStructuredData(page: (typeof source)['$inferPage']) {
   const canonical = absoluteUrl(page.url);
-  const isHome = page.slugs.length === 0;
-  const article = {
+
+  return {
     '@context': 'https://schema.org',
     '@type': 'TechArticle',
-    headline: isHome ? siteConfig.title : page.data.title,
+    headline: page.data.title,
     description: page.data.description,
     url: canonical,
     mainEntityOfPage: canonical,
@@ -141,22 +113,4 @@ function buildStructuredData(page: (typeof source)['$inferPage']) {
       { '@type': 'Thing', name: 'Change data capture' },
     ],
   };
-
-  if (!isHome) return article;
-
-  return [
-    article,
-    {
-      '@context': 'https://schema.org',
-      '@type': 'SoftwareSourceCode',
-      name: 'Supabase ETL',
-      description: siteConfig.description,
-      url: absoluteUrl('/'),
-      codeRepository: siteConfig.repository,
-      programmingLanguage: 'Rust',
-      runtimePlatform: 'PostgreSQL',
-      author: { '@type': 'Organization', name: 'Supabase', url: 'https://supabase.com' },
-      license: 'https://www.apache.org/licenses/LICENSE-2.0',
-    },
-  ];
 }

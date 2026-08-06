@@ -32,7 +32,7 @@ export const source = loader({
   source: docs.toFumadocsSource(),
   icon(name) {
     const Icon = name ? icons[name] : undefined;
-    return Icon ? createElement(Icon, { 'aria-hidden': true }) : undefined;
+    return Icon ? createElement(Icon, { 'aria-hidden': true, strokeWidth: 1.5 }) : undefined;
   },
 });
 
@@ -131,7 +131,7 @@ function getAgentHomeMarkdown() {
     })
     .join('\n\n');
 
-  return `Supabase ETL is Supabase's open-source Rust framework for Postgres change data capture. For each published table, it first performs an initial sync of existing rows. It then replicates changes and delivers them to a destination. Supabase ETL is under active development.\n\nFor the managed Supabase product, use [Supabase Pipelines](${siteConfig.supabaseDocs}).\n\n## Documentation map\n\n${groups}\n\n## Replication phases\n\n1. **Initial sync:** Copy the existing rows selected by the publication.\n2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and truncates, then deliver those changes as ordered events.\n\nStreaming describes a transfer mode that may be used within either phase; it is not a separate replication phase. Across both phases, ETL persists checkpoints and table state so replication can recover safely after a restart.`;
+  return `${siteConfig.description} For each published table, it performs an initial sync of existing rows, then replicates changes to a destination. Supabase ETL is under active development.\n\nFor the managed Supabase product, use [Supabase Pipelines](${siteConfig.supabaseDocs}).\n\n## Documentation map\n\n${groups}\n\n## Replication phases\n\n1. **Initial sync:** Copy the existing rows selected by the publication.\n2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and truncates, then deliver those changes as ordered events.\n\nStreaming describes a transfer mode that may be used within either phase; it is not a separate replication phase. Across both phases, ETL persists checkpoints and table state so replication can recover safely after a restart.`;
 }
 
 function rewriteAgentLinks(markdown: string) {
