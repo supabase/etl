@@ -446,10 +446,16 @@ button {
   font-weight: 500;
 }
 
-.prose :where(pre) {
+.prose :where(figure.shiki) {
   border-color: color-mix(in srgb, var(--color-fd-border) 74%, var(--etl-green) 26%);
   border-radius: 0.72rem;
   box-shadow: 0 18px 45px color-mix(in srgb, var(--etl-ink) 7%, transparent);
+}
+
+.prose :where(figure.shiki pre) {
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .prose :where(pre code) {

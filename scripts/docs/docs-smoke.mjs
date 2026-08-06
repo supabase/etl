@@ -314,6 +314,25 @@ async function checkDesktop(page) {
     (await page.locator('.fd-step').count()) === 5,
     'First Pipeline does not use the native Fumadocs step layout.',
   );
+  const codeBlockSurface = await page.locator('figure.shiki').first().evaluate((figure) => {
+    const region = figure.querySelector('[role="region"]');
+    const pre = figure.querySelector('pre');
+    const figureRect = figure.getBoundingClientRect();
+    const regionRect = region?.getBoundingClientRect();
+    const preStyle = pre ? getComputedStyle(pre) : null;
+
+    return {
+      fullWidth: regionRect ? Math.abs(figureRect.width - regionRect.width) <= 2 : false,
+      innerRadius: preStyle?.borderRadius,
+      innerShadow: preStyle?.boxShadow,
+    };
+  });
+  assert(
+    codeBlockSurface.fullWidth &&
+      codeBlockSurface.innerRadius === '0px' &&
+      codeBlockSurface.innerShadow === 'none',
+    'Code blocks do not use one continuous background surface.',
+  );
   const tutorialCallout = page.getByText('The example reads the standard', { exact: false });
   await tutorialCallout.waitFor();
   assert(
