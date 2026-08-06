@@ -208,3 +208,98 @@ struct SnowpipeErrorResponse {
     #[serde(default)]
     status_code: Option<u32>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_errors_are_classified_by_stable_protocol_signals() {
+        enum Expected {
+            StaleContinuation,
+            ChannelHasUncommittedRows,
+            ChannelInvalidated,
+            ChannelNotFound,
+            AuthenticationExpired,
+            ApiStatus(u32),
+            HttpStatus(StatusCode),
+        }
+
+        let cases = [
+            (
+                "stale channel sequencer",
+                StatusCode::BAD_REQUEST,
+                r#"{"code":"STALE_CONTINUATION_TOKEN_SEQUENCER","status_code":3}"#,
+                Expected::StaleContinuation,
+            ),
+            (
+                "uncommitted rows conflict",
+                StatusCode::CONFLICT,
+                r#"{"code":"ERR_CHANNEL_HAS_UNCOMMITTED_DATA","status_code":4}"#,
+                Expected::ChannelHasUncommittedRows,
+            ),
+            (
+                "other channel conflict",
+                StatusCode::CONFLICT,
+                r#"{"code":"ERR_CHANNEL_MUST_BE_REOPENED","status_code":3}"#,
+                Expected::ChannelInvalidated,
+            ),
+            (
+                "unstructured channel conflict",
+                StatusCode::CONFLICT,
+                "not JSON",
+                Expected::ChannelInvalidated,
+            ),
+            (
+                "missing channel",
+                StatusCode::NOT_FOUND,
+                r#"{"status_code":3}"#,
+                Expected::ChannelNotFound,
+            ),
+            (
+                "expired authentication API status",
+                StatusCode::BAD_REQUEST,
+                r#"{"status_code":3}"#,
+                Expected::AuthenticationExpired,
+            ),
+            (
+                "stale continuation API status",
+                StatusCode::BAD_REQUEST,
+                r#"{"status_code":4}"#,
+                Expected::StaleContinuation,
+            ),
+            (
+                "other API status",
+                StatusCode::BAD_REQUEST,
+                r#"{"status_code":99}"#,
+                Expected::ApiStatus(99),
+            ),
+            (
+                "unstructured HTTP error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "not JSON",
+                Expected::HttpStatus(StatusCode::INTERNAL_SERVER_ERROR),
+            ),
+        ];
+
+        for (case, status, body, expected) in cases {
+            let error = SnowpipeError::from_response(status, body.to_owned());
+            let matches = match (expected, &error) {
+                (Expected::StaleContinuation, SnowpipeError::StaleContinuation)
+                | (Expected::ChannelHasUncommittedRows, SnowpipeError::ChannelHasUncommittedRows)
+                | (Expected::ChannelInvalidated, SnowpipeError::ChannelInvalidated)
+                | (Expected::ChannelNotFound, SnowpipeError::ChannelNotFound)
+                | (Expected::AuthenticationExpired, SnowpipeError::AuthenticationExpired) => true,
+                (Expected::ApiStatus(expected), SnowpipeError::ApiStatus { status_code, .. }) => {
+                    expected == *status_code
+                }
+                (Expected::HttpStatus(expected), SnowpipeError::HttpStatus { status }) => {
+                    expected == *status
+                }
+                _ => false,
+            };
+
+            assert!(matches, "{case}: {error:?}");
+        }
+    }
+}

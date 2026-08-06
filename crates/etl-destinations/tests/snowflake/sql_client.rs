@@ -1,6 +1,8 @@
 use etl_destinations::snowflake::{
-    AuthManager, HttpExchanger, SqlClient, test_utils::load_test_config,
+    AuthManager, HttpExchanger, SqlClient,
+    test_utils::{load_test_config, query_rows},
 };
+use uuid::Uuid;
 
 use super::common::{build_auth, with_table_cleanup};
 
@@ -27,7 +29,7 @@ async fn ddl_lifecycle() {
             "table should exist after creation"
         );
 
-        client.truncate_table(&table).await.expect("truncate failed");
+        client.truncate_table(&table, Uuid::new_v4()).await.expect("truncate failed");
 
         assert!(
             client.table_exists(&table).await.expect("table_exists failed"),
@@ -40,6 +42,53 @@ async fn ddl_lifecycle() {
             !client.table_exists(&table).await.expect("table_exists failed"),
             "table should not exist after drop"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Snowflake credentials — see etl-destinations/src/snowflake/README.md"]
+async fn truncate_request_id_is_idempotent_across_clients() {
+    let client = build_sql_client();
+    let config = load_test_config();
+    let table = format!("etl_test_{}", Uuid::new_v4().simple());
+    let fqn = format!("\"{}\".\"{}\".\"{table}\"", config.database(), config.schema());
+
+    with_table_cleanup(&client, &[&table], || async {
+        client
+            .create_table_if_not_exists(&table, r#""id" NUMBER(10,0)"#)
+            .await
+            .expect("create table failed");
+        client
+            .execute_ddl(&format!("insert into {fqn} values (1)"))
+            .await
+            .expect("initial insert failed");
+
+        let request_id = Uuid::new_v4();
+        client.truncate_table(&table, request_id).await.expect("initial truncate failed");
+        client
+            .execute_ddl(&format!("insert into {fqn} values (2)"))
+            .await
+            .expect("post-truncate insert failed");
+
+        let restarted_client = build_sql_client();
+        restarted_client
+            .truncate_table(&table, request_id)
+            .await
+            .expect("same-ID truncate retry failed");
+        let rows = query_rows(&restarted_client, &format!("select \"id\" from {fqn}"))
+            .await
+            .expect("query after same-ID retry failed");
+        assert_eq!(rows, vec![vec![serde_json::json!("2")]]);
+
+        restarted_client
+            .truncate_table(&table, Uuid::new_v4())
+            .await
+            .expect("fresh-ID truncate failed");
+        let rows = query_rows(&restarted_client, &format!("select \"id\" from {fqn}"))
+            .await
+            .expect("query after fresh-ID truncate failed");
+        assert!(rows.is_empty());
     })
     .await;
 }
