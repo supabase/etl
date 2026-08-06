@@ -1,7 +1,7 @@
 import { HeroBrand } from '@/components/brand';
 import { getMDXComponents } from '@/components/mdx';
 import { getPageImageUrl, getPageMarkdownUrl, source } from '@/lib/source';
-import { absoluteUrl, siteConfig, withBasePath } from '@/lib/site';
+import { absoluteUrl, siteConfig } from '@/lib/site';
 import { createRelativeLink } from 'fumadocs-ui/mdx';
 import {
   DocsBody,
@@ -27,7 +27,7 @@ export default async function Page({ params }: PageRouteProps) {
 
   const MDX = page.data.body;
   const isHome = page.slugs.length === 0;
-  const markdownUrl = withBasePath(getPageMarkdownUrl(page).url);
+  const markdownUrl = getPageMarkdownUrl(page).url;
   const githubUrl = `${siteConfig.repository}/blob/main/docs/src/content/docs/${page.path}`;
   const jsonLd = buildStructuredData(page);
 

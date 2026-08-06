@@ -369,7 +369,7 @@ button {
 .etl-page-heading h1 {
   max-width: 18ch;
   margin: 0;
-  font-size: clamp(2.15rem, 5vw, 3.4rem);
+  font-size: clamp(2.15rem, 5vw, 3rem);
   font-weight: 630;
   line-height: 1.08;
   letter-spacing: -0.045em;

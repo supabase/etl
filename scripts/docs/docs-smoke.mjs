@@ -310,6 +310,32 @@ async function checkDesktop(page) {
   await searchInput.press('Escape');
 
   await page.goto(`${baseUrl}/guides/first-pipeline/`, { waitUntil: 'networkidle' });
+  await page.getByRole('button', { name: 'Open', exact: true }).click();
+  const viewMarkdownLink = page.getByRole('link', { name: /View as Markdown/ });
+  const viewMarkdownHref = await viewMarkdownLink.getAttribute('href');
+  assert(
+    viewMarkdownHref === '/etl/guides/first-pipeline.md',
+    'View as Markdown does not use the deployment-aware page URL.',
+  );
+  const openMarkdownResponse = await page.request.get(new URL(viewMarkdownHref, origin).toString());
+  assert(
+    openMarkdownResponse.ok() &&
+      openMarkdownResponse.headers()['content-type']?.includes('text/markdown'),
+    'View as Markdown does not resolve to generated Markdown.',
+  );
+  await page.keyboard.press('Escape');
+
+  const copyMarkdownResponsePromise = page.waitForResponse(
+    (response) => response.url() === `${baseUrl}/guides/first-pipeline.md`,
+  );
+  await page.getByRole('button', { name: 'Copy Markdown' }).click();
+  const copyMarkdownResponse = await copyMarkdownResponsePromise;
+  assert(
+    copyMarkdownResponse.ok() &&
+      copyMarkdownResponse.headers()['content-type']?.includes('text/markdown'),
+    'Copy Markdown does not fetch the generated Markdown page.',
+  );
+
   assert(
     (await page.locator('.fd-step').count()) === 5,
     'First Pipeline does not use the native Fumadocs step layout.',
@@ -446,7 +472,8 @@ try {
   await checkSeoEndpoints();
 
   browser = await chromium.launch();
-  const page = await browser.newPage();
+  const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
+  const page = await context.newPage();
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
@@ -456,7 +483,7 @@ try {
 
   assert(pageErrors.length === 0, `Browser errors:\n${pageErrors.join('\n')}`);
   console.log(
-    'Docs smoke checks passed: SEO, agent feeds, search, diagrams, responsive UI, and links.',
+    'Docs smoke checks passed: SEO, agent feeds, page actions, search, diagrams, responsive UI, and links.',
   );
 } finally {
   if (browser) await Promise.race([browser.close(), delay(cleanupTimeoutMs)]);
