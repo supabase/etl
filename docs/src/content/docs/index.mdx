@@ -1,0 +1,70 @@
+---
+title: Home
+description: Perform an initial sync of Postgres tables, then replicate changes to destinations with Supabase ETL.
+icon: House
+---
+
+**Supabase ETL** is Supabase's open-source Rust framework for Postgres change
+data capture. For each published table, it first performs an initial sync of
+existing rows. It then replicates changes and delivers them to a
+built-in or custom destination. BigQuery is the most mature destination module;
+DuckLake, ClickHouse, and Snowflake are also available in `etl-destinations`.
+
+For the managed product in the Supabase Dashboard—including availability,
+pricing, and operations—use the
+[Supabase Pipelines documentation](https://supabase.com/docs/guides/database/replication/pipelines).
+
+## Start Here
+
+<div className="doc-path-grid">
+  <a className="doc-path-card" href="/etl/guides/first-pipeline/">
+    <span className="doc-path-symbol" aria-hidden="true"><DocPathIcon name="Rocket" /></span>
+    <span className="doc-path-kicker">Start</span>
+    <strong>First Pipeline</strong>
+    <span>Run an initial sync, replicate changes, and implement a tiny destination.</span>
+  </a>
+  <a className="doc-path-card" href="/etl/guides/configure-postgres/">
+    <span className="doc-path-symbol" aria-hidden="true"><DocPathIcon name="Database" /></span>
+    <span className="doc-path-kicker">Prepare</span>
+    <strong>Configure Postgres</strong>
+    <span>Set WAL, publications, slots, and retention for reliable replication.</span>
+  </a>
+  <a className="doc-path-card" href="/etl/guides/custom-implementations/">
+    <span className="doc-path-symbol" aria-hidden="true"><DocPathIcon name="Blocks" /></span>
+    <span className="doc-path-kicker">Extend</span>
+    <strong>Custom Implementations</strong>
+    <span>Bring your own persistence and write replicated events anywhere.</span>
+  </a>
+  <a className="doc-path-card" href="/etl/explanation/concepts/">
+    <span className="doc-path-symbol" aria-hidden="true"><DocPathIcon name="BookOpenText" /></span>
+    <span className="doc-path-kicker">Learn</span>
+    <strong>Logical Replication</strong>
+    <span>Understand WAL, publications, slots, pgoutput, and replica identity.</span>
+  </a>
+  <a className="doc-path-card" href="/etl/explanation/schema-changes/">
+    <span className="doc-path-symbol" aria-hidden="true"><DocPathIcon name="RefreshCw" /></span>
+    <span className="doc-path-kicker">Operate</span>
+    <strong>Schema Changes</strong>
+    <span>See how relation events, DDL messages, and destination diffs work.</span>
+  </a>
+  <a className="doc-path-card" href="https://supabase.com/docs/guides/database/replication/pipelines">
+    <span className="doc-path-symbol" aria-hidden="true"><DocPathIcon name="Pipelines" /></span>
+    <span className="doc-path-kicker">Supabase</span>
+    <strong>Supabase Pipelines</strong>
+    <span>Configure and operate the managed product in the Supabase Dashboard.</span>
+  </a>
+</div>
+
+## How It Works
+
+Supabase ETL replicates each table in two phases:
+
+1. **Initial sync:** Copy the existing rows selected by the publication.
+2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and
+   truncates, then deliver those changes as ordered [events](/explanation/events/).
+
+Across both phases, a [store](/explanation/traits/) persists checkpoints and
+table state so replication can recover safely after a restart.
+
+Continue with the [First Pipeline tutorial](/guides/first-pipeline/), or read the
+[architecture overview](/explanation/architecture/) before integrating ETL.

@@ -1,11 +1,11 @@
 ---
-title: Build Custom Stores and Destinations
+title: Custom Implementations
 description: Implement your own stores and destinations.
+icon: Blocks
 ---
 
-**30 minutes**: Implement your own stores and destinations.
-
-**Prerequisites:** Completed [Your First Pipeline](/etl/guides/first-pipeline/) or familiar with ETL basics.
+Implement a store and an HTTP destination. Start with
+[First Pipeline](/guides/first-pipeline/) or be familiar with ETL basics.
 
 ## Understanding the Destination Trait
 
@@ -13,10 +13,16 @@ ETL delivers data to destinations in **two phases**:
 
 | Phase | Method | When | Data Type |
 |-------|--------|------|-----------|
-| Initial Copy | `write_table_rows()` | Startup | `Vec<TableRow>` |
-| Streaming | `write_events()` | During catch-up and continuous replication | `Vec<Event>` including `Relation` schema events |
+| Initial sync | `write_table_rows()` | Startup | `Vec<TableRow>` |
+| Ongoing replication | `write_events()` | During catch-up and ongoing replication | `Vec<Event>` including `Relation` schema events |
 
-**Note:** During initial copy, parallel table sync workers each process their own replication slot, so `Begin` and `Commit` transaction markers may appear multiple times. These repeated markers do not by themselves duplicate row events, but ETL is at-least-once, so destination writes should still be idempotent across retries and restarts.
+<Callout className="etl-callout" type="info" title="Note">
+  During initial sync, parallel table sync workers each process their own
+  replication slot, so `Begin` and `Commit` transaction markers may appear
+  multiple times. These repeated markers do not by themselves duplicate row
+  events, but ETL is at-least-once, so destination writes should still be
+  idempotent across retries and restarts.
+</Callout>
 
 Schema changes are surfaced through `Event::Relation`. If your destination
 keeps physical schemas, flush pending writes before handling a relation event,
@@ -24,19 +30,20 @@ apply the supported schema diff, then process following row events with the new
 schema. The built-in destinations handle column adds, drops, renames,
 nullability changes, and supported default changes, but default expressions and
 backfill semantics remain destination-specific. See
-[Schema Changes](/etl/explanation/schema-changes/) for the current semantics and
+[Schema Changes](/explanation/schema-changes/) for the current semantics and
 limitations.
 
-## Step 1: Create the Project
+## Create the project [#create-the-project] [step]
 
-```bash
+```bash title="Terminal"
 cargo new etl-custom --lib
 cd etl-custom
+rustup override set 1.95.0
 ```
 
 Update `Cargo.toml`:
 
-```toml
+```toml title="Cargo.toml"
 [package]
 name = "etl-custom"
 version = "0.1.0"
@@ -55,11 +62,11 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 ```
 
-**Verify:** `cargo check` succeeds.
+**Check:** `cargo check` succeeds.
 
-## Step 2: Implement a Custom Store
+## Implement a custom store [#implement-a-custom-store] [step]
 
-Create `src/custom_store.rs`. A store must implement **three traits** (see [Extension Points](/etl/explanation/traits/) for full details):
+Create `src/custom_store.rs`. A store must implement **three traits** (see [Extension Points](/explanation/traits/) for full details):
 
 - `SchemaStore` - Versioned table schema storage, retrieval, and pruning
 - `StateStore` - Table state, persisted replication checkpoints, and destination table metadata tracking
@@ -69,7 +76,7 @@ Create `src/custom_store.rs`. A store must implement **three traits** (see [Exte
 blanket-implemented facades over these traits plus the required
 clone/thread-safety bounds, so custom stores do not implement those directly.
 
-```rust
+```rust title="src/custom_store.rs" lineNumbers
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -289,8 +296,8 @@ impl TableStateLifecycleStore for CustomStore {
                     entry.schemas.clear();
                     entry.destination_metadata = None;
                 }
-                let mut progress = self.progress.lock().await;
-                progress.remove(&WorkerType::TableSync { table_id });
+                let mut checkpoints = self.checkpoints.lock().await;
+                checkpoints.remove(&WorkerType::TableSync { table_id });
                 Ok(0)
             }
             TableStateOperation::ResetForResync => {
@@ -299,15 +306,15 @@ impl TableStateLifecycleStore for CustomStore {
                 for entry in tables.values_mut() {
                     entry.state = Some(TableState::Init);
                 }
-                let mut progress = self.progress.lock().await;
-                progress.remove(&WorkerType::Apply);
+                let mut checkpoints = self.checkpoints.lock().await;
+                checkpoints.remove(&WorkerType::Apply);
                 Ok(reset_count)
             }
             TableStateOperation::Delete { table_id } => {
                 let mut tables = self.tables.lock().await;
                 let removed = usize::from(tables.remove(&table_id).is_some());
-                let mut progress = self.progress.lock().await;
-                progress.remove(&WorkerType::TableSync { table_id });
+                let mut checkpoints = self.checkpoints.lock().await;
+                checkpoints.remove(&WorkerType::TableSync { table_id });
                 Ok(removed)
             }
         }
@@ -315,24 +322,24 @@ impl TableStateLifecycleStore for CustomStore {
 }
 ```
 
-**Verify:** `cargo check` succeeds.
+**Check:** `cargo check` succeeds.
 
-## Step 3: Implement a Custom Destination
+## Implement a custom destination [#implement-a-custom-destination] [step]
 
 Create `src/http_destination.rs`. A destination implements the `Destination` trait with **four required methods**:
 
 - `name()` - Return an identifier for logging
 - `drop_table_for_copy()` - Idempotently drop destination objects and replay state before restarting a table copy using the previously stored replicated table schema
-- `write_table_rows()` - Receive rows during initial copy together with the current replicated table schema
-- `write_events()` - Receive streaming changes (batches may span multiple tables)
+- `write_table_rows()` - Receive rows during initial sync together with the current replicated table schema
+- `write_events()` - Receive change events (batches may span multiple tables)
 
 There are also optional `startup()` and `shutdown()` methods with default no-op implementations. Override `startup()` if your destination needs to reconcile active durable ETL metadata with physical destination objects after a restart. Override `shutdown()` if your destination needs cleanup when the pipeline shuts down.
 
 ETL clears its own schema versions, destination metadata, and table-sync progress **only after `drop_table_for_copy()` succeeds**. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. Before returning success, also drain or invalidate writes accepted by an earlier copy attempt so stale work cannot mutate the recreated object. If the object is already gone and no stale write can recreate or mutate it, return success.
 
-All write-like methods must complete their async result handle. Treat the method return value as the place for immediate dispatch or setup failures, and send the final write result through `async_result`. Immediate destinations should send `DestinationWriteStatus::Durable` after successful `write_table_rows()` and `write_events()` calls. A copy destination that returns `DestinationWriteStatus::Accepted` must take ownership of the rows, bound its accepted-but-not-durable backlog, and delay `Accepted` until it has capacity. It must later treat an empty `write_table_rows()` call as a same-table durability barrier: return `Durable` only when every row accepted during that copy attempt is durable. For streaming writes, `WriteEventsDurability::MayDefer` permits either `Accepted` or `Durable`. ETL may issue an empty `RequireDurable` write as a durability-only barrier for earlier accepted work, but never sends an empty `MayDefer` write. The empty vector carries no new replication events, but the call may flush or wait for earlier accepted work. It cannot return `Accepted` and must not return `Durable` until every earlier `Accepted` write in the originating ordered apply-loop stream is durable; a stronger barrier scope is valid. ETL is **at least once**, so make row and event writes idempotent. `write_events()` preserves per-table ordering, but batches can include multiple tables and transaction markers are not a complete all-tables boundary during initial copy and catch-up.
+All write-like methods must complete their async result handle. Treat the method return value as the place for immediate dispatch or setup failures, and send the final write result through `async_result`. Immediate destinations should send `DestinationWriteStatus::Durable` after successful `write_table_rows()` and `write_events()` calls. A copy destination that returns `DestinationWriteStatus::Accepted` must take ownership of the rows, bound its accepted-but-not-durable backlog, and delay `Accepted` until it has capacity. It must later treat an empty `write_table_rows()` call as a same-table durability barrier: return `Durable` only when every row accepted during that copy attempt is durable. For ongoing-replication writes, `WriteEventsDurability::MayDefer` permits either `Accepted` or `Durable`. ETL may issue an empty `RequireDurable` write as a durability-only barrier for earlier accepted work, but never sends an empty `MayDefer` write. The empty vector carries no new replication events, but the call may flush or wait for earlier accepted work. It cannot return `Accepted` and must not return `Durable` until every earlier `Accepted` write in the originating ordered apply-loop stream is durable; a stronger barrier scope is valid. ETL is **at least once**, so make row and event writes idempotent. `write_events()` preserves per-table ordering, but batches can include multiple tables and transaction markers are not a complete all-tables boundary during initial sync and catch-up.
 
-```rust
+```rust title="src/http_destination.rs" lineNumbers
 use reqwest::Client;
 use serde_json::json;
 use std::time::Duration;
@@ -436,7 +443,7 @@ impl Destination for HttpDestination {
     ) -> EtlResult<()> {
         if events.is_empty() {
             // This immediate destination never returns Accepted, so it has no
-            // earlier streaming durability debt to settle.
+            // earlier ongoing-replication durability debt to settle.
             async_result.send(Ok(DestinationWriteStatus::Durable));
             return Ok(());
         }
@@ -464,9 +471,9 @@ impl Destination for HttpDestination {
 }
 ```
 
-**Verify:** `cargo check` succeeds.
+**Check:** `cargo check` succeeds.
 
-## Step 4: Wire It Together
+## Wire it together [#wire-it-together] [step]
 
 Create `src/main.rs`:
 
@@ -474,7 +481,7 @@ The custom store owns ETL runtime state. `Pipeline::start()` still prepares the
 source database with ETL's schema snapshot helpers and schema-change event
 trigger before replication begins.
 
-```rust
+```rust title="src/main.rs" lineNumbers
 mod custom_store;
 mod http_destination;
 
@@ -513,6 +520,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         publication_name: "my_publication".to_string(),
         pg_connection: pg_config,
         store_pg_connection: None,
+        run_source_migrations: true,
         batch: BatchConfig {
             max_fill_ms: 5000,
             memory_budget_ratio: 0.2,
@@ -538,25 +546,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-**Note:** Update the database name, password, and HTTP endpoint to match your setup.
+<Callout className="etl-callout" type="info" title="Note">
+  Update the database name, password, and HTTP endpoint to match your setup.
+</Callout>
 
-## Step 5: Test
+## Test the pipeline [#test-the-pipeline] [step]
 
-```bash
+```bash title="Terminal"
 cargo run
 ```
 
 The pipeline will connect to Postgres and start replicating. You'll see your custom store logging **state transitions** and your destination receiving **HTTP calls**.
 
-## What You Built
-
-- **Custom Store** - In-memory implementation of `SchemaStore`, `StateStore`, and `TableStateLifecycleStore`
-- **HTTP Destination** - Forwards replicated data via HTTP POST with retry logic
-- **Working Pipeline** - Connects your custom components to the ETL core
-
 ## Next Steps
 
-- [Extension Points](/etl/explanation/traits/) - Full trait API documentation
-- [Event Types](/etl/explanation/events/) - Details on all events your destination receives
-- [Configure Postgres](/etl/guides/configure-postgres/) - Production database setup
-- [Architecture](/etl/explanation/architecture/) - How ETL works internally
+- [Extension Points](/explanation/traits/) - Full trait API documentation
+- [Events](/explanation/events/) - Details on all events your destination receives
+- [Configure Postgres](/guides/configure-postgres/) - Production database setup
+- [Architecture](/explanation/architecture/) - How ETL works internally

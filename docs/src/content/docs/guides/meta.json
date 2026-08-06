@@ -1,0 +1,6 @@
+{
+  "title": "Guides",
+  "description": "Build and operate Postgres CDC pipelines with Supabase ETL.",
+  "defaultOpen": true,
+  "pages": ["configure-postgres", "first-pipeline", "custom-implementations"]
+}

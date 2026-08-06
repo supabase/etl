@@ -1,9 +1,8 @@
 ---
 title: Schema Changes
-description: How ETL handles DDL and evolving table schemas.
+description: How Supabase ETL handles DDL and evolving table schemas.
+icon: RefreshCw
 ---
-
-**How ETL handles DDL and evolving table schemas**
 
 Schema-change support is in public beta and is being expanded incrementally. The
 current implementation is intentionally conservative: the source-side event
@@ -99,13 +98,13 @@ masks. This gives successive mask changes distinct snapshot IDs and preserves
 their ordering. Multiple schema messages sharing one commit LSN are ordered by
 their message LSN. A newly published table that the running pipeline does not
 know is ignored until startup publication reconciliation creates its table
-state and initial copy.
+state and initial sync.
 
 ### `ALTER PUBLICATION` support boundary
 
 The trigger's ability to observe an `ALTER PUBLICATION` command is not the same
 as runtime support for that publication change. The trigger emits schema
-snapshots; it does not add or remove ETL table state, start an initial copy, or
+snapshots; it does not add or remove ETL table state, start an initial sync, or
 change which relation OIDs the running apply worker owns.
 
 | Publication change | Trigger behavior | Runtime behavior |
@@ -125,12 +124,14 @@ sync and identities no longer returned by PostgreSQL have their ETL state
 purged. This startup process does not rename, merge, or delete destination
 tables created for an earlier root or leaf identity.
 
-> **Warning:** Only publication column-list changes for already tracked tables
-> are supported while a pipeline is running. Other `ALTER PUBLICATION` changes
-> can produce skipped events, stale destination tables, or missing or duplicated
-> data. Plan a controlled change with source writes paused and the pipeline
-> stopped, followed by an explicit restart, table resynchronization, or new
-> pipeline instead of relying on live behavior.
+<Callout className="etl-callout" type="warn" title="Warning">
+  Only publication column-list changes for already tracked tables are supported
+  while a pipeline is running. Other `ALTER PUBLICATION` changes can produce
+  skipped events, stale destination tables, or missing or duplicated data. Plan
+  a controlled change with source writes paused and the pipeline stopped,
+  followed by an explicit restart, table resynchronization, or new pipeline
+  instead of relying on live behavior.
+</Callout>
 
 The important public boundary is:
 
@@ -399,12 +400,12 @@ These behaviors are **not full destination DDL semantics** yet:
   without ETL issuing a materialization rewrite. Snowflake only receives
   add-column defaults for source defaults that can be rendered as Snowflake
   literals.
-- BigQuery applies streaming `DROP NOT NULL` changes so future source NULL values
-  remain writable. BigQuery cannot change an existing `NULLABLE` column to
+- BigQuery applies ongoing-replication `DROP NOT NULL` changes so future source
+  NULL values remain writable. BigQuery cannot change an existing `NULLABLE` column to
   `REQUIRED`, so PostgreSQL enforces later `SET NOT NULL` changes while the
   destination column remains nullable. Other built-in destinations currently
-  leave streaming nullability changes unchanged. Newly added columns remain
-  nullable where the destination requires that for historical rows.
+  leave ongoing-replication nullability changes unchanged. Newly added columns
+  remain nullable where the destination requires that for historical rows.
 - The trigger payload includes `current_query` for debugging only. It can
   contain literals and multiple statements, so it must not be treated as
   replayable DDL.

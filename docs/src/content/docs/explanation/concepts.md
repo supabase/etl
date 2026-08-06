@@ -1,11 +1,10 @@
 ---
-title: Postgres Logical Replication Concepts
-description: Essential background for understanding how ETL works.
+title: Logical Replication
+description: Essential Postgres logical replication concepts for working with Supabase ETL.
+icon: BookOpenText
 ---
 
-**Essential background for understanding how ETL works**
-
-This page explains the **Postgres concepts ETL builds on**. If you're new to logical replication, read this first.
+Read this first if Postgres logical replication is new to you.
 
 ## What is Logical Replication?
 
@@ -16,9 +15,8 @@ Postgres supports two types of replication:
 | **Physical** | Exact byte-for-byte copy of data files | Disaster recovery, read replicas |
 | **Logical** | Decoded row changes (INSERT, UPDATE, DELETE) | Data integration, ETL, CDC |
 
-**Physical replication** creates identical Postgres instances. **Logical replication** decodes changes into a format that any system can consume - not just another Postgres server.
-
-ETL uses **logical replication** to stream changes to downstream systems.
+ETL uses logical replication because decoded row changes can be sent to systems
+other than Postgres.
 
 ## The Write-Ahead Log (WAL)
 
@@ -61,7 +59,8 @@ CREATE PUBLICATION my_publication FOR TABLE users, orders;
 CREATE PUBLICATION my_publication FOR ALL TABLES;
 ```
 
-When you create an ETL pipeline, you specify which publication to consume. **Only changes to tables in that publication are streamed.**
+When you create an ETL pipeline, you specify which publication to consume.
+**Only tables and operations selected by that publication are replicated.**
 
 ### What Publications Control
 
@@ -92,10 +91,10 @@ ETL creates replication slots automatically:
 
 | Slot | Purpose |
 |------|---------|
-| `supabase_etl_apply_{pipeline_id}` | Main streaming slot for ongoing changes |
-| `supabase_etl_table_sync_{pipeline_id}_{table_id}` | Temporary slots for initial table copy |
+| `supabase_etl_apply_{pipeline_id}` | Main slot for ongoing replication |
+| `supabase_etl_table_sync_{pipeline_id}_{table_id}` | Temporary slots for initial sync |
 
-The Apply Worker uses one persistent slot. Table Sync Workers create temporary slots during initial copy, then delete them.
+The Apply Worker uses one persistent slot. Table Sync Workers create temporary slots during initial sync, then delete them.
 
 ### Slot Risks
 
@@ -107,7 +106,7 @@ To mitigate this risk:
 - Set `max_slot_wal_keep_size` to limit WAL retention
 - Alert when slots fall behind
 
-See [Configure Postgres](/etl/guides/configure-postgres/#wal-buildup-and-disk-usage) for details.
+See [Configure Postgres](/guides/configure-postgres/#wal-buildup-and-disk-usage) for details.
 
 ## The pgoutput Decoder
 
@@ -131,7 +130,13 @@ ETL receives these messages and converts them to events.
 
 ETL replicates data in **two phases**:
 
-### Phase 1: Initial Copy
+> **Terminology**
+>
+> Initial sync and ongoing replication are the replication phases. Streaming
+> describes a way data can be transferred within either phase; it is not a
+> separate phase.
+
+### Phase 1: Initial Sync
 
 Logical replication only captures **changes**. It does not know about data that existed before replication started.
 
@@ -139,13 +144,15 @@ So ETL first copies all existing rows using Postgres's `COPY` command:
 
 1. Create replication slot (captures consistent snapshot point)
 2. COPY all rows from the table
-3. Start streaming changes from the snapshot point
+3. Begin ongoing replication from the snapshot point
 
-The slot ensures **no changes are lost** between the snapshot and when streaming begins.
+The slot ensures **no changes are lost** between the snapshot and ongoing
+replication.
 
-### Phase 2: Streaming
+### Phase 2: Ongoing Replication
 
-After initial copy, ETL streams ongoing changes in real-time:
+After initial sync, ETL begins ongoing replication. It captures subsequent
+changes from the WAL and delivers them to the destination:
 
 ```mermaid
 flowchart LR
@@ -154,15 +161,11 @@ flowchart LR
 
 Each change is delivered as an `Event` through `write_events()`.
 
-### Why This Matters
+Large tables can spend significant time in initial sync. ETL exposes separate
+`write_table_rows()` and `write_events()` methods so destinations can optimize
+initial-copy rows and change events independently.
 
-Understanding the two phases helps you:
-
-- Know that initial copy can take time for large tables
-- Understand why `write_table_rows()` and `write_events()` are separate methods
-- Debug issues where data exists but changes aren't appearing (or vice versa)
-
-## REPLICA IDENTITY
+## Replica Identity
 
 **REPLICA IDENTITY** controls what data Postgres includes in UPDATE and DELETE events.
 
@@ -252,56 +255,24 @@ Multiple events in the same transaction share the same `commit_lsn`; their
 `tx_ordinal` values distinguish their order. Relation events are connection-local
 metadata and do not have an event sequence key.
 
-## Why Persist State?
+## Persisted State
 
-ETL persists operational state - **table states, schemas, replication
-checkpoints, and destination table metadata** - for recovery.
-
-### Without Persistence
-
-If ETL crashes and has no state:
-
-- It doesn't know which tables were already copied
-- It doesn't know where in the WAL to resume
-- It would have to start from scratch, potentially duplicating data
-
-### With Persistence
+ETL persists the state needed to resume safely after a restart:
 
 ETL stores:
 
 | State | Purpose |
 |-------|---------|
-| Table state | Know whether to copy or stream for each table |
+| Table state | Track each table from initial sync through ongoing replication |
 | Persisted replication checkpoint | Resume workers from a safe replay frontier |
 | Table schemas | Decode events against the correct versioned schema |
 | Destination table metadata | Track destination table IDs, applied schema snapshots, and replication masks |
-
-On restart, ETL loads this state and resumes from where it left off.
 
 The built-in `PostgresStore` persists to your Postgres database and runs its
 state-store migrations when it is created. If the pipeline reads from a
 read-only replica, configure `store_pg_connection` to point at a writable
 Postgres endpoint for this state. `MemoryStore` is for testing only - state is
 lost on restart. `Pipeline::start()` runs the ETL source migrations that install
-schema helpers and the DDL event trigger before replication begins.
-
-## Putting It Together
-
-Here's the complete flow:
-
-1. You configure Postgres (`wal_level=logical`)
-2. You create a publication for tables you want to replicate
-3. ETL creates a replication slot to track progress
-4. ETL copies existing data (Phase 1: Initial Copy)
-5. ETL streams ongoing changes (Phase 2: Streaming)
-6. Postgres decodes WAL using pgoutput
-7. ETL receives events and forwards them downstream
-8. ETL reports progress back to Postgres (so WAL can be cleaned up)
-9. State is persisted for crash recovery
-
-## Next Steps
-
-- [Architecture](/etl/explanation/architecture/): How ETL's components work together
-- [Event Types](/etl/explanation/events/): All events emitted by ETL
-- [Configure Postgres](/etl/guides/configure-postgres/): Production setup
-- [First Pipeline](/etl/guides/first-pipeline/): Build something
+schema helpers and the DDL event trigger before replication begins. See
+[Architecture](/explanation/architecture/) for the worker lifecycle and
+[Configure Postgres](/guides/configure-postgres/) for production settings.

@@ -1,0 +1,18 @@
+{
+  "title": "Supabase ETL",
+  "pages": [
+    "index",
+    "---Get started---",
+    "./guides/first-pipeline",
+    "---Guides---",
+    "./guides/configure-postgres",
+    "./guides/custom-implementations",
+    "---Concepts---",
+    "./explanation/concepts",
+    "./explanation/architecture",
+    "./explanation/schema-changes",
+    "---Reference---",
+    "./explanation/events",
+    "./explanation/traits"
+  ]
+}
