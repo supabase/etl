@@ -37,7 +37,7 @@ export default function OpenGraphImage() {
         }}
       >
         <span>Postgres replication</span>
-        <span>in Rust</span>
+        <span>in Rust.</span>
       </div>
       <div style={{ color: '#a8b9b1', fontSize: 28, marginTop: 38 }}>
         Embed it as a library or run it as a standalone binary.

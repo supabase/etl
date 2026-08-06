@@ -27,6 +27,10 @@ type Lane = {
 
 const PACKET_SHAPES: PacketShape[] = ['circle', 'square', 'squircle', 'triangle'];
 
+/* Both conduits render the same lanes so a packet that enters the hub is the one
+   that leaves it; the stylesheet holds the outbound copy back by an inbound
+   traversal plus the hub dwell. */
+
 const LANE_COUNT = 3;
 const PACKETS_PER_LANE = 3;
 
@@ -70,8 +74,9 @@ function buildLanes(): Lane[] {
 
 const FLOW_LANES = buildLanes();
 
-/* Held back until the housings and pipes have finished arriving. */
-const FLOW_START_DELAY = 1.75;
+/* Held back until the housings have landed and both pipes have finished
+   reaching outward. Keep in step with --etl-t-pipe in the stylesheet. */
+const FLOW_START_DELAY = 2.95;
 
 function FlowConnection({ direction }: { direction: 'source' | 'destination' }) {
   return (
@@ -80,7 +85,12 @@ function FlowConnection({ direction }: { direction: 'source' | 'destination' }) 
         <span
           className="etl-flow-lane"
           key={laneIndex}
-          style={{ '--lane-cycle': `${lane.cycle.toFixed(3)}s` } as CSSProperties}
+          style={
+            {
+              '--lane-cycle': `${lane.cycle.toFixed(3)}s`,
+              '--lane-index': laneIndex,
+            } as CSSProperties
+          }
         >
           {lane.packets.map((packet, packetIndex) => (
             <span

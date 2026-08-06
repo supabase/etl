@@ -328,14 +328,16 @@ button {
 }
 
 .etl-landing {
+  /* The copy rises with the grid, so it is settled while the diagram is still
+     assembling behind it. Matches --etl-t-grid. */
+  --etl-t-copy: 120ms;
+
   position: relative;
   isolation: isolate;
   height: max(100svh, 760px);
   min-height: 760px;
   overflow: hidden;
-  background:
-    radial-gradient(circle at 50% 18%, color-mix(in srgb, var(--etl-green) 9%, transparent), transparent 34rem),
-    var(--color-fd-background);
+  background: var(--color-fd-background);
 }
 
 .etl-home-header {
@@ -436,6 +438,18 @@ button {
 }
 
 .etl-flow-scene {
+  /* Entry choreography, in order: the grid pops in, the hub lands, then the
+     green wash blooms out from behind it while its flanks land and both pipes
+     reach outward toward them, and only then does data move. */
+  --etl-t-grid: 120ms;
+  --etl-t-hub: 1150ms;
+  --etl-t-glow: 1500ms;
+  --etl-t-flanks: 1500ms;
+  --etl-t-pipe: 2150ms;
+  --etl-lane-stagger: 70ms;
+  /* How long a packet spends inside the hub before it leaves the far side. */
+  --etl-hub-dwell: 0.42s;
+
   position: absolute;
   z-index: 0;
   inset: 4.25rem 0 0;
@@ -457,7 +471,7 @@ button {
   mask-repeat: no-repeat;
   mask-position: center 38%, center;
   mask-composite: intersect;
-  animation: etl-grid-sweep 1.8s cubic-bezier(0.62, 0.02, 0.28, 1) both;
+  animation: etl-grid-pop 1s var(--etl-t-grid) cubic-bezier(0.5, 0.05, 0.25, 1) both;
 }
 
 .etl-flow-glow {
@@ -470,7 +484,7 @@ button {
   background: radial-gradient(ellipse, color-mix(in srgb, var(--etl-green) 12%, transparent), transparent 66%);
   filter: blur(18px);
   transform: translate(-50%, -50%);
-  animation: etl-scene-reveal 1.4s 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: etl-glow-bloom 1.5s var(--etl-t-glow) cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .etl-flow-stage {
@@ -528,16 +542,19 @@ button {
     0 2px 4px -1px color-mix(in srgb, var(--etl-metal-cast) 55%, transparent),
     0 16px 28px -12px color-mix(in srgb, var(--etl-metal-cast) 85%, transparent),
     0 34px 76px -24px var(--etl-metal-cast);
-  animation: etl-node-enter 1.05s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: etl-node-enter 850ms cubic-bezier(0.22, 1, 0.36, 1) both;
   animation-delay: var(--node-enter-delay);
 }
 
 .etl-flow-node-source {
-  --node-enter-delay: 700ms;
+  --node-enter-delay: var(--etl-t-flanks);
 }
 
 .etl-flow-node-core {
-  --node-enter-delay: 860ms;
+  --node-enter-delay: var(--etl-t-hub);
+
+  animation-name: etl-hub-enter;
+  animation-duration: 950ms;
 
   border-color: color-mix(in srgb, var(--color-fd-border) 46%, var(--etl-green) 54%);
   box-shadow:
@@ -554,7 +571,7 @@ button {
 }
 
 .etl-flow-node-destination {
-  --node-enter-delay: 1020ms;
+  --node-enter-delay: var(--etl-t-flanks);
 }
 
 .etl-flow-node-kicker {
@@ -661,12 +678,13 @@ button {
     0 1px 0 color-mix(in srgb, var(--etl-tube-sheen) 20%, transparent);
   container-type: inline-size;
   overflow: hidden;
-  animation: etl-lane-draw 720ms 1180ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  transform-origin: left center;
+  animation: etl-lane-reach 620ms cubic-bezier(0.33, 0.9, 0.35, 1) both;
+  animation-delay: calc(var(--etl-t-pipe) + var(--lane-index, 0) * var(--etl-lane-stagger));
 }
 
-.etl-flow-conduit-destination .etl-flow-lane {
-  animation-delay: 1300ms;
+/* Both runs are laid by the hub, reaching outward to meet their flank. */
+.etl-flow-conduit-source .etl-flow-lane {
+  animation-name: etl-lane-reach-start;
 }
 
 /* Specular streak running along the top of the bore. */
@@ -705,8 +723,11 @@ button {
   will-change: transform, opacity;
 }
 
+/* Both runs carry the same packets in the same lanes. The outbound copy is held
+   for one full inbound traversal plus the hub dwell, so a packet only leaves the
+   hub after the matching one has arrived. */
 .etl-flow-conduit-destination .etl-data-packet {
-  animation-delay: calc(var(--packet-delay) + 0.42s);
+  animation-delay: calc(var(--packet-delay) + var(--lane-cycle) + var(--etl-hub-dwell));
 }
 
 /* Light the packet spills along the bore ahead of and behind itself. */
@@ -833,7 +854,7 @@ button {
 
 .etl-landing-primary {
   min-width: 0;
-  animation: etl-content-enter 1s 620ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: etl-content-enter 900ms var(--etl-t-copy) cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 .etl-landing h1 {
@@ -857,7 +878,7 @@ button {
 
 .etl-landing-summary {
   padding-bottom: 0.2rem;
-  animation: etl-content-enter 1s 740ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: etl-content-enter 900ms calc(var(--etl-t-copy) + 100ms) cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 .etl-landing-summary p {
@@ -873,7 +894,7 @@ button {
   flex-wrap: wrap;
   gap: 0.65rem;
   grid-column: 1;
-  animation: etl-content-enter 1s 860ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: etl-content-enter 900ms calc(var(--etl-t-copy) + 200ms) cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 .etl-primary-action,
@@ -933,7 +954,7 @@ button {
 .etl-landing-grid > .etl-agent-actions {
   grid-column: 1;
   padding-top: 0.3rem;
-  animation: etl-content-enter 1s 980ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: etl-content-enter 900ms calc(var(--etl-t-copy) + 300ms) cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 .etl-agent-actions > a,
@@ -1026,33 +1047,75 @@ button {
   }
 }
 
-@keyframes etl-scene-reveal {
+/* Blooms outward from behind the hub, so the wash reads as coming off it. */
+@keyframes etl-glow-bloom {
   from {
     opacity: 0;
+    transform: translate(-50%, -50%) scale(0.32);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
   }
 }
 
-@keyframes etl-grid-sweep {
+/* Cells surface progressively outward from the centre, snapping to their final
+   pitch as they land. */
+@keyframes etl-grid-pop {
   from {
     opacity: 0;
+    background-size: 4.62rem 4.62rem, 5.25rem 5.25rem, 5.25rem 5.25rem;
     mask-size: 0% 0%, 100% 100%;
   }
 
   to {
     opacity: 1;
+    background-size: 5.25rem 5.25rem, 5.25rem 5.25rem, 5.25rem 5.25rem;
     mask-size: 300% 300%, 100% 100%;
   }
 }
 
-@keyframes etl-lane-draw {
+/* clip-path rather than scaleX so the bore, walls and end shadows keep their
+   proportions as the pipe extends. */
+/* Reaches away from the hub: rightward on the destination side. */
+@keyframes etl-lane-reach {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* Leftward on the source side, so both runs grow out of the hub together. */
+@keyframes etl-lane-reach-start {
+  from {
+    clip-path: inset(0 0 0 100%);
+  }
+
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* The hub lands first and carries a little more weight than its flanks. */
+@keyframes etl-hub-enter {
   from {
     opacity: 0;
-    transform: scaleX(0);
+    filter: blur(14px);
+    transform: translateY(1.7rem) scale(0.9);
+  }
+
+  55% {
+    filter: blur(0);
   }
 
   to {
     opacity: 1;
-    transform: scaleX(1);
+    filter: blur(0);
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -1760,6 +1823,7 @@ button {
   }
 
   .etl-flow-lane {
+    clip-path: none !important;
     opacity: 1;
     transform: none;
   }
