@@ -56,7 +56,7 @@ fn find_update_event(events: &[Event], update_index: usize) -> &etl::event::Upda
             _ => None,
         })
         .nth(update_index)
-        .expect("expected update event")
+        .unwrap()
 }
 
 fn find_delete_event(events: &[Event]) -> &etl::event::DeleteEvent {
@@ -66,7 +66,7 @@ fn find_delete_event(events: &[Event]) -> &etl::event::DeleteEvent {
             Event::Delete(delete) => Some(delete),
             _ => None,
         })
-        .expect("expected delete event")
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -640,7 +640,7 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -864,7 +864,7 @@ async fn table_nullable_scalar_columns() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1065,7 +1065,7 @@ async fn table_nullable_array_columns() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1286,7 +1286,7 @@ async fn table_non_nullable_scalar_columns() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1528,7 +1528,7 @@ async fn table_non_nullable_array_columns() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1780,7 +1780,7 @@ async fn table_array_with_null_values() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -2042,7 +2042,7 @@ async fn table_validation_out_of_bounds_values() {
             ],
         )
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -2112,20 +2112,20 @@ async fn schema_change_add_column_defaults() {
     let table_id = database
         .create_table(table_name.clone(), true, &[("name", "text not null")])
         .await
-        .expect("failed to create source table");
+        .unwrap();
 
     let publication_name = "test_pub_bq_defaults_schema".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("failed to create publication");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name) values ('Alice')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert initial source row");
+        .unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -2165,7 +2165,7 @@ async fn schema_change_add_column_defaults() {
             ],
         )
         .await
-        .expect("failed to alter source table");
+        .unwrap();
 
     database
         .run_sql(&format!(
@@ -2173,17 +2173,14 @@ async fn schema_change_add_column_defaults() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert defaulted source row");
+        .unwrap();
 
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let destination_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("destination metadata should exist after applying defaults");
+    let destination_metadata =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
     let defaults = bigquery_database
         .query_column_defaults_by_id(&destination_metadata.destination_table_id)
         .await;
@@ -2256,13 +2253,13 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             ],
         )
         .await
-        .expect("failed to create source table");
+        .unwrap();
 
     let publication_name = "test_pub_bq_nullability_schema".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("failed to create publication");
+        .unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -2305,7 +2302,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             ],
         )
         .await
-        .expect("failed to set source not null constraint");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, initially_required, divergent_default) values ('before-drop', \
@@ -2313,7 +2310,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert non-null source row");
+        .unwrap();
 
     set_not_null_notify.notified().await;
 
@@ -2336,14 +2333,14 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             ],
         )
         .await
-        .expect("failed to drop source not null constraint");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, initially_required) values (null, null)",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert null source row");
+        .unwrap();
 
     drop_not_null_notify.notified().await;
 
@@ -2363,7 +2360,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             }],
         )
         .await
-        .expect("failed to drop supported source default");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, initially_required, divergent_default) values \
@@ -2371,17 +2368,14 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert source row after dropping default");
+        .unwrap();
 
     drop_default_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let destination_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("destination metadata should exist after clearing the default");
+    let destination_metadata =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
     let defaults = bigquery_database
         .query_column_defaults_by_id(&destination_metadata.destination_table_id)
         .await;
@@ -2422,7 +2416,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_change() {
+async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
     if skip_if_missing_bigquery_env_vars() {
         return;
     }
@@ -2450,7 +2444,7 @@ async fn table_schema_change() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -2466,11 +2460,8 @@ async fn table_schema_change() {
 
     table_sync_complete_notify.notified().await;
 
-    let initial_state = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("destination schema state should exist after table creation");
+    let initial_state =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
     let initial_snapshot_id = initial_state.snapshot_id;
 
     // Insert the initial row.
@@ -2552,23 +2543,18 @@ async fn table_schema_change() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let final_state = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("destination schema state should exist after schema change");
-    assert!(
-        final_state.snapshot_id > initial_snapshot_id,
-        "snapshot_id should have increased after schema change"
-    );
+    let final_state =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
+    // Applying the relation must advance the durable destination schema.
+    assert!(final_state.snapshot_id > initial_snapshot_id);
 
-    let table_schema = bigquery_database
-        .query_table_schema(table_name.clone())
-        .await
-        .expect("BigQuery table schema should exist after schema change");
+    let table_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
+    // A successful plan must consume every planner-generated temporary column.
     assert!(
-        table_schema.column_names().iter().all(|name| !name.starts_with("supabase_etl_")),
-        "planner-generated columns must not remain after a successful schema change"
+        table_schema
+            .column_names()
+            .iter()
+            .all(|name| !name.starts_with("supabase_etl_ddl_tmp_column_"))
     );
 
     let rows = bigquery_database.query_table(table_name).await.unwrap();

@@ -86,12 +86,12 @@ async fn write_table_copy_and_wait(
     assert!(!rows.is_empty(), "table-copy test batch should not be empty");
 
     let status =
-        invoke_write_table_rows(destination, schema, rows).await.expect("table-copy write failed");
+        invoke_write_table_rows(destination, schema, rows).await.unwrap();
     assert_eq!(status, DestinationWriteStatus::Accepted);
 
     let barrier = invoke_write_table_rows(destination, schema, vec![])
         .await
-        .expect("table-copy durability barrier failed");
+        .unwrap();
     assert_eq!(barrier, DestinationWriteStatus::Durable);
 }
 
@@ -119,7 +119,7 @@ async fn poll_and_query_rows(
         format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database(), harness.config.schema());
     query_rows(&harness.sql, &format!("SELECT * FROM {fqn} ORDER BY \"_cdc_sequence_number\""))
         .await
-        .expect("query_rows failed")
+        .unwrap()
 }
 
 fn make_table_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
@@ -178,12 +178,12 @@ async fn apply_relation_event(
 async fn column_names(sql: &SqlClient<AuthManager<HttpExchanger>>, fqn: &str) -> Vec<String> {
     query_rows(sql, &format!("show columns in table {fqn}"))
         .await
-        .expect("show columns failed")
+        .unwrap()
         .into_iter()
         .map(|row| {
             row.get(2)
                 .and_then(serde_json::Value::as_str)
-                .expect("show columns should return a column name")
+                .unwrap()
                 .to_owned()
         })
         .collect()
@@ -200,7 +200,7 @@ async fn assert_status_default_absent(
         .unwrap_or_else(|error| panic!("show columns ({context}) failed: {error}"));
     assert_eq!(rows.len(), 1, "{context}: expected exactly one status column");
 
-    let default = rows[0].get(5).expect("show columns should return a default value");
+    let default = rows[0].get(5).unwrap();
     assert!(
         default.is_null() || default.as_str() == Some(""),
         "{context}: status should not have a default"
@@ -260,10 +260,10 @@ async fn create_table_with_simulator_defaults() {
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
         let status = invoke_write_table_rows(&harness.destination, &schema, vec![])
             .await
-            .expect("write_table_rows with simulator defaults failed");
+            .unwrap();
         assert_eq!(status, DestinationWriteStatus::Durable);
 
-        let exists = harness.sql.table_exists(&sf_table).await.expect("table_exists failed");
+        let exists = harness.sql.table_exists(&sf_table).await.unwrap();
         assert!(exists, "table with simulator defaults should have been created");
     })
     .await;
@@ -293,7 +293,7 @@ async fn write_table_rows_basic() {
             ],
         )
         .await
-        .expect("write_table_rows failed");
+        .unwrap();
         assert_eq!(status, DestinationWriteStatus::Accepted);
 
         let metadata = harness
@@ -301,7 +301,7 @@ async fn write_table_rows_basic() {
             .get_destination_table_metadata(table_id)
             .await
             .unwrap()
-            .expect("successful table setup should store destination metadata");
+            .unwrap();
         assert!(metadata.is_applied());
         assert_eq!(metadata.snapshot_id, schema.inner().snapshot_id);
         assert_eq!(&metadata.replication_mask, schema.replication_mask());
@@ -309,7 +309,7 @@ async fn write_table_rows_basic() {
         // The empty write is the table-wide durability barrier.
         let status = invoke_write_table_rows(&harness.destination, &schema, vec![])
             .await
-            .expect("table-copy durability barrier failed");
+            .unwrap();
         assert_eq!(status, DestinationWriteStatus::Durable);
 
         let copy_offset = first_copy_request_offset();
@@ -347,10 +347,10 @@ async fn write_table_rows_empty() {
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
         let status = invoke_write_table_rows(&harness.destination, &schema, vec![])
             .await
-            .expect("write_table_rows with empty rows failed");
+            .unwrap();
         assert_eq!(status, DestinationWriteStatus::Durable);
 
-        let exists = harness.sql.table_exists(&sf_table).await.expect("table_exists failed");
+        let exists = harness.sql.table_exists(&sf_table).await.unwrap();
         assert!(exists, "table should have been created even with empty row set");
     })
     .await;
@@ -407,7 +407,7 @@ async fn write_events_insert_update_delete() {
             ],
         )
         .await
-        .expect("write_events failed");
+        .unwrap();
 
         let expected_offset = OffsetToken::new(PgLsn::from(3u64), 0);
         let rows = poll_and_query_rows(&harness, table_id, &sf_table, &expected_offset).await;
@@ -457,7 +457,7 @@ async fn write_events_delete_key_only() {
             })],
         )
         .await
-        .expect("write_events failed");
+        .unwrap();
 
         let expected_offset = OffsetToken::new(PgLsn::from(1u64), 0);
         let rows = poll_and_query_rows(&harness, table_id, &sf_table, &expected_offset).await;
@@ -548,7 +548,7 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
             })],
         )
         .await
-        .expect("write_events (RelationEvent) failed");
+        .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -565,7 +565,7 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
             })],
         )
         .await
-        .expect("write_events (Insert with new column) failed");
+        .unwrap();
 
         let expected_offset = OffsetToken::new(PgLsn::from(101u64), 0);
         let committed = poll_destination_offset(
@@ -615,7 +615,7 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
             ],
         )
         .await
-        .expect_err("a stale relation should fail closed");
+        .unwrap_err();
         assert_eq!(replay_error.kind(), ErrorKind::DestinationSchemaRewind);
 
         let fqn = format!(
@@ -628,7 +628,7 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
             &format!("SELECT \"id\", \"email\" FROM {fqn} ORDER BY \"id\""),
         )
         .await
-        .expect("query_rows after stale replay failed");
+        .unwrap();
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0][0], serde_json::Value::String("1".into()));
@@ -641,7 +641,7 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
             .get_applied_destination_table_metadata(table_id)
             .await
             .unwrap()
-            .expect("destination metadata should remain applied");
+            .unwrap();
         assert_eq!(final_metadata.snapshot_id, new_snapshot_id);
         assert_eq!(final_metadata.replication_mask, *evolved_replicated.replication_mask());
     })
@@ -705,7 +705,8 @@ async fn schema_evolution_add_column_defaults() {
             DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
-        assert!(committed.is_some(), "initial data should commit before DDL");
+        // The initial row must be durable before the schema transition begins.
+        assert!(committed.is_some());
 
         let initial_metadata = DestinationTableMetadata::new_applied(
             sf_table.clone(),
@@ -722,7 +723,7 @@ async fn schema_evolution_add_column_defaults() {
             })],
         )
         .await
-        .expect("write_events (RelationEvent defaults) failed");
+        .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -741,7 +742,7 @@ async fn schema_evolution_add_column_defaults() {
             })],
         )
         .await
-        .expect("write_events (Insert with defaults) failed");
+        .unwrap();
 
         let expected_offset = OffsetToken::new(PgLsn::from(101u64), 0);
         let committed = poll_destination_offset(
@@ -767,7 +768,7 @@ async fn schema_evolution_add_column_defaults() {
             ),
         )
         .await
-        .expect("query for defaulted rows failed");
+        .unwrap();
         assert_eq!(
             rows,
             vec![
@@ -844,7 +845,7 @@ async fn schema_evolution_existing_column_default_changes() {
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
         let status = invoke_write_table_rows(&harness.destination, &initial_replicated, vec![])
             .await
-            .expect("initial table write failed");
+            .unwrap();
         assert_eq!(status, DestinationWriteStatus::Durable);
 
         let fqn = format!(
@@ -926,8 +927,8 @@ async fn schema_evolution_applies_ordered_name_reuse_plan() {
         )
         .await;
 
-        // Wait for initial data to commit before DDL -- channel refresh loses
-        // uncommitted rows.
+        // Wait for initial data to commit before DDL because channel refresh
+        // loses uncommitted rows.
         let committed = poll_destination_offset(
             &harness.destination,
             table_id,
@@ -936,7 +937,7 @@ async fn schema_evolution_applies_ordered_name_reuse_plan() {
             DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
-        assert!(committed.is_some(), "initial data should commit before DDL");
+        assert!(committed.is_some());
 
         let initial_metadata = DestinationTableMetadata::new_applied(
             sf_table.clone(),
@@ -953,7 +954,7 @@ async fn schema_evolution_applies_ordered_name_reuse_plan() {
             })],
         )
         .await
-        .expect("write_events (RelationEvent ordered plan) failed");
+        .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -971,7 +972,7 @@ async fn schema_evolution_applies_ordered_name_reuse_plan() {
             })],
         )
         .await
-        .expect("write_events (Insert after ordered plan) failed");
+        .unwrap();
 
         let expected_offset = OffsetToken::new(PgLsn::from(101u64), 0);
         let committed = poll_destination_offset(
@@ -982,7 +983,8 @@ async fn schema_evolution_applies_ordered_name_reuse_plan() {
             DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
-        assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
+        // The post-DDL row must reach the expected durable offset.
+        assert_eq!(committed, Some(expected_offset));
 
         let fqn = format!(
             "\"{}\".\"{}\".\"{sf_table}\"",
@@ -997,7 +999,7 @@ async fn schema_evolution_applies_ordered_name_reuse_plan() {
             ),
         )
         .await
-        .expect("query after ordered schema plan failed");
+        .unwrap();
         assert_eq!(
             rows,
             vec![
@@ -1094,7 +1096,7 @@ async fn schema_evolution_drop_column() {
             })],
         )
         .await
-        .expect("write_events (RelationEvent drop) failed");
+        .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -1107,7 +1109,7 @@ async fn schema_evolution_drop_column() {
             })],
         )
         .await
-        .expect("write_events (Insert after column drop) failed");
+        .unwrap();
 
         let expected_offset = OffsetToken::new(PgLsn::from(101u64), 0);
         let committed = poll_destination_offset(
@@ -1131,7 +1133,7 @@ async fn schema_evolution_drop_column() {
             &format!("select \"id\", \"name\" from {fqn} order by \"id\""),
         )
         .await
-        .expect("query after drop failed");
+        .unwrap();
         assert_eq!(
             rows,
             vec![
@@ -1266,7 +1268,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             })],
         )
         .await
-        .expect("write_events (Insert v1) failed");
+        .unwrap();
         poll(1, 0).await;
 
         invoke_write_events(
@@ -1275,7 +1277,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             vec![Event::Relation(RelationEvent { replicated_table_schema: replicated_v2.clone() })],
         )
         .await
-        .expect("write_events (Relation v2) failed");
+        .unwrap();
 
         // Phase 2: Insert(v2) + RENAME
         invoke_write_events(
@@ -1293,7 +1295,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             })],
         )
         .await
-        .expect("write_events (Insert v2) failed");
+        .unwrap();
         poll(101, 0).await;
 
         invoke_write_events(
@@ -1302,7 +1304,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             vec![Event::Relation(RelationEvent { replicated_table_schema: replicated_v3.clone() })],
         )
         .await
-        .expect("write_events (Relation v3) failed");
+        .unwrap();
 
         // Phase 3: Insert(v3) + DROP COLUMN
         invoke_write_events(
@@ -1320,7 +1322,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             })],
         )
         .await
-        .expect("write_events (Insert v3) failed");
+        .unwrap();
         poll(201, 0).await;
 
         invoke_write_events(
@@ -1329,7 +1331,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             vec![Event::Relation(RelationEvent { replicated_table_schema: replicated_v4.clone() })],
         )
         .await
-        .expect("write_events (Relation v4) failed");
+        .unwrap();
 
         // Phase 4: Final insert after all DDL.
         invoke_write_events(
@@ -1343,7 +1345,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             })],
         )
         .await
-        .expect("write_events (Insert v4) failed");
+        .unwrap();
         poll(301, 0).await;
 
         let fqn = format!(
@@ -1359,7 +1361,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
             &format!("select \"id\", \"full_name\" from {fqn} order by \"id\""),
         )
         .await
-        .expect("final query failed");
+        .unwrap();
 
         // 5 rows: 1 from initial copy + 4 from CDC inserts.
         assert_eq!(rows.len(), 5, "expected 5 rows, got {}", rows.len());

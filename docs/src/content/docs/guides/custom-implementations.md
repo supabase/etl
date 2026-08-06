@@ -20,10 +20,13 @@ ETL delivers data to destinations in **two phases**:
 
 Schema changes are surfaced through `Event::Relation`. If your destination
 keeps physical schemas, flush pending writes before handling a relation event,
-apply the supported schema diff, then process following row events with the new
-schema. The built-in destinations handle column adds, drops, renames,
-nullability changes, and supported default changes, but default expressions and
-backfill semantics remain destination-specific. See
+compare the previously applied and target schemas, build a destination-aware
+schema plan, and apply its supported operations in order before processing
+following row events. BigQuery, ClickHouse, DuckLake, and Snowflake apply column
+adds, drops, renames, and supported default changes. BigQuery also relaxes
+existing required columns to nullable; other shared-planner nullability changes
+and all shared-planner type alterations are currently skipped. Default
+expressions and backfill semantics remain destination-specific. See
 [Schema Changes](/etl/explanation/schema-changes/) for the current semantics and
 limitations.
 

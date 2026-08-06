@@ -74,7 +74,7 @@ async fn acquire_ducklake_test_hook_guard() -> OwnedSemaphorePermit {
     Arc::clone(&DUCKLAKE_TEST_HOOKS_GUARD)
         .acquire_owned()
         .await
-        .expect("ducklake test hook semaphore should stay open")
+        .unwrap()
 }
 
 fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
@@ -138,7 +138,7 @@ fn try_open_lake_conn(catalog: &Url, data: &Url) -> Result<Connection, duckdb::E
 
 /// Opens a verification connection, panicking on failure.
 fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
-    try_open_lake_conn(catalog, data).expect("failed to attach DuckLake catalog")
+    try_open_lake_conn(catalog, data).unwrap()
 }
 
 fn lake_table_exists(conn: &Connection, table_name: &DuckLakeTableName) -> bool {
@@ -197,7 +197,7 @@ async fn new_test_destination(
         store,
     )
     .await
-    .expect("failed to create DuckLake destination")
+    .unwrap()
 }
 
 fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
@@ -215,7 +215,7 @@ fn count_rows(conn: &Connection, table_name: &DuckLakeTableName) -> i64 {
         [],
         |r| r.get(0),
     )
-    .expect("count query failed")
+    .unwrap()
 }
 
 fn table_column_names(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<String> {
@@ -226,11 +226,11 @@ fn table_column_names(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<
         quote_literal(table_name.schema()),
         quote_literal(table_name.table()),
     ))
-    .expect("failed to prepare column query")
+    .unwrap()
     .query_map([], |row| row.get::<_, String>(0))
-    .expect("failed to query table columns")
+    .unwrap()
     .collect::<Result<Vec<_>, _>>()
-    .expect("failed to read table columns")
+    .unwrap()
 }
 
 fn count_applied_batches(
@@ -249,7 +249,7 @@ fn count_applied_batches(
         [],
         |r| r.get(0),
     )
-    .expect("batch marker count query failed")
+    .unwrap()
 }
 
 fn count_streaming_progress_rows(conn: &Connection, table_name: &DuckLakeTableName) -> i64 {
@@ -263,7 +263,7 @@ fn count_streaming_progress_rows(conn: &Connection, table_name: &DuckLakeTableNa
         [],
         |r| r.get(0),
     )
-    .expect("streaming progress count query failed")
+    .unwrap()
 }
 
 fn read_streaming_progress(
@@ -316,7 +316,7 @@ fn flush_inlined_rows(conn: &Connection, table_name: &DuckLakeTableName) -> i64 
         [],
         |r| r.get(0),
     )
-    .expect("inlined data flush query failed")
+    .unwrap()
 }
 
 /// Forces DuckLake to checkpoint catalog metadata before cross-connection
@@ -330,7 +330,7 @@ fn flush_inlined_rows(conn: &Connection, table_name: &DuckLakeTableName) -> i64 
 /// deterministically.
 fn checkpoint_lake(catalog: &Url, data: &Url) {
     let conn = open_lake_conn(catalog, data);
-    conn.execute_batch("CHECKPOINT").expect("failed to checkpoint DuckLake catalog");
+    conn.execute_batch("CHECKPOINT").unwrap();
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -373,7 +373,7 @@ async fn write_table_rows_basic() {
             ],
         )
         .await
-        .expect("write_table_rows failed");
+        .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 3);
@@ -445,14 +445,14 @@ async fn ducklake_rejects_zero_pool_size() {
     let data_dir = tempfile::Builder::new()
         .prefix("etl_ducklake_zero_pool_size_")
         .tempdir()
-        .expect("failed to create temp dir")
+        .unwrap()
         .keep()
         .join("data");
-    std::fs::create_dir_all(&data_dir).expect("failed to create data dir");
+    std::fs::create_dir_all(&data_dir).unwrap();
 
     let err = DuckLakeDestination::new(
         Url::parse("postgres://ducklake@localhost/test_catalog")
-            .expect("failed to parse catalog url"),
+            .unwrap(),
         path_to_file_url(&data_dir),
         0,
         None,
@@ -463,7 +463,7 @@ async fn ducklake_rejects_zero_pool_size() {
     )
     .await
     .err()
-    .expect("pool_size = 0 should fail");
+    .unwrap();
 
     assert_eq!(err.kind(), ErrorKind::ConfigError);
 }
@@ -474,16 +474,16 @@ async fn ducklake_rejects_non_postgres_catalog_url() {
     let file_catalog = tempfile::Builder::new()
         .prefix("etl_ducklake_file_catalog_")
         .tempdir()
-        .expect("failed to create file catalog dir")
+        .unwrap()
         .keep()
         .join("catalog.ducklake");
     let data_dir = tempfile::Builder::new()
         .prefix("etl_ducklake_non_postgres_catalog_")
         .tempdir()
-        .expect("failed to create temp data dir")
+        .unwrap()
         .keep()
         .join("data");
-    std::fs::create_dir_all(&data_dir).expect("failed to create data dir");
+    std::fs::create_dir_all(&data_dir).unwrap();
 
     let err = DuckLakeDestination::new(
         path_to_file_url(&file_catalog),
@@ -497,7 +497,7 @@ async fn ducklake_rejects_non_postgres_catalog_url() {
     )
     .await
     .err()
-    .expect("file-backed catalogs should be rejected");
+    .unwrap();
 
     assert_eq!(err.kind(), ErrorKind::ConfigError);
 }
@@ -520,7 +520,7 @@ async fn ducklake_rejects_invalid_expire_snapshots_retention() {
     )
     .await
     .err()
-    .expect("invalid expire_snapshots_older_than should fail");
+    .unwrap();
 
     assert_eq!(err.kind(), ErrorKind::ConfigError);
     assert_eq!(
@@ -548,7 +548,7 @@ async fn ducklake_rejects_destructive_expire_snapshots_retention() {
         )
         .await
         .err()
-        .expect("destructive expire_snapshots_older_than should fail");
+        .unwrap();
 
         assert_eq!(err.kind(), ErrorKind::ConfigError);
         assert_eq!(
@@ -806,7 +806,7 @@ async fn concurrent_same_table_copy_batches_complete() {
     let rows = count_rows(&conn, &table_name);
     let markers = count_applied_batches(&conn, &table_name, "copy");
 
-    let data_path = data_url.to_file_path().expect("data_url should be a file:// URL");
+    let data_path = data_url.to_file_path().unwrap();
     let parquet_glob = format!("{}/**/*.parquet", data_path.display());
     let parquet_rows: i64 = conn
         .query_row(
@@ -826,11 +826,11 @@ async fn concurrent_same_table_copy_batches_complete() {
             quote_literal("copy"),
             quote_literal("__legacy__"),
         );
-        let mut stmt = conn.prepare(&sql).expect("marker count by epoch prepare failed");
+        let mut stmt = conn.prepare(&sql).unwrap();
         stmt.query_map([], |row| row.get::<_, i64>(0))
-            .expect("marker count by epoch query failed")
+            .unwrap()
             .collect::<Result<Vec<_>, _>>()
-            .expect("marker count by epoch collect failed")
+            .unwrap()
     };
 
     let marker_detail: Vec<(String, String, Option<u64>, Option<u64>)> = {
@@ -843,7 +843,7 @@ async fn concurrent_same_table_copy_batches_complete() {
             quote_literal(&table_name.id()),
             quote_literal("copy"),
         );
-        let mut stmt = conn.prepare(&sql).expect("marker detail prepare failed");
+        let mut stmt = conn.prepare(&sql).unwrap();
         stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -852,9 +852,9 @@ async fn concurrent_same_table_copy_batches_complete() {
                 row.get::<_, Option<u64>>(3)?,
             ))
         })
-        .expect("marker detail query failed")
+        .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .expect("marker detail collect failed")
+        .unwrap()
     };
 
     eprintln!(
@@ -905,7 +905,7 @@ async fn write_table_rows_empty_creates_table() {
     destination
         .write_table_rows(&replicated_table_schema, vec![])
         .await
-        .expect("empty write failed");
+        .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 0, "table should exist but be empty");
@@ -949,7 +949,7 @@ async fn truncate_clears_rows() {
         .await
         .unwrap();
 
-    destination.truncate_table(&replicated_table_schema).await.expect("truncate failed");
+    destination.truncate_table(&replicated_table_schema).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 0, "table should be empty after truncate");
@@ -1082,7 +1082,7 @@ async fn write_events() {
             }),
         ])
         .await
-        .expect("write_events failed");
+        .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
@@ -1093,7 +1093,7 @@ async fn write_events() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .expect("state query failed");
+        .unwrap();
     assert_eq!(id, 1);
     assert_eq!(name, "Gadget");
 }
@@ -1151,7 +1151,7 @@ async fn write_events_splits_same_table_batch_by_replicated_schema() {
             }),
         ])
         .await
-        .expect("write_events should keep each row with its own schema");
+        .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut statement = conn
@@ -1159,14 +1159,14 @@ async fn write_events_splits_same_table_batch_by_replicated_schema() {
             "select id, name, email from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
-        .expect("failed to prepare segmented schema query");
+        .unwrap();
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
         })
-        .expect("failed to query segmented schema table")
+        .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .expect("failed to read segmented schema rows");
+        .unwrap();
 
     assert_eq!(
         rows,
@@ -1257,13 +1257,13 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
             }),
         ])
         .await
-        .expect("write_events should recover applying schema metadata");
+        .unwrap();
 
     let metadata = store
         .get_destination_table_metadata(old_schema.id)
         .await
         .unwrap()
-        .expect("destination metadata should exist");
+        .unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
@@ -1273,14 +1273,14 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
             "select id, name, email from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
-        .expect("failed to prepare state query");
+        .unwrap();
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
         })
-        .expect("failed to query recovered table")
+        .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .expect("failed to read recovered table rows");
+        .unwrap();
 
     assert_eq!(
         rows,
@@ -1349,7 +1349,7 @@ async fn write_events_rejects_mismatched_relation_before_applying_recovery() {
             replicated_table_schema: old_replicated_table_schema,
         })])
         .await
-        .expect_err("a relation that does not match the recovery target should be rejected");
+        .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
     assert_eq!(
         store.get_destination_table_metadata(old_schema.id).await.unwrap(),
@@ -1416,21 +1416,21 @@ async fn write_events_rejects_stale_relation_before_reverse_ddl() {
             }),
         ])
         .await
-        .expect("the newer schema and row should be applied");
+        .unwrap();
 
     let error = destination
         .write_events(vec![Event::Relation(RelationEvent {
             replicated_table_schema: old_replicated_table_schema,
         })])
         .await
-        .expect_err("a stale relation should be rejected");
+        .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
 
     let metadata = store
         .get_destination_table_metadata(old_schema.id)
         .await
         .unwrap()
-        .expect("destination metadata should remain available");
+        .unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
@@ -1440,14 +1440,14 @@ async fn write_events_rejects_stale_relation_before_reverse_ddl() {
             "select id, name, email from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
-        .expect("failed to prepare stale-relation state query");
+        .unwrap();
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
         })
-        .expect("failed to query stale-relation state")
+        .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .expect("failed to read stale-relation rows");
+        .unwrap();
     assert_eq!(
         rows,
         vec![
@@ -1537,7 +1537,7 @@ async fn write_events_applies_defaulted_schema_change() {
             }),
         ])
         .await
-        .expect("write_events should apply defaulted schema change");
+        .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut rows_statement = conn
@@ -1545,7 +1545,7 @@ async fn write_events_applies_defaulted_schema_change() {
             "select id, name, status, score, active from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
-        .expect("failed to prepare defaulted row query");
+        .unwrap();
     let rows = rows_statement
         .query_map([], |row| {
             Ok((
@@ -1556,9 +1556,9 @@ async fn write_events_applies_defaulted_schema_change() {
                 row.get::<_, Option<bool>>(4)?,
             ))
         })
-        .expect("failed to query defaulted rows")
+        .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .expect("failed to read defaulted rows");
+        .unwrap();
 
     // DuckLake records supported add-time defaults as metadata without
     // rewriting existing data files.
@@ -1647,13 +1647,13 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
             }),
         ])
         .await
-        .expect("write_events should reconcile missing applied schema columns");
+        .unwrap();
 
     let metadata = store
         .get_destination_table_metadata(old_schema.id)
         .await
         .unwrap()
-        .expect("destination metadata should exist");
+        .unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
@@ -1663,14 +1663,14 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
             "select id, name, email from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
-        .expect("failed to prepare state query");
+        .unwrap();
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
         })
-        .expect("failed to query reconciled table")
+        .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .expect("failed to read reconciled table rows");
+        .unwrap();
 
     assert_eq!(
         rows,
@@ -1749,7 +1749,7 @@ async fn write_events_supports_drop_and_add_same_column_name() {
             }),
         ])
         .await
-        .expect("write_events should support replacing a column with the same name");
+        .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let columns = table_column_names(&conn, &table_name);
@@ -1761,14 +1761,14 @@ async fn write_events_supports_drop_and_add_same_column_name() {
             "select id, name, status from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
-        .expect("failed to prepare state query");
+        .unwrap();
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i32>>(2)?))
         })
-        .expect("failed to query replaced column")
+        .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .expect("failed to read replaced column rows");
+        .unwrap();
 
     assert_eq!(rows, vec![(1, "Alice".to_owned(), None), (2, "Bob".to_owned(), Some(7))]);
 }
@@ -1859,7 +1859,7 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
             }),
         ])
         .await
-        .expect("write_events should support replacing the same column name twice");
+        .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let columns = table_column_names(&conn, &table_name);
@@ -1871,12 +1871,12 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
             "select id, status from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
-        .expect("failed to prepare state query");
+        .unwrap();
     let rows = statement
         .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, Option<String>>(1)?)))
-        .expect("failed to query replaced column")
+        .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .expect("failed to read replaced column rows");
+        .unwrap();
 
     assert_eq!(rows, vec![(1, None), (2, None), (3, Some("ready".to_owned()))]);
 }
@@ -1927,7 +1927,7 @@ async fn write_table_rows_preserves_active_column_with_tombstone_prefix() {
             [],
             |row| row.get(0),
         )
-        .expect("failed to query active prefix column");
+        .unwrap();
 
     assert_eq!(value, "kept");
 }
@@ -1992,14 +1992,14 @@ async fn startup_after_restart_reconciles_applied_metadata_missing_columns() {
             "select id, name, email from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
-        .expect("failed to prepare state query");
+        .unwrap();
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
         })
-        .expect("failed to query reconciled table")
+        .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .expect("failed to read reconciled table rows");
+        .unwrap();
 
     assert_eq!(
         rows,
@@ -2058,7 +2058,7 @@ async fn startup_after_restart_recovers_applying_schema_change() {
         .get_destination_table_metadata(old_schema.id)
         .await
         .unwrap()
-        .expect("destination metadata should exist");
+        .unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
@@ -2120,7 +2120,7 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
         quote_identifier("ddl_col_4_0"),
         quote_identifier("ddl_col_4_1"),
     ))
-    .expect("failed to create stale physical rename-source shape");
+    .unwrap();
     drop(conn);
 
     let applying_metadata = DestinationTableMetadata::new_applied(
@@ -2152,7 +2152,7 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
         .get_destination_table_metadata(old_schema.id)
         .await
         .unwrap()
-        .expect("destination metadata should exist");
+        .unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
@@ -2164,12 +2164,12 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
             "select id, ddl_col_4_0 from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
-        .expect("failed to prepare state query");
+        .unwrap();
     let rows = statement
         .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
-        .expect("failed to query recovered rename table")
+        .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .expect("failed to read recovered rename rows");
+        .unwrap();
 
     assert_eq!(rows, vec![(1, "existing".to_owned()), (2, "new".to_owned())]);
 }
@@ -2228,7 +2228,7 @@ async fn startup_after_restart_rejects_applying_schema_change_with_pruned_previo
         .get_destination_table_metadata(old_schema.id)
         .await
         .unwrap()
-        .expect("destination metadata should exist");
+        .unwrap();
     assert!(metadata.is_applying());
     assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
     assert_eq!(metadata.previous_snapshot_id, Some(missing_previous_snapshot_id));
@@ -2266,7 +2266,7 @@ async fn startup_after_restart_recovers_initial_applying_metadata() {
         .get_destination_table_metadata(schema.id)
         .await
         .unwrap()
-        .expect("destination metadata should exist");
+        .unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id, schema.snapshot_id);
 
@@ -2382,7 +2382,7 @@ async fn write_events_with_old_row_update() {
             }),
         ])
         .await
-        .expect("write_events with old row update failed");
+        .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
@@ -2393,7 +2393,7 @@ async fn write_events_with_old_row_update() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .expect("state query failed");
+        .unwrap();
     assert_eq!(id, 1);
     assert_eq!(name, "Gadget");
 }
@@ -2650,7 +2650,7 @@ async fn write_events_replay_is_idempotent() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .expect("state query failed");
+        .unwrap();
     assert_eq!(id, 1);
     assert_eq!(name, "paid");
 }
@@ -3529,7 +3529,7 @@ async fn type_mapping_round_trip() {
             ])],
         )
         .await
-        .expect("write failed");
+        .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let row: (i32, String, f64, bool, String) = conn
@@ -3541,7 +3541,7 @@ async fn type_mapping_round_trip() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
-        .expect("query failed");
+        .unwrap();
 
     assert_eq!(row.0, 42);
     assert_eq!(row.1, "hello");

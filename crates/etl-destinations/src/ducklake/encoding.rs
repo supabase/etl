@@ -21,6 +21,8 @@ use etl::{
 };
 use pg_escape::quote_literal;
 
+use crate::ducklake::DUCKLAKE_COLUMN_NAME_MAPPING;
+
 /// Prepared row payload reused across retry attempts.
 pub(super) enum PreparedRows {
     Appender(Vec<Vec<Value>>),
@@ -306,7 +308,8 @@ fn copy_rows_to_arrow_record_batch(
     table_rows: Vec<TableRow>,
 ) -> EtlResult<RecordBatch> {
     let row_count = table_rows.len();
-    let column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
+    let column_schemas: Vec<_> =
+        replicated_table_schema.destination_column_schemas(DUCKLAKE_COLUMN_NAME_MAPPING).collect();
     let mut column_values = column_kinds
         .iter()
         .copied()

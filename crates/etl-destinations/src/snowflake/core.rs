@@ -11,7 +11,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{DeleteEvent, Event, InsertEvent, UpdateEvent},
-    schema::{ColumnNameEquivalence, ColumnSchema, ReplicatedTableSchema, TableId},
+    schema::{ColumnSchema, ReplicatedTableSchema, TableId},
     store::DestinationStore,
 };
 use tokio::{
@@ -23,7 +23,7 @@ use tracing::{info, warn};
 use crate::{
     recovery::ensure_relation_schema_transition,
     snowflake::{
-        Client,
+        Client, SNOWFLAKE_COLUMN_NAME_MAPPING,
         auth::{AuthManager, HttpExchanger, TokenProvider},
         encoding::{CdcMeta, CdcOperation},
         metrics::register_metrics,
@@ -70,9 +70,11 @@ impl TableInitializer {
         T: TokenProvider + 'static,
         C: StreamClient,
     {
+        table_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
         let table_id = table_schema.id();
         let table_name = try_stringify_table_name(table_schema.name())?.to_uppercase();
-        let columns: Vec<_> = table_schema.column_schemas().cloned().collect();
+        let columns: Vec<_> =
+            table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
 
         // Applied metadata needs no transition coordination, but this process
         // may still need to reopen its local channel state.
@@ -94,8 +96,14 @@ impl TableInitializer {
 
         // The permit owns the complete Applying -> remote setup -> Applied
         // transition for this table.
-        let _permit =
-            gate.acquire_owned().await.expect("table initialization gates are never closed");
+        let _permit = gate.acquire_owned().await.map_err(|error| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "Snowflake table initialization gate is closed",
+                format!("Table {table_id}"),
+                source: error
+            )
+        })?;
 
         // Re-read under the table gate because another copy partition may have
         // completed setup after the fast-path read.
@@ -291,7 +299,9 @@ where
             if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                 break;
             }
-            let event = iter.next().expect("iterator is non-empty after peek");
+            let Some(event) = iter.next() else {
+                break;
+            };
             match event {
                 Event::Insert(e) => self.encode_insert(e, &mut builders, &mut column_cache).await?,
                 Event::Update(e) => self.encode_update(e, &mut builders, &mut column_cache).await?,
@@ -422,8 +432,11 @@ where
                     .map_err(EtlError::from)
             }
             SnowflakeDeleteRow::Key(key_row) => {
-                let identity_cols: Vec<_> =
-                    e.replicated_table_schema.identity_column_schemas().cloned().collect();
+                let identity_cols: Vec<_> = e
+                    .replicated_table_schema
+                    .identity_column_schemas()
+                    .map(|column| SNOWFLAKE_COLUMN_NAME_MAPPING.map_column_schema(column))
+                    .collect();
                 builders
                     .entry(table_id)
                     .or_default()
@@ -447,7 +460,8 @@ where
         #[allow(clippy::map_entry)]
         if !column_cache.contains_key(&table_id) {
             self.prepare_table_for_streaming(table_schema).await?;
-            let cols: Vec<_> = table_schema.column_schemas().cloned().collect();
+            let cols: Vec<_> =
+                table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
             column_cache.insert(table_id, cols);
         }
         Ok(())
@@ -515,10 +529,10 @@ where
             current_replication_mask.clone(),
         );
 
-        let new_columns: Vec<_> = new_schema.column_schemas().cloned().collect();
+        let new_columns: Vec<_> =
+            new_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
         schema::validate_no_cdc_collisions(&new_columns).map_err(EtlError::from)?;
-        let plan =
-            current_schema.plan_schema_change(new_schema, ColumnNameEquivalence::CaseSensitive)?;
+        let plan = current_schema.plan_schema_change(new_schema, SNOWFLAKE_COLUMN_NAME_MAPPING)?;
 
         let table_name = try_stringify_table_name(new_schema.name())?.to_uppercase();
         self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
@@ -679,7 +693,9 @@ where
             }
 
             let table_id = replicated_table_schema.id();
-            let columns: Vec<_> = replicated_table_schema.column_schemas().cloned().collect();
+            let columns: Vec<_> = replicated_table_schema
+                .destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING)
+                .collect();
 
             // Build row batches. Snowflake has limits on max size of input, so we slice
             // into proper batches, when necessary.
@@ -887,7 +903,7 @@ mod tests {
                 replicated_table_schema: stale_schema,
             })])
             .await
-            .expect_err("stale relation event should be rejected");
+            .unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
         assert_eq!(store.get_destination_table_metadata(table_id).await.unwrap(), Some(metadata));

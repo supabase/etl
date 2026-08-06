@@ -1039,7 +1039,7 @@ impl From<SchemaPlanError> for EtlError {
         let (kind, description, detail) = match &err {
             SchemaPlanError::DestinationColumnNameCollision {
                 endpoint,
-                column_name_equivalence,
+                column_name_mapping,
                 first_column_name,
                 second_column_name,
             } => (
@@ -1047,25 +1047,10 @@ impl From<SchemaPlanError> for EtlError {
                 Cow::Borrowed("Source column names collide in the destination"),
                 Cow::Owned(format!(
                     "The {endpoint} source schema contains columns '{first_column_name}' and \
-                     '{second_column_name}', which are equivalent under the destination's \
-                     {column_name_equivalence} column-name rules. Rename or exclude one of these \
-                     source columns."
-                )),
-            ),
-            SchemaPlanError::CurrentColumnNotFound { column_name } => (
-                ErrorKind::InvalidState,
-                Cow::Borrowed("Schema diff references a missing current column"),
-                Cow::Owned(format!(
-                    "The schema diff references current column '{column_name}', but that name was \
-                     not present in the supplied current endpoint."
-                )),
-            ),
-            SchemaPlanError::CurrentColumnClassifiedMultipleTimes { column_name } => (
-                ErrorKind::InvalidState,
-                Cow::Borrowed("Schema diff classifies a current column more than once"),
-                Cow::Owned(format!(
-                    "The schema diff classifies current column '{column_name}' as more than one \
-                     endpoint change."
+                     '{second_column_name}', which both map to destination column '{}' under the \
+                     {column_name_mapping} column-name mapping. Rename or exclude one of these \
+                     source columns.",
+                    column_name_mapping.map_name(first_column_name)
                 )),
             ),
             SchemaPlanError::BlockedRenameTarget { current_column_name, target_column_name } => (
@@ -1074,6 +1059,14 @@ impl From<SchemaPlanError> for EtlError {
                 Cow::Owned(format!(
                     "The rename from '{current_column_name}' to '{target_column_name}' is blocked \
                      by a column outside the pending rename set."
+                )),
+            ),
+            SchemaPlanError::ReadyRenameNotPending { ordinal_position } => (
+                ErrorKind::InvalidState,
+                Cow::Borrowed("Schema rename plan has inconsistent state"),
+                Cow::Owned(format!(
+                    "The ready rename at PostgreSQL ordinal {ordinal_position} is absent from the \
+                     pending rename set."
                 )),
             ),
         };
@@ -1151,7 +1144,7 @@ mod tests {
     fn destination_column_name_collision_is_a_source_schema_error() {
         let err = EtlError::from(SchemaPlanError::DestinationColumnNameCollision {
             endpoint: SchemaEndpoint::Target,
-            column_name_equivalence: crate::schema::ColumnNameEquivalence::AsciiCaseInsensitive,
+            column_name_mapping: crate::schema::ColumnNameMapping::AsciiLowercase,
             first_column_name: "a".to_owned(),
             second_column_name: "A".to_owned(),
         });

@@ -291,8 +291,13 @@
 - Doctests use `cargo test --doc` (nextest does not support them).
 - If test output shows `0 passed; 0 failed; 0 ignored; n filtered out`, treat that as a failure to run tests.
 - Verify that expected tests actually ran, not just that Cargo exited successfully.
-- Do not add custom messages to assertions. Use a preceding comment when an
-  assertion's purpose is not evident from its expression.
+- In tests, prefer `unwrap()` and `unwrap_err()` over `expect()` and
+  `expect_err()`. Use an `expect` message only when it adds diagnostic context
+  that is not already clear from the expression and surrounding test. Put
+  non-obvious test intent in a preceding comment instead of a panic message.
+- Prefer assertions without custom messages. Use a message only when it adds
+  diagnostic context that is not already clear from the assertion. Explain
+  non-obvious test intent with a preceding comment instead.
 - Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - When a test failure needs deeper debugging, rerun the targeted test with

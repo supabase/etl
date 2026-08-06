@@ -46,7 +46,7 @@ async fn query_default_rows(
         ),
     )
     .await
-    .expect("query for defaulted rows failed")
+    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -62,20 +62,17 @@ async fn schema_change_batched_operations() {
             &[("name", "text not null"), ("replaced", "integer not null")],
         )
         .await
-        .expect("failed to create source table");
+        .unwrap();
 
     let publication_name = "test_pub_snowflake_defaults";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, replaced) values ('Alice', 25)",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert initial source row");
+        .unwrap();
 
     let config = load_test_config().clone_without_credentials();
     let auth = build_auth();
@@ -114,7 +111,8 @@ async fn schema_change_batched_operations() {
             DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
-        assert_eq!(committed, Some(copy_offset), "initial data should commit before source DDL");
+        // The initial copy must be durable before schema evolution starts.
+        assert_eq!(committed, Some(copy_offset));
 
         let events_notify = destination
             .wait_for_events(vec![
@@ -141,14 +139,14 @@ async fn schema_change_batched_operations() {
                 ],
             )
             .await
-            .expect("failed to alter source table");
+            .unwrap();
         database
             .run_sql(&format!(
                 "insert into {} (name, replaced) values ('Bob', 'new-replaced')",
                 table_name.as_quoted_identifier()
             ))
             .await
-            .expect("failed to insert defaulted source row");
+            .unwrap();
 
         events_notify.notified().await;
         let expected_offset = destination
@@ -162,7 +160,7 @@ async fn schema_change_batched_operations() {
                 }
                 _ => None,
             })
-            .expect("expected a replicated insert event");
+            .unwrap();
 
         pipeline.shutdown_and_wait().await.unwrap();
 
@@ -174,11 +172,8 @@ async fn schema_change_batched_operations() {
             DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
-        assert_eq!(
-            committed,
-            Some(expected_offset),
-            "defaulted row should commit before the final query"
-        );
+        // The post-DDL row must be durable before querying destination state.
+        assert_eq!(committed, Some(expected_offset));
 
         let expected = vec![
             vec![

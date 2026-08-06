@@ -34,6 +34,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     bigquery::{
+        BIGQUERY_COLUMN_NAME_MAPPING,
         encoding::BigQueryTableRow,
         metrics::{
             ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
@@ -1144,7 +1145,7 @@ impl BigQueryClient {
             .fields
             .unwrap_or_default()
             .into_iter()
-            .find(|field| field.name == column_name)
+            .find(|field| BIGQUERY_COLUMN_NAME_MAPPING.equivalent(&field.name, column_name))
             .ok_or_else(|| {
                 etl_error!(
                     ErrorKind::DestinationError,

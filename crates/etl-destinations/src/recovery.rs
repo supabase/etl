@@ -80,7 +80,7 @@ mod tests {
             applied_snapshot_id,
             &applied_mask,
         )
-        .expect("an identical applied schema should be accepted");
+        .unwrap();
         ensure_relation_schema_transition(
             "Test",
             table_id,
@@ -89,7 +89,7 @@ mod tests {
             test_snapshot_id(300_u64, 300_u64),
             &ReplicationMask::from_bytes(vec![1, 0, 1]),
         )
-        .expect("a newer schema snapshot should be accepted");
+        .unwrap();
     }
 
     #[test]
@@ -105,7 +105,7 @@ mod tests {
             test_snapshot_id(100_u64, 100_u64),
             &applied_mask,
         )
-        .expect_err("an older schema snapshot should be rejected");
+        .unwrap_err();
         assert_eq!(older_error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 
@@ -122,7 +122,7 @@ mod tests {
             applied_snapshot_id,
             &ReplicationMask::from_bytes(vec![1, 0, 1]),
         )
-        .expect_err("an equal snapshot with a different mask should be rejected");
+        .unwrap_err();
         assert_eq!(ambiguous_error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 }

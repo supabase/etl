@@ -21,7 +21,7 @@ use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{debug, warn};
 
 use crate::{
-    iceberg::{IcebergClient, error::iceberg_error_to_etl_error},
+    iceberg::{ICEBERG_COLUMN_NAME_MAPPING, IcebergClient, error::iceberg_error_to_etl_error},
     recovery::ensure_relation_schema_transition,
     table_name::try_stringify_table_name,
 };
@@ -461,6 +461,8 @@ where
         inner: &mut Inner,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<(String, IcebergTableName)> {
+        replicated_table_schema
+            .validate_destination_column_names(ICEBERG_COLUMN_NAME_MAPPING)?;
         let table_id = replicated_table_schema.id();
         let table_name = replicated_table_schema.name();
         let snapshot_id = replicated_table_schema.inner().snapshot_id;
@@ -552,8 +554,9 @@ where
     fn build_cdc_column_schemas(
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> Vec<ColumnSchema> {
-        let mut column_schemas: Vec<ColumnSchema> =
-            replicated_table_schema.column_schemas().cloned().collect();
+        let mut column_schemas: Vec<ColumnSchema> = replicated_table_schema
+            .destination_column_schemas(ICEBERG_COLUMN_NAME_MAPPING)
+            .collect();
 
         // Add cdc specific columns.
         let cdc_operation_col = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
@@ -856,7 +859,7 @@ mod tests {
         .unwrap();
 
         ensure_iceberg_relation_is_unchanged(&metadata, &schema)
-            .expect("an identical relation should be idempotent");
+            .unwrap();
 
         let newer_table_schema = Arc::new(TableSchema::with_snapshot_id(
             schema.id(),
@@ -866,7 +869,7 @@ mod tests {
         ));
         let newer_schema = ReplicatedTableSchema::all(newer_table_schema);
         let newer_error = ensure_iceberg_relation_is_unchanged(&metadata, &newer_schema)
-            .expect_err("Iceberg should reject a newer schema");
+            .unwrap_err();
         assert_eq!(newer_error.kind(), ErrorKind::CorruptedTableSchema);
 
         let newer_metadata: AppliedDestinationTableMetadata =
@@ -878,7 +881,7 @@ mod tests {
             .into_applied()
             .unwrap();
         let stale_error = ensure_iceberg_relation_is_unchanged(&newer_metadata, &schema)
-            .expect_err("Iceberg should reject a stale schema");
+            .unwrap_err();
         assert_eq!(stale_error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 

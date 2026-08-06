@@ -18,8 +18,8 @@ use etl::{
     event::{Event, EventSequenceKey},
     pipeline::PipelineId,
     schema::{
-        ColumnModificationType, ColumnNameEquivalence, ColumnPresenceChangeReason, IdentityType,
-        ReplicatedTableSchema, SchemaOperation, SchemaPlan, TableId, TableName,
+        ColumnAlteration, ColumnPresenceChangeReason, IdentityType, ReplicatedTableSchema,
+        SchemaOperation, SchemaPlan, TableId, TableName,
     },
     store::DestinationStore,
 };
@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     bigquery::{
-        BigQueryDatasetId, BigQueryTableId,
+        BIGQUERY_COLUMN_NAME_MAPPING, BigQueryDatasetId, BigQueryTableId,
         client::{BigQueryClient, BigQueryOperationType},
         encoding::BigQueryTableRow,
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
@@ -45,9 +45,18 @@ use crate::{
 const BIGQUERY_SEQUENCE_ORDINAL_FIRST: u64 = 0;
 /// Internal CDC sequence ordinal for generated upserts after generated deletes.
 const BIGQUERY_SEQUENCE_ORDINAL_SECOND: u64 = 1;
-/// BigQuery column identifiers are compared case-insensitively.
-const BIGQUERY_COLUMN_NAME_EQUIVALENCE: ColumnNameEquivalence =
-    ColumnNameEquivalence::UnicodeCaseInsensitive;
+/// BigQuery-reserved column prefixes, compared case-insensitively.
+const BIGQUERY_RESERVED_COLUMN_PREFIXES: [&str; 9] = [
+    "_TABLE_",
+    "_FILE_",
+    "_PARTITION",
+    "_ROW_TIMESTAMP",
+    "__ROOT__",
+    "_COLIDENTIFIER",
+    "_CHANGE_SEQUENCE_NUMBER",
+    "_CHANGE_TYPE",
+    "_CHANGE_TIMESTAMP",
+];
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -677,7 +686,7 @@ where
         &self,
         new_replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        validate_bigquery_table_shape(new_replicated_table_schema)?;
+        validate_bigquery_table_capabilities(new_replicated_table_schema)?;
 
         let table_id = new_replicated_table_schema.id();
         let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
@@ -763,7 +772,7 @@ where
         ensure_bigquery_primary_key_unchanged(&current_schema, new_replicated_table_schema)?;
 
         let plan = current_schema
-            .plan_schema_change(new_replicated_table_schema, BIGQUERY_COLUMN_NAME_EQUIVALENCE)?;
+            .plan_schema_change(new_replicated_table_schema, BIGQUERY_COLUMN_NAME_MAPPING)?;
         let sequenced_bigquery_table_id = metadata.destination_table_id.parse()?;
 
         // Mark as applying before making changes (with the NEW snapshot_id and mask).
@@ -822,10 +831,12 @@ where
         Ok(())
     }
 
-    /// Applies a validated schema plan to the BigQuery table.
+    /// Translates a validated schema plan into BigQuery DDL.
     ///
-    /// Executes the necessary DDL operations (ADD COLUMN, DROP COLUMN, RENAME
-    /// COLUMN) to transform the destination schema.
+    /// Operations execute in the supplied order. Shared planning already owns
+    /// name-equivalence validation; this layer only applies BigQuery behavior
+    /// for structural, nullability, and default operations and warns when
+    /// skipping an unsupported type alteration.
     async fn apply_schema_plan(
         &self,
         table_id: &TableId,
@@ -842,7 +853,7 @@ where
             destination_table_id = %sequenced_bigquery_table_id,
             added_column_count = plan.diff().columns_to_add.len(),
             removed_column_count = plan.diff().columns_to_drop.len(),
-            changed_column_count = plan.diff().columns_to_modify.len(),
+            altered_column_count = plan.diff().columns_to_alter.len(),
             "applying bigquery table schema plan"
         );
 
@@ -858,19 +869,39 @@ where
                         )
                         .await?;
                 }
-                SchemaOperation::ModifyColumn {
-                    old_column_schema,
-                    new_column_schema,
-                    modification_type: ColumnModificationType::Rename,
+                SchemaOperation::AlterColumn {
+                    column_schema,
+                    alteration: ColumnAlteration::Rename { new_name },
                 } => {
                     self.client
                         .rename_column(
                             &self.dataset_id,
                             &sequenced_bigquery_table_id.to_string(),
-                            &old_column_schema.name,
-                            &new_column_schema.name,
+                            &column_schema.name,
+                            new_name,
                         )
                         .await?;
+                }
+                SchemaOperation::AlterColumn {
+                    column_schema,
+                    alteration:
+                        ColumnAlteration::Type {
+                            previous_type,
+                            previous_modifier,
+                            target_type,
+                            target_modifier,
+                        },
+                } => {
+                    warn!(
+                        table_id = %table_id,
+                        destination_table_id = %sequenced_bigquery_table_id,
+                        column_name = %column_schema.name,
+                        previous_data_type = previous_type.name(),
+                        previous_type_modifier = previous_modifier,
+                        target_data_type = target_type.name(),
+                        target_type_modifier = target_modifier,
+                        "skipping unsupported bigquery column type change"
+                    );
                 }
                 SchemaOperation::AddColumn { column_schema, reason } => {
                     self.client
@@ -904,49 +935,48 @@ where
                         );
                     }
                 }
-                SchemaOperation::ModifyColumn {
-                    old_column_schema,
-                    new_column_schema,
-                    modification_type: ColumnModificationType::Nullability,
+                SchemaOperation::AlterColumn {
+                    column_schema,
+                    alteration: ColumnAlteration::Nullability { previous_nullable, target_nullable },
                 } => {
                     // Unsupported metadata changes can leave BigQuery intentionally
                     // divergent, so later operations must tolerate that state.
-                    if !old_column_schema.nullable && new_column_schema.nullable {
+                    if !previous_nullable && *target_nullable {
                         self.client
                             .drop_column_not_null(
                                 &self.dataset_id,
                                 &sequenced_bigquery_table_id.to_string(),
-                                &new_column_schema.name,
+                                &column_schema.name,
                             )
                             .await?;
                     } else {
                         warn!(
                             table_id = %table_id,
-                            column_name = %new_column_schema.name,
+                            column_name = %column_schema.name,
                             "bigquery does not support setting not null on an existing column; \
                              keeping the destination column nullable"
                         );
                     }
                 }
-                SchemaOperation::ModifyColumn {
-                    new_column_schema,
-                    modification_type: ColumnModificationType::Default,
-                    ..
+                SchemaOperation::AlterColumn {
+                    column_schema,
+                    alteration: alteration @ ColumnAlteration::Default { .. },
                 } => {
-                    if let Some(default_expression) = column_default_sql(new_column_schema) {
+                    let target_column_schema = alteration.apply_to(column_schema);
+                    if let Some(default_expression) = column_default_sql(&target_column_schema) {
                         self.client
                             .set_column_default(
                                 &self.dataset_id,
                                 &sequenced_bigquery_table_id.to_string(),
-                                &new_column_schema.name,
+                                &column_schema.name,
                                 &default_expression,
                             )
                             .await?;
                     } else {
-                        if new_column_schema.default_expression.is_some() {
+                        if target_column_schema.default_expression.is_some() {
                             warn!(
                                 table_id = %table_id,
-                                column_name = %new_column_schema.name,
+                                column_name = %column_schema.name,
                                 "skipping unsupported source column default for bigquery"
                             );
                         }
@@ -955,7 +985,7 @@ where
                             .clear_column_default(
                                 &self.dataset_id,
                                 &sequenced_bigquery_table_id.to_string(),
-                                &new_column_schema.name,
+                                &column_schema.name,
                             )
                             .await?;
                     }
@@ -1317,12 +1347,74 @@ where
     }
 }
 
-/// Validates that a replicated table schema can be written to BigQuery CDC.
+/// Returns whether a column name can be used directly as a protobuf field.
 ///
-/// BigQuery matches CDC rows by the destination table primary key, so the
-/// source table must expose that key when creating or writing the table.
-fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<()> {
-    replicated_table_schema.validate_destination_column_names(BIGQUERY_COLUMN_NAME_EQUIVALENCE)?;
+/// ETL supplies source column names directly in the protobuf descriptor used by
+/// the BigQuery Storage Write API. Flexible BigQuery column names require a
+/// separate `column_name` annotation, which the current writer does not emit.
+fn is_bigquery_storage_write_column_name(column_name: &str) -> bool {
+    let Some((&first, rest)) = column_name.as_bytes().split_first() else {
+        return false;
+    };
+
+    (first.is_ascii_alphabetic() || first == b'_')
+        && rest.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+/// Returns the reserved BigQuery prefix matched by a source column name.
+fn bigquery_reserved_column_prefix(column_name: &str) -> Option<&'static str> {
+    BIGQUERY_RESERVED_COLUMN_PREFIXES.into_iter().find(|prefix| {
+        column_name
+            .get(..prefix.len())
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+    })
+}
+
+/// Validates that a source column name is writable through BigQuery CDC.
+fn validate_bigquery_column_name(
+    replicated_table_schema: &ReplicatedTableSchema,
+    column_name: &str,
+) -> EtlResult<()> {
+    if let Some(reserved_prefix) = bigquery_reserved_column_prefix(column_name) {
+        bail!(
+            ErrorKind::SourceSchemaError,
+            "BigQuery source column name uses a reserved prefix",
+            format!(
+                "Table '{}' column '{}' begins with BigQuery-reserved prefix '{}'.",
+                replicated_table_schema.name(),
+                column_name,
+                reserved_prefix
+            )
+        );
+    }
+
+    if !is_bigquery_storage_write_column_name(column_name) {
+        bail!(
+            ErrorKind::SourceSchemaError,
+            "BigQuery source column name is unsupported",
+            format!(
+                "Table '{}' column '{}' is not an ASCII protobuf identifier. BigQuery flexible \
+                 column names are not supported by the current Storage Write encoder.",
+                replicated_table_schema.name(),
+                column_name
+            )
+        );
+    }
+
+    Ok(())
+}
+
+/// Validates BigQuery-specific schema capabilities.
+///
+/// Shared planning owns destination name-equivalence validation during schema
+/// changes. This check owns protobuf syntax, reserved names, and the source
+/// primary-key requirements used by BigQuery CDC.
+fn validate_bigquery_table_capabilities(
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    for column_schema in replicated_table_schema.column_schemas() {
+        validate_bigquery_column_name(replicated_table_schema, &column_schema.name)?;
+    }
 
     if replicated_table_schema.primary_key_column_schemas().len() == 0 {
         bail!(
@@ -1355,6 +1447,12 @@ fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema
     Ok(())
 }
 
+/// Validates a complete schema before creating or writing a BigQuery table.
+fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<()> {
+    replicated_table_schema.validate_destination_column_names(BIGQUERY_COLUMN_NAME_MAPPING)?;
+    validate_bigquery_table_capabilities(replicated_table_schema)
+}
+
 /// Rejects source primary-key changes that BigQuery cannot apply in place.
 ///
 /// BigQuery CDC matches rows through the primary-key constraint created during
@@ -1365,23 +1463,23 @@ fn ensure_bigquery_primary_key_unchanged(
     current_schema: &ReplicatedTableSchema,
     new_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
-    let primary_key_definition = |schema: &ReplicatedTableSchema| {
-        schema
-            .primary_key_column_schemas()
-            .map(|column| {
-                (column.ordinal_position, column.name.clone(), column.primary_key_ordinal_position)
-            })
-            .collect::<Vec<_>>()
-    };
+    let current_primary_key = current_schema.primary_key_column_schemas().collect::<Vec<_>>();
+    let new_primary_key = new_schema.primary_key_column_schemas().collect::<Vec<_>>();
+    let primary_key_changed = current_primary_key.len() != new_primary_key.len()
+        || current_primary_key.iter().zip(&new_primary_key).any(|(current, new)| {
+            current.ordinal_position != new.ordinal_position
+                || current.primary_key_ordinal_position != new.primary_key_ordinal_position
+                || !BIGQUERY_COLUMN_NAME_MAPPING.equivalent(&current.name, &new.name)
+        });
 
-    if primary_key_definition(current_schema) != primary_key_definition(new_schema) {
+    if primary_key_changed {
         bail!(
             ErrorKind::SourceSchemaError,
             "BigQuery does not support changing a primary key during replication",
             format!(
-                "Table '{}' changed its primary-key columns, names, or order. BigQuery CDC uses \
-                 the destination primary-key constraint, which ETL cannot alter safely in place. \
-                 Restore the source primary key or resync the table.",
+                "Table '{}' changed its primary-key columns, destination identifiers, or order. \
+                 BigQuery CDC uses the destination primary-key constraint, which ETL cannot alter \
+                 safely in place. Restore the source primary key or resync the table.",
                 new_schema.name()
             )
         );
@@ -1921,6 +2019,20 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    /// Builds a keyed schema with one caller-named non-key column.
+    fn replicated_schema_with_column_name(column_name: &str) -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new(column_name.to_owned(), Type::TEXT, -1, 2, true),
+            ],
+        ));
+
+        ReplicatedTableSchema::all(table_schema)
+    }
+
     /// Encodes tagged cells the same way [`BigQueryTableRow`] does, for
     /// comparison against a row produced by the code under test.
     fn expected_row_bytes(tagged_cells: Vec<(usize, Cell)>) -> Vec<u8> {
@@ -1940,6 +2052,31 @@ mod tests {
         ));
         let replication_mask = etl::schema::ReplicationMask::from_bytes(vec![0, 1, 1]);
         let identity_mask = IdentityMask::from_bytes(vec![0, 1, 0]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    /// Builds a two-column schema with caller-selected primary-key membership
+    /// and order.
+    fn replicated_schema_with_primary_key_positions(
+        first_position: Option<i32>,
+        second_position: Option<i32>,
+    ) -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, false)
+                    .with_primary_key_ordinal_position(first_position),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, false)
+                    .with_primary_key_ordinal_position(second_position),
+            ],
+        ));
+        let replication_mask = etl::schema::ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![
+            u8::from(first_position.is_some()),
+            u8::from(second_position.is_some()),
+        ]);
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
@@ -2178,12 +2315,48 @@ mod tests {
         ));
         let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
 
-        let error = validate_bigquery_table_shape(&replicated_table_schema)
-            .expect_err("BigQuery should reject source columns that differ only by case");
+        let error = validate_bigquery_table_shape(&replicated_table_schema).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
         assert_eq!(error.description(), Some("Source column names collide in the destination"));
         assert!(error.detail().is_some_and(|detail| detail.contains("'name' and 'Name'")));
+    }
+
+    #[test]
+    fn validate_bigquery_table_shape_rejects_reserved_column_prefixes() {
+        for column_name in [
+            "_TABLE_source",
+            "_file_source",
+            "_PARTITION_source",
+            "_row_timestamp_source",
+            "__ROOT__source",
+            "_colidentifier_source",
+            "_CHANGE_SEQUENCE_NUMBER_source",
+            "_change_type_source",
+            "_CHANGE_TIMESTAMP_source",
+        ] {
+            let replicated_table_schema = replicated_schema_with_column_name(column_name);
+
+            let error = validate_bigquery_table_shape(&replicated_table_schema).unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+            assert_eq!(
+                error.description(),
+                Some("BigQuery source column name uses a reserved prefix")
+            );
+        }
+    }
+
+    #[test]
+    fn validate_bigquery_table_shape_rejects_flexible_column_names() {
+        for column_name in ["2fa", "user-name", "naïve"] {
+            let replicated_table_schema = replicated_schema_with_column_name(column_name);
+
+            let error = validate_bigquery_table_shape(&replicated_table_schema).unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+            assert_eq!(error.description(), Some("BigQuery source column name is unsupported"));
+        }
     }
 
     #[test]
@@ -2262,6 +2435,26 @@ mod tests {
     }
 
     #[test]
+    fn ensure_bigquery_primary_key_unchanged_accepts_equivalent_key_rename() {
+        let current_schema = replicated_schema(IdentityType::PrimaryKey);
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("ID".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+            ],
+        ));
+        let new_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            etl::schema::ReplicationMask::all(&table_schema),
+            IdentityMask::from_bytes(vec![1, 0]),
+        );
+
+        ensure_bigquery_primary_key_unchanged(&current_schema, &new_schema).unwrap();
+    }
+
+    #[test]
     fn ensure_bigquery_primary_key_unchanged_rejects_key_rename() {
         let current_schema = replicated_schema(IdentityType::PrimaryKey);
         let table_schema = Arc::new(TableSchema::new(
@@ -2279,11 +2472,36 @@ mod tests {
             IdentityMask::from_bytes(vec![1, 0]),
         );
 
-        let error = ensure_bigquery_primary_key_unchanged(&current_schema, &new_schema)
-            .expect_err("primary-key rename should be rejected before BigQuery DDL");
+        let error =
+            ensure_bigquery_primary_key_unchanged(&current_schema, &new_schema).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
-        assert!(error.to_string().contains("primary-key columns, names, or order"));
+        assert!(
+            error.to_string().contains("primary-key columns, destination identifiers, or order")
+        );
+    }
+
+    #[test]
+    fn ensure_bigquery_primary_key_unchanged_rejects_membership_and_order_changes() {
+        for (current_schema, target_schema) in [
+            (
+                replicated_schema_with_primary_key_positions(Some(1), None),
+                replicated_schema_with_primary_key_positions(None, None),
+            ),
+            (
+                replicated_schema_with_primary_key_positions(Some(1), None),
+                replicated_schema_with_primary_key_positions(Some(1), Some(2)),
+            ),
+            (
+                replicated_schema_with_primary_key_positions(Some(1), Some(2)),
+                replicated_schema_with_primary_key_positions(Some(2), Some(1)),
+            ),
+        ] {
+            let error =
+                ensure_bigquery_primary_key_unchanged(&current_schema, &target_schema).unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        }
     }
 
     #[test]

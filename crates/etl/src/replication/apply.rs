@@ -808,8 +808,6 @@ struct ApplyLoopState {
     replication_lag_metrics: ReplicationLagMetrics,
     /// Events and associated batching information waiting for dispatch.
     event_batch: EventBatch,
-    /// Instant from when a transaction began.
-    current_tx_begin_ts: Option<Instant>,
     /// Number of row-change and truncate messages observed since the most
     /// recent `BEGIN`.
     current_tx_events: u64,
@@ -2286,19 +2284,15 @@ where
                 self.handle_relation_message(relation_body).await
             }
             LogicalReplicationMessage::Insert(insert_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_insert_message(insert_body).await
             }
             LogicalReplicationMessage::Update(update_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_update_message(update_body).await
             }
             LogicalReplicationMessage::Delete(delete_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_delete_message(delete_body).await
             }
             LogicalReplicationMessage::Truncate(truncate_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_truncate_message(truncate_body).await
             }
             LogicalReplicationMessage::Origin(_) => {
@@ -2492,6 +2486,7 @@ where
         let final_lsn = PgLsn::from(message.final_lsn());
         self.state.remote_final_lsn = Some(final_lsn);
 
+        // When a new transaction begins, we want to reset the accumulating state.
         self.state.current_tx_begin_ts = Some(Instant::now());
         self.state.current_tx_events = 0;
         self.state.reset_tx_ordinal();
@@ -2527,16 +2522,9 @@ where
             );
         }
 
-        if let Some(begin_ts) = self.state.current_tx_begin_ts.take() {
-            let now = Instant::now();
-            let duration_seconds = (now - begin_ts).as_secs_f64();
-
-            histogram!(ETL_TRANSACTION_DURATION_SECONDS).record(duration_seconds);
-            counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
-            histogram!(ETL_TRANSACTION_SIZE).record(self.state.current_tx_events as f64);
-
-            self.state.current_tx_events = 0;
-        }
+        // Emit the transaction metrics.
+        counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
+        histogram!(ETL_TRANSACTION_SIZE).record(self.state.current_tx_events as f64);
 
         let end_lsn = PgLsn::from(message.end_lsn());
 
@@ -2964,8 +2952,10 @@ where
                 "Transaction must be active before processing INSERT message"
             );
         };
-        let tx_ordinal = self.state.next_tx_ordinal();
 
+        self.state.current_tx_events += 1;
+
+        let tx_ordinal = self.state.next_tx_ordinal();
         let table_id = TableId::new(message.rel_id());
 
         // Capture the source payload metadata and emit the initial metrics.
@@ -3006,8 +2996,10 @@ where
                 "Transaction must be active before processing UPDATE message"
             );
         };
-        let tx_ordinal = self.state.next_tx_ordinal();
 
+        self.state.current_tx_events += 1;
+
+        let tx_ordinal = self.state.next_tx_ordinal();
         let table_id = TableId::new(message.rel_id());
 
         // Capture the source payload metadata and emit the initial metrics.
@@ -3048,8 +3040,10 @@ where
                 "Transaction must be active before processing DELETE message"
             );
         };
-        let tx_ordinal = self.state.next_tx_ordinal();
 
+        self.state.current_tx_events += 1;
+
+        let tx_ordinal = self.state.next_tx_ordinal();
         let table_id = TableId::new(message.rel_id());
 
         // Capture the source payload metadata and emit the initial metrics.
@@ -3090,6 +3084,9 @@ where
                 "Transaction must be active before processing TRUNCATE message"
             );
         };
+
+        self.state.current_tx_events += 1;
+
         let tx_ordinal = self.state.next_tx_ordinal();
 
         // Collect the replicated schemas for tables this worker currently owns.
