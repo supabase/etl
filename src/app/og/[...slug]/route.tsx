@@ -1,3 +1,4 @@
+import { EtlMark } from '@/components/brand';
 import { getPageImageUrl, source } from '@/lib/source';
 import { siteConfig } from '@/lib/site';
 import { ImageResponse } from 'next/og';
@@ -31,21 +32,7 @@ export async function GET(_request: Request, { params }: ImageRouteProps) {
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 20, fontSize: 30, fontWeight: 700 }}>
-        <span
-          style={{
-            width: 54,
-            height: 54,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderRadius: 14,
-            color: '#0d1512',
-            background: '#3ecf8e',
-            fontSize: 42,
-          }}
-        >
-          →
-        </span>
+        <EtlMark fill="#34b27b" style={{ width: 50, height: 32 }} />
         <span>Supabase ETL</span>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 22, maxWidth: 980 }}>

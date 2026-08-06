@@ -1,3 +1,4 @@
+import { EtlMark } from '@/components/brand';
 import { ImageResponse } from 'next/og';
 
 export const alt = 'Supabase ETL — High-performance Postgres replication in Rust';
@@ -21,7 +22,10 @@ export default function OpenGraphImage() {
         fontFamily: 'Inter, Arial, sans-serif',
       }}
     >
-      <div style={{ color: '#3ecf8e', fontSize: 30, fontWeight: 700, marginBottom: 36 }}>SUPABASE ETL</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 40 }}>
+        <EtlMark fill="#34b27b" style={{ width: 56, height: 36 }} />
+        <span style={{ color: '#3ecf8e', fontSize: 30, fontWeight: 700 }}>SUPABASE ETL</span>
+      </div>
       <div
         style={{
           display: 'flex',
@@ -33,7 +37,7 @@ export default function OpenGraphImage() {
         }}
       >
         <span>Postgres replication</span>
-        <span>in Rust.</span>
+        <span>in Rust</span>
       </div>
       <div style={{ color: '#a8b9b1', fontSize: 28, marginTop: 38 }}>
         Embed it as a library or run it as a standalone binary.

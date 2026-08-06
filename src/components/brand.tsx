@@ -1,6 +1,4 @@
-import Image from 'next/image';
 import type { SVGProps } from 'react';
-import icon from '../../docs/public/assets/etl-logo.png';
 
 export function PipelinesMark(props: SVGProps<SVGSVGElement>) {
   return (
@@ -14,23 +12,19 @@ export function PipelinesMark(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-export function Brand() {
+export function EtlMark(props: SVGProps<SVGSVGElement>) {
   return (
-    <span className="etl-brand">
-      <Image src={icon} alt="" width={28} height={28} priority />
-      <span>Supabase ETL</span>
-    </span>
+    <svg viewBox="0 0 538 343" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M299.75 50.0977C299.75 7.07317 350.482 -15.8614 382.781 12.5616L520.347 133.62C542.971 153.53 542.971 188.782 520.347 208.691L382.781 329.749C350.482 358.172 299.75 335.238 299.75 292.213V211.655H40C17.9086 211.655 0 193.747 0 171.655C4.94855e-05 149.564 17.9086 131.655 40 131.655H299.75V50.0977ZM210 261.655C232.091 261.655 250 279.564 250 301.655C250 323.747 232.091 341.655 210 341.655H40C17.9086 341.655 0 323.747 0 301.655C4.94855e-05 279.564 17.9086 261.655 40 261.655H210ZM210 1.65534C232.091 1.65534 250 19.564 250 41.6553C250 63.7467 232.091 81.6553 210 81.6553H40C17.9086 81.6553 0 63.7467 0 41.6553C4.94855e-05 19.564 17.9086 1.65534 40 1.65534H210Z" />
+    </svg>
   );
 }
 
-export function HeroBrand() {
+export function Brand() {
   return (
-    <div className="etl-hero-brand">
-      <Image src={icon} alt="" width={40} height={40} priority />
-      <div>
-        <strong>Supabase ETL</strong>
-        <span>High-performance Postgres replication</span>
-      </div>
-    </div>
+    <span className="etl-brand">
+      <EtlMark className="etl-brand-mark" />
+      <span>Supabase ETL</span>
+    </span>
   );
 }

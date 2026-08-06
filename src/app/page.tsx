@@ -93,7 +93,7 @@ export default function HomePage() {
             <div className="etl-landing-primary">
               <h1 id="etl-home-title">
                 <span>Postgres replication</span>
-                <span>in Rust.</span>
+                <span>in Rust</span>
               </h1>
             </div>
 

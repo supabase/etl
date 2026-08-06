@@ -1,7 +1,6 @@
-import Image from 'next/image';
-import { ChartNoAxesColumnIncreasing, ChartSpline, Table2 } from 'lucide-react';
-import type { SVGProps } from 'react';
-import etlLogo from '../../docs/public/assets/etl-logo.png';
+import { EtlMark } from '@/components/brand';
+import { ChartNoAxesColumnIncreasing } from 'lucide-react';
+import type { CSSProperties, SVGProps } from 'react';
 
 function PostgresMark(props: SVGProps<SVGSVGElement>) {
   return (
@@ -12,22 +11,92 @@ function PostgresMark(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+type PacketShape = 'circle' | 'square' | 'squircle' | 'triangle';
+
+type Packet = {
+  shape: PacketShape;
+  /* Seconds into the lane's cycle at which this packet enters. */
+  offset: number;
+};
+
+type Lane = {
+  /* Seconds for one end-to-end traversal. */
+  cycle: number;
+  packets: Packet[];
+};
+
+const PACKET_SHAPES: PacketShape[] = ['circle', 'square', 'squircle', 'triangle'];
+
+const LANE_COUNT = 3;
+const PACKETS_PER_LANE = 3;
+
+/* Seeded so the server and client agree; the numbers only need to look
+   unpatterned, not be unpredictable. */
+function createRandom(seed: number) {
+  let state = seed;
+
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let value = Math.imul(state ^ (state >>> 15), 1 | state);
+    value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
+
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* Packets keep a uniform size; only spacing and speed vary. Speed drifts only
+   slightly between lanes, while spacing is jittered within each lane's slots by
+   enough to look irregular without letting two packets converge. */
+const LANE_CYCLE = 3.4;
+const LANE_SPEED_SPREAD = 0.16;
+const PACKET_SPACING_JITTER = 0.72;
+
+function buildLanes(): Lane[] {
+  const random = createRandom(0x5eed);
+
+  return Array.from({ length: LANE_COUNT }, () => {
+    const cycle = LANE_CYCLE + (random() - 0.5) * LANE_SPEED_SPREAD;
+
+    return {
+      cycle,
+      packets: Array.from({ length: PACKETS_PER_LANE }, (_unused, slot) => ({
+        shape: PACKET_SHAPES[Math.floor(random() * PACKET_SHAPES.length)],
+        offset:
+          ((slot + 0.5 + (random() - 0.5) * PACKET_SPACING_JITTER) / PACKETS_PER_LANE) * cycle,
+      })),
+    };
+  });
+}
+
+const FLOW_LANES = buildLanes();
+
+/* Held back until the housings and pipes have finished arriving. */
+const FLOW_START_DELAY = 1.75;
+
 function FlowConnection({ direction }: { direction: 'source' | 'destination' }) {
   return (
-    <div className={`etl-flow-connection etl-flow-connection-${direction}`}>
-      <span className="etl-flow-track" />
-      <span className="etl-data-packet etl-data-packet-circle">
-        <i />
-      </span>
-      <span className="etl-data-packet etl-data-packet-square">
-        <i />
-      </span>
-      <span className="etl-data-packet etl-data-packet-squircle">
-        <i />
-      </span>
-      <span className="etl-data-packet etl-data-packet-triangle">
-        <i />
-      </span>
+    <div className={`etl-flow-conduit etl-flow-conduit-${direction}`}>
+      {FLOW_LANES.map((lane, laneIndex) => (
+        <span
+          className="etl-flow-lane"
+          key={laneIndex}
+          style={{ '--lane-cycle': `${lane.cycle.toFixed(3)}s` } as CSSProperties}
+        >
+          {lane.packets.map((packet, packetIndex) => (
+            <span
+              className={`etl-data-packet etl-data-packet-${packet.shape}`}
+              key={packetIndex}
+              style={
+                {
+                  '--packet-delay': `${(FLOW_START_DELAY + packet.offset).toFixed(3)}s`,
+                } as CSSProperties
+              }
+            >
+              <i />
+            </span>
+          ))}
+        </span>
+      ))}
     </div>
   );
 }
@@ -39,42 +108,32 @@ export function ReplicationFlow() {
       <div className="etl-flow-glow" />
 
       <div className="etl-flow-stage">
-        <div className="etl-flow-node etl-flow-source">
+        <div className="etl-flow-node etl-flow-node-source">
           <span className="etl-flow-node-kicker">Source</span>
           <span className="etl-flow-node-icon">
-            <PostgresMark className="etl-postgres-mark" strokeWidth={1.25} />
+            <PostgresMark className="etl-postgres-mark" strokeWidth={1.5} />
           </span>
-          <span className="etl-flow-node-copy">
-            <strong>Postgres</strong>
-          </span>
+          <span className="etl-flow-node-label">Postgres</span>
         </div>
 
         <FlowConnection direction="source" />
 
-        <div className="etl-flow-core">
-          <span className="etl-flow-core-impact" />
-          <Image src={etlLogo} alt="" width={72} height={72} priority />
-          <span className="etl-flow-node-copy">
-            <strong>Supabase ETL</strong>
-            <small>Replicate changes</small>
+        <div className="etl-flow-node etl-flow-node-core">
+          <span className="etl-flow-node-kicker">Pipeline</span>
+          <span className="etl-flow-node-icon">
+            <EtlMark className="etl-flow-etl-mark" />
           </span>
+          <span className="etl-flow-node-label">Supabase ETL</span>
         </div>
 
         <FlowConnection direction="destination" />
 
-        <div className="etl-flow-destinations">
-          <span className="etl-flow-node-kicker">Destinations</span>
-          <div className="etl-analytics-stack">
-            <span className="etl-analytics-system">
-              <ChartNoAxesColumnIncreasing strokeWidth={1.25} />
-            </span>
-            <span className="etl-analytics-system">
-              <Table2 strokeWidth={1.25} />
-            </span>
-            <span className="etl-analytics-system">
-              <ChartSpline strokeWidth={1.25} />
-            </span>
-          </div>
+        <div className="etl-flow-node etl-flow-node-destination">
+          <span className="etl-flow-node-kicker">Destination</span>
+          <span className="etl-flow-node-icon">
+            <ChartNoAxesColumnIncreasing strokeWidth={1.5} />
+          </span>
+          <span className="etl-flow-node-label">Analytics</span>
         </div>
       </div>
 
