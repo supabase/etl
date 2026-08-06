@@ -172,10 +172,10 @@ export function ReplicationFlow() {
         <FlowConnection direction="destination" />
 
         <div className="etl-flow-node etl-flow-node-destination">
-          <div className="etl-destination-drum">
+          <span className="etl-flow-node-kicker">Destination</span>
+          <div className="etl-destination-stage">
             {DESTINATIONS.map(({ label, Icon }, index) => (
               <div className="etl-destination-face" key={label} style={destinationSlot(index)}>
-                <span className="etl-flow-node-kicker">Destination</span>
                 <span className="etl-flow-node-icon">
                   <Icon strokeWidth={1.5} />
                 </span>

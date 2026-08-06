@@ -4,8 +4,10 @@ export const siteConfig = {
   title: 'Supabase ETL — High-performance Postgres replication in Rust',
   description:
     'A high-performance Postgres replication engine written in Rust. Embed it in your Rust application or run it as a standalone binary.',
-  origin: 'https://supabase.github.io',
-  basePath: '/etl',
+  // Overridable so a fork, preview deployment, or custom domain does not bake in
+  // supabase.github.io/etl. Keep the defaults in sync with `next.config.mjs`.
+  origin: process.env.SITE_ORIGIN ?? 'https://supabase.github.io',
+  basePath: process.env.SITE_BASE_PATH ?? '/etl',
   repository: 'https://github.com/supabase/etl',
   supabaseDocs: 'https://supabase.com/docs/guides/database/replication/pipelines',
 } as const;

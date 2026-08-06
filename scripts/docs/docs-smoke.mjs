@@ -10,6 +10,13 @@ const origin = `http://${host}:${port}`;
 const baseUrl = `${origin}/etl`;
 const cleanupTimeoutMs = 5000;
 
+// The public canonical origin this build is deployed under. Overridable via the
+// same env vars as `next.config.mjs`/`src/lib/site.ts`, so a fork or preview
+// deployment can run this smoke test against its own domain.
+const canonicalOrigin = process.env.SITE_ORIGIN ?? 'https://supabase.github.io';
+const canonicalBasePath = process.env.SITE_BASE_PATH ?? '/etl';
+const canonicalBaseUrl = `${canonicalOrigin}${canonicalBasePath}`;
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -129,10 +136,10 @@ async function checkSeoEndpoints() {
   const sitemapText = await sitemap.text();
   assert(
     sitemapText.includes(
-      '<loc>https://supabase.github.io/etl/guides/first-pipeline/</loc>',
+      `<loc>${canonicalBaseUrl}/guides/first-pipeline/</loc>`,
     ) &&
       !sitemapText.includes(
-        '<loc>https://supabase.github.io/etl/guides/first-pipeline</loc>',
+        `<loc>${canonicalBaseUrl}/guides/first-pipeline</loc>`,
       ),
     'Sitemap HTML locations do not use canonical trailing slashes.',
   );
@@ -178,8 +185,8 @@ async function checkSeoEndpoints() {
     'Agent manifest page URLs do not distinguish HTML routes from Markdown files.',
   );
   assert(
-    agentData.discovery.search_index === 'https://supabase.github.io/etl/api/search' &&
-      agentData.discovery.llms_txt === 'https://supabase.github.io/etl/llms.txt',
+    agentData.discovery.search_index === `${canonicalBaseUrl}/api/search` &&
+      agentData.discovery.llms_txt === `${canonicalBaseUrl}/llms.txt`,
     'Static agent endpoints received an invalid trailing slash.',
   );
 
@@ -196,15 +203,15 @@ async function checkSeoEndpoints() {
   assert(!homeText.includes('<div'), 'Homepage Markdown contains presentation-only HTML.');
   assert(!homeText.includes('PipelinesMark'), 'Homepage Markdown contains a UI component name.');
   const canonicalHtmlUrls = [
-    'https://supabase.github.io/etl/',
-    'https://supabase.github.io/etl/guides/first-pipeline/',
-    'https://supabase.github.io/etl/guides/configure-postgres/',
-    'https://supabase.github.io/etl/guides/custom-implementations/',
-    'https://supabase.github.io/etl/explanation/concepts/',
-    'https://supabase.github.io/etl/explanation/architecture/',
-    'https://supabase.github.io/etl/explanation/schema-changes/',
-    'https://supabase.github.io/etl/explanation/events/',
-    'https://supabase.github.io/etl/explanation/traits/',
+    `${canonicalBaseUrl}/`,
+    `${canonicalBaseUrl}/guides/first-pipeline/`,
+    `${canonicalBaseUrl}/guides/configure-postgres/`,
+    `${canonicalBaseUrl}/guides/custom-implementations/`,
+    `${canonicalBaseUrl}/explanation/concepts/`,
+    `${canonicalBaseUrl}/explanation/architecture/`,
+    `${canonicalBaseUrl}/explanation/schema-changes/`,
+    `${canonicalBaseUrl}/explanation/events/`,
+    `${canonicalBaseUrl}/explanation/traits/`,
   ];
   assert(
     markdownTexts.every((text, index) =>
@@ -315,7 +322,7 @@ async function checkDesktop(page) {
       wideHeroAlignment.horizontalGap >= 48 &&
       wideHeroAlignment.titleLines === 2 &&
       wideHeroAlignment.shellEdgeDelta <= 1 &&
-      wideHeroAlignment.bodyFont.includes('Geist') &&
+      wideHeroAlignment.bodyFont.includes('Inter') &&
       wideHeroAlignment.headingFont.includes('Manrope') &&
       wideHeroAlignment.navFontSize >= 14,
     'The wide homepage headline overlaps or misaligns with the supporting copy.',
@@ -339,12 +346,12 @@ async function checkDesktop(page) {
     'The product homepage is still rendered inside the documentation shell.',
   );
   assert(
-    (await page.locator('.etl-flow-connection').count()) === 2 &&
-      (await page.locator('.etl-data-packet').count()) === 8,
+    (await page.locator('.etl-flow-conduit').count()) === 2 &&
+      (await page.locator('.etl-data-packet').count()) === 18,
     'The homepage data-flow scene is missing its replication connections or packets.',
   );
   const flowGeometry = await page.evaluate(() => {
-    const selectors = ['.etl-flow-source', '.etl-flow-core', '.etl-flow-destinations'];
+    const selectors = ['.etl-flow-node-source', '.etl-flow-node-core', '.etl-flow-node-destination'];
     const nodes = selectors.map((selector) => document.querySelector(selector));
     const headerItems = [
       document.querySelector('.etl-home-nav-brand'),
@@ -374,27 +381,28 @@ async function checkDesktop(page) {
       flowGeometry.headerCenterDelta <= 2,
     `The homepage flow or header is not aligned: ${JSON.stringify(flowGeometry)}.`,
   );
-  const flowSourceText = (await page.locator('.etl-flow-source').innerText())
+  const flowSourceText = (await page.locator('.etl-flow-node-source').innerText())
     .replace(/\s+/g, ' ')
     .toLowerCase();
-  const flowCoreText = (await page.locator('.etl-flow-core').innerText())
+  const flowCoreText = (await page.locator('.etl-flow-node-core').innerText())
     .replace(/\s+/g, ' ')
     .toLowerCase();
-  const flowDestinationText = (await page.locator('.etl-flow-destinations').innerText()).replace(
-    /\s+/g,
-    ' ',
-  ).toLowerCase();
+  const flowDestinationLabels = ['analytics', 'search', 'cache', 'warehouse', 'data lake'];
+  const flowDestinationText = (
+    await page.locator('.etl-flow-node-destination').innerText()
+  )
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
   assert(
     flowSourceText.includes('source postgres') &&
-      flowCoreText.includes('supabase etl replicate changes') &&
-      flowDestinationText.includes('destinations') &&
-      !flowDestinationText.includes('analytics') &&
-      (await page.locator('.etl-analytics-system').count()) === 3,
-    'The data-flow scene does not explain source, ETL, and destinations.',
+      flowCoreText.includes('pipeline supabase etl') &&
+      flowDestinationLabels.every((label) => flowDestinationText.includes(label)) &&
+      (await page.locator('.etl-destination-face').count()) === flowDestinationLabels.length,
+    'The data-flow scene does not explain source, ETL, and the arbitrary destinations it can cycle through.',
   );
   assert(
     (await page.locator('h1').innerText()).replace(/\s+/g, ' ') ===
-      'Postgres replication in Rust.',
+      'Postgres replication, in Rust.',
     'Homepage heading changed unexpectedly.',
   );
   const heroTitleLines = await page.locator('h1').evaluate((title) => {
@@ -404,7 +412,7 @@ async function checkDesktop(page) {
   assert(heroTitleLines === 2, 'Homepage heading does not use the intended two-line lockup.');
   assert(
     (await page.locator('link[rel="canonical"]').getAttribute('href')) ===
-      'https://supabase.github.io/etl/',
+      `${canonicalBaseUrl}/`,
     'Homepage canonical URL is incorrect.',
   );
   assert(
@@ -418,7 +426,7 @@ async function checkDesktop(page) {
   );
   assert(
     (await page.locator('link[rel="alternate"][type="text/markdown"]').getAttribute('href')) ===
-      'https://supabase.github.io/etl/index.md',
+      `${canonicalBaseUrl}/index.md`,
     'Homepage does not advertise its agent-readable Markdown.',
   );
   assert(
@@ -469,9 +477,10 @@ async function checkDesktop(page) {
 
   const homeChatGptHref = await page.getByRole('link', { name: 'Ask ChatGPT' }).getAttribute('href');
   const homeClaudeHref = await page.getByRole('link', { name: 'Ask Claude' }).getAttribute('href');
+  const homeAgentPrompt = `Read ${canonicalBaseUrl}/, I want to ask questions about it.`;
   assert(
-    new URL(homeChatGptHref).searchParams.get('q')?.includes('https://supabase.github.io/etl/') &&
-      new URL(homeClaudeHref).searchParams.get('q')?.includes('https://supabase.github.io/etl/'),
+    new URL(homeChatGptHref).searchParams.get('q') === homeAgentPrompt &&
+      new URL(homeClaudeHref).searchParams.get('q') === homeAgentPrompt,
     'Homepage agent actions do not use the canonical deployment URL.',
   );
   const homeCopyResponsePromise = page.waitForResponse(
@@ -559,18 +568,16 @@ async function checkDesktop(page) {
   );
   const guideChatGptHref = await page.getByRole('link', { name: 'Ask ChatGPT' }).getAttribute('href');
   const guideClaudeHref = await page.getByRole('link', { name: 'Ask Claude' }).getAttribute('href');
+  const guideAgentPrompt =
+    `Read ${canonicalBaseUrl}/guides/first-pipeline/, I want to ask questions about it.`;
   assert(
-    new URL(guideChatGptHref).searchParams
-      .get('q')
-      ?.includes('https://supabase.github.io/etl/guides/first-pipeline/') &&
-      new URL(guideClaudeHref).searchParams
-        .get('q')
-        ?.includes('https://supabase.github.io/etl/guides/first-pipeline/'),
+    new URL(guideChatGptHref).searchParams.get('q') === guideAgentPrompt &&
+      new URL(guideClaudeHref).searchParams.get('q') === guideAgentPrompt,
     'Guide agent actions do not use the canonical page URL.',
   );
   assert(
     (await page.locator('link[rel="canonical"]').getAttribute('href')) ===
-      'https://supabase.github.io/etl/guides/first-pipeline/',
+      `${canonicalBaseUrl}/guides/first-pipeline/`,
     'Guide metadata does not use the canonical trailing-slash URL.',
   );
   const guideStructuredData = JSON.parse(
@@ -578,9 +585,9 @@ async function checkDesktop(page) {
   );
   assert(
     guideStructuredData.url ===
-      'https://supabase.github.io/etl/guides/first-pipeline/' &&
+      `${canonicalBaseUrl}/guides/first-pipeline/` &&
       guideStructuredData.mainEntityOfPage ===
-        'https://supabase.github.io/etl/guides/first-pipeline/',
+        `${canonicalBaseUrl}/guides/first-pipeline/`,
     'Guide structured data does not use the canonical trailing-slash URL.',
   );
 
@@ -652,18 +659,18 @@ async function checkMobile(page) {
   await page.waitForTimeout(1500);
   await assertNoHorizontalOverflow(page);
   assert(
-    (await page.locator('.etl-flow-source').count()) === 1 &&
-      (await page.locator('.etl-flow-core').count()) === 1 &&
-      (await page.locator('.etl-flow-destinations').count()) === 1,
+    (await page.locator('.etl-flow-node-source').count()) === 1 &&
+      (await page.locator('.etl-flow-node-core').count()) === 1 &&
+      (await page.locator('.etl-flow-node-destination').count()) === 1,
     'The mobile homepage is missing the replication scene.',
   );
   const mobileFlowGeometry = await page
     .locator('.etl-flow-stage')
     .evaluate((stage) => {
       const nodes = [
-        stage.querySelector('.etl-flow-source'),
-        stage.querySelector('.etl-flow-core'),
-        stage.querySelector('.etl-flow-destinations'),
+        stage.querySelector('.etl-flow-node-source'),
+        stage.querySelector('.etl-flow-node-core'),
+        stage.querySelector('.etl-flow-node-destination'),
       ];
       if (nodes.some((node) => !(node instanceof HTMLElement))) return null;
       const rects = nodes.map((node) => node.getBoundingClientRect());
@@ -697,7 +704,7 @@ async function checkMobile(page) {
   );
   assert(
     (await page.locator('.etl-landing h1').innerText()).replace(/\s+/g, ' ') ===
-      'Postgres replication in Rust.',
+      'Postgres replication, in Rust.',
     'The mobile homepage changed the product statement.',
   );
 

@@ -46,7 +46,7 @@ export async function GET(_request: Request, { params }: ImageRouteProps) {
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', color: '#81938a', fontSize: 20 }}>
         <span>{siteConfig.repository}</span>
-        <span>supabase.github.io/etl</span>
+        <span>{siteConfig.origin.replace(/^https?:\/\//, '')}{siteConfig.basePath}</span>
       </div>
     </div>,
     { width: 1200, height: 630 },

@@ -474,9 +474,9 @@ button {
   --etl-lane-stagger: 70ms;
   /* How long each destination kind is held before the next takes its place. */
   --etl-destination-step: 3.2s;
-  /* The drum stays put well after the intro settles, so the first turn reads as
-     a deliberate change rather than part of the entrance. Its first rotation
-     lands at this delay plus one hold. */
+  /* The destination stays on its first face well after the intro settles, so
+     the first swap reads as a deliberate change rather than part of the
+     entrance. Its first transition lands at this delay plus one hold. */
   --etl-t-drum: 5.4s;
   /* How long a packet spends inside the hub before it leaves the far side. */
   --etl-hub-dwell: 0.42s;
@@ -530,10 +530,7 @@ button {
   transform: translate(-50%, -50%);
 }
 
-/* Panel layout, shared by the static housings and by each face of the
-   destination drum. */
-.etl-flow-node,
-.etl-destination-face {
+.etl-flow-node {
   display: flex;
   min-height: var(--panel-height);
   flex-direction: column;
@@ -572,8 +569,8 @@ button {
 
 .etl-flow-node {
   --node-enter-delay: 0ms;
-  /* Panel metrics live here so the drum faces, which are children, inherit the
-     same values as the static housings at every breakpoint. */
+  /* Panel metrics live here so the destination's crossfading faces, which are
+     children, inherit the same gap as the static housings at every breakpoint. */
   --panel-height: 11.75rem;
   --panel-gap: 1rem;
   --panel-padding: 1.6rem 1.4rem;
@@ -608,51 +605,35 @@ button {
   animation-duration: 950ms;
 }
 
-/* The destination is a rotating drum: ETL writes to arbitrary systems, so the
-   module turns to present a different one every few seconds. */
-/* The destination is a drum turning behind a fixed window: ETL writes to
-   arbitrary systems, so the module presents a different one every few seconds.
-   Doubled selector so the per-breakpoint .etl-flow-node padding cannot win. */
-.etl-flow-node.etl-flow-node-destination {
+.etl-flow-node-destination {
   --node-enter-delay: var(--etl-t-flanks);
-  /* Apothem of a regular pentagonal prism whose faces are the panel height:
-     height / (2 * tan(180deg / 5)). */
-  --drum-radius: calc(var(--panel-height) / 1.45309);
-
-  padding: 0;
-  overflow: hidden;
-  perspective: 62rem;
 }
 
-.etl-destination-drum {
-  position: absolute;
-  inset: 0;
-  transform-style: preserve-3d;
-  /* Resting pose, also what shows during the start delay: the front face seated
-     at z = 0 so the perspective does not scale it up. */
-  transform: translateZ(calc(var(--drum-radius) * -1));
-  animation: etl-destination-drum calc(var(--etl-destination-step) * 5)
-    var(--etl-t-drum) infinite;
+/* The destination cycles through the kinds of system ETL can write to. Every
+   face sits in the same grid cell, so the stage sizes itself to the widest one
+   and the housing never moves; only the icon and label underneath crossfade. */
+.etl-destination-stage {
+  display: grid;
+  justify-items: center;
 }
 
 .etl-destination-face {
-  position: absolute;
-  inset: 0;
-  /* Identical material to the static housings so the three panels read as one
-     set; the frame's own surface is hidden behind whichever face is front. */
-  background:
-    linear-gradient(180deg, var(--etl-metal-sheen), transparent 20%),
-    repeating-linear-gradient(
-      90deg,
-      var(--etl-metal-texture) 0 1px,
-      transparent 1px 3px
-    ),
-    linear-gradient(180deg, var(--etl-metal-top), var(--etl-metal-bottom));
-  box-shadow:
-    inset 0 1px 0 var(--etl-metal-edge-light),
-    inset 0 -1px 0 var(--etl-metal-edge-dark);
-  backface-visibility: hidden;
-  transform: rotateX(calc(var(--destination-index) * -72deg)) translateZ(var(--drum-radius));
+  grid-area: 1 / 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--panel-gap);
+  animation: etl-destination-cycle calc(var(--etl-destination-step) * 5) linear infinite;
+  animation-delay: calc(var(--etl-t-drum) + var(--destination-index) * var(--etl-destination-step));
+}
+
+/* Visible immediately, matching the entrance, while the rest wait their turn. */
+.etl-destination-face:first-child {
+  opacity: 1;
+}
+
+.etl-destination-face:not(:first-child) {
+  opacity: 0;
 }
 
 .etl-flow-node-kicker {
@@ -1150,44 +1131,33 @@ button {
   }
 }
 
-/* clip-path rather than scaleX so the bore, walls and end shadows keep their
-   proportions as the pipe extends. */
-/* Reaches away from the hub: rightward on the destination side. */
-/* Steps a fifth of a turn at a time, holding each face square to the viewer. */
-/* Steps a fifth of a turn at a time, holding each face square to the viewer.
-   The leading translateZ seats the front face at z = 0, so it is not scaled up
-   by the perspective relative to the static panels. */
-@keyframes etl-destination-drum {
-  0%,
-  16% {
-    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(0deg);
+/* Each face holds visible for a fifth of the cycle, then dissolves into the
+   next: a soft blur clears in, holds, and blurs back out as it hands off. */
+/* Five faces share one cycle, so each owns an even fifth (20%) of it end to
+   end; a short blur handles the fade at either edge, with no gap between one
+   face's hand-off and the next one's arrival. */
+@keyframes etl-destination-cycle {
+  0% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+
+  2%,
+  18% {
+    opacity: 1;
+    filter: blur(0);
   }
 
   20%,
-  36% {
-    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(72deg);
-  }
-
-  40%,
-  56% {
-    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(144deg);
-  }
-
-  60%,
-  76% {
-    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(216deg);
-  }
-
-  80%,
-  96% {
-    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(288deg);
-  }
-
   100% {
-    transform: translateZ(calc(var(--drum-radius) * -1)) rotateX(360deg);
+    opacity: 0;
+    filter: blur(6px);
   }
 }
 
+/* clip-path rather than scaleX so the bore, walls and end shadows keep their
+   proportions as the pipe extends. Reaches away from the hub: rightward on the
+   destination side. */
 @keyframes etl-lane-reach {
   from {
     clip-path: inset(0 100% 0 0);
@@ -1941,9 +1911,13 @@ button {
     transform: none;
   }
 
-  /* Park the drum square on its first face instead of snapping mid-turn. */
-  .etl-destination-drum {
+  /* Park the destination on its first face instead of cycling mid-fade. */
+  .etl-destination-face {
     animation: none !important;
-    transform: translateZ(calc(var(--drum-radius) * -1));
+  }
+
+  .etl-destination-face:first-child {
+    opacity: 1;
+    filter: none;
   }
 }
