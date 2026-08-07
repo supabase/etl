@@ -344,7 +344,10 @@ button {
 .etl-brand-mark {
   display: block;
   width: auto;
-  height: 0.94em;
+  /* Fixed rather than em-relative so the mark renders at the same size
+     everywhere regardless of surrounding font-size, keeping the homepage and
+     docs logos visually identical. */
+  height: 0.92rem;
   flex: none;
   /* A root <svg> clips to its viewBox by default, which shaves the glyph's
      antialiased edge rows at small sizes. */
@@ -401,10 +404,6 @@ button {
   gap: 0.68rem;
   font-size: 1.05rem;
   line-height: 1;
-}
-
-.etl-home-nav .etl-brand-mark {
-  height: 1.15rem;
 }
 
 .etl-home-search {
@@ -1685,10 +1684,6 @@ button {
     font-size: 0.87rem;
   }
 
-  .etl-home-nav .etl-brand-mark {
-    height: 0.85rem;
-  }
-
   .etl-home-search {
     grid-column: 2;
   }
@@ -1717,9 +1712,10 @@ button {
     padding: 0.15rem !important;
   }
 
-  .etl-home-theme-switch svg {
-    width: 1.25rem !important;
-    height: 1.25rem !important;
+  .etl-home-theme-switch > button {
+    width: 1.625rem;
+    height: 1.625rem;
+    padding: 0.375rem;
   }
 
   .etl-flow-scene {
