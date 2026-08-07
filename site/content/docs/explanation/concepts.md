@@ -128,13 +128,8 @@ ETL receives these messages and converts them to events.
 
 ## Why Two Phases?
 
-ETL replicates data in **two phases**:
-
-> **Terminology**
->
-> Initial sync and ongoing replication are the replication phases. Streaming
-> describes a way data can be transferred within either phase; it is not a
-> separate phase.
+ETL replicates data in two phases: **initial sync** and **ongoing
+replication**.
 
 ### Phase 1: Initial Sync
 
