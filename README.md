@@ -1,7 +1,7 @@
 <br />
 <p align="center">
   <a href="https://supabase.com">
-    <img alt="Supabase ETL" width="100%" src="docs/public/assets/etl-logo-extended.png">
+    <img alt="Supabase ETL" width="100%" src="site/public/assets/etl-logo-extended.png">
   </a>
 </p>
 

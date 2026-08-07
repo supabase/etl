@@ -22,11 +22,9 @@ target/
 .DS_Store
 
 # Docs build directories
-.astro/
 .next/
 .source/
 out/
-site/
 dist/
 *.tsbuildinfo
 

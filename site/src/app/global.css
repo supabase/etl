@@ -47,12 +47,12 @@
   --etl-grid: rgba(10, 10, 10, 0.05);
   /* Explicit tones down the bore rather than white washes, so the channel reads
      as a curved recess instead of a flat bar. */
-  --etl-tube-top: oklch(0.858 0 0);
-  --etl-tube-mid: oklch(0.924 0 0);
+  --etl-tube-top: oklch(0.902 0 0);
+  --etl-tube-mid: oklch(0.947 0 0);
   --etl-tube-gloss: oklch(0.988 0 0);
-  --etl-tube-bottom: oklch(0.948 0 0);
-  --etl-tube-wall: rgba(10, 10, 10, 0.17);
-  --etl-tube-shade: rgba(10, 10, 10, 0.38);
+  --etl-tube-bottom: oklch(0.963 0 0);
+  --etl-tube-wall: rgba(10, 10, 10, 0.11);
+  --etl-tube-shade: rgba(10, 10, 10, 0.24);
   --etl-packet: var(--etl-brand-500);
   --etl-tube-sheen: rgba(255, 255, 255, 1);
   /* The panel body is off-white so highlights have somewhere to sit; on a light
@@ -344,7 +344,10 @@ button {
 .etl-brand-mark {
   display: block;
   width: auto;
-  height: 0.94em;
+  /* Fixed rather than em-relative so the mark renders at the same size
+     everywhere regardless of surrounding font-size, keeping the homepage and
+     docs logos visually identical. */
+  height: 0.92rem;
   flex: none;
   /* A root <svg> clips to its viewBox by default, which shaves the glyph's
      antialiased edge rows at small sizes. */
@@ -397,14 +400,12 @@ button {
   text-decoration: none;
 }
 
+/* Deliberately no size/gap override here: the homepage brand should always
+   render exactly like the docs sidebar's (.etl-brand's own base styles), at
+   every viewport, so the header doesn't visibly resize when navigating
+   between the two. */
 .etl-home-nav .etl-brand {
-  gap: 0.68rem;
-  font-size: 1.05rem;
   line-height: 1;
-}
-
-.etl-home-nav .etl-brand-mark {
-  height: 1.15rem;
 }
 
 .etl-home-search {
@@ -1671,22 +1672,16 @@ button {
   }
 
   .etl-home-header {
-    height: 3.75rem;
+    /* Matches Fumadocs' own mobile header height (--fd-header-height:
+       spacing(14), i.e. 3.5rem) so the header doesn't visibly resize when
+       navigating between the homepage and docs. */
+    height: 3.5rem;
   }
 
   .etl-home-nav {
     grid-template-columns: 1fr auto auto;
     gap: 0.7rem;
     padding-inline: var(--etl-page-gutter);
-  }
-
-  .etl-home-nav .etl-brand {
-    gap: 0.5rem;
-    font-size: 0.87rem;
-  }
-
-  .etl-home-nav .etl-brand-mark {
-    height: 0.85rem;
   }
 
   .etl-home-search {
@@ -1717,9 +1712,10 @@ button {
     padding: 0.15rem !important;
   }
 
-  .etl-home-theme-switch svg {
-    width: 1.25rem !important;
-    height: 1.25rem !important;
+  .etl-home-theme-switch > button {
+    width: 1.625rem;
+    height: 1.625rem;
+    padding: 0.375rem;
   }
 
   .etl-flow-scene {
