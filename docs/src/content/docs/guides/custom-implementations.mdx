@@ -6,6 +6,10 @@ icon: Blocks
 
 Implement a store and an HTTP destination. Start with
 [First Pipeline](/guides/first-pipeline/) or be familiar with ETL basics.
+Your implementation can live entirely in your own project; it does not need to
+be accepted as an official built-in destination. See
+[Destinations](/reference/destinations/#custom-destinations-and-upstream-support)
+for the distinction and upstream maintenance expectations.
 
 ## Understanding the Destination Trait
 
@@ -76,6 +80,14 @@ Create `src/custom_store.rs`. A store must implement **three traits** (see [Exte
 blanket-implemented facades over these traits plus the required
 clone/thread-safety bounds, so custom stores do not implement those directly.
 
+<Callout className="etl-callout" type="warn" title="Instructional store">
+  This example keeps state in memory so the trait contract is visible in one
+  file, including rollback during an in-process retry. It does not survive a
+  process restart. A production store must durably and atomically persist state
+  history, checkpoints, schemas, and destination metadata before acknowledging
+  each write.
+</Callout>
+
 ```rust title="src/custom_store.rs" lineNumbers
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -84,18 +96,20 @@ use tracing::info;
 
 use etl::{
     destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
-    error::EtlResult,
+    error::{ErrorKind, EtlResult},
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
         SchemaStore, StateStore, TableState, TableStateLifecycleStore, TableStateOperation,
         TableStates, WorkerType,
     },
 };
+use etl::etl_error;
 
 #[derive(Debug, Clone, Default)]
 struct TableEntry {
     schemas: HashMap<SnapshotId, Arc<TableSchema>>,
     state: Option<TableState>,
+    state_history: Vec<TableState>,
     destination_metadata: Option<DestinationTableMetadata>,
 }
 
@@ -215,13 +229,27 @@ impl StateStore for CustomStore {
         let mut tables = self.tables.lock().await;
         for (table_id, state) in updates {
             info!("table {} -> {:?}", table_id.0, state);
-            tables.entry(table_id).or_default().state = Some(state);
+            let entry = tables.entry(table_id).or_default();
+            if let Some(current_state) = entry.state.replace(state) {
+                entry.state_history.push(current_state);
+            }
         }
         Ok(())
     }
 
-    async fn rollback_table_state(&self, _table_id: TableId) -> EtlResult<TableState> {
-        todo!("Implement rollback if needed")
+    async fn rollback_table_state(&self, table_id: TableId) -> EtlResult<TableState> {
+        let mut tables = self.tables.lock().await;
+        let entry = tables.get_mut(&table_id).ok_or_else(|| {
+            etl_error!(ErrorKind::StateRollbackError, "No table state available to roll back")
+        })?;
+        let previous_state = entry.state_history.pop().ok_or_else(|| {
+            etl_error!(
+                ErrorKind::StateRollbackError,
+                "No previous state available to roll back to"
+            )
+        })?;
+        entry.state = Some(previous_state.clone());
+        Ok(previous_state)
     }
 
     async fn get_replication_checkpoint(
@@ -304,7 +332,9 @@ impl TableStateLifecycleStore for CustomStore {
                 let mut tables = self.tables.lock().await;
                 let reset_count = tables.len();
                 for entry in tables.values_mut() {
-                    entry.state = Some(TableState::Init);
+                    if let Some(current_state) = entry.state.replace(TableState::Init) {
+                        entry.state_history.push(current_state);
+                    }
                 }
                 let mut checkpoints = self.checkpoints.lock().await;
                 checkpoints.remove(&WorkerType::Apply);

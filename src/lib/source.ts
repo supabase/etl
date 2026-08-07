@@ -4,11 +4,13 @@ import {
   Blocks,
   BookOpenText,
   Database,
+  DatabaseZap,
   House,
   ListTree,
   Puzzle,
   RefreshCw,
   Rocket,
+  Terminal,
   Workflow,
   type LucideIcon,
 } from 'lucide-react';
@@ -19,11 +21,13 @@ const icons: Record<string, LucideIcon> = {
   Blocks,
   BookOpenText,
   Database,
+  DatabaseZap,
   House,
   ListTree,
   Puzzle,
   RefreshCw,
   Rocket,
+  Terminal,
   Workflow,
 };
 
@@ -69,8 +73,12 @@ export function getPageImageUrl(page: (typeof source)['$inferPage']) {
 /** Groups documentation by the reader intent used in the sidebar. */
 export function getAgentDocSection(page: SourcePage): AgentDocSection {
   if (page.slugs[0] === 'guides') {
-    return page.slugs[1] === 'first-pipeline' ? 'Get started' : 'Guides';
+    return ['first-pipeline', 'standalone-replicator'].includes(page.slugs[1] ?? '')
+      ? 'Get started'
+      : 'Guides';
   }
+
+  if (page.slugs[0] === 'reference') return 'Reference';
 
   return ['events', 'traits'].includes(page.slugs[1] ?? '') ? 'Reference' : 'Concepts';
 }
@@ -86,13 +94,15 @@ export function getAgentPageGroups() {
   const pages = source.getPages().filter((page) => page.slugs.length > 0);
   const pageOrder = new Map([
     ['/guides/first-pipeline', 0],
-    ['/guides/configure-postgres', 1],
-    ['/guides/custom-implementations', 2],
-    ['/explanation/concepts', 3],
-    ['/explanation/architecture', 4],
-    ['/explanation/schema-changes', 5],
-    ['/explanation/events', 6],
-    ['/explanation/traits', 7],
+    ['/guides/standalone-replicator', 1],
+    ['/guides/configure-postgres', 2],
+    ['/guides/custom-implementations', 3],
+    ['/explanation/concepts', 4],
+    ['/explanation/architecture', 5],
+    ['/explanation/schema-changes', 6],
+    ['/reference/destinations', 7],
+    ['/explanation/events', 8],
+    ['/explanation/traits', 9],
   ]);
 
   return sectionOrder.map((section) => ({
@@ -131,12 +141,12 @@ function getAgentHomeMarkdown() {
     })
     .join('\n\n');
 
-  return `${siteConfig.description} For each published table, it performs an initial sync of existing rows, then replicates changes to a destination. Supabase ETL is under active development.\n\nFor the managed Supabase product, use [Supabase Pipelines](${siteConfig.supabaseDocs}).\n\n## Documentation map\n\n${groups}\n\n## Replication phases\n\n1. **Initial sync:** Copy the existing rows selected by the publication.\n2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and truncates, then deliver those changes as ordered events.\n\nStreaming describes a transfer mode that may be used within either phase; it is not a separate replication phase. Across both phases, ETL persists checkpoints and table state so replication can recover safely after a restart.`;
+  return `${siteConfig.description} For each published table, it performs an initial sync of existing rows, then replicates changes to a destination. ${siteConfig.projectStatus}\n\nFor the managed Supabase product, use [Supabase Pipelines](${siteConfig.supabaseDocs}).\n\n## Documentation map\n\n${groups}\n\n## Replication phases\n\n1. **Initial sync:** Copy the existing rows selected by the publication.\n2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and truncates, then deliver those changes as ordered events.\n\nStreaming describes a transfer mode that may be used within either phase; it is not a separate replication phase. Across both phases, ETL persists checkpoints and table state so replication can recover safely after a restart.`;
 }
 
 function rewriteAgentLinks(markdown: string) {
   return markdown.replace(
-    /\]\(\/((?:guides|explanation)\/[^)#]+?)\/?(#[^)]+)?\)/g,
+    /\]\(\/((?:guides|explanation|reference)\/[^)#]+?)\/?(#[^)]+)?\)/g,
     (_match, path: string, hash: string | undefined) =>
       `](${absoluteUrl(`/${path}.md`)}${hash ?? ''})`,
   );
@@ -159,6 +169,11 @@ function rewriteAgentCallouts(markdown: string) {
 
 function rewriteAgentLayout(markdown: string) {
   return markdown
+    .replace(
+      /<DestinationStatus status="(stable|in-progress|deprecated)"\s*\/>/g,
+      (_match, status: string) =>
+        `**Status: ${{ stable: 'Stable', 'in-progress': 'In progress', deprecated: 'Deprecated' }[status]}**`,
+    )
     .replace(/^\s*<div className="fd-(?:steps|step)">\s*$/gm, '')
     .replace(/^\s*<\/div>\s*$/gm, '')
     .replace(/^ {4}/gm, '');

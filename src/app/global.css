@@ -902,7 +902,7 @@ button {
 .etl-landing-grid {
   display: grid;
   width: 100%;
-  max-width: var(--etl-shell-width);
+  max-width: calc(var(--etl-shell-width) - 2 * var(--etl-page-gutter));
   grid-template-columns: minmax(0, 1fr) minmax(20rem, 24rem);
   gap: 1.15rem clamp(4rem, 7vw, 8rem);
   align-items: end;
@@ -1435,6 +1435,41 @@ button {
 
 .prose .etl-callout :where(p) {
   line-height: 1.65;
+}
+
+.prose .etl-destination-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.15rem 0 0.65rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 0.3rem 0.58rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.prose .etl-destination-status svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.prose .etl-destination-status[data-status='stable'] {
+  color: var(--etl-green);
+  background: color-mix(in srgb, var(--etl-green) 10%, transparent);
+}
+
+.prose .etl-destination-status[data-status='in-progress'] {
+  color: light-dark(#9a5b00, #f4b74f);
+  background: light-dark(rgb(154 91 0 / 8%), rgb(244 183 79 / 9%));
+}
+
+.prose .etl-destination-status[data-status='deprecated'] {
+  color: light-dark(#a13b3b, #ef8d8d);
+  background: light-dark(rgb(161 59 59 / 8%), rgb(239 141 141 / 8%));
 }
 
 .doc-path-grid {

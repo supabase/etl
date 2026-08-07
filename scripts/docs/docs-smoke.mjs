@@ -16,6 +16,8 @@ const cleanupTimeoutMs = 5000;
 const canonicalOrigin = process.env.SITE_ORIGIN ?? 'https://supabase.github.io';
 const canonicalBasePath = process.env.SITE_BASE_PATH ?? '/etl';
 const canonicalBaseUrl = `${canonicalOrigin}${canonicalBasePath}`;
+const projectStatus =
+  'Supabase ETL is under active development. APIs and setup steps may change before the first stable release.';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -31,10 +33,11 @@ async function checkSourceCodeFences() {
     .filter((path) => /\.(?:md|mdx)$/.test(path))
     .map((path) => resolve(documentationDirectory, path));
   const files = [resolve('README.md'), ...documentationFiles];
-  const allowedLanguages = new Set(['bash', 'ini', 'mermaid', 'rust', 'sql', 'text', 'toml']);
+  const allowedLanguages = new Set(['bash', 'ini', 'mermaid', 'rust', 'sql', 'text', 'toml', 'yaml']);
   const titleLanguages = [
     [/title="[^"]+\.rs"/, 'rust'],
     [/title="Cargo\.toml"/, 'toml'],
+    [/title="[^"]+\.yaml"/, 'yaml'],
     [/title="Terminal"/, 'bash'],
     [/title="psql"/, 'sql'],
     [/title="postgresql\.conf(?: \(standby\))?"/, 'ini'],
@@ -71,6 +74,28 @@ async function checkSourceCodeFences() {
   }
 
   assert(failures.length === 0, `Invalid documentation code fences:\n${failures.join('\n')}`);
+}
+
+async function checkProjectStatusConsistency() {
+  const files = [
+    resolve('README.md'),
+    resolve('docs/src/content/docs/guides/first-pipeline.mdx'),
+    resolve('docs/src/content/docs/guides/standalone-replicator.mdx'),
+    resolve('src/lib/site.ts'),
+  ];
+
+  for (const file of files) {
+    const normalized = (await readFile(file, 'utf8')).replace(/^>\s?/gm, '').replace(/\s+/g, ' ');
+    assert(normalized.includes(projectStatus), `${file} does not use the canonical project status.`);
+  }
+
+  for (const file of files.slice(1, 3)) {
+    const source = await readFile(file, 'utf8');
+    assert(
+      source.includes('type="info" title="Active development"'),
+      `${file} does not present project status as consistent informational guidance.`,
+    );
+  }
 }
 
 async function waitForPreview() {
@@ -120,11 +145,13 @@ async function checkSeoEndpoints() {
   const markdownPaths = [
     '/index.md',
     '/guides/first-pipeline.md',
+    '/guides/standalone-replicator.md',
     '/guides/configure-postgres.md',
     '/guides/custom-implementations.md',
     '/explanation/concepts.md',
     '/explanation/architecture.md',
     '/explanation/schema-changes.md',
+    '/reference/destinations.md',
     '/explanation/events.md',
     '/explanation/traits.md',
   ];
@@ -150,6 +177,10 @@ async function checkSeoEndpoints() {
     'llms.txt does not use the canonical product positioning.',
   );
   assert(llmsText.includes('/etl/guides/first-pipeline.md'), 'llms.txt is missing stable Markdown URLs.');
+  assert(
+    llmsText.includes('/etl/reference/destinations.md'),
+    'llms.txt is missing the Destinations reference.',
+  );
   assert(!llmsText.includes('/llms.mdx/'), 'llms.txt exposes an internal generation route.');
   assert((await search.json()).type === 'advanced', 'Static search index is malformed.');
   assert((await socialImage.arrayBuffer()).byteLength > 0, 'Social image is empty.');
@@ -167,7 +198,30 @@ async function checkSeoEndpoints() {
     agentData.description.includes('high-performance Postgres replication engine written in Rust'),
     'Agent manifest does not use the canonical product positioning.',
   );
-  assert(agentData.pages.length === 9, 'Agent manifest does not include every documentation page.');
+  assert(
+    agentData.status_description === projectStatus,
+    'Agent manifest does not use the canonical project status.',
+  );
+  assert(
+    agentData.pages.some(
+      (page) =>
+        page.html_url === `${canonicalBaseUrl}/guides/standalone-replicator/` &&
+        page.section === 'Get started',
+    ),
+    'Standalone Replicator is not grouped under Get started for agents.',
+  );
+  assert(
+    agentData.pages.some(
+      (page) =>
+        page.html_url === `${canonicalBaseUrl}/reference/destinations/` &&
+        page.section === 'Reference',
+    ),
+    'Destinations is not grouped under Reference for agents.',
+  );
+  assert(
+    agentData.pages.length === markdownPaths.length,
+    'Agent manifest does not include every documentation page.',
+  );
   assert(
     agentData.terminology.replication_phases[1] === 'ongoing replication',
     'Agent manifest uses the wrong phase terminology.',
@@ -205,11 +259,13 @@ async function checkSeoEndpoints() {
   const canonicalHtmlUrls = [
     `${canonicalBaseUrl}/`,
     `${canonicalBaseUrl}/guides/first-pipeline/`,
+    `${canonicalBaseUrl}/guides/standalone-replicator/`,
     `${canonicalBaseUrl}/guides/configure-postgres/`,
     `${canonicalBaseUrl}/guides/custom-implementations/`,
     `${canonicalBaseUrl}/explanation/concepts/`,
     `${canonicalBaseUrl}/explanation/architecture/`,
     `${canonicalBaseUrl}/explanation/schema-changes/`,
+    `${canonicalBaseUrl}/reference/destinations/`,
     `${canonicalBaseUrl}/explanation/events/`,
     `${canonicalBaseUrl}/explanation/traits/`,
   ];
@@ -221,7 +277,10 @@ async function checkSeoEndpoints() {
   );
   assert(
     markdownTexts.every(
-      (text) => !text.includes('](/guides/') && !text.includes('](/explanation/'),
+      (text) =>
+        !text.includes('](/guides/') &&
+        !text.includes('](/explanation/') &&
+        !text.includes('](/reference/'),
     ),
     'Agent-readable Markdown contains a base-path-breaking internal link.',
   );
@@ -241,9 +300,19 @@ async function checkSeoEndpoints() {
     markdownTexts.every((text) => !text.includes('<Callout')),
     'Agent-readable Markdown contains presentation-only callout markup.',
   );
+  const destinationsText = markdownTexts[8];
   assert(
-    markdownTexts[1].includes('Supabase ETL is currently under active development'),
-    'First Pipeline does not carry the active-development notice.',
+    destinationsText.includes('**Status: Stable**') &&
+      destinationsText.match(/\*\*Status: In progress\*\*/g)?.length === 3 &&
+      destinationsText.includes('**Status: Deprecated**') &&
+      !destinationsText.includes('<DestinationStatus'),
+    'The Destinations Markdown does not expose consistent plain-text statuses.',
+  );
+  assert(
+    markdownTexts
+      .slice(1, 3)
+      .every((text) => text.replace(/^>\s?/gm, '').replace(/\s+/g, ' ').includes(projectStatus)),
+    'The getting-started guides do not carry the canonical project status.',
   );
 }
 
@@ -251,12 +320,14 @@ async function crawlInternalLinks(page) {
   const routes = [
     '/',
     '/guides/first-pipeline/',
+    '/guides/standalone-replicator/',
     '/guides/configure-postgres/',
     '/guides/custom-implementations/',
     '/explanation/concepts/',
     '/explanation/architecture/',
     '/explanation/events/',
     '/explanation/schema-changes/',
+    '/reference/destinations/',
     '/explanation/traits/',
   ];
   const links = new Set(routes.map((route) => `${baseUrl}${route}`));
@@ -310,6 +381,10 @@ async function checkDesktop(page) {
         Math.abs(headerBrandRect.left - footerTextRect.left),
         Math.abs(headerLinksRect.right - footerLinksRect.right),
       ),
+      contentEdgeDelta: Math.max(
+        Math.abs(titleRect.left - headerBrandRect.left),
+        Math.abs(summaryRect.right - headerLinksRect.right),
+      ),
       bodyFont: getComputedStyle(document.body).fontFamily,
       headingFont: style.fontFamily,
       navFontSize: Number.parseFloat(
@@ -322,6 +397,7 @@ async function checkDesktop(page) {
       wideHeroAlignment.horizontalGap >= 48 &&
       wideHeroAlignment.titleLines === 2 &&
       wideHeroAlignment.shellEdgeDelta <= 1 &&
+      wideHeroAlignment.contentEdgeDelta <= 1 &&
       wideHeroAlignment.bodyFont.includes('Inter') &&
       wideHeroAlignment.headingFont.includes('Manrope') &&
       wideHeroAlignment.navFontSize >= 14,
@@ -477,11 +553,11 @@ async function checkDesktop(page) {
 
   const homeChatGptHref = await page.getByRole('link', { name: 'Ask ChatGPT' }).getAttribute('href');
   const homeClaudeHref = await page.getByRole('link', { name: 'Ask Claude' }).getAttribute('href');
-  const homeAgentPrompt = `Read ${canonicalBaseUrl}/, I want to ask questions about it.`;
+  const homeAgentPrompt = `Read ${baseUrl}/, I want to ask questions about it.`;
   assert(
     new URL(homeChatGptHref).searchParams.get('q') === homeAgentPrompt &&
       new URL(homeClaudeHref).searchParams.get('q') === homeAgentPrompt,
-    'Homepage agent actions do not use the canonical deployment URL.',
+    'Homepage agent actions do not use the current deployment URL.',
   );
   const homeCopyResponsePromise = page.waitForResponse(
     (response) => response.url() === `${baseUrl}/index.md`,
@@ -491,6 +567,13 @@ async function checkDesktop(page) {
   assert(
     homeCopyResponse.ok() && homeCopyResponse.headers()['content-type']?.includes('text/markdown'),
     'Homepage Copy Markdown does not fetch the generated Markdown page.',
+  );
+  const homeClipboardText = await page.evaluate(() => navigator.clipboard.readText());
+  assert(
+    homeClipboardText.startsWith('# Home') &&
+      homeClipboardText.includes('## Documentation map') &&
+      !/<(?:!doctype|html|body)\b/i.test(homeClipboardText),
+    'Homepage Copy Markdown copied HTML instead of the generated Markdown.',
   );
 
   await page.goto(`${baseUrl}/guides/first-pipeline/`, { waitUntil: 'networkidle' });
@@ -529,6 +612,7 @@ async function checkDesktop(page) {
   for (const label of [
     'Get started',
     'First Pipeline',
+    'Standalone Replicator',
     'Guides',
     'Configure Postgres',
     'Custom Implementations',
@@ -537,12 +621,29 @@ async function checkDesktop(page) {
     'Architecture',
     'Schema Changes',
     'Reference',
+    'Destinations',
     'Events',
     'Extension Points',
   ]) {
     assert(sidebarText.includes(label), `Sidebar is missing the concise label: ${label}.`);
   }
   assert(!sidebarText.includes('Home'), 'The docs sidebar should begin with First Pipeline.');
+  const standaloneSidebarLink = page.locator(
+    '#nd-sidebar a[href="/etl/guides/standalone-replicator/"]',
+  );
+  assert(
+    (await standaloneSidebarLink.count()) === 1 &&
+      (await standaloneSidebarLink.locator('svg').count()) === 1,
+    'Standalone Replicator is missing its sidebar icon.',
+  );
+  const destinationsSidebarLink = page.locator(
+    '#nd-sidebar a[href="/etl/reference/destinations/"]',
+  );
+  assert(
+    (await destinationsSidebarLink.count()) === 1 &&
+      (await destinationsSidebarLink.locator('svg').count()) === 1,
+    'Destinations is missing its sidebar icon.',
+  );
   for (const oldLabel of [
     'Build Your First ETL Pipeline',
     'Configure Postgres for Replication',
@@ -569,11 +670,11 @@ async function checkDesktop(page) {
   const guideChatGptHref = await page.getByRole('link', { name: 'Ask ChatGPT' }).getAttribute('href');
   const guideClaudeHref = await page.getByRole('link', { name: 'Ask Claude' }).getAttribute('href');
   const guideAgentPrompt =
-    `Read ${canonicalBaseUrl}/guides/first-pipeline/, I want to ask questions about it.`;
+    `Read ${baseUrl}/guides/first-pipeline/, I want to ask questions about it.`;
   assert(
     new URL(guideChatGptHref).searchParams.get('q') === guideAgentPrompt &&
       new URL(guideClaudeHref).searchParams.get('q') === guideAgentPrompt,
-    'Guide agent actions do not use the canonical page URL.',
+    'Guide agent actions do not use the current deployment URL.',
   );
   assert(
     (await page.locator('link[rel="canonical"]').getAttribute('href')) ===
@@ -600,6 +701,13 @@ async function checkDesktop(page) {
     copyMarkdownResponse.ok() &&
       copyMarkdownResponse.headers()['content-type']?.includes('text/markdown'),
     'Copy Markdown does not fetch the generated Markdown page.',
+  );
+  const guideClipboardText = await page.evaluate(() => navigator.clipboard.readText());
+  assert(
+    guideClipboardText.startsWith('# First Pipeline') &&
+      guideClipboardText.includes('## Create the project') &&
+      !/<(?:!doctype|html|body)\b/i.test(guideClipboardText),
+    'Guide Copy Markdown copied HTML instead of the generated Markdown.',
   );
 
   const pageNavigationGap = await page.evaluate(() => {
@@ -642,6 +750,36 @@ async function checkDesktop(page) {
     (await tutorialCallout.locator('xpath=ancestor::*[contains(@class, "etl-callout")][1]').count()) === 1,
     'The First Pipeline note does not use a native Fumadocs callout.',
   );
+
+  await page.goto(`${baseUrl}/reference/destinations/`, { waitUntil: 'networkidle' });
+  await assertNoHorizontalOverflow(page);
+  assert(
+    (await page.locator('.etl-destination-status[data-status="stable"] svg').count()) === 1 &&
+      (await page.locator('.etl-destination-status[data-status="in-progress"] svg').count()) === 3 &&
+      (await page.locator('.etl-destination-status[data-status="deprecated"] svg').count()) === 1,
+    'Destination maturity badges are missing their status icons.',
+  );
+  assert(
+    (await page.locator('#nd-page').innerText()).includes('BigQuery is the stable, recommended default.'),
+    'The Destinations reference does not identify BigQuery as the default.',
+  );
+  await page.route(`${baseUrl}/reference/destinations.md`, (route) =>
+    route.fulfill({ status: 404, contentType: 'text/html', body: '<!doctype html><title>Missing</title>' }),
+  );
+  const generatedMarkdownResponse = page.waitForResponse(
+    (response) =>
+      response.url() === `${baseUrl}/llms.mdx/reference/destinations/content.md` && response.ok(),
+  );
+  await page.getByRole('button', { name: 'Copy Markdown' }).click();
+  await generatedMarkdownResponse;
+  await page.getByRole('button', { name: 'Copied' }).waitFor();
+  const fallbackClipboardText = await page.evaluate(() => navigator.clipboard.readText());
+  assert(
+    fallbackClipboardText.startsWith('# Destinations') &&
+      !/<(?:!doctype|html|body)\b/i.test(fallbackClipboardText),
+    'Copy Markdown did not use the generated Markdown fallback after an alias failure.',
+  );
+  await page.unroute(`${baseUrl}/reference/destinations.md`);
 
   await page.goto(`${baseUrl}/explanation/architecture/`, { waitUntil: 'networkidle' });
   await assertNoHorizontalOverflow(page);
@@ -823,6 +961,7 @@ async function stopPreview() {
 
 try {
   await checkSourceCodeFences();
+  await checkProjectStatusConsistency();
   await waitForPreview();
   await checkSeoEndpoints();
 

@@ -121,7 +121,11 @@ Replication slots prevent Postgres from deleting WAL files until all consumers h
 max_slot_wal_keep_size = 10GB
 ```
 
-If a slot is terminated due to exceeding this limit, ETL will restart the table sync from scratch.
+If the main replication slot is invalidated, ETL fails pipeline startup by
+default and requires operator intervention. Set `invalidated_slot_behavior` to
+`recreate` to have ETL delete and recreate the slot, reset table states, and
+resynchronize eligible tables from scratch. Automatic recreation can repeat a
+large initial copy, so choose it deliberately and monitor destination capacity.
 
 ### Monitoring WAL Usage
 

@@ -167,8 +167,11 @@ interrupted `Applying` state.
 | ClickHouse | Supports add, drop, rename, and supported literal defaults. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. |
 | DuckLake | Supports add, drop, rename, and supported literal defaults. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
 | Snowflake | Supports add, drop, rename, create-table literal defaults, and literal add-column defaults. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. |
-| Iceberg | Deprecated for now. An identical relation is idempotent, but schema-change DDL is not supported and any newer schema is rejected. Older or ambiguously masked relations are rejected before row writes. |
+| Iceberg | Deprecated. An identical relation is idempotent, but schema-change DDL is not supported and any newer schema is rejected. Older or ambiguously masked relations are rejected before row writes. |
 | Custom destinations | Destination authors decide which `Event::Relation` changes to apply, reject, or handle manually. |
+
+See [Destinations](/reference/destinations/) for the canonical maturity status
+and broader limitations of every built-in implementation.
 
 ## Default Backfills
 

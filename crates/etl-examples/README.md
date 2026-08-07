@@ -11,6 +11,11 @@ This crate contains practical examples demonstrating how to replicate data from 
 | [DuckLake](#ducklake)           | `ducklake`   | `ducklake`   | DuckLake (open data lake format)           | In progress |
 | [Snowflake](#snowflake)         | `snowflake`  | `snowflake`  | Snowflake (cloud data warehouse)           | In progress |
 
+BigQuery is the stable, recommended default. Iceberg is deprecated and does
+not have an example here. See the
+[Destinations reference](https://supabase.github.io/etl/reference/destinations/)
+for the canonical status and limitations of every built-in destination.
+
 ## Running an example
 
 The quickest way to run an example is via the xtask wrapper.

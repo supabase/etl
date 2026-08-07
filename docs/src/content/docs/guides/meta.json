@@ -2,5 +2,5 @@
   "title": "Guides",
   "description": "Build and operate Postgres replication pipelines with Supabase ETL.",
   "defaultOpen": true,
-  "pages": ["configure-postgres", "first-pipeline", "custom-implementations"]
+  "pages": ["configure-postgres", "first-pipeline", "standalone-replicator", "custom-implementations"]
 }

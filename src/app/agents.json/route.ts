@@ -23,6 +23,7 @@ export function GET() {
     name: siteConfig.name,
     description: siteConfig.description,
     status: 'under_active_development',
+    status_description: siteConfig.projectStatus,
     canonical_url: absoluteUrl('/'),
     repository_url: siteConfig.repository,
     managed_product_url: siteConfig.supabaseDocs,

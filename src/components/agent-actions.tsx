@@ -1,6 +1,101 @@
-import { absoluteUrl } from '@/lib/site';
-import { MarkdownCopyButton } from 'fumadocs-ui/layouts/docs/page';
+'use client';
+
+import { Check, Copy } from 'lucide-react';
+import { useState, useSyncExternalStore } from 'react';
 import type { SVGProps } from 'react';
+
+function normalizePagePath(pagePath: string) {
+  if (pagePath === '/') return '/';
+  return `/${pagePath.replace(/^\/+|\/+$/g, '')}/`;
+}
+
+function getDeploymentBasePath(currentPath: string, pagePath: string) {
+  const normalizedCurrentPath = currentPath.endsWith('/') ? currentPath : `${currentPath}/`;
+  const normalizedPagePath = normalizePagePath(pagePath);
+
+  if (!normalizedCurrentPath.endsWith(normalizedPagePath)) return null;
+  return normalizedCurrentPath.slice(0, -normalizedPagePath.length).replace(/\/$/, '');
+}
+
+function getDeployedUrl(applicationPath: string, pagePath: string) {
+  const deploymentBasePath = getDeploymentBasePath(window.location.pathname, pagePath);
+  if (deploymentBasePath !== null) {
+    const normalizedApplicationPath = `/${applicationPath.replace(/^\/+/, '')}`;
+    return `${window.location.origin}${deploymentBasePath}${normalizedApplicationPath}`;
+  }
+
+  const currentPath = window.location.pathname.replace(/\/$/, '');
+  return `${window.location.origin}${currentPath}`;
+}
+
+function getGeneratedMarkdownPath(pagePath: string) {
+  const normalizedPagePath = pagePath.replace(/^\/+|\/+$/g, '');
+  return normalizedPagePath.length === 0
+    ? '/llms.mdx/content.md'
+    : `/llms.mdx/${normalizedPagePath}/content.md`;
+}
+
+async function fetchMarkdown(markdownUrl: string, pagePath: string) {
+  const candidates = [markdownUrl, getGeneratedMarkdownPath(pagePath)];
+
+  for (const candidate of candidates) {
+    const response = await fetch(getDeployedUrl(candidate, pagePath));
+    const contentType = response.headers.get('content-type') ?? '';
+    const text = await response.text();
+    const looksLikeHtml =
+      contentType.includes('text/html') || /^\s*<(?:!doctype|html|body)\b/i.test(text);
+
+    if (response.ok && !looksLikeHtml && /^#\s+\S/m.test(text)) return text;
+  }
+
+  throw new Error('No Markdown endpoint returned valid Markdown.');
+}
+
+function copyWithTextArea(text: string) {
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) throw new Error('The browser rejected the clipboard operation.');
+}
+
+async function writeMarkdownToClipboard(markdown: Promise<string>) {
+  if ('ClipboardItem' in window && navigator.clipboard?.write) {
+    try {
+      const item = new ClipboardItem({
+        'text/plain': markdown.then((text) => new Blob([text], { type: 'text/plain' })),
+      });
+      await navigator.clipboard.write([item]);
+      return;
+    } catch {
+      // Fall through for browsers that expose ClipboardItem but reject it.
+    }
+  }
+
+  const text = await markdown;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    copyWithTextArea(text);
+  }
+}
+
+function subscribeToLocation() {
+  return () => {};
+}
+
+function getCurrentPageUrl() {
+  return `${window.location.origin}${window.location.pathname}`;
+}
+
+function getServerPageUrl() {
+  return undefined;
+}
 
 function OpenAIIcon(props: SVGProps<SVGSVGElement>) {
   return (
@@ -19,14 +114,39 @@ function AnthropicIcon(props: SVGProps<SVGSVGElement>) {
 }
 
 export function AgentActions({ markdownUrl, pagePath }: { markdownUrl: string; pagePath: string }) {
-  const pageUrl = absoluteUrl(pagePath);
-  const prompt = `Read ${pageUrl}, I want to ask questions about it.`;
+  const pageUrl = useSyncExternalStore(subscribeToLocation, getCurrentPageUrl, getServerPageUrl);
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+
+  const prompt = pageUrl ? `Read ${pageUrl}, I want to ask questions about it.` : undefined;
+  const chatGptUrl = prompt
+    ? `https://chatgpt.com/?${new URLSearchParams({ hints: 'search', q: prompt })}`
+    : undefined;
+  const claudeUrl = prompt
+    ? `https://claude.ai/new?${new URLSearchParams({ q: prompt })}`
+    : undefined;
+
+  async function copyMarkdown() {
+    try {
+      const markdown = fetchMarkdown(markdownUrl, pagePath);
+      await writeMarkdownToClipboard(markdown);
+      setCopyState('copied');
+    } catch {
+      setCopyState('failed');
+    }
+  }
 
   return (
     <div className="etl-agent-actions" aria-label="Agent-readable documentation">
-      <MarkdownCopyButton markdownUrl={markdownUrl} />
+      <button type="button" onClick={copyMarkdown} aria-live="polite">
+        {copyState === 'copied' ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+        {copyState === 'copied'
+          ? 'Copied'
+          : copyState === 'failed'
+            ? 'Copy failed'
+            : 'Copy Markdown'}
+      </button>
       <a
-        href={`https://chatgpt.com/?${new URLSearchParams({ hints: 'search', q: prompt })}`}
+        href={chatGptUrl}
         target="_blank"
         rel="noreferrer noopener"
       >
@@ -34,7 +154,7 @@ export function AgentActions({ markdownUrl, pagePath }: { markdownUrl: string; p
         Ask ChatGPT
       </a>
       <a
-        href={`https://claude.ai/new?${new URLSearchParams({ q: prompt })}`}
+        href={claudeUrl}
         target="_blank"
         rel="noreferrer noopener"
       >

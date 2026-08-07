@@ -30,13 +30,16 @@
   ·
   <a href="https://supabase.github.io/etl/guides/first-pipeline/"><strong>First Pipeline</strong></a>
   ·
+  <a href="https://supabase.github.io/etl/guides/standalone-replicator/"><strong>Standalone Replicator</strong></a>
+  ·
   <a href="crates/etl-examples/README.md"><strong>Examples</strong></a>
   ·
   <a href="https://github.com/supabase/etl/issues"><strong>Issues</strong></a>
 </p>
 
-> [!IMPORTANT]
-> Supabase ETL is under active development.
+> [!NOTE]
+> Supabase ETL is under active development. APIs and setup steps may change
+> before the first stable release.
 
 Supabase ETL is a high-performance Postgres replication engine written in Rust.
 Embed it in your Rust application or run it as a standalone binary. For each
@@ -73,6 +76,7 @@ separate replication phase.
 | Goal | Documentation |
 | --- | --- |
 | Build a working pipeline | [First Pipeline](https://supabase.github.io/etl/guides/first-pipeline/) |
+| Run the standalone process | [Standalone Replicator](https://supabase.github.io/etl/guides/standalone-replicator/) |
 | Prepare a source database | [Configure Postgres](https://supabase.github.io/etl/guides/configure-postgres/) |
 | Implement a store or destination | [Custom Implementations](https://supabase.github.io/etl/guides/custom-implementations/) |
 | Understand the runtime | [Architecture](https://supabase.github.io/etl/explanation/architecture/) |
@@ -99,7 +103,7 @@ tokio = { version = "1", features = ["full"] }
 - **Recovery-aware:** Persist checkpoints and table state for safe restarts and
   at-least-once delivery.
 
-## Destinations
+## [Destinations](https://supabase.github.io/etl/reference/destinations/)
 
 | Feature | Destination | Status |
 | --- | --- | --- |
@@ -107,11 +111,12 @@ tokio = { version = "1", features = ["full"] }
 | `clickhouse` | ClickHouse | In progress |
 | `ducklake` | DuckLake | In progress |
 | `snowflake` | Snowflake | In progress |
-| `iceberg` | Apache Iceberg | Deprecated for now |
+| `iceberg` | Apache Iceberg | Deprecated |
 
-BigQuery is the most mature destination module. See the
-[`etl-examples` guide](crates/etl-examples/README.md) for prerequisites and
-commands for each destination.
+BigQuery is the stable, recommended default. See the
+[Destinations reference](https://supabase.github.io/etl/reference/destinations/)
+for maturity and limitations, and the
+[`etl-examples` guide](crates/etl-examples/README.md) for runnable examples.
 
 ## Requirements
 
@@ -133,6 +138,8 @@ linting, and tests. The workspace uses Rust 1.95.0 from `rust-toolchain.toml`.
 Contributions are welcome. Before proposing a new destination, start a
 [discussion or issue](https://github.com/supabase/etl/issues) so maintainership
 and long-term demand can be evaluated first.
+
+Report suspected vulnerabilities privately according to [SECURITY.md](SECURITY.md).
 
 ## License
 
