@@ -80,7 +80,7 @@ function createRandom(seed: number) {
 /* Packets keep a uniform size; only spacing and speed vary. Speed drifts only
    slightly between lanes, while spacing is jittered within each lane's slots by
    enough to look irregular without letting two packets converge. */
-const LANE_CYCLE = 1.3;
+const LANE_CYCLE = 0.75;
 const LANE_SPEED_SPREAD = 0.16;
 const PACKET_SPACING_JITTER = 0.4;
 
