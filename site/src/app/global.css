@@ -400,9 +400,11 @@ button {
   text-decoration: none;
 }
 
+/* Deliberately no size/gap override here: the homepage brand should always
+   render exactly like the docs sidebar's (.etl-brand's own base styles), at
+   every viewport, so the header doesn't visibly resize when navigating
+   between the two. */
 .etl-home-nav .etl-brand {
-  gap: 0.68rem;
-  font-size: 1.05rem;
   line-height: 1;
 }
 
@@ -1670,18 +1672,16 @@ button {
   }
 
   .etl-home-header {
-    height: 3.75rem;
+    /* Matches Fumadocs' own mobile header height (--fd-header-height:
+       spacing(14), i.e. 3.5rem) so the header doesn't visibly resize when
+       navigating between the homepage and docs. */
+    height: 3.5rem;
   }
 
   .etl-home-nav {
     grid-template-columns: 1fr auto auto;
     gap: 0.7rem;
     padding-inline: var(--etl-page-gutter);
-  }
-
-  .etl-home-nav .etl-brand {
-    gap: 0.5rem;
-    font-size: 0.87rem;
   }
 
   .etl-home-search {
