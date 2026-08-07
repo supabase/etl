@@ -568,6 +568,7 @@ async function checkDesktop(page) {
     homeCopyResponse.ok() && homeCopyResponse.headers()['content-type']?.includes('text/markdown'),
     'Homepage Copy Markdown does not fetch the generated Markdown page.',
   );
+  await page.getByRole('button', { name: 'Copied' }).waitFor();
   const homeClipboardText = await page.evaluate(() => navigator.clipboard.readText());
   assert(
     homeClipboardText.startsWith('# Home') &&
@@ -702,6 +703,7 @@ async function checkDesktop(page) {
       copyMarkdownResponse.headers()['content-type']?.includes('text/markdown'),
     'Copy Markdown does not fetch the generated Markdown page.',
   );
+  await page.getByRole('button', { name: 'Copied' }).waitFor();
   const guideClipboardText = await page.evaluate(() => navigator.clipboard.readText());
   assert(
     guideClipboardText.startsWith('# First Pipeline') &&
