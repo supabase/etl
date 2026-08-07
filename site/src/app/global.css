@@ -47,12 +47,12 @@
   --etl-grid: rgba(10, 10, 10, 0.05);
   /* Explicit tones down the bore rather than white washes, so the channel reads
      as a curved recess instead of a flat bar. */
-  --etl-tube-top: oklch(0.858 0 0);
-  --etl-tube-mid: oklch(0.924 0 0);
+  --etl-tube-top: oklch(0.902 0 0);
+  --etl-tube-mid: oklch(0.947 0 0);
   --etl-tube-gloss: oklch(0.988 0 0);
-  --etl-tube-bottom: oklch(0.948 0 0);
-  --etl-tube-wall: rgba(10, 10, 10, 0.17);
-  --etl-tube-shade: rgba(10, 10, 10, 0.38);
+  --etl-tube-bottom: oklch(0.963 0 0);
+  --etl-tube-wall: rgba(10, 10, 10, 0.11);
+  --etl-tube-shade: rgba(10, 10, 10, 0.24);
   --etl-packet: var(--etl-brand-500);
   --etl-tube-sheen: rgba(255, 255, 255, 1);
   /* The panel body is off-white so highlights have somewhere to sit; on a light

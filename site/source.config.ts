@@ -3,7 +3,7 @@ import { remarkSteps } from 'fumadocs-core/mdx-plugins/remark-steps';
 import { defineConfig, defineDocs } from 'fumadocs-mdx/config';
 
 export const docs = defineDocs({
-  dir: 'docs/src/content/docs',
+  dir: 'content/docs',
   docs: {
     postprocess: {
       includeProcessedMarkdown: true,

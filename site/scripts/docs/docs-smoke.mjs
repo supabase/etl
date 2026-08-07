@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
 
+const repositoryRoot = resolve(import.meta.dirname, '../../..');
 const host = '127.0.0.1';
 const port = 4330;
 const origin = `http://${host}:${port}`;
@@ -28,11 +29,11 @@ function withoutFencedCode(markdown) {
 }
 
 async function checkSourceCodeFences() {
-  const documentationDirectory = resolve('docs/src/content/docs');
+  const documentationDirectory = join(repositoryRoot, 'site/content/docs');
   const documentationFiles = (await readdir(documentationDirectory, { recursive: true }))
     .filter((path) => /\.(?:md|mdx)$/.test(path))
     .map((path) => resolve(documentationDirectory, path));
-  const files = [resolve('README.md'), ...documentationFiles];
+  const files = [join(repositoryRoot, 'README.md'), ...documentationFiles];
   const allowedLanguages = new Set(['bash', 'ini', 'mermaid', 'rust', 'sql', 'text', 'toml', 'yaml']);
   const titleLanguages = [
     [/title="[^"]+\.rs"/, 'rust'],
@@ -78,10 +79,10 @@ async function checkSourceCodeFences() {
 
 async function checkProjectStatusConsistency() {
   const files = [
-    resolve('README.md'),
-    resolve('docs/src/content/docs/guides/first-pipeline.mdx'),
-    resolve('docs/src/content/docs/guides/standalone-replicator.mdx'),
-    resolve('src/lib/site.ts'),
+    join(repositoryRoot, 'README.md'),
+    join(repositoryRoot, 'site/content/docs/guides/first-pipeline.mdx'),
+    join(repositoryRoot, 'site/content/docs/guides/standalone-replicator.mdx'),
+    join(repositoryRoot, 'site/src/lib/site.ts'),
   ];
 
   for (const file of files) {

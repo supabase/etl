@@ -3,19 +3,19 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
-const repositoryRoot = resolve(import.meta.dirname, '../..');
+const repositoryRoot = resolve(import.meta.dirname, '../../..');
 const etlCratePath = join(repositoryRoot, 'crates/etl');
 const targetDirectory = join(repositoryRoot, 'target/docs-tutorials');
 
 const tutorials = [
   {
     name: 'First Pipeline',
-    source: 'docs/src/content/docs/guides/first-pipeline.mdx',
+    source: 'site/content/docs/guides/first-pipeline.mdx',
     files: ['Cargo.toml', 'src/main.rs'],
   },
   {
     name: 'Custom Implementations',
-    source: 'docs/src/content/docs/guides/custom-implementations.mdx',
+    source: 'site/content/docs/guides/custom-implementations.mdx',
     files: ['Cargo.toml', 'src/custom_store.rs', 'src/http_destination.rs', 'src/main.rs'],
   },
 ];

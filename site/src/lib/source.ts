@@ -122,7 +122,7 @@ export async function getLLMText(page: SourcePage) {
       ),
     ),
   ).trim();
-  const sourceUrl = `${siteConfig.repository}/blob/main/docs/src/content/docs/${page.path}`;
+  const sourceUrl = `${siteConfig.repository}/blob/main/site/content/docs/${page.path}`;
 
   return `# ${page.data.title}\n\n> ${page.data.description ?? ''}\n\n- Canonical HTML: ${absoluteUrl(page.url)}\n- Agent-readable Markdown: ${absoluteUrl(getPageMarkdownUrl(page).url)}\n- Source: ${sourceUrl}\n\n${processed}`;
 }

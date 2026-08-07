@@ -12,7 +12,7 @@
   - `crates/etl-examples/`: examples.
   - `crates/etl-benchmarks/`: benchmarks.
   - `crates/xtask/`: workspace automation commands.
-- Docs live in `docs/`.
+- The Next.js/Fumadocs website lives in `site/`; its documentation content lives in `site/content/docs/`.
 - Local development and ops tooling live in `crates/xtask/` (run via `cargo x`) and `DEVELOPMENT.md`.
 - Tests live next to code in `src/` or `tests/`.
 
@@ -330,13 +330,3 @@
 - Doctests pass for the changed target or workspace as appropriate.
 - Docs and comments match the final behavior.
 - New metrics, logs, and labels follow existing naming patterns.
-
-<!-- BEGIN:nextjs-agent-rules -->
-
-# This is NOT the Next.js you know
-
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
-
-This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
-
-<!-- END:nextjs-agent-rules -->

@@ -15,7 +15,7 @@ export function GET() {
     section: page.slugs.length === 0 ? 'Overview' : getAgentDocSection(page),
     html_url: absoluteUrl(page.url),
     markdown_url: absoluteUrl(getPageMarkdownUrl(page).url),
-    source_url: `${siteConfig.repository}/blob/main/docs/src/content/docs/${page.path}`,
+    source_url: `${siteConfig.repository}/blob/main/site/content/docs/${page.path}`,
   }));
 
   return Response.json({
