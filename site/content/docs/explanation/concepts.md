@@ -129,7 +129,7 @@ ETL receives these messages and converts them to events.
 ## Why Two Phases?
 
 ETL replicates data in two phases: **initial sync** and **ongoing
-replication**. Together, these two phases are what we call replication.
+replication**.
 
 ### Phase 1: Initial Sync
 
