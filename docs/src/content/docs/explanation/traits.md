@@ -1,11 +1,11 @@
 ---
 title: Extension Points
-description: Traits you implement to customize ETL behavior.
+description: Traits you implement to customize Supabase ETL behavior.
+icon: Puzzle
 ---
 
-**Traits you implement to customize ETL behavior**
-
-ETL provides extension traits for customization. Implement these to control **where data goes** and **how state is stored**.
+Implement these traits to control where replicated data goes and how ETL state
+is stored.
 
 ## Destination
 
@@ -31,23 +31,23 @@ pub trait Destination {
 | `startup()` | Called after store caches are loaded, removed-publication tables are purged, and before workers start. Default is a no-op. Override to reconcile destination state after restarts |
 | `drop_table_for_copy()` | Drops the existing destination object and destination-private replay state before restarting a table copy. Receives the previously stored replicated schema for locating the old object |
 | `write_table_rows()` | Writes rows during initial table copy. Receives the current replicated schema and may get an empty vector for an empty table or a deferred durability barrier |
-| `write_events()` | Processes streaming replication events (inserts, updates, deletes, truncates, relations, and transaction markers). Batches may span multiple tables, or be empty for a required durability barrier |
+| `write_events()` | Processes ongoing replication events (inserts, updates, deletes, truncates, relations, and transaction markers). Batches may span multiple tables, or be empty for a required durability barrier |
 
 ### Implementation Notes
 
 - `drop_table_for_copy()` should be **idempotent**. ETL calls it before clearing copy-scoped store state, so implementations can still use the supplied schema and existing destination metadata to locate the old object. Before returning success, it must also drain or invalidate writes accepted by an earlier copy attempt so stale work cannot mutate the recreated table.
-- `write_table_rows()` is called even for empty source tables so destinations can create or prepare initial destination state before streaming begins.
+- `write_table_rows()` is called even for empty source tables so destinations can prepare initial destination state before ongoing replication begins.
 - An immediate `write_table_rows()` implementation returns `DestinationWriteStatus::Durable` after the batch is durable. A deferred implementation may return `Accepted` after taking ownership of a nonempty batch. It must bound its accepted-but-not-durable backlog and delay `Accepted` when no capacity is available. If any batch returns `Accepted`, ETL sends an empty batch after all copy workers finish; the destination must return `Durable` from that call only after all rows accepted during the current copy attempt are durable.
 - `WriteEventsDurability::MayDefer` permits `write_events()` to return `Accepted` or `Durable`. ETL may issue `write_events(Vec::new(), WriteEventsDurability::RequireDurable, ...)` as a durability-only barrier, but never an empty `MayDefer` write. The empty vector carries no new replication events, but the call may flush or wait for earlier accepted work and must return `Durable` only after all writes covered by the destination's ordering state are durable. A destination may use a stronger barrier scope than the originating apply-loop stream.
 - `write_table_rows()` and `write_events()` must tolerate **duplicate delivery** because ETL may retry or replay after failure.
 - Handle **concurrent calls** safely, especially from parallel table sync workers.
-- Preserve **per-table event order**. During initial copy and catch-up, transaction markers are not a reliable all-tables transaction boundary.
-- Treat `Event::Relation` as an ordered schema transition, not a `write_events()` batch boundary. ETL batches streaming events by size and time, so one call can contain multiple schema changes, including multiple relation events for the same table.
+- Preserve **per-table event order**. During initial sync and catch-up, transaction markers are not a reliable all-tables transaction boundary.
+- Treat `Event::Relation` as an ordered schema transition, not a `write_events()` batch boundary. ETL batches ongoing replication events by size and time, so one call can contain multiple schema changes, including multiple relation events for the same table.
 - Always complete the supplied async result handle. Dropping it reports a destination error to ETL.
 - `startup()` runs after ETL has loaded destination metadata and table schemas from the store and purged tables removed from the publication, so destinations can compare active persisted ETL state with their physical objects before replication work starts.
-- All three write-like methods use async results, but ETL waits differently. `drop_table_for_copy()` waits immediately before copy-scoped store cleanup. `write_table_rows()` also waits immediately, requesting the next batch only after the current one reports `Accepted` or `Durable` for that copy partition. `write_events()` is the method where ETL can keep processing other work while the destination finishes the current batch; ETL still waits for that batch's async result before handing the destination the next streaming batch.
+- All three write-like methods use async results, but ETL waits differently. `drop_table_for_copy()` waits immediately before copy-scoped store cleanup. `write_table_rows()` also waits immediately, requesting the next batch only after the current one reports `Accepted` or `Durable` for that copy partition. `write_events()` is the method where ETL can keep processing other work while the destination finishes the current batch; ETL still waits for that result before handing over the next ongoing-replication batch.
 
-See [Event Types](/etl/explanation/events/) for details on the events received by `write_events()`.
+See [Events](/explanation/events/) for details on the events received by `write_events()`.
 
 `PipelineDestination` is a blanket-implemented facade for destinations that
 also satisfy the pipeline runtime clone and thread-safety bounds. Pipeline
@@ -156,7 +156,7 @@ Tables progress through these states:
 | `SyncWait` | No | Table sync worker signaling apply worker to pause |
 | `Catchup { lsn }` | No | Apply worker paused, table sync worker catching up to LSN |
 | `SyncDone { lsn }` | Yes | Caught up to LSN; durable decoder retained until Apply materializes local state |
-| `Ready` | Yes | Streaming changes via apply worker |
+| `Ready` | Yes | Changes via apply worker |
 | `Errored { reason, solution, retry_policy }` | Yes | Error occurred, excluded until rollback |
 
 ## TableStateLifecycleStore
@@ -231,14 +231,8 @@ implementation you use.
 
 All trait implementations must be **thread-safe**. ETL calls these methods concurrently from:
 
-- Multiple table sync workers (parallel initial copy)
-- Apply worker (streaming changes)
+- Multiple table sync workers (parallel initial sync)
+- Apply worker (ongoing replication)
 - Pipeline coordination
 
 Use `Arc<Mutex<_>>`, `RwLock`, or similar synchronization primitives for shared state.
-
-## Next Steps
-
-- [Custom Stores and Destinations](/etl/guides/custom-implementations/): Implement these traits
-- [Event Types](/etl/explanation/events/): Events received by `write_events()`
-- [Architecture](/etl/explanation/architecture/): How these components fit together

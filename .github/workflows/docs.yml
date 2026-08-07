@@ -27,6 +27,11 @@ jobs:
           cache: npm
       - name: Install Docs Dependencies
         run: npm ci
+      - name: Install Tutorial Rust Toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Check Rust Tutorials
+        timeout-minutes: 10
+        run: npm run check:tutorials
       - name: Install Docs Smoke Browser
         run: npx playwright install --with-deps chromium
       - name: Build Docs
@@ -38,7 +43,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: dist
+          path: out
 
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404

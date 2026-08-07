@@ -2,7 +2,7 @@
 
 BigQuery Example
 
-This example demonstrates how to use the pipeline to stream
+This example demonstrates how to use the pipeline to replicate
 data from Postgres to BigQuery using change data capture (CDC).
 
 Prerequisites:
@@ -26,7 +26,7 @@ Usage:
 The pipeline will automatically:
 - Create tables in BigQuery matching your Postgres schema
 - Perform initial data sync for existing tables
-- Stream real-time changes using logical replication
+- Replicate changes using logical replication
 - Handle schema changes and DDL operations
 
 */

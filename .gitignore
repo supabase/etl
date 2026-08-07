@@ -23,8 +23,12 @@ target/
 
 # Docs build directories
 .astro/
+.next/
+.source/
+out/
 site/
 dist/
+*.tsbuildinfo
 
 # venv files
 /bin/

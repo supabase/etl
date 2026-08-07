@@ -1,0 +1,149 @@
+---
+title: Standalone Replicator
+description: Build, configure, and run Supabase ETL as a standalone process.
+icon: Terminal
+---
+
+The standalone replicator is the ready-made `etl-replicator` application for
+running Supabase ETL without embedding the library in another Rust program.
+
+<Callout className="etl-callout" type="info" title="Active development">
+  Supabase ETL is under active development. APIs and setup steps may change
+  before the first stable release.
+</Callout>
+
+## What the replicator is
+
+The replicator packages one ETL pipeline, a Postgres-backed state store, and
+one configured built-in destination into a long-lived process. It loads the
+source, destination, batching, retry, and operational settings from files and
+environment variables, starts replication, and handles graceful shutdown. It
+does not require Kubernetes or the managed Supabase product.
+
+Use the standalone replicator when a built-in destination and the standard
+Postgres-backed store fit your deployment. Embed the `etl` crate instead when
+you need a custom destination, a custom store, or application-specific runtime
+orchestration. See [First Pipeline](/guides/first-pipeline/) for the library
+path.
+
+## Prerequisites
+
+- Rust 1.95.0, as pinned by `rust-toolchain.toml`.
+- PostgreSQL 14 through 18 configured for logical replication.
+- A publication containing the tables and operations you want to replicate.
+- A Google Cloud project with the BigQuery API enabled and a dataset for the
+  replicated tables.
+- A service account with the BigQuery Data Editor and BigQuery Job User roles.
+
+Complete [Configure Postgres](/guides/configure-postgres/) before starting the
+replicator. PostgreSQL 15 or newer is recommended for column and row
+publication filters, and PostgreSQL 16 or newer is required when replication
+connects to a physical read replica.
+
+## Build the binary
+
+Clone the repository and build only the destination features you need. BigQuery
+is the stable, recommended default:
+
+```bash title="Terminal"
+git clone https://github.com/supabase/etl.git
+cd etl
+cargo build --release -p etl-replicator --no-default-features --features bigquery
+```
+
+The executable is written to `target/release/etl-replicator`. Available
+destination features are `bigquery`, `clickhouse`, `ducklake`, `snowflake`, and
+the currently deprecated `iceberg` implementation. BigQuery is the stable,
+recommended default; review [Destinations](/reference/destinations/) before
+choosing a module.
+
+## Create the configuration
+
+The replicator reads a required `base.yaml` plus an environment-specific file
+from a configuration directory. Keep that directory outside the repository so
+credentials cannot be committed accidentally.
+
+Create `/absolute/path/to/etl-config/base.yaml` with the BigQuery destination
+and Postgres source settings:
+
+```yaml title="base.yaml"
+destination:
+  big_query:
+    project_id: example-gcp-project
+    dataset_id: etl_dataset
+    service_account_key: "{}"
+    max_staleness_mins: null
+
+pipeline:
+  id: 1
+  publication_name: etl_publication
+  pg_connection:
+    host: 127.0.0.1
+    hostaddr: null
+    port: 5432
+    name: example_database
+    username: etl_user
+    password: null
+    tls:
+      enabled: false
+      trusted_root_certs: ""
+```
+
+Create `/absolute/path/to/etl-config/prod.yaml` for production overrides. It
+may be empty when `base.yaml` contains the complete configuration:
+
+```yaml title="prod.yaml"
+{}
+```
+
+The default environment is `prod`. Set `APP_ENVIRONMENT` to `dev`, `staging`,
+or `prod` to load the corresponding file instead. Configuration values can be
+overridden with `APP_`-prefixed environment variables; use `__` between nested
+keys. For example:
+
+```bash title="Terminal"
+export APP_PIPELINE__PG_CONNECTION__PASSWORD='placeholder-password'
+export APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY='placeholder-service-account-json'
+```
+
+The credential values above and the `{}` service-account key in `base.yaml` are
+intentionally invalid placeholders. Supply the complete service-account JSON
+through your runtime's secret manager or protected environment rather than
+tracked files, shell history, logs, or process arguments. Enable TLS and
+provide trusted root certificates for networked production connections.
+
+## Run the replicator
+
+`APP_CONFIG_DIR` must be an absolute path:
+
+```bash title="Terminal"
+APP_CONFIG_DIR=/absolute/path/to/etl-config \
+  APP_ENVIRONMENT=prod \
+  ./target/release/etl-replicator
+```
+
+The process runs until it receives a shutdown signal or encounters a terminal
+pipeline error. Run it under a service manager that restarts failed processes,
+preserves logs, and provides resource limits.
+
+## Recovery and operations
+
+Validate destination behavior, resource limits, and recovery procedures in a
+non-production environment before operating the replicator on production data.
+
+- ETL provides at-least-once delivery. Destination writes must tolerate
+  retries without producing incorrect duplicate state.
+- Pipeline state and checkpoints are stored in Postgres. When replication uses
+  a read-only physical replica, configure a separate writable
+  `store_pg_connection`.
+- The default `invalidated_slot_behavior` is `error`, which stops startup and
+  requires operator intervention. Set it to `recreate` only when automatically
+  resetting table states and repeating initial copies is acceptable.
+- Monitor PostgreSQL replication-slot WAL retention, destination capacity,
+  process memory, replication lag, and terminal errors.
+- Back up configuration metadata, but never include credentials in diagnostic
+  bundles or public issues.
+
+See [Architecture](/explanation/architecture/) for the runtime model and
+[Extension Points](/explanation/traits/) if you need a custom destination or
+state store.
