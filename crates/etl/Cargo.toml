@@ -11,11 +11,13 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
+tls-rustls-ring = ["sqlx/tls-rustls-ring"]
+tls-rustls-aws-lc-rs = ["sqlx/tls-rustls-aws-lc-rs"]
 test-utils = ["etl-postgres/test-utils", "dep:proptest"]
 failpoints = ["fail/failpoints"]
 egress = []
 fuzzing = []
-default = []
+default = ["tls-rustls-ring"]
 
 [dependencies]
 
@@ -36,7 +38,7 @@ rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive", "alloc"] }
 serde_json = { workspace = true, features = ["arbitrary_precision", "std"] }
 simdutf8 = { workspace = true }
-sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate"] }
 sysinfo = { workspace = true, features = ["system"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 tokio-postgres = { workspace = true, features = ["runtime", "with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }

@@ -19,7 +19,7 @@ schemars = "0.8"
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "json"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "json"] }
 tokio = { workspace = true, features = ["full"] }
 toml = "1.1"
 xshell = "0.2"

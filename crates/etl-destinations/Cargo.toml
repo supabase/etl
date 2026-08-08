@@ -13,6 +13,9 @@ homepage.workspace = true
 doctest = false
 
 [features]
+default = ["tls-rustls-ring"]
+tls-rustls-ring = ["sqlx?/tls-rustls-ring"]
+tls-rustls-aws-lc-rs = ["sqlx?/tls-rustls-aws-lc-rs"]
 ducklake = [
     "dep:duckdb",
     "dep:etl-maintenance",
@@ -128,7 +131,7 @@ secrecy = { workspace = true, optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
 sha2 = { workspace = true, optional = true }
-sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "postgres"] }
 thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }
