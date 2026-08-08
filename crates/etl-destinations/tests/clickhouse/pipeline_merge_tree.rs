@@ -21,21 +21,20 @@ use rand::random;
 
 use crate::support::{clickhouse::current_state_query, crypto::install_crypto_provider};
 
-/// MergeTree event-log row: includes CDC metadata. All three operations in this
-/// test target the same source row, so `id` is asserted on alongside the
-/// CDC columns.
+/// MergeTree event-log row with source CDC ordering metadata.
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
 struct EventLogRow {
     id: i64,
     value: String,
     cdc_operation: String,
     cdc_lsn: u64,
+    cdc_tx_ordinal: u64,
 }
 
 const TX_ORDER_SELECT: &str = concat!(
-    "SELECT id, value, cdc_operation, cdc_lsn ",
-    "FROM \"test_tx__order\" ",
-    "ORDER BY id, cdc_lsn",
+    "select id, value, cdc_operation, cdc_lsn, cdc_tx_ordinal ",
+    "from \"test_tx__order\" ",
+    "order by id, cdc_lsn, cdc_tx_ordinal",
 );
 
 /// MergeTree-only: verifies that updates from separately committed transactions
@@ -142,16 +141,6 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
     assert!(rows[2].cdc_lsn > rows[1].cdc_lsn, "update_b must have a higher LSN than update_a");
 }
 
-/// MergeTree event-log row with the complete source event ordering pair.
-#[derive(clickhouse::Row, serde::Deserialize, Debug)]
-struct SequencedEventLogRow {
-    id: i64,
-    value: String,
-    cdc_operation: String,
-    cdc_lsn: u64,
-    cdc_tx_ordinal: u64,
-}
-
 /// Current user row projected from MergeTree event history.
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
 struct CurrentRow {
@@ -245,7 +234,7 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
     events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let event_rows: Vec<SequencedEventLogRow> = clickhouse_db
+    let event_rows: Vec<EventLogRow> = clickhouse_db
         .query(
             "select id, value, cdc_operation, cdc_lsn, cdc_tx_ordinal from \
              \"test_same__tx__pk__change\" order by cdc_lsn, cdc_tx_ordinal, id, cdc_operation",
