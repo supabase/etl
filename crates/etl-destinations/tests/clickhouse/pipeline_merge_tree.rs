@@ -159,8 +159,8 @@ struct CurrentRow {
     value: String,
 }
 
-/// MergeTree preserves same-transaction order when a later update changes the
-/// primary key.
+/// MergeTree preserves same-transaction order when primary-key changes move a
+/// row away from a key and then back to it.
 #[tokio::test(flavor = "multi_thread")]
 async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
     init_test_tracing();
@@ -180,7 +180,7 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
         .expect("Failed to create same_tx_pk_change publication");
     database
         .run_sql(&format!(
-            "INSERT INTO {} (value) VALUES ('original')",
+            "insert into {} (value) values ('original')",
             table_name.as_quoted_identifier(),
         ))
         .await
@@ -191,7 +191,7 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
         .db_client()
         .query(
             "create table \"test_same__tx__pk__change\" (
-                \"id\" Int32,
+                \"id\" Int64,
                 \"value\" String,
                 \"cdc_operation\" String,
                 \"cdc_lsn\" UInt64
@@ -219,21 +219,27 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 2)])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 3)])
         .await;
     let tx = database.begin_transaction().await;
     tx.run_sql(&format!(
-        "UPDATE {} SET value = 'intermediate' WHERE id = 1",
+        "update {} set value = 'intermediate' where id = 1",
         table_name.as_quoted_identifier(),
     ))
     .await
     .expect("Failed to update the value");
     tx.run_sql(&format!(
-        "UPDATE {} SET id = 2, value = 'final' WHERE id = 1",
+        "update {} set id = 2, value = 'moved' where id = 1",
         table_name.as_quoted_identifier(),
     ))
     .await
     .expect("Failed to update the primary key");
+    tx.run_sql(&format!(
+        "update {} set id = 1, value = 'final' where id = 2",
+        table_name.as_quoted_identifier(),
+    ))
+    .await
+    .expect("Failed to reuse the original primary key");
     tx.commit_transaction().await;
 
     events_notify.notified().await;
@@ -241,8 +247,8 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
 
     let event_rows: Vec<SequencedEventLogRow> = clickhouse_db
         .query(
-            "SELECT id, value, cdc_operation, cdc_lsn, cdc_tx_ordinal FROM \
-             \"test_same__tx__pk__change\" ORDER BY cdc_lsn, cdc_tx_ordinal, id, cdc_operation",
+            "select id, value, cdc_operation, cdc_lsn, cdc_tx_ordinal from \
+             \"test_same__tx__pk__change\" order by cdc_lsn, cdc_tx_ordinal, id, cdc_operation",
         )
         .await;
     let current_rows: Vec<CurrentRow> = clickhouse_db
@@ -255,15 +261,17 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
         ))
         .await;
 
-    assert_eq!(event_rows.len(), 4);
+    assert_eq!(event_rows.len(), 6);
     assert_eq!(event_rows[0].cdc_operation, "INSERT");
     assert_eq!(event_rows[0].cdc_lsn, 0);
     assert_eq!(event_rows[0].cdc_tx_ordinal, 0);
 
+    let streaming_lsn = event_rows[1].cdc_lsn;
+    assert!(event_rows[1..].iter().all(|row| row.cdc_lsn == streaming_lsn));
+
     assert_eq!(event_rows[1].id, 1);
     assert_eq!(event_rows[1].value, "intermediate");
     assert_eq!(event_rows[1].cdc_operation, "UPDATE");
-    assert_eq!(event_rows[1].cdc_lsn, event_rows[2].cdc_lsn);
     assert!(event_rows[1].cdc_tx_ordinal < event_rows[2].cdc_tx_ordinal);
 
     assert_eq!(event_rows[2].id, 1);
@@ -271,10 +279,19 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
     assert_eq!(event_rows[2].cdc_tx_ordinal, event_rows[3].cdc_tx_ordinal);
 
     assert_eq!(event_rows[3].id, 2);
-    assert_eq!(event_rows[3].value, "final");
+    assert_eq!(event_rows[3].value, "moved");
     assert_eq!(event_rows[3].cdc_operation, "UPDATE");
+    assert!(event_rows[3].cdc_tx_ordinal < event_rows[4].cdc_tx_ordinal);
+
+    assert_eq!(event_rows[4].id, 1);
+    assert_eq!(event_rows[4].value, "final");
+    assert_eq!(event_rows[4].cdc_operation, "UPDATE");
+    assert_eq!(event_rows[4].cdc_tx_ordinal, event_rows[5].cdc_tx_ordinal);
+
+    assert_eq!(event_rows[5].id, 2);
+    assert_eq!(event_rows[5].cdc_operation, "DELETE");
 
     assert_eq!(current_rows.len(), 1);
-    assert_eq!(current_rows[0].id, 2);
+    assert_eq!(current_rows[0].id, 1);
     assert_eq!(current_rows[0].value, "final");
 }

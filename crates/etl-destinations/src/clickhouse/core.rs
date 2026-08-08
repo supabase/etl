@@ -1405,6 +1405,28 @@ fn validate_clickhouse_table_shape(
     Ok(())
 }
 
+/// Verifies that a full row has one value for each replicated column.
+fn ensure_clickhouse_full_row_width(
+    replicated_table_schema: &ReplicatedTableSchema,
+    row: &TableRow,
+) -> EtlResult<()> {
+    let column_count = replicated_table_schema.column_schemas().len();
+    if row.values().len() != column_count {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "ClickHouse full row image does not match the replicated schema",
+            format!(
+                "Expected {} values for table '{}', got {}",
+                column_count,
+                replicated_table_schema.name(),
+                row.values().len()
+            )
+        ));
+    }
+
+    Ok(())
+}
+
 /// Returns the full new row required for a ClickHouse update.
 fn clickhouse_update_row(
     replicated_table_schema: &ReplicatedTableSchema,
@@ -1422,6 +1444,8 @@ fn clickhouse_update_row(
             )
         ));
     };
+
+    ensure_clickhouse_full_row_width(replicated_table_schema, &row)?;
 
     Ok(row)
 }
@@ -1487,47 +1511,61 @@ fn ensure_clickhouse_update_without_old_row_can_skip_delete(
     }
 }
 
+/// Compares key values using PostgreSQL's equality rule for floating-point NaN.
+fn postgres_key_cell_equal(old_value: &Cell, new_value: &Cell) -> bool {
+    use etl::data::ArrayCell;
+
+    if old_value == new_value {
+        return true;
+    }
+
+    match (old_value, new_value) {
+        (Cell::F32(old_value), Cell::F32(new_value)) => old_value.is_nan() && new_value.is_nan(),
+        (Cell::F64(old_value), Cell::F64(new_value)) => old_value.is_nan() && new_value.is_nan(),
+        (Cell::Array(ArrayCell::F32(old_values)), Cell::Array(ArrayCell::F32(new_values))) => {
+            old_values.len() == new_values.len()
+                && old_values.iter().zip(new_values).all(|(old_value, new_value)| {
+                    match (old_value, new_value) {
+                        (Some(old_value), Some(new_value)) => {
+                            old_value == new_value || (old_value.is_nan() && new_value.is_nan())
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    }
+                })
+        }
+        (Cell::Array(ArrayCell::F64(old_values)), Cell::Array(ArrayCell::F64(new_values))) => {
+            old_values.len() == new_values.len()
+                && old_values.iter().zip(new_values).all(|(old_value, new_value)| {
+                    match (old_value, new_value) {
+                        (Some(old_value), Some(new_value)) => {
+                            old_value == new_value || (old_value.is_nan() && new_value.is_nan())
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    }
+                })
+        }
+        _ => false,
+    }
+}
+
 /// Returns whether an update changed the source primary key.
 fn clickhouse_primary_key_changed(
     replicated_table_schema: &ReplicatedTableSchema,
     old_table_row: &OldTableRow,
     new_table_row: &TableRow,
 ) -> EtlResult<bool> {
-    let column_count = replicated_table_schema.column_schemas().len();
-    if new_table_row.values().len() != column_count {
-        return Err(etl_error!(
-            ErrorKind::InvalidState,
-            "ClickHouse full row image does not match the replicated schema",
-            format!(
-                "Expected {} values for table '{}', got {}",
-                column_count,
-                replicated_table_schema.name(),
-                new_table_row.values().len()
-            )
-        ));
-    }
-
     match old_table_row {
         OldTableRow::Full(row) => {
-            if row.values().len() != column_count {
-                return Err(etl_error!(
-                    ErrorKind::InvalidState,
-                    "ClickHouse full row image does not match the replicated schema",
-                    format!(
-                        "Expected {} values for table '{}', got {}",
-                        column_count,
-                        replicated_table_schema.name(),
-                        row.values().len()
-                    )
-                ));
-            }
+            ensure_clickhouse_full_row_width(replicated_table_schema, row)?;
 
             Ok(replicated_table_schema
                 .column_schemas()
                 .zip(row.values())
                 .zip(new_table_row.values())
                 .any(|((column_schema, old_value), new_value)| {
-                    column_schema.primary_key() && old_value != new_value
+                    column_schema.primary_key() && !postgres_key_cell_equal(old_value, new_value)
                 }))
         }
         OldTableRow::Key(row) => {
@@ -1558,7 +1596,7 @@ fn clickhouse_primary_key_changed(
                         .filter(|(column_schema, _)| column_schema.primary_key())
                         .map(|(_, value)| value),
                 )
-                .any(|(old_value, new_value)| old_value != new_value))
+                .any(|(old_value, new_value)| !postgres_key_cell_equal(old_value, new_value)))
         }
     }
 }
@@ -1854,6 +1892,41 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    /// Builds a full-identity schema with the requested primary-key type.
+    fn replicated_schema_with_primary_key_type(primary_key_type: Type) -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), primary_key_type, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1, 1]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    /// Builds a primary-key identity schema with two key columns.
+    fn replicated_composite_primary_key_schema() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, false).with_primary_key(2),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1, 1, 0]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
     fn replicated_schema_with_partial_primary_key() -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
@@ -1887,6 +1960,25 @@ mod tests {
     }
 
     #[test]
+    fn clickhouse_update_rows_projects_composite_old_key_in_schema_order() {
+        let update_row =
+            TableRow::new(vec![Cell::I32(10), Cell::I32(2), Cell::String("updated".to_owned())]);
+
+        let rows = clickhouse_update_rows(
+            &replicated_composite_primary_key_schema(),
+            UpdatedTableRow::Full(update_row.clone()),
+            Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(10), Cell::I32(1)]))),
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows.delete_row,
+            Some(TableRow::new(vec![Cell::I32(10), Cell::I32(1), Cell::Null]))
+        );
+        assert_eq!(rows.update_row, update_row);
+    }
+
+    #[test]
     fn clickhouse_update_rows_skips_tombstone_when_primary_key_is_unchanged() {
         let update_row = TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_owned())]);
 
@@ -1902,6 +1994,63 @@ mod tests {
 
         assert_eq!(rows.delete_row, None);
         assert_eq!(rows.update_row, update_row);
+    }
+
+    #[test]
+    fn clickhouse_update_rows_accepts_primary_key_identity_without_old_row() {
+        let update_row = TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_owned())]);
+
+        let rows = clickhouse_update_rows(
+            &replicated_schema(IdentityType::PrimaryKey),
+            UpdatedTableRow::Full(update_row.clone()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(rows.delete_row, None);
+        assert_eq!(rows.update_row, update_row);
+    }
+
+    #[test]
+    fn clickhouse_update_rows_uses_postgres_nan_equality_for_primary_keys() {
+        let cases = [
+            (Type::FLOAT4, Cell::F32(f32::NAN)),
+            (Type::FLOAT8, Cell::F64(f64::NAN)),
+            (Type::FLOAT4_ARRAY, Cell::Array(ArrayCell::F32(vec![Some(f32::NAN), None]))),
+            (Type::FLOAT8_ARRAY, Cell::Array(ArrayCell::F64(vec![Some(f64::NAN), None]))),
+        ];
+
+        for (primary_key_type, primary_key_value) in cases {
+            let rows = clickhouse_update_rows(
+                &replicated_schema_with_primary_key_type(primary_key_type),
+                UpdatedTableRow::Full(TableRow::new(vec![
+                    primary_key_value.clone(),
+                    Cell::String("updated".to_owned()),
+                ])),
+                Some(OldTableRow::Full(TableRow::new(vec![
+                    primary_key_value,
+                    Cell::String("before".to_owned()),
+                ]))),
+            )
+            .unwrap();
+
+            assert!(rows.delete_row.is_none());
+        }
+
+        let rows = clickhouse_update_rows(
+            &replicated_schema_with_primary_key_type(Type::FLOAT8_ARRAY),
+            UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::Array(ArrayCell::F64(vec![Some(f64::NAN), Some(2.0)])),
+                Cell::String("updated".to_owned()),
+            ])),
+            Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::Array(ArrayCell::F64(vec![Some(f64::NAN), Some(1.0)])),
+                Cell::String("before".to_owned()),
+            ]))),
+        )
+        .unwrap();
+
+        assert!(rows.delete_row.is_some());
     }
 
     #[test]
@@ -1948,6 +2097,33 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn clickhouse_update_rows_rejects_malformed_new_row_width_without_old_row() {
+        let error = clickhouse_update_rows(
+            &replicated_schema(IdentityType::PrimaryKey),
+            UpdatedTableRow::Full(TableRow::new(vec![Cell::I32(1)])),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+    }
+
+    #[test]
+    fn clickhouse_update_rows_rejects_malformed_full_old_row_width() {
+        let error = clickhouse_update_rows(
+            &replicated_schema(IdentityType::Full),
+            UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("updated".to_owned()),
+            ])),
+            Some(OldTableRow::Full(TableRow::new(vec![Cell::I32(1)]))),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
     }
 
     #[test]
