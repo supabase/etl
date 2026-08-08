@@ -118,9 +118,9 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
 
     events_notify.notified().await;
 
-    let rows: Vec<EventLogRow> = clickhouse_db.query(TX_ORDER_SELECT).await;
-
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let rows: Vec<EventLogRow> = clickhouse_db.query(TX_ORDER_SELECT).await;
 
     // --- THEN: three rows on id=1 with strictly increasing LSNs ---
     assert_eq!(rows.len(), 3, "expected INSERT + two UPDATEs");
@@ -155,6 +155,7 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
     init_test_tracing();
     install_crypto_provider();
 
+    // --- GIVEN: a legacy MergeTree table with one copied row ---
     let mut database = spawn_source_database().await;
     let table_name = test_table_name("same_tx_pk_change");
     let table_id = database
@@ -207,6 +208,7 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
     pipeline.start().await.unwrap();
     table_sync_complete_notify.notified().await;
 
+    // --- WHEN: one transaction updates the row and moves its key away and back ---
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 3)])
         .await;
@@ -234,6 +236,7 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
     events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
+    // --- THEN: source order and final current state are preserved ---
     let event_rows: Vec<EventLogRow> = clickhouse_db
         .query(
             "select id, value, cdc_operation, cdc_lsn, cdc_tx_ordinal from \
