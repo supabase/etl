@@ -4,7 +4,7 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{DestinationTableMetadata, DestinationWriteStatus, WriteEventsDurability},
     error::ErrorKind,
-    event::{DeleteEvent, Event, InsertEvent, RelationEvent, UpdateEvent},
+    event::{DeleteEvent, Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
     pipeline::PipelineId,
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
@@ -96,13 +96,14 @@ async fn write_table_copy_and_wait(
 }
 
 async fn poll_and_query_rows(
+    destination: &SnowflakeTestDestination,
     harness: &TestHarness,
     table_id: TableId,
     sf_table: &str,
     expected_offset: &OffsetToken,
 ) -> Vec<Vec<serde_json::Value>> {
     let committed = poll_destination_offset(
-        &harness.destination,
+        destination,
         table_id,
         expected_offset,
         DESTINATION_OFFSET_POLL_INTERVAL,
@@ -131,6 +132,33 @@ fn make_table_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
             ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
         ],
     )
+}
+
+/// Builds one transaction that surrounds a truncate with data events.
+fn truncate_replay_events(schema: &ReplicatedTableSchema) -> Vec<Event> {
+    // BEGIN consumes ordinal zero, so replicated events start at one.
+    let commit_lsn = PgLsn::from(20_u64);
+
+    vec![
+        Event::Insert(InsertEvent {
+            commit_lsn,
+            tx_ordinal: 1,
+            replicated_table_schema: schema.clone(),
+            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("before".into())]),
+        }),
+        Event::Truncate(TruncateEvent {
+            commit_lsn,
+            tx_ordinal: 2,
+            options: 0,
+            truncated_tables: vec![schema.clone()],
+        }),
+        Event::Insert(InsertEvent {
+            commit_lsn,
+            tx_ordinal: 3,
+            replicated_table_schema: schema.clone(),
+            table_row: TableRow::new(vec![Cell::I32(2), Cell::String("after".into())]),
+        }),
+    ]
 }
 
 /// Builds the schema used by existing-column default change tests.
@@ -313,7 +341,9 @@ async fn write_table_rows_basic() {
         assert_eq!(status, DestinationWriteStatus::Durable);
 
         let copy_offset = first_copy_request_offset();
-        let rows = poll_and_query_rows(&harness, table_id, &sf_table, &copy_offset).await;
+        let rows =
+            poll_and_query_rows(&harness.destination, &harness, table_id, &sf_table, &copy_offset)
+                .await;
         assert_eq!(rows.len(), 2, "expected 2 rows");
 
         let zero_sequence = OffsetToken::zero().to_string();
@@ -410,7 +440,14 @@ async fn write_events_insert_update_delete() {
         .expect("write_events failed");
 
         let expected_offset = OffsetToken::new(PgLsn::from(3u64), 0);
-        let rows = poll_and_query_rows(&harness, table_id, &sf_table, &expected_offset).await;
+        let rows = poll_and_query_rows(
+            &harness.destination,
+            &harness,
+            table_id,
+            &sf_table,
+            &expected_offset,
+        )
+        .await;
         assert_eq!(rows.len(), 3, "expected 3 rows (insert + update + delete)");
 
         // Column order: id, name, _cdc_operation, _cdc_sequence_number
@@ -426,6 +463,95 @@ async fn write_events_insert_update_delete() {
         assert_eq!(rows[2][0], serde_json::json!("2"));
         assert_eq!(rows[2][1], serde_json::json!("Bob"));
         assert_eq!(rows[2][2], serde_json::json!("delete"));
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn whole_transaction_replay_restores_post_truncate_rows() {
+    let harness = TestHarness::new();
+    let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+
+    let table_id = TableId::new(1013);
+    let table_schema = make_table_schema(1013, "public", &src_table);
+    let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
+    harness.store.store_table_schema(table_schema).await.unwrap();
+
+    with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        let first_status = invoke_write_events(
+            &harness.destination,
+            WriteEventsDurability::RequireDurable,
+            truncate_replay_events(&schema),
+        )
+        .await
+        .expect("initial truncate sequence failed");
+        assert_eq!(first_status, DestinationWriteStatus::Durable);
+
+        // Simulate a crash after Snowflake durably applied the transaction but
+        // before its source checkpoint advanced. The fresh destination must
+        // therefore replay the whole transaction, including the first insert.
+        let pipeline_id: PipelineId = 1;
+        let first_restarted_destination =
+            Destination::new(Client::new(build_auth(), pipeline_id), harness.store.clone());
+        let replay_status = invoke_write_events(
+            &first_restarted_destination,
+            WriteEventsDurability::RequireDurable,
+            truncate_replay_events(&schema),
+        )
+        .await
+        .expect("replayed truncate sequence failed");
+        assert_eq!(replay_status, DestinationWriteStatus::Durable);
+
+        let post_truncate_offset = OffsetToken::new(PgLsn::from(20_u64), 3);
+        let rows = poll_and_query_rows(
+            &first_restarted_destination,
+            &harness,
+            table_id,
+            &sf_table,
+            &post_truncate_offset,
+        )
+        .await;
+        // The first replay must restore the later row exactly once before the
+        // next replay has a chance to repair it.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], serde_json::json!("2"));
+        assert_eq!(rows[0][1], serde_json::json!("after"));
+        assert_eq!(rows[0][3], serde_json::json!(post_truncate_offset.to_string()));
+
+        // Replay the same source range through another fresh process. The
+        // channel has advanced since the previous physical truncate, so this
+        // cycle must derive a new request ID and clear the previously restored
+        // row before inserting it again.
+        let second_restarted_destination =
+            Destination::new(Client::new(build_auth(), pipeline_id), harness.store.clone());
+        let second_replay_status = invoke_write_events(
+            &second_restarted_destination,
+            WriteEventsDurability::RequireDurable,
+            truncate_replay_events(&schema).into_iter().skip(1).collect(),
+        )
+        .await
+        .expect("second replayed truncate sequence failed");
+        assert_eq!(second_replay_status, DestinationWriteStatus::Durable);
+
+        let rows = poll_and_query_rows(
+            &second_restarted_destination,
+            &harness,
+            table_id,
+            &sf_table,
+            &post_truncate_offset,
+        )
+        .await;
+        assert_eq!(
+            rows,
+            vec![vec![
+                serde_json::json!("2"),
+                serde_json::json!("after"),
+                serde_json::json!("insert"),
+                serde_json::json!(post_truncate_offset.to_string()),
+            ]]
+        );
     })
     .await;
 }
@@ -460,7 +586,14 @@ async fn write_events_delete_key_only() {
         .expect("write_events failed");
 
         let expected_offset = OffsetToken::new(PgLsn::from(1u64), 0);
-        let rows = poll_and_query_rows(&harness, table_id, &sf_table, &expected_offset).await;
+        let rows = poll_and_query_rows(
+            &harness.destination,
+            &harness,
+            table_id,
+            &sf_table,
+            &expected_offset,
+        )
+        .await;
         assert_eq!(rows.len(), 1, "expected 1 delete row");
 
         // Column order: id, name, _cdc_operation, _cdc_sequence_number

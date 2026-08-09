@@ -1,0 +1,121 @@
+---
+title: Destinations
+description: Official built-in destinations, maturity, requirements, and limitations.
+icon: DatabaseZap
+---
+
+Supabase ETL ships official destination implementations in the
+`etl-destinations` crate. Enable only the destination feature you need when
+embedding ETL or building the standalone replicator. **BigQuery is the stable,
+recommended default.**
+
+| Feature | Destination | Status | Guidance |
+| --- | --- | --- | --- |
+| `bigquery` | Google BigQuery | Stable | Recommended default |
+| `clickhouse` | ClickHouse | In progress | Evaluate for your workload |
+| `ducklake` | DuckLake | In progress | Evaluate for your workload |
+| `snowflake` | Snowflake | In progress | Evaluate for your workload |
+| `iceberg` | Apache Iceberg | Deprecated | Do not use for new deployments |
+
+## Status definitions
+
+- **Stable:** The most mature built-in destination and the recommended default.
+  Review its limitations and validate it against your production workload.
+- **In progress:** Functional, but behavior, configuration, schema support, and
+  operational requirements may still change. Test recovery and schema changes
+  before production use.
+- **Deprecated:** Retained for compatibility but no longer recommended for new
+  deployments. Plan to move away from it.
+
+## BigQuery
+
+<DestinationStatus status="stable" />
+
+BigQuery uses the BigQuery Storage Write API and BigQuery change data capture
+to maintain destination tables. The standalone replicator guide uses BigQuery
+as its default example.
+
+### Limitations
+
+- Every replicated source table needs a primary key, and all primary-key
+  columns must be included in the publication.
+- PostgreSQL arrays containing `NULL` elements are not supported.
+- Supported schema changes are applied automatically, but PostgreSQL default
+  expressions and backfill behavior are only supported where they map safely
+  to BigQuery. See [Schema Changes](/explanation/schema-changes/).
+
+## ClickHouse
+
+<DestinationStatus status="in-progress" />
+
+ClickHouse supports a current-state layout with `ReplacingMergeTree` and an
+append-only event-log layout with `MergeTree`.
+
+### Limitations
+
+- The default `ReplacingMergeTree` layout requires a source primary key with
+  every primary-key column included in the publication, and requires
+  ClickHouse 23.5 or newer.
+- `MergeTree` preserves an append-only event log; it does not expose a
+  current-state replica by itself.
+- Tombstone cleanup and `OPTIMIZE ... FINAL CLEANUP` are operator-managed.
+
+## DuckLake
+
+<DestinationStatus status="in-progress" />
+
+DuckLake writes through DuckDB to a file or PostgreSQL catalog and local or
+object storage.
+
+### Limitations
+
+- Data storage URLs currently support `file`, `s3`, and `gs` schemes.
+- Deployments must account for the required DuckDB extensions and the catalog,
+  storage, and maintenance services they configure.
+- Primary-key sorting requires source tables to have a primary key; other
+  sorting modes do not add that requirement.
+
+## Snowflake
+
+<DestinationStatus status="in-progress" />
+
+Snowflake uses direct Snowpipe Streaming and key-pair authentication.
+
+### Limitations
+
+- Setup requires a Snowflake user and role with the documented warehouse,
+  database, and schema privileges.
+- Schema evolution support is still in progress. Only defaults that ETL can
+  translate safely are applied; unsupported expressions are skipped with a
+  warning.
+- Validate channel recovery, committed offsets, and account-specific resource
+  limits before production use.
+
+## Iceberg
+
+<DestinationStatus status="deprecated" />
+
+The Apache Iceberg implementation is retained for compatibility and is not
+recommended for new deployments.
+
+### Limitations
+
+- Schema-change DDL is not supported. A newer relation schema is rejected.
+- The destination is deprecated and is not receiving the same product
+  investment as the active destination implementations.
+
+## Custom destinations and upstream support
+
+Adding an official destination is a long-term maintenance commitment. It
+requires durable and idempotent writes, schema-evolution behavior, restart and
+recovery coverage, integration infrastructure, credential handling, ongoing
+dependency updates, and operational support. For that reason, maintainers are
+careful about accepting new destination implementations upstream. Open an issue
+or discussion before investing in an upstream implementation; acceptance is
+not guaranteed.
+
+You do not need to contribute a destination upstream to use ETL. Implement the
+[`Destination`](/explanation/traits/#destination) trait in your own Rust
+project, wire it into `Pipeline::new`, and maintain it alongside your
+application. See [Custom Implementations](/guides/custom-implementations/) for
+a complete example.

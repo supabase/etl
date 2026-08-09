@@ -2,30 +2,30 @@
 //!   <img src="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/supabase-logo-wordmark--light.svg" alt="Supabase" width="480">
 //! </p>
 //!
-//! This crate provides a high-performance, streaming ETL (Extract, Transform,
-//! Load) system built on Postgres logical replication. It enables real-time
-//! data synchronization from Postgres databases to destination systems with a
-//! typed Rust API and robust error handling.
+//! Supabase ETL is a high-performance Postgres replication engine written in
+//! Rust. This crate provides the embeddable runtime for performing an initial
+//! sync of published tables, then replicating changes to destination systems
+//! through a typed Rust API.
 //!
 //! # Key Features
 //!
-//! - **Real-time streaming**: Uses Postgres logical replication for minimal
-//!   latency
+//! - **Initial sync and ongoing replication**: Copies existing rows, then
+//!   replicates changes with low latency.
 //! - **Destination agnostic**: Implement your own custom destinations to which
-//!   data will be sent
+//!   data will be sent.
 //! - **Robust error handling**: Comprehensive error classification with retry
-//!   strategies
+//!   strategies.
 //! - **Concurrent processing**: Parallel table synchronization and event
-//!   application for increased throughput
+//!   application for increased throughput.
 //! - **Suspendable**: Persistent replication checkpoints allow the pipeline to
-//!   be safely paused and restarted
+//!   be safely paused and restarted.
 //!
 //! # Core Concepts
 //!
 //! ## Pipeline
 //! A [`pipeline::Pipeline`] represents a complete ETL workflow that connects a
 //! Postgres publication to a destination. It manages the replication stream,
-//! coordinates initial copy and streaming workers, and handles failures
+//! coordinates initial sync and ongoing replication, and handles failures
 //! gracefully.
 //!
 //! ## Destinations

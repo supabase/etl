@@ -81,6 +81,7 @@ snowflake = [
     "dep:thiserror",
     "dep:tokio",
     "dep:tracing",
+    "uuid/v5",
     "dep:zstd",
 ]
 # We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only

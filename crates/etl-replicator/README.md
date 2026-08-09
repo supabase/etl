@@ -1,6 +1,13 @@
 # `etl` - Replicator
 
-Long-lived process that performs Postgres logical replication using the `etl` crate.
+Ready-made, long-lived application that runs one `etl` replication pipeline
+with a Postgres-backed state store and one configured built-in destination.
+BigQuery is the stable, recommended default. Compare all built-in modules in
+the [Destinations reference](https://supabase.github.io/etl/reference/destinations/).
+
+For build instructions, a complete minimal configuration, credential handling,
+and production considerations, see the
+[Standalone Replicator guide](https://supabase.github.io/etl/guides/standalone-replicator/).
 
 ## Configuration
 

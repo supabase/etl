@@ -12,7 +12,7 @@
   - `crates/etl-examples/`: examples.
   - `crates/etl-benchmarks/`: benchmarks.
   - `crates/xtask/`: workspace automation commands.
-- Docs live in `docs/`.
+- The Next.js/Fumadocs website lives in `site/`; its documentation content lives in `site/content/docs/`.
 - Local development and ops tooling live in `crates/xtask/` (run via `cargo x`) and `DEVELOPMENT.md`.
 - Tests live next to code in `src/` or `tests/`.
 
@@ -291,8 +291,12 @@
 - Doctests use `cargo test --doc` (nextest does not support them).
 - If test output shows `0 passed; 0 failed; 0 ignored; n filtered out`, treat that as a failure to run tests.
 - Verify that expected tests actually ran, not just that Cargo exited successfully.
-- Do not add custom messages to assertions. Use a preceding comment when an
-  assertion's purpose is not evident from its expression.
+- Avoid custom assertion messages that merely restate the condition or duplicate
+  values already reported by the assertion macro. Use a preceding comment to
+  explain why a non-obvious invariant matters. Add a concise custom message when
+  it supplies non-sensitive runtime context that the default failure output
+  cannot provide, such as a case identifier in table-driven tests, loops, or
+  shared assertion helpers.
 - Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - When a test failure needs deeper debugging, rerun the targeted test with

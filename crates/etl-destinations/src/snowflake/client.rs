@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc};
 
 use etl::{
     pipeline::PipelineId,
@@ -7,9 +7,10 @@ use etl::{
 use metrics::{counter, gauge, histogram};
 use tokio::{
     sync::{Mutex, RwLock},
-    time::sleep,
+    time::{Instant, sleep},
 };
 use tracing::warn;
+use uuid::Uuid;
 
 use crate::snowflake::{
     Config, Error, Result, SnowpipeError,
@@ -26,7 +27,6 @@ use crate::snowflake::{
     streaming::{
         AcceptedRowBatch, ChannelHandle, DEFAULT_COMMIT_POLL_INTERVAL, DEFAULT_COMMIT_WAIT_TIMEOUT,
         OffsetToken, PendingDurabilityTarget, RestStreamClient, RowBatch, StreamClient,
-        validate_committed_status,
     },
 };
 
@@ -58,6 +58,62 @@ const STREAMING_PENDING_MAX_ROW_BATCHES: usize = 64;
 
 /// Maximum accepted compressed bytes before forcing a durability wait.
 const STREAMING_PENDING_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// Namespace for deterministic Snowflake truncate-attempt request IDs.
+///
+/// The namespace and encoded identity are a durable protocol: changing either
+/// would prevent a restarted process from recovering an outcome-unknown SQL
+/// request under its original ID.
+const TRUNCATE_ATTEMPT_NAMESPACE: Uuid = Uuid::from_u128(0x4b929faf_9687_4544_a34f_f934369a37f7);
+
+/// Version tag for the truncate-attempt identity encoding.
+const TRUNCATE_ATTEMPT_IDENTITY_VERSION: &[u8] = b"supabase-etl/snowflake/truncate-attempt/v1";
+
+/// Stable identity for one physical Snowflake truncate attempt.
+#[derive(Clone, Copy)]
+struct TruncateAttemptIdentity<'a> {
+    /// ETL pipeline that owns the target channel.
+    pipeline_id: PipelineId,
+    /// Source Postgres table identifier.
+    table_id: TableId,
+    /// Exact Snowflake database identifier used by SQL.
+    database: &'a str,
+    /// Exact Snowflake schema identifier used by SQL.
+    schema: &'a str,
+    /// Exact Snowflake table identifier used by SQL.
+    table: &'a str,
+    /// Source truncate boundary assigned to the channel before SQL.
+    truncate_offset: &'a OffsetToken,
+    /// Snowflake channel creation timestamp observed before SQL.
+    channel_created_on_ms: u64,
+    /// Cumulative inserted rows observed before SQL.
+    rows_inserted: u64,
+}
+
+impl TruncateAttemptIdentity<'_> {
+    /// Derives the Snowflake SQL request ID for this physical attempt.
+    fn request_id(self) -> Uuid {
+        fn append_identity_component(identity: &mut Vec<u8>, component: &[u8]) {
+            let component_len = u64::try_from(component.len())
+                .expect("identity component length should fit into u64");
+            identity.extend_from_slice(&component_len.to_be_bytes());
+            identity.extend_from_slice(component);
+        }
+
+        let mut identity = Vec::new();
+        append_identity_component(&mut identity, TRUNCATE_ATTEMPT_IDENTITY_VERSION);
+        identity.extend_from_slice(&self.pipeline_id.to_be_bytes());
+        identity.extend_from_slice(&self.table_id.into_inner().to_be_bytes());
+        append_identity_component(&mut identity, self.database.as_bytes());
+        append_identity_component(&mut identity, self.schema.as_bytes());
+        append_identity_component(&mut identity, self.table.as_bytes());
+        append_identity_component(&mut identity, self.truncate_offset.as_ref().as_bytes());
+        identity.extend_from_slice(&self.channel_created_on_ms.to_be_bytes());
+        identity.extend_from_slice(&self.rows_inserted.to_be_bytes());
+
+        Uuid::new_v5(&TRUNCATE_ATTEMPT_NAMESPACE, &identity)
+    }
+}
 
 /// Global accepted-but-not-durable Snowflake streaming state.
 #[derive(Debug, Default)]
@@ -112,6 +168,11 @@ impl PendingDurabilityState {
     /// Returns whether there is no accepted-but-not-durable streaming work.
     fn is_empty(&self) -> bool {
         self.targets.is_empty()
+    }
+
+    /// Returns whether one table still has accepted-but-not-durable work.
+    fn has_target(&self, table_id: TableId) -> bool {
+        self.targets.contains_key(&table_id)
     }
 
     /// Clones the current pending targets for status polling.
@@ -418,12 +479,62 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         }
     }
 
-    /// Truncate the table and reset ingestion state so offsets restart.
-    pub async fn truncate_table(&self, table_id: TableId, table_name: &str) -> Result<()> {
-        self.wait_for_pending_durability().await?;
-        let mut guard = self.get_channel(table_id).await?.lock_owned().await;
-        self.sql_client.truncate_table(table_name).await?;
-        guard.reset().await
+    /// Applies a source truncate to Snowflake and positions the table's
+    /// Snowpipe channel at `truncate_offset`.
+    ///
+    /// Previously accepted rows are made durable first. The channel lock is
+    /// then held while the channel is opened at the truncate boundary, the
+    /// table is cleared, and the channel is reopened after DDL. This makes a
+    /// failed attempt safe to replay: earlier DML is covered by the channel
+    /// offset, while later DML remains eligible for replay. The first open's
+    /// channel lineage and row progress identify the physical SQL attempt so a
+    /// restart can reconcile an outcome-unknown request without suppressing a
+    /// later required truncate.
+    pub async fn truncate_table(
+        &self,
+        table_id: TableId,
+        table_name: &str,
+        truncate_offset: &OffsetToken,
+    ) -> Result<()> {
+        loop {
+            self.wait_for_pending_durability().await?;
+            let mut guard = self.get_channel(table_id).await?.lock_owned().await;
+
+            // A sender holds this channel lock until it records any accepted batch
+            // in `pending_durability`. If a sender finished after the wait above,
+            // release the channel and drain its batch before truncating.
+            if self.pending_durability.lock().await.has_target(table_id) {
+                drop(guard);
+                continue;
+            }
+
+            // Open at the truncate offset before clearing the table. This waits for
+            // any in-flight rowset to commit and invalidates the previous owner's
+            // continuation token.
+            let status = guard.open_at(truncate_offset).await?;
+            let channel_created_on_ms = status.created_on_ms.ok_or_else(|| {
+                Error::Channel(
+                    "Snowflake open response omitted the channel creation timestamp.".into(),
+                )
+            })?;
+            let request_id = TruncateAttemptIdentity {
+                pipeline_id: self.pipeline_id,
+                table_id,
+                database: &self.database,
+                schema: &self.schema,
+                table: table_name,
+                truncate_offset,
+                channel_created_on_ms,
+                rows_inserted: status.rows_inserted,
+            }
+            .request_id();
+            self.sql_client.truncate_table(table_name, request_id).await?;
+
+            // TRUNCATE may invalidate that token, so reopen at the same offset before
+            // allowing another sender to acquire the channel lock.
+            guard.open_at(truncate_offset).await?;
+            return Ok(());
+        }
     }
 
     /// Retires one table's process-local state before a fresh copy reset.
@@ -516,7 +627,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                 self.wait_for_pending_durability().await?;
             }
 
-            let accepted = channel.lock().await.accept_streaming_batches(vec![batch]).await?;
+            let mut channel = channel.lock().await;
+            let accepted = channel.accept_streaming_batches(vec![batch]).await?;
             for accepted_batch in accepted {
                 let mut pending = self.pending_durability.lock().await;
                 pending.record(table_id, accepted_batch)?;
@@ -576,15 +688,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             let mut committed = Vec::new();
             for (table_id, target) in targets {
                 let channel = self.get_channel(table_id).await?;
-                let status = channel.lock().await.refresh_status().await?;
-                let accepted_batch = target.as_accepted_batch();
-                validate_committed_status(&status, &accepted_batch)?;
-
-                if status
-                    .offset_token
-                    .as_ref()
-                    .is_some_and(|offset| offset >= &target.target_offset)
-                {
+                if channel.lock().await.check_durability(&target, deadline).await? {
                     committed.push((table_id, target.target_offset.clone()));
                 }
             }
@@ -646,7 +750,7 @@ mod tests {
             rows,
             bytes,
             baseline_rows_inserted: 100,
-            baseline_rows_error_count: 1,
+            channel_created_on_ms: 1,
         }
     }
 
@@ -684,7 +788,6 @@ mod tests {
         assert_eq!(target.rows, 5);
         assert_eq!(target.bytes, 50);
         assert_eq!(target.baseline_rows_inserted, 100);
-        assert_eq!(target.baseline_rows_error_count, 1);
     }
 
     #[test]
@@ -732,6 +835,72 @@ mod tests {
 
         assert!(state.limits_reached());
         assert!(state.would_exceed_limits(1));
+    }
+
+    #[test]
+    fn truncate_attempt_request_id_has_stable_encoding() {
+        let truncate_offset = OffsetToken::new(0x1234_5678_9abc_def0_u64.into(), 42);
+        let identity = TruncateAttemptIdentity {
+            pipeline_id: 17,
+            table_id: TableId::new(23),
+            database: "TEST_DB",
+            schema: "PUBLIC",
+            table: "USERS",
+            truncate_offset: &truncate_offset,
+            channel_created_on_ms: 1_754_321_098_765,
+            rows_inserted: 987_654,
+        };
+
+        assert_eq!(identity.request_id().to_string(), "f57cbf52-002a-5509-a5e7-670dd1ec603b");
+    }
+
+    #[test]
+    fn truncate_attempt_request_id_changes_with_each_identity_component() {
+        let truncate_offset = OffsetToken::new(100_u64.into(), 3);
+        let other_truncate_offset = OffsetToken::new(100_u64.into(), 4);
+        let identity = TruncateAttemptIdentity {
+            pipeline_id: 17,
+            table_id: TableId::new(23),
+            database: "TEST_DB",
+            schema: "PUBLIC",
+            table: "USERS",
+            truncate_offset: &truncate_offset,
+            channel_created_on_ms: 1_754_321_098_765,
+            rows_inserted: 987_654,
+        };
+        let expected = identity.request_id();
+        let variants = [
+            TruncateAttemptIdentity { pipeline_id: 18, ..identity },
+            TruncateAttemptIdentity { table_id: TableId::new(24), ..identity },
+            TruncateAttemptIdentity { database: "OTHER_DB", ..identity },
+            TruncateAttemptIdentity { schema: "PRIVATE", ..identity },
+            TruncateAttemptIdentity { table: "users", ..identity },
+            TruncateAttemptIdentity { truncate_offset: &other_truncate_offset, ..identity },
+            TruncateAttemptIdentity { channel_created_on_ms: 1_754_321_098_766, ..identity },
+            TruncateAttemptIdentity { rows_inserted: 987_655, ..identity },
+        ];
+
+        for variant in variants {
+            assert_ne!(variant.request_id(), expected);
+        }
+    }
+
+    #[test]
+    fn truncate_attempt_target_components_are_length_delimited() {
+        let truncate_offset = OffsetToken::new(100_u64.into(), 3);
+        let first = TruncateAttemptIdentity {
+            pipeline_id: 17,
+            table_id: TableId::new(23),
+            database: "AB",
+            schema: "C",
+            table: "USERS",
+            truncate_offset: &truncate_offset,
+            channel_created_on_ms: 1_754_321_098_765,
+            rows_inserted: 987_654,
+        };
+        let second = TruncateAttemptIdentity { database: "A", schema: "BC", ..first };
+
+        assert_ne!(first.request_id(), second.request_id());
     }
 
     #[tokio::test]

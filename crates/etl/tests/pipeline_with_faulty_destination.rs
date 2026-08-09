@@ -8,12 +8,15 @@ use etl::{
     schema::{TableId, TableName},
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
-        database::{replication_slot_state, spawn_source_database, wait_for_new_walsender},
+        database::{
+            WalsenderTermination, replication_slot_state, spawn_source_database,
+            terminate_active_walsender, terminate_walsender, wait_for_new_walsender,
+        },
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::{FaultAction, FaultyOp},
         materialize::{FromTableRow, materialize_events},
         memory_destination::MemoryDestination,
-        notify::TimedNotify,
+        notify::{DEFAULT_NOTIFY_TIMEOUT, TimedNotify},
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         property::{block_on, run_expensive_property},
@@ -149,36 +152,6 @@ async fn wait_for_notification(
         .map_err(|_| TestCaseError::fail(format!("timed out waiting for {description}")))
 }
 
-/// Terminates the active apply walsender and returns its PID.
-async fn terminate_apply_walsender(
-    client: &Client,
-    apply_slot_name: &str,
-) -> Result<i32, TestCaseError> {
-    let (_, active_pid) = replication_slot_state(client, apply_slot_name).await;
-    let old_pid = active_pid
-        .ok_or_else(|| TestCaseError::fail("apply walsender was not active at disconnect"))?;
-    let row = client
-        .query_one("select pg_terminate_backend($1)", &[&old_pid])
-        .await
-        .map_err(|error| TestCaseError::fail(format!("failed to terminate walsender: {error}")))?;
-    let terminated: bool = row.get(0);
-
-    prop_assert!(terminated, "Postgres did not terminate apply walsender {old_pid}");
-
-    Ok(old_pid)
-}
-
-/// Waits for a new apply walsender within the roulette timeout.
-async fn wait_for_apply_reconnect(
-    client: &Client,
-    apply_slot_name: &str,
-    old_pid: i32,
-) -> Result<(), TestCaseError> {
-    tokio::time::timeout(ROULETTE_TIMEOUT, wait_for_new_walsender(client, apply_slot_name, old_pid))
-        .await
-        .map_err(|_| TestCaseError::fail("timed out waiting for the apply walsender to reconnect"))
-}
-
 /// Mutable state used to execute one walsender roulette workload.
 struct WalsenderRouletteWorkload<'a> {
     /// Source database receiving generated transactions.
@@ -241,6 +214,41 @@ impl<'a> WalsenderRouletteWorkload<'a> {
         }
     }
 
+    /// Terminates the active apply walsender and maps failures.
+    async fn terminate_apply_walsender(&self) -> Result<i32, TestCaseError> {
+        let client = self.database.client.as_ref().unwrap();
+        let termination =
+            terminate_active_walsender(client, self.apply_slot_name).await.map_err(|error| {
+                TestCaseError::fail(format!("Failed to terminate active walsender: {error}"))
+            })?;
+
+        match termination {
+            WalsenderTermination::Inactive => {
+                Err(TestCaseError::fail("Apply walsender was not active at disconnect"))
+            }
+            WalsenderTermination::NotTerminated { pid } => Err(TestCaseError::fail(format!(
+                "Postgres did not terminate apply walsender {pid}"
+            ))),
+            WalsenderTermination::Terminated { pid } => Ok(pid),
+        }
+    }
+
+    /// Waits for a new apply walsender and maps failures.
+    async fn wait_for_reconnect(&self, old_pid: i32) -> Result<(), TestCaseError> {
+        let client = self.database.client.as_ref().unwrap();
+        let reconnect =
+            wait_for_new_walsender(client, self.apply_slot_name, old_pid, ROULETTE_TIMEOUT).await;
+        let new_pid = reconnect.map_err(|error| {
+            TestCaseError::fail(format!(
+                "Failed to query the apply walsender while waiting for reconnect: {error}"
+            ))
+        })?;
+
+        prop_assert!(new_pid.is_some(), "Timed out waiting for the apply walsender to reconnect");
+
+        Ok(())
+    }
+
     /// Disconnects after the scheduled write reaches the destination.
     async fn disconnect_after_delivered_write(
         &mut self,
@@ -248,10 +256,9 @@ impl<'a> WalsenderRouletteWorkload<'a> {
     ) -> Result<(), TestCaseError> {
         self.insert_user(user_number).await?;
 
-        let client = self.database.client.as_ref().unwrap();
-        let old_pid = terminate_apply_walsender(client, self.apply_slot_name).await?;
+        let old_pid = self.terminate_apply_walsender().await?;
 
-        wait_for_apply_reconnect(client, self.apply_slot_name, old_pid).await
+        self.wait_for_reconnect(old_pid).await
     }
 
     /// Disconnects while the scheduled write response is held.
@@ -269,18 +276,17 @@ impl<'a> WalsenderRouletteWorkload<'a> {
             .await
             .map_err(|_| TestCaseError::fail("timed out waiting for held write response"))?;
 
-        let client = self.database.client.as_ref().unwrap();
-        let old_pid = terminate_apply_walsender(client, self.apply_slot_name).await?;
+        let old_pid = self.terminate_apply_walsender().await?;
 
         match response_timing {
             WriteResponseTiming::ReleaseThenWaitForReconnect => {
                 hold.release_ok();
                 wait_for_notification(&delivered, format!("delivery of held user {user_id}"))
                     .await?;
-                wait_for_apply_reconnect(client, self.apply_slot_name, old_pid).await
+                self.wait_for_reconnect(old_pid).await
             }
             WriteResponseTiming::WaitForReconnectThenRelease => {
-                wait_for_apply_reconnect(client, self.apply_slot_name, old_pid).await?;
+                self.wait_for_reconnect(old_pid).await?;
                 hold.release_ok();
                 wait_for_notification(&delivered, format!("delivery of held user {user_id}")).await
             }
@@ -575,7 +581,17 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
     transaction.commit_transaction().await;
 
     users_ready_notify.notified().await;
-    wait_for_new_walsender(database.client.as_ref().unwrap(), &apply_slot_name, old_pid).await;
+    assert!(
+        wait_for_new_walsender(
+            database.client.as_ref().unwrap(),
+            &apply_slot_name,
+            old_pid,
+            DEFAULT_NOTIFY_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
     replayed_events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -886,10 +902,13 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
     let client = database.client.as_ref().unwrap();
     let (flush_lsn_at_kill, active_pid) = replication_slot_state(client, &apply_slot_name).await;
     let old_pid = active_pid.expect("apply walsender should be active");
-
-    client.query_one("select pg_terminate_backend($1)", &[&old_pid]).await.unwrap();
-
-    wait_for_new_walsender(client, &apply_slot_name, old_pid).await;
+    assert!(terminate_walsender(client, old_pid).await.unwrap());
+    assert!(
+        wait_for_new_walsender(client, &apply_slot_name, old_pid, DEFAULT_NOTIFY_TIMEOUT)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // WHEN: the held response is released only after the reconnect
     let replay_recorded_notify = destination
@@ -975,7 +994,7 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
         .wait_for_all_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
-    client.query_one("select pg_terminate_backend($1)", &[&old_pid]).await.unwrap();
+    assert!(terminate_walsender(client, old_pid).await.unwrap());
 
     hold.release_ok();
 
@@ -984,7 +1003,12 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
         .first()
         .expect("released insert should be recorded");
 
-    wait_for_new_walsender(client, &apply_slot_name, old_pid).await;
+    assert!(
+        wait_for_new_walsender(client, &apply_slot_name, old_pid, DEFAULT_NOTIFY_TIMEOUT)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // THEN: streaming continues without loss, replaying the insert at most once
     let second_insert_notify = destination

@@ -1,0 +1,1975 @@
+@import '@fontsource-variable/inter/index.css';
+@import '@fontsource-variable/manrope/index.css';
+@import '@fontsource-variable/source-code-pro/index.css';
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+@theme {
+  /* Supabase design system: Inter for UI, Manrope for headings, Source Code Pro
+     for code. */
+  --font-sans: 'Inter Variable', Inter, ui-sans-serif, system-ui, sans-serif;
+  --font-heading: 'Manrope Variable', Manrope, ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Source Code Pro Variable', 'Source Code Pro', Menlo, monospace;
+}
+
+:root {
+  --fd-layout-width: 1500px;
+  --etl-shell-width: 1500px;
+  --etl-page-gutter: clamp(1.5rem, 4vw, 4rem);
+  /* Neutrals mirror the Supabase design system: a zero-chroma lightness ramp,
+     with brand colour reserved for emphasis. */
+  --color-fd-background: oklch(0.995 0 0);
+  --color-fd-foreground: oklch(0.145 0 0);
+  --color-fd-muted: oklch(0.973 0 0);
+  --color-fd-muted-foreground: oklch(0.521 0 0);
+  --color-fd-popover: oklch(1 0 0);
+  --color-fd-popover-foreground: oklch(0.145 0 0);
+  --color-fd-card: oklch(1 0 0);
+  --color-fd-card-foreground: oklch(0.145 0 0);
+  --color-fd-border: oklch(0.145 0 0 / 0.108);
+  --color-fd-primary-foreground: oklch(0.995 0 0);
+  --color-fd-secondary: oklch(0.958 0 0);
+  --color-fd-secondary-foreground: oklch(0.205 0 0);
+  --color-fd-accent: color-mix(in srgb, var(--etl-brand-default) 15%, white);
+  --color-fd-accent-foreground: var(--etl-brand-600);
+  --color-fd-ring: var(--etl-brand-500);
+  /* brand-default / brand-500 / brand-600 from the Supabase design system. */
+  --etl-brand-default: #3fcf8e;
+  --etl-brand-500: #16b674;
+  --etl-brand-600: #097c4f;
+  --etl-green: var(--etl-brand-default);
+  --etl-brand: var(--etl-brand-500);
+  --etl-green-strong: var(--etl-brand-600);
+  --etl-green-soft: color-mix(in srgb, var(--etl-brand-default) 16%, white);
+  --color-fd-primary: var(--etl-brand-600);
+  --etl-ink: #0a0a0a;
+  --etl-grid: rgba(10, 10, 10, 0.05);
+  /* Explicit tones down the bore rather than white washes, so the channel reads
+     as a curved recess instead of a flat bar. */
+  --etl-tube-top: oklch(0.902 0 0);
+  --etl-tube-mid: oklch(0.947 0 0);
+  --etl-tube-gloss: oklch(0.988 0 0);
+  --etl-tube-bottom: oklch(0.963 0 0);
+  --etl-tube-wall: rgba(10, 10, 10, 0.11);
+  --etl-tube-shade: rgba(10, 10, 10, 0.24);
+  --etl-packet: var(--etl-brand-500);
+  --etl-tube-sheen: rgba(255, 255, 255, 1);
+  /* The panel body is off-white so highlights have somewhere to sit; on a light
+     theme form is carved by shadow, not by adding more white. */
+  --etl-metal-top: oklch(0.995 0 0);
+  --etl-metal-bottom: oklch(0.943 0 0);
+  --etl-metal-texture: rgba(10, 10, 10, 0.032);
+  --etl-metal-sheen: rgba(255, 255, 255, 1);
+  --etl-metal-edge-light: rgba(255, 255, 255, 1);
+  --etl-metal-edge-dark: rgba(10, 10, 10, 0.1);
+  --etl-metal-rim: rgba(10, 10, 10, 0.17);
+  --etl-metal-cast: rgba(10, 10, 10, 0.2);
+  --etl-port-top: oklch(0.917 0 0);
+  --etl-port-bottom: oklch(0.972 0 0);
+}
+
+.dark {
+  --color-fd-background: oklch(0.145 0 0);
+  --color-fd-foreground: oklch(0.955 0 0);
+  --color-fd-muted: oklch(0.196 0 0);
+  --color-fd-muted-foreground: oklch(0.64 0 0);
+  --color-fd-popover: oklch(0.185 0 0);
+  --color-fd-popover-foreground: oklch(0.955 0 0);
+  --color-fd-card: oklch(0.178 0 0);
+  --color-fd-card-foreground: oklch(0.955 0 0);
+  --color-fd-border: oklch(1 0 0 / 0.11);
+  --color-fd-primary: var(--etl-brand-default);
+  --color-fd-primary-foreground: oklch(0.145 0 0);
+  --color-fd-secondary: oklch(0.215 0 0);
+  --color-fd-secondary-foreground: oklch(0.955 0 0);
+  --color-fd-accent: color-mix(in srgb, var(--etl-brand-default) 13%, transparent);
+  --color-fd-accent-foreground: var(--etl-brand-default);
+  --color-fd-ring: var(--etl-brand-default);
+  --etl-brand: var(--etl-brand-default);
+  --etl-green-strong: var(--etl-brand-default);
+  --etl-green-soft: color-mix(in srgb, var(--etl-brand-default) 14%, transparent);
+  --etl-grid: rgba(255, 255, 255, 0.045);
+  --etl-tube-top: oklch(0.093 0 0);
+  --etl-tube-mid: oklch(0.134 0 0);
+  --etl-tube-gloss: oklch(0.258 0 0);
+  --etl-tube-bottom: oklch(0.183 0 0);
+  --etl-tube-wall: rgba(255, 255, 255, 0.12);
+  --etl-tube-shade: rgba(0, 0, 0, 0.7);
+  --etl-tube-sheen: rgba(255, 255, 255, 0.13);
+  --etl-packet: var(--etl-brand-default);
+  --etl-metal-top: oklch(0.222 0 0);
+  --etl-metal-bottom: oklch(0.152 0 0);
+  --etl-metal-texture: rgba(255, 255, 255, 0.024);
+  --etl-metal-sheen: rgba(255, 255, 255, 0.1);
+  --etl-metal-edge-light: rgba(255, 255, 255, 0.14);
+  --etl-metal-edge-dark: rgba(0, 0, 0, 0.55);
+  --etl-metal-rim: rgba(255, 255, 255, 0.135);
+  --etl-metal-cast: rgba(0, 0, 0, 0.72);
+  --etl-port-top: oklch(0.128 0 0);
+  --etl-port-bottom: oklch(0.208 0 0);
+}
+
+* {
+  scrollbar-color: color-mix(in srgb, var(--color-fd-muted-foreground) 38%, transparent) transparent;
+}
+
+html {
+  scroll-behavior: smooth;
+  scrollbar-gutter: stable;
+  tab-size: 4;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 48% -22rem, color-mix(in srgb, var(--etl-green) 5%, transparent), transparent 35rem),
+    var(--color-fd-background);
+  color: var(--color-fd-foreground);
+  font-family: var(--font-sans);
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  letter-spacing: -0.008em;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-heading);
+}
+
+::selection {
+  color: var(--color-fd-primary-foreground);
+  background: color-mix(in srgb, var(--etl-green) 74%, white);
+}
+
+a,
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-fd-ring);
+  outline-offset: 3px;
+}
+
+#nd-docs-layout {
+  background: transparent;
+}
+
+#nd-sidebar {
+  background: var(--color-fd-card);
+  border-color: var(--color-fd-border);
+}
+
+#nd-sidebar .etl-brand {
+  padding-block: 0.5rem;
+  padding-inline-start: 0.2rem;
+}
+
+@media (min-width: 768px) {
+  #nd-sidebar {
+    width: var(--fd-sidebar-width);
+    align-items: stretch;
+  }
+}
+
+#nd-sidebar a[aria-label='GitHub'] {
+  gap: 0.45rem;
+  padding-inline: 0.7rem;
+}
+
+#nd-sidebar a[aria-label='GitHub']::after {
+  content: 'Supabase ETL';
+  font-size: 0.75rem;
+  font-weight: 620;
+}
+
+#nd-sidebar a[aria-current='page'] {
+  color: var(--color-fd-accent-foreground);
+  background: var(--color-fd-accent);
+  font-weight: 620;
+}
+
+#fd-search-dialog-content {
+  top: clamp(4.75rem, 14vh, 8rem) !important;
+  width: min(calc(100% - 2rem), 35rem) !important;
+  max-width: none !important;
+  border-color: color-mix(in srgb, var(--color-fd-border) 72%, var(--etl-green) 28%) !important;
+  border-radius: 1rem !important;
+  background:
+    linear-gradient(160deg, color-mix(in srgb, var(--color-fd-popover) 94%, var(--etl-green) 6%), var(--color-fd-popover)) !important;
+  box-shadow:
+    0 24px 90px color-mix(in srgb, var(--etl-ink) 24%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--etl-green) 5%, transparent) !important;
+}
+
+#fd-search-dialog-content > div:nth-of-type(1) {
+  min-height: 3.5rem;
+  gap: 0.65rem;
+  padding: 0.72rem 0.8rem;
+  border-bottom-color: color-mix(in srgb, var(--color-fd-border) 78%, transparent);
+}
+
+#fd-search-dialog-content [data-fd-search-dialog-input] {
+  font-size: 0.94rem;
+  letter-spacing: -0.012em;
+  caret-color: var(--color-fd-primary);
+}
+
+#fd-search-dialog-content [data-fd-search-dialog-input]:focus,
+#fd-search-dialog-content [data-fd-search-dialog-input]:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+#fd-search-dialog-content button[aria-label='Close Search'] {
+  border-color: color-mix(in srgb, var(--color-fd-border) 78%, transparent);
+  border-radius: 0.52rem;
+  background: color-mix(in srgb, var(--color-fd-muted) 58%, transparent);
+  font-size: 0.62rem;
+}
+
+#fd-search-dialog-content > div:nth-of-type(2) {
+  min-height: 7rem;
+}
+
+#fd-search-dialog-content > div:nth-of-type(2) > div {
+  max-height: min(52vh, 23rem);
+  padding: 0.35rem;
+}
+
+#fd-search-dialog-content > div:nth-of-type(2) > div > div:only-child {
+  padding-block: 2.5rem;
+  font-size: 0.78rem;
+}
+
+#fd-search-dialog-content > div:last-child {
+  padding: 0.65rem 0.85rem;
+  color: var(--color-fd-muted-foreground);
+  background: color-mix(in srgb, var(--color-fd-muted) 52%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.01em;
+}
+
+.etl-sidebar-pipelines {
+  order: -1;
+  display: flex;
+  min-height: 3.15rem;
+  align-items: center;
+  gap: 0.65rem;
+  margin-bottom: 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--etl-green) 38%, var(--color-fd-border));
+  border-radius: 0.62rem;
+  padding: 0.55rem 0.68rem;
+  color: var(--color-fd-accent-foreground);
+  background:
+    linear-gradient(110deg, color-mix(in srgb, var(--etl-green) 13%, var(--color-fd-card)), var(--color-fd-card));
+  text-decoration: none;
+  transition: 150ms ease;
+  transition-property: border-color, box-shadow, transform;
+}
+
+.etl-sidebar-pipelines:hover {
+  border-color: color-mix(in srgb, var(--etl-green) 68%, var(--color-fd-border));
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--etl-green) 9%, transparent);
+  transform: translateY(-1px);
+}
+
+.etl-sidebar-pipelines svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex: 0 0 1.05rem;
+}
+
+.etl-sidebar-pipelines-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.etl-sidebar-pipelines-copy strong {
+  color: var(--color-fd-foreground);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.etl-sidebar-pipelines-copy small {
+  margin-top: 0.16rem;
+  color: var(--color-fd-muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.025em;
+}
+
+.etl-sidebar-pipelines-arrow {
+  margin-inline-start: auto;
+  color: var(--color-fd-primary);
+  font-size: 0.9rem;
+}
+
+#nd-subnav {
+  border-color: color-mix(in srgb, var(--color-fd-border) 82%, var(--etl-green) 18%);
+}
+
+#nd-toc a[data-active='true'] {
+  color: var(--color-fd-primary);
+  font-weight: 620;
+}
+
+#nd-page {
+  gap: 0;
+  max-width: 920px;
+  padding-bottom: 7rem;
+}
+
+#nd-page > .prose {
+  margin-bottom: clamp(2rem, 4vw, 3rem);
+}
+
+.etl-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.58rem;
+  color: var(--color-fd-foreground);
+  font-size: 0.98rem;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.etl-brand-mark {
+  display: block;
+  width: auto;
+  /* Fixed rather than em-relative so the mark renders at the same size
+     everywhere regardless of surrounding font-size, keeping the homepage and
+     docs logos visually identical. */
+  height: 0.92rem;
+  flex: none;
+  /* A root <svg> clips to its viewBox by default, which shaves the glyph's
+     antialiased edge rows at small sizes. */
+  overflow: visible;
+  color: var(--etl-brand);
+}
+
+.etl-landing {
+  /* The copy rises with the grid, so it is settled while the diagram is still
+     assembling behind it. Matches --etl-t-grid. */
+  --etl-t-copy: 120ms;
+
+  position: relative;
+  isolation: isolate;
+  height: max(100svh, 760px);
+  min-height: 760px;
+  overflow: hidden;
+  background: var(--color-fd-background);
+}
+
+.etl-home-header {
+  position: absolute;
+  z-index: 50;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 4.25rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-fd-border) 86%, transparent);
+  background: color-mix(in srgb, var(--color-fd-background) 72%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.etl-home-nav {
+  display: grid;
+  width: 100%;
+  max-width: var(--etl-shell-width);
+  height: 100%;
+  grid-template-columns: minmax(12rem, 1fr) minmax(16rem, 22rem) minmax(12rem, 1fr);
+  align-items: center;
+  gap: 1.5rem;
+  margin-inline: auto;
+  padding-inline: var(--etl-page-gutter);
+}
+
+.etl-home-nav-brand {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-self: start;
+  text-decoration: none;
+}
+
+/* Deliberately no size/gap override here: the homepage brand should always
+   render exactly like the docs sidebar's (.etl-brand's own base styles), at
+   every viewport, so the header doesn't visibly resize when navigating
+   between the two. */
+.etl-home-nav .etl-brand {
+  line-height: 1;
+}
+
+.etl-home-search {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+.etl-home-search-full {
+  width: 100%;
+  min-height: 2.5rem;
+  border-color: color-mix(in srgb, var(--color-fd-border) 86%, transparent) !important;
+  border-radius: 999px !important;
+  background: color-mix(in srgb, var(--color-fd-muted) 64%, transparent) !important;
+}
+
+.etl-home-search-compact {
+  display: none !important;
+}
+
+.etl-home-nav-links {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-self: end;
+  gap: 1.25rem;
+}
+
+.etl-home-nav-links > a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--color-fd-foreground);
+  font-size: 0.875rem;
+  font-weight: 650;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.etl-home-nav-links > a:hover {
+  color: var(--color-fd-primary);
+}
+
+.etl-home-nav-links > a svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.etl-home-theme-switch {
+  min-height: 2.35rem;
+  border-color: color-mix(in srgb, var(--color-fd-border) 86%, transparent) !important;
+  background: color-mix(in srgb, var(--color-fd-muted) 64%, transparent);
+}
+
+.etl-flow-scene {
+  /* Entry choreography, in order: the grid pops in, the hub lands, then the
+     green wash blooms out from behind it while its flanks land and both pipes
+     reach outward toward them, and only then does data move. */
+  --etl-t-grid: 120ms;
+  --etl-t-hub: 1150ms;
+  --etl-t-glow: 1500ms;
+  --etl-t-flanks: 1500ms;
+  --etl-t-pipe: 2150ms;
+  --etl-lane-stagger: 70ms;
+  /* How long each destination kind is held before the next takes its place. */
+  --etl-destination-step: 3.2s;
+  /* The destination stays on its first face well after the intro settles, so
+     the first swap reads as a deliberate change rather than part of the
+     entrance. Its first transition lands at this delay plus one hold. */
+  --etl-t-drum: 5.4s;
+  /* How long a packet spends inside the hub before it leaves the far side. */
+  --etl-hub-dwell: 0.42s;
+
+  position: absolute;
+  z-index: 0;
+  inset: 4.25rem 0 0;
+  overflow: hidden;
+}
+
+.etl-flow-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(circle, color-mix(in srgb, var(--etl-green) 30%, transparent) 1.3px, transparent 2px),
+    linear-gradient(to right, var(--etl-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--etl-grid) 1px, transparent 1px);
+  background-position: center 38%;
+  background-size: 5.25rem 5.25rem, 5.25rem 5.25rem, 5.25rem 5.25rem;
+  mask-image:
+    radial-gradient(circle at 50% 38%, black 44%, transparent 82%),
+    linear-gradient(to bottom, black 0%, black 58%, transparent 86%);
+  mask-repeat: no-repeat;
+  mask-position: center 38%, center;
+  mask-composite: intersect;
+  animation: etl-grid-pop 1s var(--etl-t-grid) cubic-bezier(0.5, 0.05, 0.25, 1) both;
+}
+
+.etl-flow-glow {
+  position: absolute;
+  top: 38%;
+  left: 50%;
+  width: min(74rem, 84vw);
+  height: 23rem;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, color-mix(in srgb, var(--etl-green) 12%, transparent), transparent 66%);
+  filter: blur(18px);
+  transform: translate(-50%, -50%);
+  animation: etl-glow-bloom 1.5s var(--etl-t-glow) cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.etl-flow-stage {
+  position: absolute;
+  z-index: 3;
+  top: 38%;
+  left: 50%;
+  display: grid;
+  width: min(calc(100% - 6.25rem), 74rem);
+  grid-template-columns: 16.5rem minmax(4rem, 1fr) 16.5rem minmax(4rem, 1fr) 16.5rem;
+  align-items: center;
+  transform: translate(-50%, -50%);
+}
+
+.etl-flow-node {
+  display: flex;
+  min-height: var(--panel-height);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--panel-gap);
+  padding: var(--panel-padding);
+  color: var(--color-fd-foreground);
+}
+
+/* Machined panel: a specular band along the top face, a fine brush across the
+   body, and the body itself falling off toward the bottom. */
+.etl-flow-node-source,
+.etl-flow-node-core,
+.etl-flow-node-destination {
+  border: 1px solid var(--etl-metal-rim);
+  border-radius: 1.15rem;
+  background:
+    linear-gradient(180deg, var(--etl-metal-sheen), transparent 20%),
+    repeating-linear-gradient(
+      90deg,
+      var(--etl-metal-texture) 0 1px,
+      transparent 1px 3px
+    ),
+    linear-gradient(180deg, var(--etl-metal-top), var(--etl-metal-bottom));
+  box-shadow:
+    inset 0 1px 0 var(--etl-metal-edge-light),
+    inset 1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 40%, transparent),
+    inset -1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 40%, transparent),
+    inset 0 -1px 0 var(--etl-metal-edge-dark),
+    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 70%, transparent),
+    0 2px 3px -1px color-mix(in srgb, var(--etl-metal-cast) 50%, transparent),
+    0 14px 24px -12px color-mix(in srgb, var(--etl-metal-cast) 80%, transparent),
+    0 32px 68px -26px var(--etl-metal-cast);
+}
+
+.etl-flow-node {
+  --node-enter-delay: 0ms;
+  /* Panel metrics live here so the destination's crossfading faces, which are
+     children, inherit the same gap as the static housings at every breakpoint. */
+  --panel-height: 11.75rem;
+  --panel-gap: 1rem;
+  --panel-padding: 1.6rem 1.4rem;
+
+  position: relative;
+  z-index: 4;
+  animation: etl-node-enter 850ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--node-enter-delay);
+}
+
+.etl-flow-node-source {
+  --node-enter-delay: var(--etl-t-flanks);
+}
+
+.etl-flow-node-core {
+  --node-enter-delay: var(--etl-t-hub);
+
+  /* The hub is the emphasis element, so it is the only panel that carries a
+     brand-tinted rim and a faint bloom. */
+  border-color: color-mix(in srgb, var(--etl-metal-rim) 40%, var(--etl-green) 60%);
+  box-shadow:
+    inset 0 1px 0 var(--etl-metal-edge-light),
+    inset 1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 40%, transparent),
+    inset -1px 0 0 color-mix(in srgb, var(--etl-metal-edge-light) 40%, transparent),
+    inset 0 -1.5px 0 var(--etl-metal-edge-dark),
+    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 55%, transparent),
+    0 2px 3px -1px color-mix(in srgb, var(--etl-metal-cast) 50%, transparent),
+    0 16px 28px -12px color-mix(in srgb, var(--etl-metal-cast) 85%, transparent),
+    0 38px 78px -26px var(--etl-metal-cast),
+    0 0 40px -6px color-mix(in srgb, var(--etl-green) 22%, transparent);
+  animation-name: etl-hub-enter;
+  animation-duration: 950ms;
+}
+
+.etl-flow-node-destination {
+  --node-enter-delay: var(--etl-t-flanks);
+}
+
+/* The destination cycles through the kinds of system ETL can write to. Every
+   face sits in the same grid cell, so the stage sizes itself to the widest one
+   and the housing never moves; only the icon and label underneath crossfade. */
+.etl-destination-stage {
+  display: grid;
+  justify-items: center;
+}
+
+.etl-destination-face {
+  grid-area: 1 / 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--panel-gap);
+  animation: etl-destination-cycle calc(var(--etl-destination-step) * 5) linear infinite;
+  animation-delay: calc(var(--etl-t-drum) + var(--destination-index) * var(--etl-destination-step));
+}
+
+/* Visible immediately, matching the entrance. Its separate cycle fades it out
+   with Search, then brings it back between Data lake and the next Search. */
+.etl-destination-face:first-child {
+  opacity: 1;
+  animation-name: etl-destination-first-cycle;
+}
+
+.etl-destination-face:not(:first-child) {
+  opacity: 0;
+}
+
+.etl-flow-node-kicker {
+  color: var(--color-fd-muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-align: center;
+  text-shadow: 0 1px 0 var(--etl-metal-edge-light);
+  text-transform: uppercase;
+}
+
+.etl-flow-node-icon {
+  position: relative;
+  display: flex;
+  width: 4.4rem;
+  height: 4.4rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--etl-metal-rim) 80%, transparent);
+  border-radius: 1rem;
+  color: var(--etl-green);
+  /* A port milled into the panel: dark under the near wall, catching bounce
+     light at the bottom. Same lighting model as the pipe bore. */
+  background: linear-gradient(180deg, var(--etl-port-top), var(--etl-port-bottom));
+  box-shadow:
+    inset 0 2px 4px -1px var(--etl-tube-shade),
+    inset 0 -1px 0 color-mix(in srgb, var(--etl-tube-sheen) 60%, transparent),
+    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 70%, transparent);
+}
+
+.etl-postgres-mark {
+  display: block;
+}
+
+.etl-flow-node-icon svg {
+  width: 2.3rem;
+  height: 2.3rem;
+}
+
+.etl-flow-etl-mark {
+  display: block;
+  width: 2.9rem;
+  height: auto;
+  overflow: visible;
+}
+
+.etl-flow-node-core .etl-flow-node-icon {
+  border-color: color-mix(in srgb, var(--etl-metal-rim) 55%, var(--etl-green) 45%);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--etl-port-top) 88%, var(--etl-green)),
+      color-mix(in srgb, var(--etl-port-bottom) 90%, var(--etl-green))
+    );
+}
+
+.etl-flow-node-label {
+  font-size: 1.08rem;
+  font-weight: 680;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  text-align: center;
+  text-shadow: 0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 70%, transparent);
+  white-space: nowrap;
+}
+
+
+.etl-flow-conduit {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.36rem;
+  /* Run the pipe run under both housings so it reads as entering them. */
+  margin-inline: -1.35rem;
+}
+
+/* A lane reads as a length of pipe: the bore falls into shadow under the top
+   wall, then brightens across the lower wall where it faces the light, with a
+   soft gloss band rather than a drawn highlight. */
+.etl-flow-lane {
+  position: relative;
+  display: block;
+  height: 1.02rem;
+  border: 1px solid var(--etl-tube-wall);
+  border-block-width: 1px;
+  border-inline-width: 0;
+  background: linear-gradient(
+    180deg,
+    var(--etl-tube-top) 0%,
+    var(--etl-tube-mid) 34%,
+    var(--etl-tube-gloss) 74%,
+    var(--etl-tube-bottom) 100%
+  );
+  box-shadow:
+    inset 0 1.5px 2px -0.5px var(--etl-tube-shade),
+    0 1px 0 color-mix(in srgb, var(--etl-metal-edge-light) 60%, transparent);
+  container-type: inline-size;
+  overflow: hidden;
+  animation: etl-lane-reach 620ms cubic-bezier(0.33, 0.9, 0.35, 1) both;
+  animation-delay: calc(var(--etl-t-pipe) + var(--lane-index, 0) * var(--etl-lane-stagger));
+}
+
+/* Both runs are laid by the hub, reaching outward to meet their flank. */
+.etl-flow-conduit-source .etl-flow-lane {
+  animation-name: etl-lane-reach-start;
+}
+
+/* The bore falls into shadow where it enters a housing. */
+.etl-flow-lane::after {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  content: '';
+  box-shadow:
+    inset 1.1rem 0 0.9rem -0.85rem var(--etl-tube-shade),
+    inset -1.1rem 0 0.9rem -0.85rem var(--etl-tube-shade);
+  pointer-events: none;
+}
+
+.etl-data-packet {
+  --packet-delay: 0s;
+  --packet-size: 0.6rem;
+
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  bottom: 0;
+  left: -0.85rem;
+  width: 0.85rem;
+  opacity: 0;
+  animation: etl-data-packet var(--lane-cycle, 3.4s) linear infinite;
+  animation-delay: var(--packet-delay);
+  will-change: transform, opacity;
+}
+
+/* Both runs carry the same packets in the same lanes. The outbound copy is held
+   for one full inbound traversal plus the hub dwell, so a packet only leaves the
+   hub after the matching one has arrived. */
+.etl-flow-conduit-destination .etl-data-packet {
+  animation-delay: calc(var(--packet-delay) + var(--lane-cycle) + var(--etl-hub-dwell));
+}
+
+/* Light the packet spills along the bore ahead of and behind itself. */
+.etl-data-packet::before {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4.6rem;
+  height: 1.6rem;
+  content: '';
+  background: radial-gradient(
+    ellipse,
+    color-mix(in srgb, var(--etl-packet) 62%, transparent),
+    color-mix(in srgb, var(--etl-packet) 22%, transparent) 36%,
+    transparent 72%
+  );
+  filter: blur(2.5px);
+  opacity: 0.85;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.etl-data-packet i {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: block;
+  width: var(--packet-size);
+  height: var(--packet-size);
+  border: 0;
+  /* Machined slug: lit on top, seated in shadow. */
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, white 40%, var(--etl-packet)),
+    var(--etl-packet) 52%,
+    color-mix(in srgb, var(--etl-packet) 88%, var(--etl-ink))
+  );
+  /* drop-shadow rather than box-shadow: it follows the rendered alpha, so the
+     clip-path shapes get a shadow too. box-shadow is painted outside the border
+     box, which clip-path then removes. */
+  filter:
+    drop-shadow(0 1.5px 1.5px color-mix(in srgb, var(--etl-ink) 48%, transparent))
+    drop-shadow(0 0 0.5rem color-mix(in srgb, var(--etl-packet) 70%, transparent));
+  transform: translate(-50%, -50%);
+}
+
+.etl-data-packet-circle i {
+  border-radius: 50%;
+}
+
+.etl-data-packet-square i {
+  border-radius: 0.1rem;
+}
+
+.etl-data-packet-squircle i {
+  border-radius: 42%;
+}
+
+.etl-data-packet-triangle i {
+  border: 0;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+.etl-flow-fade,
+.etl-flow-vignette {
+  position: absolute;
+  z-index: 8;
+  pointer-events: none;
+}
+
+.etl-flow-fade {
+  inset: 68% 0 0;
+  background: linear-gradient(to bottom, transparent, var(--color-fd-background) 96%);
+}
+
+.etl-flow-vignette {
+  inset: 0;
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--color-fd-background) 16%, transparent),
+      transparent 18%,
+      transparent 60%,
+      color-mix(in srgb, var(--color-fd-background) 82%, transparent)
+    ),
+    radial-gradient(
+      ellipse at 50% 38%,
+      transparent 24%,
+      color-mix(in srgb, var(--color-fd-background) 28%, transparent) 58%,
+      color-mix(in srgb, var(--color-fd-background) 92%, transparent) 100%
+    );
+}
+
+.etl-landing-content {
+  position: absolute;
+  z-index: 20;
+  isolation: isolate;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding: 1rem var(--etl-page-gutter) clamp(3.2rem, 7vh, 5.2rem);
+}
+
+.etl-landing-content::before {
+  position: absolute;
+  z-index: -1;
+  inset: -3rem 0 0;
+  content: '';
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--color-fd-background) 72%, transparent) 5rem,
+    var(--color-fd-background) 10rem
+  );
+  pointer-events: none;
+}
+
+.etl-landing-grid {
+  display: grid;
+  width: 100%;
+  max-width: calc(var(--etl-shell-width) - 2 * var(--etl-page-gutter));
+  grid-template-columns: minmax(0, 1fr) minmax(20rem, 24rem);
+  gap: 1.15rem clamp(4rem, 7vw, 8rem);
+  align-items: end;
+  margin-inline: auto;
+}
+
+.etl-landing-primary {
+  min-width: 0;
+  animation: etl-content-enter 900ms var(--etl-t-copy) cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.etl-landing h1 {
+  margin: 0;
+  color: var(--color-fd-foreground);
+  font-size: clamp(3.35rem, 5vw, 5rem);
+  font-weight: 590;
+  line-height: 0.91;
+  letter-spacing: -0.062em;
+  white-space: normal;
+}
+
+.etl-landing h1 span {
+  display: block;
+}
+
+.etl-landing h1 span:last-child {
+  margin-top: 0.16em;
+  color: color-mix(in srgb, var(--color-fd-muted-foreground) 82%, var(--color-fd-foreground));
+}
+
+.etl-landing-summary {
+  padding-bottom: 0.2rem;
+  animation: etl-content-enter 900ms calc(var(--etl-t-copy) + 100ms) cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.etl-landing-summary p {
+  max-width: 32rem;
+  margin: 0;
+  color: var(--color-fd-muted-foreground);
+  font-size: clamp(1rem, 1.3vw, 1.125rem);
+  line-height: 1.65;
+}
+
+.etl-landing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  grid-column: 1;
+  animation: etl-content-enter 900ms calc(var(--etl-t-copy) + 200ms) cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.etl-primary-action,
+.etl-secondary-action {
+  display: inline-flex;
+  min-height: 2.8rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 0.6rem;
+  padding: 0.68rem 1rem;
+  font-size: 0.92rem;
+  font-weight: 650;
+  text-decoration: none;
+  transition: 160ms ease;
+  transition-property: background, border-color, box-shadow, color, transform;
+}
+
+.etl-landing-actions svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.etl-primary-action {
+  color: oklch(0.145 0 0);
+  background: var(--etl-green);
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--etl-green) 17%, transparent);
+}
+
+.etl-primary-action:hover {
+  color: oklch(0.145 0 0);
+  background: color-mix(in srgb, var(--etl-green) 88%, white);
+  box-shadow: 0 14px 34px color-mix(in srgb, var(--etl-green) 24%, transparent);
+  transform: translateY(-1px);
+}
+
+.etl-secondary-action {
+  color: var(--color-fd-foreground);
+  border: 1px solid var(--color-fd-border);
+  background: color-mix(in srgb, var(--color-fd-background) 70%, transparent);
+}
+
+.etl-secondary-action:hover {
+  border-color: color-mix(in srgb, var(--etl-green) 48%, var(--color-fd-border));
+  background: var(--color-fd-accent);
+  transform: translateY(-1px);
+}
+
+.etl-agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.2rem;
+}
+
+.etl-landing-grid > .etl-agent-actions {
+  grid-column: 1;
+  padding-top: 0.3rem;
+  animation: etl-content-enter 900ms calc(var(--etl-t-copy) + 300ms) cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.etl-agent-actions > a,
+.etl-agent-actions > button {
+  display: inline-flex;
+  min-height: 2rem;
+  align-items: center;
+  gap: 0.42rem;
+  border: 1px solid transparent;
+  border-radius: 0.55rem;
+  padding: 0.42rem 0.65rem;
+  color: var(--color-fd-muted-foreground);
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 580;
+  text-decoration: none;
+}
+
+.etl-agent-actions > button:first-child {
+  border-color: color-mix(in srgb, var(--color-fd-border) 82%, transparent);
+  color: var(--color-fd-foreground);
+  background: color-mix(in srgb, var(--color-fd-muted) 62%, transparent);
+}
+
+.etl-agent-actions > a:hover,
+.etl-agent-actions > button:hover {
+  color: var(--color-fd-primary);
+  background: color-mix(in srgb, var(--color-fd-accent) 68%, transparent);
+}
+
+.etl-agent-actions svg {
+  width: 0.86rem;
+  height: 0.86rem;
+}
+
+.etl-home-footer {
+  min-height: 5.25rem;
+  border-top: 1px solid var(--color-fd-border);
+  color: var(--color-fd-muted-foreground);
+  background: var(--color-fd-background);
+  font-size: 0.8125rem;
+}
+
+.etl-home-footer-inner {
+  display: flex;
+  width: 100%;
+  max-width: var(--etl-shell-width);
+  min-height: inherit;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+  margin-inline: auto;
+  padding: 1.5rem var(--etl-page-gutter);
+}
+
+.etl-home-footer p {
+  margin: 0;
+}
+
+.etl-home-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.2rem;
+}
+
+.etl-home-footer a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.etl-home-footer a:hover {
+  color: var(--color-fd-primary);
+}
+
+@keyframes etl-data-packet {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(0.72);
+  }
+
+  10%,
+  86% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate3d(calc(100cqw + 1.7rem), 0, 0) scale(1);
+  }
+}
+
+/* Blooms outward from behind the hub, so the wash reads as coming off it. */
+@keyframes etl-glow-bloom {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.32);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+/* Cells surface progressively outward from the centre, snapping to their final
+   pitch as they land. */
+@keyframes etl-grid-pop {
+  from {
+    opacity: 0;
+    background-size: 4.62rem 4.62rem, 5.25rem 5.25rem, 5.25rem 5.25rem;
+    mask-size: 0% 0%, 100% 100%;
+  }
+
+  to {
+    opacity: 1;
+    background-size: 5.25rem 5.25rem, 5.25rem 5.25rem, 5.25rem 5.25rem;
+    mask-size: 300% 300%, 100% 100%;
+  }
+}
+
+/* Each face holds visible for a fifth of the cycle, then dissolves into the
+   next: a soft blur clears in, holds, and blurs back out as it hands off. */
+/* Five faces share one cycle, so each owns an even fifth (20%) of it end to
+   end; a short blur handles the fade at either edge, with no gap between one
+   face's hand-off and the next one's arrival. */
+@keyframes etl-destination-cycle {
+  0% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+
+  2%,
+  18% {
+    opacity: 1;
+    filter: blur(0);
+  }
+
+  20%,
+  100% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+
+@keyframes etl-destination-first-cycle {
+  0%,
+  100% {
+    opacity: 1;
+    filter: blur(0);
+  }
+
+  2%,
+  78% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+
+  80% {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+/* clip-path rather than scaleX so the bore, walls and end shadows keep their
+   proportions as the pipe extends. Reaches away from the hub: rightward on the
+   destination side. */
+@keyframes etl-lane-reach {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* Leftward on the source side, so both runs grow out of the hub together. */
+@keyframes etl-lane-reach-start {
+  from {
+    clip-path: inset(0 0 0 100%);
+  }
+
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* The hub lands first and carries a little more weight than its flanks. */
+@keyframes etl-hub-enter {
+  from {
+    opacity: 0;
+    filter: blur(14px);
+    transform: translateY(1.7rem) scale(0.9);
+  }
+
+  55% {
+    filter: blur(0);
+  }
+
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes etl-node-enter {
+  from {
+    opacity: 0;
+    filter: blur(10px);
+    transform: translateY(1.4rem) scale(0.94);
+  }
+
+  60% {
+    filter: blur(0);
+  }
+
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes etl-content-enter {
+  from {
+    opacity: 0;
+    transform: translateY(1.5rem);
+  }
+}
+
+@media (max-width: 1100px) {
+  .etl-home-nav {
+    grid-template-columns: 1fr minmax(10rem, 15rem) 1fr;
+  }
+
+  .etl-landing-grid {
+    grid-template-columns: 1fr;
+    gap: 0.9rem;
+  }
+
+  .etl-flow-stage {
+    width: calc(100% - 5.5rem);
+    grid-template-columns: 12.5rem minmax(2.5rem, 1fr) 12.5rem minmax(2.5rem, 1fr) 12.5rem;
+  }
+
+  .etl-flow-node {
+    --panel-height: 10.25rem;
+    --panel-gap: 0.8rem;
+    --panel-padding: 1.2rem 1rem;
+  }
+
+  .etl-flow-node-icon {
+    width: 3.5rem;
+    height: 3.5rem;
+    border-radius: 0.85rem;
+  }
+
+  .etl-postgres-mark {
+  display: block;
+}
+
+.etl-flow-node-icon svg {
+    width: 1.85rem;
+    height: 1.85rem;
+  }
+
+  .etl-flow-node-icon .etl-flow-etl-mark {
+    width: 2.35rem;
+  }
+
+  .etl-flow-node-label {
+    font-size: 0.95rem;
+  }
+
+  .etl-landing-summary {
+    max-width: 42rem;
+  }
+
+  .etl-landing-actions,
+  .etl-agent-actions {
+    grid-column: 1;
+  }
+
+}
+
+.etl-page-heading {
+  margin-bottom: 0;
+  padding-bottom: 1.6rem;
+}
+
+.etl-page-heading .etl-eyebrow {
+  margin-bottom: 0.8rem;
+}
+
+.etl-page-heading h1 {
+  max-width: 18ch;
+  margin: 0;
+  font-size: clamp(2.15rem, 5vw, 3rem);
+  font-weight: 630;
+  line-height: 1.08;
+  letter-spacing: -0.045em;
+  text-wrap: balance;
+}
+
+.etl-page-heading > p {
+  max-width: 720px;
+  margin-top: 0.9rem;
+  color: var(--color-fd-muted-foreground);
+  font-size: 1.03rem;
+  line-height: 1.65;
+}
+
+.etl-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 2.2rem;
+  padding: 1.05rem 0;
+  border-block: 1px solid var(--color-fd-border);
+}
+
+.prose {
+  color: var(--color-fd-muted-foreground);
+  font-size: 1rem;
+  line-height: 1.78;
+}
+
+.prose :where(h2, h3, h4) {
+  color: var(--color-fd-foreground);
+  letter-spacing: -0.028em;
+  text-wrap: balance;
+}
+
+.prose :where(h2) {
+  margin-top: 3.2rem;
+  padding-top: 0.3rem;
+  font-size: 1.65rem;
+  font-weight: 630;
+}
+
+.prose :where(h3) {
+  margin-top: 2rem;
+  font-size: 1.18rem;
+  font-weight: 640;
+}
+
+.prose :where(p, li) {
+  text-wrap: pretty;
+}
+
+.prose :where(a) {
+  color: var(--color-fd-primary);
+  font-weight: 540;
+  text-decoration-color: color-mix(in srgb, var(--color-fd-primary) 45%, transparent);
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.22em;
+}
+
+.prose :where(strong) {
+  color: var(--color-fd-foreground);
+  font-weight: 650;
+}
+
+.prose :where(code):not(pre code) {
+  border: 1px solid var(--color-fd-border);
+  border-radius: 0.36rem;
+  padding: 0.08rem 0.36rem;
+  color: var(--color-fd-accent-foreground);
+  background: var(--color-fd-muted);
+  font-family: var(--font-mono);
+  font-size: 0.83em;
+  font-weight: 500;
+}
+
+.prose :where(figure.shiki) {
+  border-color: color-mix(in srgb, var(--color-fd-border) 74%, var(--etl-green) 26%);
+  border-radius: 0.72rem;
+  box-shadow: 0 18px 45px color-mix(in srgb, var(--etl-ink) 7%, transparent);
+}
+
+.prose :where(figure.shiki pre) {
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.prose :where(pre code) {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.72;
+}
+
+.prose :where(table) {
+  width: 100%;
+  margin: 1.5rem 0 2rem;
+  font-size: 0.88rem;
+}
+
+.prose :where(th) {
+  color: var(--color-fd-foreground);
+  background: var(--color-fd-muted);
+  font-weight: 650;
+}
+
+.prose :where(th, td) {
+  padding: 0.7rem 0.8rem;
+  border-color: var(--color-fd-border);
+  vertical-align: top;
+}
+
+.prose .etl-callout {
+  margin-block: 1.5rem;
+  border-color: color-mix(in srgb, var(--color-fd-border) 76%, var(--callout-color) 24%);
+  border-radius: 0.72rem;
+  padding: 0.85rem 0.95rem 0.85rem 0.42rem;
+  background: color-mix(in srgb, var(--color-fd-card) 94%, var(--callout-color) 6%);
+  box-shadow: none;
+}
+
+.prose .etl-callout :where(p) {
+  line-height: 1.65;
+}
+
+.prose .etl-destination-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.15rem 0 0.65rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 0.3rem 0.58rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.prose .etl-destination-status svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.prose .etl-destination-status[data-status='stable'] {
+  color: var(--etl-green);
+  background: color-mix(in srgb, var(--etl-green) 10%, transparent);
+}
+
+.prose .etl-destination-status[data-status='in-progress'] {
+  color: light-dark(#9a5b00, #f4b74f);
+  background: light-dark(rgb(154 91 0 / 8%), rgb(244 183 79 / 9%));
+}
+
+.prose .etl-destination-status[data-status='deprecated'] {
+  color: light-dark(#a13b3b, #ef8d8d);
+  background: light-dark(rgb(161 59 59 / 8%), rgb(239 141 141 / 8%));
+}
+
+.doc-path-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+  min-width: 0;
+  margin: 1.4rem 0 2.4rem;
+}
+
+.doc-path-card {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 10.5rem;
+  flex-direction: column;
+  gap: 0.45rem;
+  overflow: hidden;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 0.78rem;
+  padding: 1.05rem 1.1rem;
+  color: var(--color-fd-muted-foreground) !important;
+  background: color-mix(in srgb, var(--color-fd-card) 92%, transparent);
+  text-decoration: none !important;
+  box-shadow: 0 10px 30px color-mix(in srgb, var(--etl-ink) 4%, transparent);
+  transition: 170ms ease;
+  transition-property: border-color, background, box-shadow, transform;
+}
+
+.doc-path-card::after {
+  position: absolute;
+  right: 0.9rem;
+  bottom: 0.7rem;
+  color: var(--color-fd-primary);
+  font-size: 1.25rem;
+  content: '↗';
+  opacity: 0;
+  transform: translate(-0.2rem, 0.2rem);
+  transition: 170ms ease;
+}
+
+.doc-path-card:hover {
+  border-color: color-mix(in srgb, var(--etl-green) 52%, var(--color-fd-border));
+  background: color-mix(in srgb, var(--color-fd-card) 90%, var(--etl-green) 10%);
+  box-shadow: 0 18px 42px color-mix(in srgb, var(--etl-green) 8%, transparent);
+  transform: translateY(-2px);
+}
+
+.doc-path-card:hover::after {
+  opacity: 1;
+  transform: none;
+}
+
+.doc-path-card strong {
+  color: var(--color-fd-foreground);
+  font-size: 1rem;
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.doc-path-symbol {
+  display: grid;
+  width: 2.15rem;
+  height: 2.15rem;
+  flex: 0 0 2.15rem;
+  place-items: center;
+  margin-bottom: 0.3rem;
+  border: 1px solid color-mix(in srgb, var(--color-fd-border) 70%, var(--etl-green) 30%);
+  border-radius: 0.52rem;
+  color: var(--color-fd-primary);
+  background: var(--color-fd-accent);
+  line-height: 1;
+}
+
+.doc-path-symbol svg {
+  display: block;
+  width: 1.05rem;
+  height: 1.05rem;
+  stroke-width: 1.8;
+}
+
+.doc-path-symbol .doc-path-pipelines-icon {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.doc-path-card > span:last-child {
+  max-width: 31ch;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.doc-path-kicker {
+  color: var(--color-fd-primary);
+  font-family: var(--font-mono);
+  font-size: 0.67rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mermaid-diagram {
+  display: grid;
+  min-height: 12rem;
+  place-items: center;
+  overflow: auto;
+  margin: 1.5rem 0 2rem;
+  border: 1px solid color-mix(in srgb, var(--color-fd-border) 74%, var(--etl-green) 26%);
+  border-radius: 0.85rem;
+  padding: 1.4rem;
+  background:
+    radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--etl-green) 7%, transparent), transparent 18rem),
+    var(--color-fd-card);
+}
+
+.mermaid-diagram > div,
+.mermaid-diagram svg {
+  max-width: 100%;
+}
+
+.mermaid-skeleton {
+  width: min(100%, 34rem);
+  height: 8rem;
+  border-radius: 0.6rem;
+  background: linear-gradient(
+    105deg,
+    var(--color-fd-muted) 22%,
+    color-mix(in srgb, var(--color-fd-muted) 74%, var(--etl-green) 26%) 38%,
+    var(--color-fd-muted) 54%
+  );
+  background-size: 220% 100%;
+  animation: etl-shimmer 1.4s linear infinite;
+}
+
+.mermaid-fallback {
+  overflow: auto;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+}
+
+.etl-not-found {
+  display: flex;
+  min-height: 70vh;
+  max-width: 760px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  margin-inline: auto;
+  padding: 2rem;
+}
+
+.etl-not-found h1 {
+  max-width: 15ch;
+  margin: 0;
+  font-size: clamp(2.4rem, 7vw, 4.5rem);
+  font-weight: 640;
+  line-height: 1;
+  letter-spacing: -0.055em;
+  text-wrap: balance;
+}
+
+.etl-not-found p {
+  max-width: 48ch;
+  margin: 1.2rem 0 1.8rem;
+  color: var(--color-fd-muted-foreground);
+  line-height: 1.7;
+}
+
+@keyframes etl-shimmer {
+  to {
+    background-position-x: -220%;
+  }
+}
+
+@media (max-width: 767px) {
+  :root {
+    --etl-page-gutter: 1rem;
+  }
+
+  #fd-search-dialog-content {
+    top: 4rem !important;
+    width: calc(100% - 1rem) !important;
+    border-radius: 0.85rem !important;
+  }
+
+  #fd-search-dialog-content > div:last-child {
+    font-size: 0.57rem;
+  }
+
+  .etl-landing {
+    height: max(100svh, 820px);
+    min-height: 820px;
+  }
+
+  .etl-home-header {
+    /* Matches Fumadocs' own mobile header height (--fd-header-height:
+       spacing(14), i.e. 3.5rem) so the header doesn't visibly resize when
+       navigating between the homepage and docs. */
+    height: 3.5rem;
+  }
+
+  .etl-home-nav {
+    grid-template-columns: 1fr auto auto;
+    gap: 0.7rem;
+    padding-inline: var(--etl-page-gutter);
+  }
+
+  .etl-home-search {
+    grid-column: 2;
+  }
+
+  .etl-home-search-full {
+    display: none !important;
+  }
+
+  .etl-home-search-compact {
+    display: inline-flex !important;
+  }
+
+  .etl-home-nav-links {
+    gap: 0.65rem;
+  }
+
+  .etl-home-nav-links > a {
+    font-size: 0.75rem;
+  }
+
+  .etl-home-nav-links > a:nth-child(2) {
+    display: none;
+  }
+
+  .etl-home-theme-switch {
+    padding: 0.15rem !important;
+  }
+
+  .etl-home-theme-switch > button {
+    width: 1.625rem;
+    height: 1.625rem;
+    padding: 0.375rem;
+  }
+
+  .etl-flow-scene {
+    inset-block-start: 3.75rem;
+  }
+
+  .etl-flow-grid {
+    background-size: 4rem 4rem;
+  }
+
+  .etl-flow-glow {
+    top: 25%;
+    width: 112vw;
+    height: 14rem;
+  }
+
+  .etl-flow-stage {
+    top: 25%;
+    width: calc(100% - 1.5rem);
+    grid-template-columns: 5.5rem minmax(1.6rem, 1fr) 5.5rem minmax(1.6rem, 1fr) 5.5rem;
+  }
+
+  .etl-flow-node {
+    --panel-height: 6.9rem;
+    --panel-gap: 0.5rem;
+    --panel-padding: 0.7rem 0.4rem;
+
+    border-radius: 0.78rem;
+  }
+
+  .etl-flow-node-kicker {
+    font-size: 0.46rem;
+    letter-spacing: 0.1em;
+  }
+
+  .etl-flow-node-icon {
+    width: 2.2rem;
+    height: 2.2rem;
+    border-radius: 0.55rem;
+  }
+
+  .etl-postgres-mark {
+  display: block;
+}
+
+.etl-flow-node-icon svg {
+    width: 1.15rem;
+    height: 1.15rem;
+  }
+
+  .etl-flow-node-icon .etl-flow-etl-mark {
+    width: 1.5rem;
+  }
+
+  .etl-flow-node-label {
+    font-size: 0.62rem;
+  }
+
+  .etl-flow-conduit {
+    gap: 0.24rem;
+    margin-inline: -0.5rem;
+  }
+
+  .etl-flow-lane {
+    height: 0.66rem;
+  }
+
+  .etl-flow-lane::after {
+    box-shadow:
+      inset 0.5rem 0 0.4rem -0.4rem var(--etl-tube-shade),
+      inset -0.5rem 0 0.4rem -0.4rem var(--etl-tube-shade);
+  }
+
+  .etl-data-packet {
+    left: -0.55rem;
+    width: 0.55rem;
+  }
+
+  .etl-data-packet::before {
+    width: 2.6rem;
+    height: 1rem;
+  }
+
+  .etl-data-packet i {
+    width: calc(var(--packet-size) * 0.64);
+    height: calc(var(--packet-size) * 0.64);
+  }
+
+  .etl-flow-fade {
+    inset-block-start: 40%;
+    background: linear-gradient(to bottom, transparent, var(--color-fd-background) 82%);
+  }
+
+  .etl-landing-content {
+    padding: 1rem var(--etl-page-gutter) 2.4rem;
+  }
+
+  .etl-landing-grid {
+    gap: 0.82rem;
+  }
+
+  .etl-landing h1 {
+    max-width: 100%;
+    font-size: clamp(2.35rem, 10vw, 2.6rem);
+    line-height: 0.92;
+    white-space: normal;
+  }
+
+  .etl-landing-summary p {
+    max-width: 35rem;
+    font-size: 0.9rem;
+    line-height: 1.55;
+  }
+
+  .etl-landing-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+
+  .etl-landing-actions > * {
+    min-width: 0;
+    min-height: 2.5rem;
+    padding-inline: 0.65rem;
+    font-size: 0.75rem;
+  }
+
+  .etl-agent-actions {
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+
+  .etl-agent-actions > a,
+  .etl-agent-actions > button {
+    min-height: 1.9rem;
+    font-size: 0.65rem;
+  }
+
+  .etl-home-footer {
+    min-height: 0;
+  }
+
+  .etl-home-footer-inner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+    padding: 1.5rem var(--etl-page-gutter);
+  }
+
+  #nd-sidebar-mobile > div:has(> .etl-sidebar-pipelines) {
+    border-top: 0;
+    padding: 0.8rem 1rem 1.1rem;
+  }
+
+  #nd-sidebar-mobile {
+    align-items: stretch;
+  }
+
+  #nd-sidebar-mobile > * {
+    width: 100%;
+    max-width: none;
+    align-self: stretch;
+    margin-inline: 0;
+  }
+
+  #nd-sidebar-mobile [data-search-full] {
+    width: 100%;
+  }
+
+  #nd-sidebar-mobile .etl-sidebar-pipelines {
+    min-height: 3.8rem;
+    gap: 0.78rem;
+    margin: 0;
+    border-radius: 0.82rem;
+    padding: 0.72rem 0.82rem;
+    box-shadow: 0 10px 28px color-mix(in srgb, var(--etl-green) 7%, transparent);
+  }
+
+  #nd-sidebar-mobile .etl-sidebar-pipelines svg {
+    width: 1.22rem;
+    height: 1.22rem;
+    flex-basis: 1.22rem;
+  }
+
+  #nd-sidebar-mobile .etl-sidebar-pipelines-copy strong {
+    font-size: 0.8rem;
+  }
+
+  #nd-sidebar-mobile .etl-sidebar-pipelines-copy small {
+    margin-top: 0.2rem;
+    font-size: 0.62rem;
+  }
+
+  #nd-page {
+    padding-inline: 1rem;
+    padding-top: 1.1rem;
+  }
+
+  .doc-path-grid {
+    grid-template-columns: 1fr;
+    gap: 0.72rem;
+  }
+
+  .doc-path-card {
+    min-height: 0;
+    padding: 1rem;
+  }
+
+  .doc-path-symbol {
+    width: 2rem;
+    height: 2rem;
+    flex-basis: 2rem;
+  }
+
+  .prose :where(table) {
+    font-size: 0.8rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .etl-data-packet {
+    left: 26%;
+    opacity: 0.85;
+    animation: none !important;
+    transform: none;
+  }
+
+  .etl-data-packet:nth-child(2) {
+    left: 68%;
+  }
+
+  .etl-flow-lane {
+    clip-path: none !important;
+    opacity: 1;
+    transform: none;
+  }
+
+  /* Park the destination on its first face instead of cycling mid-fade. */
+  .etl-destination-face {
+    animation: none !important;
+  }
+
+  .etl-destination-face:first-child {
+    opacity: 1;
+    filter: none;
+  }
+}
