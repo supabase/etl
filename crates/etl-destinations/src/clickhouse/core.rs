@@ -1177,6 +1177,15 @@ where
                     user_column_names.retain(|name| name != &before_column_schema.name);
                 }
                 SchemaOperation::AddColumn { after_column_schema, reason } => {
+                    if !after_column_schema.nullable && !is_array_type(&after_column_schema.typ) {
+                        warn!(
+                            table_name = %clickhouse_table_name,
+                            column_name = %after_column_schema.name,
+                            "adding a source not null column as nullable in clickhouse; the \
+                             destination schema will be more permissive"
+                        );
+                    }
+
                     let insertion_index = clickhouse_add_column_insertion_index(
                         &user_column_names,
                         &after_column_index_by_name,
@@ -1198,11 +1207,15 @@ where
                     let mut destination_column_schema = after_column_schema.clone();
                     if *reason == ColumnPresenceChangeReason::ReplicationMask {
                         destination_column_schema.default_expression = None;
-                        debug!(
-                            table_name = %clickhouse_table_name,
-                            column_name = %after_column_schema.name,
-                            "leaving publication-added clickhouse column without a default"
-                        );
+                        if after_column_schema.default_expression.is_some() {
+                            warn!(
+                                table_name = %clickhouse_table_name,
+                                column_name = %after_column_schema.name,
+                                "not applying the source default to a publication-added clickhouse \
+                                 column; the destination schema will differ from the logical \
+                                 source schema"
+                            );
+                        }
                     }
                     self.client
                         .add_column(
@@ -1593,6 +1606,22 @@ fn validate_clickhouse_schema_capabilities(
     replicated_table_schema: &ReplicatedTableSchema,
     engine: ClickHouseEngine,
 ) -> EtlResult<()> {
+    if let Some(column) = replicated_table_schema
+        .column_schemas()
+        .find(|column| column.nullable && is_array_type(&column.typ))
+    {
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse cannot represent nullable source arrays",
+            format!(
+                "Table '{}' column '{}' is a nullable array. The ClickHouse destination uses a \
+                 non-nullable Array column and cannot preserve a top-level NULL array.",
+                replicated_table_schema.name(),
+                column.name
+            )
+        ));
+    }
+
     let trailing_column_names = trailing_cdc_column_names(engine);
     if let Some(column) = replicated_table_schema.column_schemas().find(|column| {
         trailing_column_names.iter().any(|trailing_name| {
@@ -2107,6 +2136,23 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
         assert!(err.to_string().contains("tenant_id"));
+    }
+
+    #[test]
+    fn validate_clickhouse_table_shape_rejects_nullable_arrays() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![ColumnSchema::new("tags".to_owned(), Type::TEXT_ARRAY, -1, 1, true)],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
+
+        let error =
+            validate_clickhouse_table_shape(&replicated_table_schema, ClickHouseEngine::MergeTree)
+                .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(error.description(), Some("ClickHouse cannot represent nullable source arrays"));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use etl::{
     pipeline::PipelineId,
     schema::{
         ColumnAlterationKind, ColumnPresenceChangeReason, IdentityType, ReplicatedTableSchema,
-        SchemaOperation, SchemaPlan, TableId, TableName,
+        SchemaOperation, SchemaPlan, TableId, TableName, is_array_type,
     },
     store::DestinationStore,
 };
@@ -879,11 +879,15 @@ where
                         .await?;
 
                     if *reason == ColumnPresenceChangeReason::ReplicationMask {
-                        debug!(
-                            table_id = %table_id,
-                            column_name = %after_column_schema.name,
-                            "leaving publication-added bigquery column without a default"
-                        );
+                        if after_column_schema.default_expression.is_some() {
+                            warn!(
+                                table_id = %table_id,
+                                column_name = %after_column_schema.name,
+                                "not applying the source default to a publication-added bigquery \
+                                 column; the destination schema will differ from the logical \
+                                 source schema"
+                            );
+                        }
                     } else if let Some(default_expression) = column_default_sql(after_column_schema)
                     {
                         self.client
@@ -1404,6 +1408,19 @@ fn validate_bigquery_table_capabilities(
 ) -> EtlResult<()> {
     for column_schema in replicated_table_schema.column_schemas() {
         validate_bigquery_column_name(replicated_table_schema, &column_schema.name)?;
+
+        if column_schema.nullable && is_array_type(&column_schema.typ) {
+            bail!(
+                ErrorKind::SourceSchemaError,
+                "BigQuery cannot represent nullable source arrays",
+                format!(
+                    "Table '{}' column '{}' is a nullable array. BigQuery repeated fields cannot \
+                     preserve the difference between NULL and an empty array.",
+                    replicated_table_schema.name(),
+                    column_schema.name
+                )
+            );
+        }
     }
 
     if replicated_table_schema.primary_key_column_schemas().len() == 0 {
@@ -2402,6 +2419,24 @@ mod tests {
         let error = validate_bigquery_table_shape(&replicated_table_schema).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
         assert!(error.to_string().contains("tenant_id"));
+    }
+
+    #[test]
+    fn validate_bigquery_table_shape_rejects_nullable_arrays() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("tags".to_owned(), Type::TEXT_ARRAY, -1, 2, true),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
+
+        let error = validate_bigquery_table_shape(&replicated_table_schema).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(error.description(), Some("BigQuery cannot represent nullable source arrays"));
     }
 
     #[test]

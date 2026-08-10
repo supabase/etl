@@ -53,6 +53,13 @@ pub(crate) fn build_column_defs(columns: &[ColumnSchema]) -> String {
     let mut parts: Vec<String> = columns
         .iter()
         .map(|col| {
+            if !col.nullable {
+                warn!(
+                    column_name = %col.name,
+                    "creating a source not null column as nullable in snowflake so key-only delete \
+                     records remain writable; the destination schema will be more permissive"
+                );
+            }
             let default_clause = default_clause(col).unwrap_or_default();
             format!("{} {}{}", quote_identifier(&col.name), type_name(&col.typ), default_clause)
         })
@@ -274,9 +281,9 @@ mod tests {
     }
 
     #[test]
-    fn build_column_defs_output() {
+    fn build_column_defs_keeps_source_columns_nullable() {
         let cases = vec![
-            (ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, true), r#""id" INTEGER"#),
+            (ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false), r#""id" INTEGER"#),
             (
                 ColumnSchema::new("created_at".to_owned(), Type::TIMESTAMPTZ, -1, 2, true),
                 r#""created_at" TIMESTAMP_TZ"#,

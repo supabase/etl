@@ -469,8 +469,8 @@ mod tests {
     }
 
     #[test]
-    fn build_add_column_sql_includes_supported_default() {
-        let column = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 4, true)
+    fn build_add_column_sql_keeps_not_null_column_nullable_with_supported_default() {
+        let column = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 4, false)
             .with_default_expression("'pending'::text".to_owned());
         let sql = build_add_column_sql_ducklake(&table_name("test_table"), &column);
 

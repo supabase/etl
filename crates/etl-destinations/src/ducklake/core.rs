@@ -922,6 +922,15 @@ fn plan_ducklake_schema_ddl(
                 column_names.remove(index);
             }
             SchemaOperation::AddColumn { after_column_schema, reason } => {
+                if !after_column_schema.nullable {
+                    warn!(
+                        table_name = %table_name,
+                        column_name = %after_column_schema.name,
+                        "adding a source not null column as nullable in ducklake; the destination \
+                         schema will be more permissive"
+                    );
+                }
+
                 if find_ducklake_column(&column_names, &after_column_schema.name).is_some() {
                     debug!(
                         table = %table_name,
@@ -930,11 +939,15 @@ fn plan_ducklake_schema_ddl(
                     );
 
                     if *reason == ColumnPresenceChangeReason::ReplicationMask {
-                        debug!(
-                            table = %table_name,
-                            column = %after_column_schema.name,
-                            "leaving publication-added ducklake column without a default"
-                        );
+                        if after_column_schema.default_expression.is_some() {
+                            warn!(
+                                table_name = %table_name,
+                                column_name = %after_column_schema.name,
+                                "not applying the source default to a publication-added ducklake \
+                                 column; the destination schema will differ from the logical source \
+                                 schema"
+                            );
+                        }
                     } else if let Some(default_expression) =
                         after_column_schema.default_expression.as_deref()
                     {
@@ -963,11 +976,15 @@ fn plan_ducklake_schema_ddl(
                 let mut destination_column_schema = after_column_schema.clone();
                 if *reason == ColumnPresenceChangeReason::ReplicationMask {
                     destination_column_schema.default_expression = None;
-                    debug!(
-                        table = %table_name,
-                        column = %after_column_schema.name,
-                        "leaving publication-added ducklake column without a default"
-                    );
+                    if after_column_schema.default_expression.is_some() {
+                        warn!(
+                            table_name = %table_name,
+                            column_name = %after_column_schema.name,
+                            "not applying the source default to a publication-added ducklake \
+                             column; the destination schema will differ from the logical source \
+                             schema"
+                        );
+                    }
                 }
                 statements.push(DuckLakeSchemaDdlStatement {
                     sql: build_add_column_sql_ducklake(table_name, &destination_column_schema),

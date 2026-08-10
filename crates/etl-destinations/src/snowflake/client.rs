@@ -12,7 +12,7 @@ use tokio::{
     sync::{Mutex, RwLock},
     time::{Instant, sleep},
 };
-use tracing::{debug, warn};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::snowflake::{
@@ -405,13 +405,26 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                     self.sql_client.drop_column(table_name, &before_column_schema.name).await?;
                 }
                 SchemaOperation::AddColumn { after_column_schema, reason } => {
+                    if !after_column_schema.nullable {
+                        warn!(
+                            table_name,
+                            column_name = %after_column_schema.name,
+                            "adding a source not null column as nullable in snowflake; the \
+                             destination schema will be more permissive"
+                        );
+                    }
+
                     let add_column_default_clause =
                         if *reason == ColumnPresenceChangeReason::ReplicationMask {
-                            debug!(
-                                table_name,
-                                column_name = %after_column_schema.name,
-                                "leaving publication-added snowflake column without a default"
-                            );
+                            if after_column_schema.default_expression.is_some() {
+                                warn!(
+                                    table_name,
+                                    column_name = %after_column_schema.name,
+                                    "not applying the source default to a publication-added \
+                                     snowflake column; the destination schema will differ from the \
+                                     logical source schema"
+                                );
+                            }
                             None
                         } else {
                             schema::add_column_default_clause(after_column_schema)
