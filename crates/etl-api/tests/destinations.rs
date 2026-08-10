@@ -129,7 +129,7 @@ async fn an_existing_destination_can_be_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn destination_read_endpoints_omit_credentials() {
+async fn destination_read_endpoints_omit_credential_fields() {
     init_test_tracing();
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;

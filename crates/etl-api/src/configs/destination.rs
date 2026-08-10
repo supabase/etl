@@ -30,59 +30,6 @@ pub const fn default_ducklake_pool_size() -> u32 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
 }
 
-/// Returns whether a URL query parameter can carry credential material.
-fn is_sensitive_url_query_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key == "apikey"
-        || key.split(['-', '_', '.']).any(|part| {
-            matches!(
-                part,
-                "auth"
-                    | "authorization"
-                    | "credential"
-                    | "key"
-                    | "password"
-                    | "passwd"
-                    | "pwd"
-                    | "secret"
-                    | "sig"
-                    | "signature"
-                    | "token"
-            )
-        })
-}
-
-/// Removes embedded credential values from a URL.
-fn strip_url_credentials(mut url: Url) -> Url {
-    if !url.username().is_empty() {
-        let _ = url.set_username("");
-    }
-    if url.password().is_some() {
-        let _ = url.set_password(None);
-    }
-
-    let safe_query_pairs = url
-        .query_pairs()
-        .filter(|(key, _)| !is_sensitive_url_query_key(key))
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect::<Vec<_>>();
-    url.set_query(None);
-    if !safe_query_pairs.is_empty() {
-        url.query_pairs_mut().extend_pairs(safe_query_pairs);
-    }
-    url.set_fragment(None);
-
-    url
-}
-
-/// Removes embedded credentials when a string contains a valid URL.
-fn strip_string_url_credentials(value: String) -> String {
-    match Url::parse(&value) {
-        Ok(url) => strip_url_credentials(url).to_string(),
-        Err(_) => value,
-    }
-}
-
 /// Non-patch API representation of a destination configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -255,7 +202,7 @@ pub enum StrippedApiDestinationConfig {
     /// ClickHouse destination configuration without its password.
     #[serde(rename = "clickhouse")]
     ClickHouse {
-        /// ClickHouse HTTP(S) endpoint without embedded credentials.
+        /// ClickHouse HTTP(S) endpoint.
         #[schema(value_type = String)]
         url: Url,
         /// ClickHouse user name.
@@ -276,7 +223,7 @@ pub enum StrippedApiDestinationConfig {
     /// DuckLake destination configuration without its catalog URL or
     /// object-store credentials.
     Ducklake {
-        /// DuckLake data path without embedded URL credentials.
+        /// DuckLake data path.
         data_path: String,
         /// Size of the DuckDB connection pool.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -284,8 +231,7 @@ pub enum StrippedApiDestinationConfig {
         /// Optional S3-compatible storage region.
         #[serde(skip_serializing_if = "Option::is_none")]
         s3_region: Option<String>,
-        /// Optional S3-compatible storage endpoint without embedded URL
-        /// credentials.
+        /// Optional S3-compatible storage endpoint.
         #[serde(skip_serializing_if = "Option::is_none")]
         s3_endpoint: Option<String>,
         /// Optional S3 URL style.
@@ -1164,7 +1110,7 @@ impl From<StoredDestinationConfig> for StrippedApiDestinationConfig {
                 connection_pool_size: Some(connection_pool_size),
             },
             StoredDestinationConfig::ClickHouse { url, user, password: _, database, engine } => {
-                Self::ClickHouse { url: strip_url_credentials(url), user, database, engine }
+                Self::ClickHouse { url, user, database, engine }
             }
             StoredDestinationConfig::Iceberg { config } => Self::Iceberg { config: config.into() },
             StoredDestinationConfig::Ducklake {
@@ -1183,10 +1129,10 @@ impl From<StoredDestinationConfig> for StrippedApiDestinationConfig {
                 maintenance_mode,
                 table_sorting,
             } => Self::Ducklake {
-                data_path: strip_string_url_credentials(data_path),
+                data_path,
                 pool_size: Some(pool_size),
                 s3_region,
-                s3_endpoint: s3_endpoint.map(strip_string_url_credentials),
+                s3_endpoint,
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
@@ -1985,14 +1931,14 @@ pub enum StrippedApiIcebergConfig {
     /// REST Iceberg catalog configuration without its object-store
     /// credentials.
     Rest {
-        /// REST catalog URI without embedded credentials.
+        /// REST catalog URI.
         catalog_uri: String,
         /// Warehouse name in the catalog.
         warehouse_name: String,
         /// Optional Iceberg catalog namespace.
         #[serde(skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
-        /// S3-compatible endpoint without embedded credentials.
+        /// S3-compatible endpoint.
         s3_endpoint: String,
     },
 }
@@ -2016,12 +1962,7 @@ impl From<StoredIcebergConfig> for StrippedApiIcebergConfig {
                 s3_access_key_id: _,
                 s3_secret_access_key: _,
                 s3_endpoint,
-            } => Self::Rest {
-                catalog_uri: strip_string_url_credentials(catalog_uri),
-                warehouse_name,
-                namespace,
-                s3_endpoint: strip_string_url_credentials(s3_endpoint),
-            },
+            } => Self::Rest { catalog_uri, warehouse_name, namespace, s3_endpoint },
         }
     }
 }
@@ -2547,7 +2488,7 @@ mod tests {
     }
 
     #[test]
-    fn stripped_api_destination_configs_omit_all_credentials() {
+    fn stripped_api_destination_configs_omit_credential_fields() {
         for config in stored_destination_configs_with_credentials() {
             let stripped = StrippedApiDestinationConfig::from(config);
             let serialized = serde_json::to_string(&stripped).unwrap();
@@ -2605,60 +2546,6 @@ mod tests {
                 stripped_json
             );
         }
-    }
-
-    #[test]
-    fn stripped_api_destination_configs_remove_embedded_url_credentials() {
-        let clickhouse = StoredDestinationConfig::ClickHouse {
-            url: Url::parse(
-                "https://embedded-user:embedded-password@clickhouse.example.com?password=query-password&safe_setting=enabled",
-            )
-            .unwrap(),
-            user: "clickhouse_user".to_owned(),
-            password: None,
-            database: "analytics".to_owned(),
-            engine: ClickHouseEngine::ReplacingMergeTree,
-        };
-        let iceberg = StoredDestinationConfig::Iceberg {
-            config: StoredIcebergConfig::Rest {
-                catalog_uri: "https://embedded-user:embedded-password@catalog.example.com/v1"
-                    .to_owned(),
-                warehouse_name: "example-warehouse".to_owned(),
-                namespace: None,
-                s3_access_key_id: SerializableSecretString::from(
-                    "placeholder-access-key-id".to_owned(),
-                ),
-                s3_secret_access_key: SerializableSecretString::from(
-                    "placeholder-secret-access-key".to_owned(),
-                ),
-                s3_endpoint: "https://embedded-user:embedded-password@objects.example.com"
-                    .to_owned(),
-            },
-        };
-
-        for config in [clickhouse, iceberg] {
-            let stripped = StrippedApiDestinationConfig::from(config);
-            let serialized = serde_json::to_string(&stripped).unwrap();
-
-            assert!(!serialized.contains("embedded-user"));
-            assert!(!serialized.contains("embedded-password"));
-            assert!(!serialized.contains("query-password"));
-        }
-
-        let stripped = StrippedApiDestinationConfig::from(StoredDestinationConfig::ClickHouse {
-            url: Url::parse(
-                "https://clickhouse.example.com?access_token=placeholder-token&safe_setting=enabled&monkey=value",
-            )
-            .unwrap(),
-            user: "clickhouse_user".to_owned(),
-            password: None,
-            database: "analytics".to_owned(),
-            engine: ClickHouseEngine::ReplacingMergeTree,
-        });
-        let serialized = serde_json::to_string(&stripped).unwrap();
-        assert!(!serialized.contains("placeholder-token"));
-        assert!(serialized.contains("safe_setting=enabled"));
-        assert!(serialized.contains("monkey=value"));
     }
 
     #[test]
