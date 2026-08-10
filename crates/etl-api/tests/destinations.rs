@@ -129,6 +129,33 @@ async fn an_existing_destination_can_be_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn destination_read_endpoints_omit_credentials() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let destination_id = create_destination_with_config(
+        &app,
+        tenant_id,
+        new_name(),
+        new_bigquery_destination_config(),
+    )
+    .await;
+
+    // Both destination read surfaces must use the stripped response contract.
+    let response = app.read_destination(tenant_id, destination_id).await;
+    assert!(response.status().is_success());
+    let body = response.text().await.unwrap();
+    assert!(!body.contains("service_account_key"));
+    assert!(!body.contains("service-account-key"));
+
+    let response = app.read_all_destinations(tenant_id).await;
+    assert!(response.status().is_success());
+    let body = response.text().await.unwrap();
+    assert!(!body.contains("service_account_key"));
+    assert!(!body.contains("service-account-key"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn non_existing_destination_cannot_be_read() {
     init_test_tracing();
     // Arrange
@@ -205,7 +232,7 @@ async fn destination_config_update_preserves_omitted_fields_and_resets_default_f
         response.json().await.expect("failed to deserialize response");
 
     match response.config {
-        etl_api::configs::destination::ApiDestinationConfig::BigQuery {
+        etl_api::configs::destination::StrippedApiDestinationConfig::BigQuery {
             project_id,
             dataset_id,
             connection_pool_size,
