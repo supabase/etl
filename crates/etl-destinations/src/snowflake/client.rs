@@ -344,21 +344,44 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         }
     }
 
-    /// Ensure the table exists in Snowflake and is ready to receive data.
-    ///
-    /// Returns `true` when streaming was newly set up for this table in the
-    /// current process (the Snowflake table itself may have already existed).
-    #[allow(clippy::map_entry)]
-    pub async fn ensure_table(
+    /// Returns whether this process already has an open channel for `table_id`.
+    pub(super) async fn has_channel(&self, table_id: TableId) -> bool {
+        self.channels.read().await.contains_key(&table_id)
+    }
+
+    /// Creates a table when needed and prepares it for initial-copy writes.
+    pub(super) async fn initialize_table(
         &self,
         table_id: TableId,
         table_name: &str,
         columns: &[ColumnSchema],
-    ) -> Result<bool> {
+    ) -> Result<()> {
+        self.prepare_channel(table_id, table_name, columns, true).await
+    }
+
+    /// Opens and validates an existing table for streaming writes.
+    pub(super) async fn prepare_existing_table(
+        &self,
+        table_id: TableId,
+        table_name: &str,
+        columns: &[ColumnSchema],
+    ) -> Result<()> {
+        self.prepare_channel(table_id, table_name, columns, false).await
+    }
+
+    /// Prepares one table and caches its validated channel.
+    #[allow(clippy::map_entry)]
+    async fn prepare_channel(
+        &self,
+        table_id: TableId,
+        table_name: &str,
+        columns: &[ColumnSchema],
+        create_if_missing: bool,
+    ) -> Result<()> {
         // Fast path: read lock, check if already set up.
         let channels = self.channels.read().await;
         if channels.contains_key(&table_id) {
-            return Ok(false);
+            return Ok(());
         }
         drop(channels);
 
@@ -367,13 +390,15 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         // during startup is acceptable.
         let mut channels = self.channels.write().await;
         if channels.contains_key(&table_id) {
-            return Ok(false);
+            return Ok(());
         }
 
-        // Create Snowflake table.
         schema::validate_no_cdc_collisions(columns)?;
-        let column_defs = schema::build_column_defs(columns);
-        self.sql_client.create_table_if_not_exists(table_name, &column_defs).await?;
+        if create_if_missing {
+            let column_defs = schema::build_column_defs(columns);
+            self.sql_client.create_table_if_not_exists(table_name, &column_defs).await?;
+        }
+        self.validate_table(table_name, columns).await?;
 
         // Obtain table channel.
         let mut handle = ChannelHandle::new(
@@ -387,7 +412,20 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 
         // Persist table-channel mapping.
         channels.insert(table_id, Arc::new(Mutex::new(handle)));
-        Ok(true)
+        Ok(())
+    }
+
+    /// Validates a table before opening or reopening its streaming channel.
+    ///
+    /// Physical validation intentionally runs only at channel lifecycle
+    /// boundaries, not during ordinary writes.
+    async fn validate_table(&self, table_name: &str, columns: &[ColumnSchema]) -> Result<()> {
+        let expected_column_names = columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .chain([schema::CDC_OPERATION_COLUMN, schema::CDC_SEQUENCE_COLUMN])
+            .collect::<Vec<_>>();
+        self.sql_client.validate_table_schema(table_name, &expected_column_names).await
     }
 
     /// Translates a validated schema plan into Snowflake DDL in the supplied
@@ -516,7 +554,6 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     pub async fn truncate_table(
         &self,
         table_id: TableId,
-        table_name: &str,
         truncate_offset: &OffsetToken,
     ) -> Result<()> {
         loop {
@@ -530,6 +567,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                 drop(guard);
                 continue;
             }
+
+            let table_name = guard.table_name().to_owned();
 
             // Open at the truncate offset before clearing the table. This waits for
             // any in-flight rowset to commit and invalidates the previous owner's
@@ -545,13 +584,13 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                 table_id,
                 database: &self.database,
                 schema: &self.schema,
-                table: table_name,
+                table: &table_name,
                 truncate_offset,
                 channel_created_on_ms,
                 rows_inserted: status.rows_inserted,
             }
             .request_id();
-            self.sql_client.truncate_table(table_name, request_id).await?;
+            self.sql_client.truncate_table(&table_name, request_id).await?;
 
             // TRUNCATE may invalidate that token, so reopen at the same offset before
             // allowing another sender to acquire the channel lock.
@@ -610,18 +649,20 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.sql_client.drop_table(&table_name).await
     }
 
-    /// Refresh the table's ingestion state after a schema change.
+    /// Validates and refreshes the table's ingestion state after a schema
+    /// change.
     ///
-    /// Channels must be reopened after ALTER TABLE so Snowpipe picks up the
-    /// new column list. Without this, inserts would fail (and fall back to
-    /// the auto-recovery path in `accept_streaming_batches`, so after one error
-    /// round-trip data would still be pushed, but we can avoid that extra
-    /// trip).
+    /// Channels are reopened after ALTER TABLE so Snowpipe picks up the new
+    /// column list.
     ///
     /// Ref: <https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-classic-recommendation>
-    pub async fn refresh_table(&self, table_id: &TableId) -> Result<()> {
+    pub async fn refresh_table(&self, table_id: &TableId, columns: &[ColumnSchema]) -> Result<()> {
         self.wait_for_pending_durability().await?;
-        self.get_channel(*table_id).await?.lock().await.open().await.map(|_| ())
+        let channel = self.get_channel(*table_id).await?;
+        let mut channel = channel.lock().await;
+        let table_name = channel.table_name().to_owned();
+        self.validate_table(&table_name, columns).await?;
+        channel.open().await.map(|_| ())
     }
 
     /// Send table-copy row batches and retain their pending durability target.

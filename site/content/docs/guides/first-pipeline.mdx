@@ -1,0 +1,233 @@
+---
+title: First Pipeline
+description: Learn Supabase ETL by building a working Postgres replication pipeline.
+icon: Rocket
+---
+
+Build a pipeline that performs an initial sync of a Postgres table, then
+replicates row changes through a small custom `Destination`.
+
+<Callout className="etl-callout" type="info" title="Active development">
+  Supabase ETL is under active development. APIs and setup steps may change
+  before the first stable release.
+</Callout>
+
+## Prerequisites
+
+- Rust toolchain 1.95.0, matching `rust-toolchain.toml`
+- Postgres 14+ with logical replication enabled (`wal_level = logical` in `postgresql.conf`)
+- Basic familiarity with Rust and SQL
+
+New to Postgres logical replication? Read
+[Logical Replication](/explanation/concepts/) first.
+
+## Create the project [#create-the-project] [step]
+
+```bash title="Terminal"
+cargo new etl-tutorial
+cd etl-tutorial
+rustup override set 1.95.0
+```
+
+Add dependencies to `Cargo.toml`:
+
+```toml title="Cargo.toml"
+[dependencies]
+etl = { git = "https://github.com/supabase/etl" }
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+```
+
+**Check:** Run `cargo check` and confirm it compiles without errors.
+
+## Set up Postgres [#set-up-postgres] [step]
+
+Connect to Postgres and create a **test database, table, seed rows, and publication**:
+
+```sql title="psql"
+CREATE DATABASE etl_tutorial;
+\c etl_tutorial
+
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+INSERT INTO users (name, email) VALUES
+    ('Alice Johnson', 'alice@example.com'),
+    ('Bob Smith', 'bob@example.com');
+
+CREATE PUBLICATION my_publication FOR TABLE users;
+```
+
+**Check:** `SELECT * FROM pg_publication WHERE pubname = 'my_publication';`
+returns one row.
+
+## Write the pipeline [#write-the-pipeline] [step]
+
+Replace `src/main.rs`:
+
+```rust title="src/main.rs" lineNumbers
+use etl::{
+    config::{
+        BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig,
+        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+    },
+    data::TableRow,
+    destination::{
+        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
+    },
+    error::EtlResult,
+    event::Event,
+    pipeline::Pipeline,
+    schema::ReplicatedTableSchema,
+    store::MemoryStore,
+};
+use std::error::Error;
+
+#[derive(Clone)]
+struct LoggingDestination;
+
+impl Destination for LoggingDestination {
+    fn name() -> &'static str {
+        "logging"
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        async_result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        println!("preparing fresh table copy");
+        async_result.send(Ok(()));
+        Ok(())
+    }
+
+    async fn write_table_rows(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        println!("copied {} rows", rows.len());
+        async_result.send(Ok(DestinationWriteStatus::Durable));
+        Ok(())
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        _durability: WriteEventsDurability,
+        async_result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        println!("received {} ongoing replication events", events.len());
+        async_result.send(Ok(DestinationWriteStatus::Durable));
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt::init();
+
+    let pg_config = PgConnectionConfig {
+        host: std::env::var("PGHOST").unwrap_or_else(|_| "localhost".to_string()),
+        hostaddr: None,
+        port: std::env::var("PGPORT")
+            .ok()
+            .and_then(|port| port.parse().ok())
+            .unwrap_or(5432),
+        name: std::env::var("PGDATABASE").unwrap_or_else(|_| "etl_tutorial".to_string()),
+        username: std::env::var("PGUSER").unwrap_or_else(|_| "postgres".to_string()),
+        password: std::env::var("PGPASSWORD").ok().map(Into::into),
+        tls: TlsConfig {
+            enabled: false,
+            trusted_root_certs: String::new(),
+        },
+        keepalive: TcpKeepaliveConfig::default(),
+    };
+
+    let config = PipelineConfig {
+        id: 1,
+        publication_name: "my_publication".to_string(),
+        pg_connection: pg_config,
+        store_pg_connection: None,
+        run_source_migrations: true,
+        batch: BatchConfig {
+            max_fill_ms: 5000,
+            memory_budget_ratio: 0.2,
+            max_bytes: 8 * 1024 * 1024,
+        },
+        table_error_retry_delay_ms: 10_000,
+        table_error_retry_max_attempts: 5,
+        max_table_sync_workers: 4,
+        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        memory_refresh_interval_ms: 100,
+        replication_lag_refresh_interval_ms: 10_000,
+        memory_backpressure: None,
+        table_sync_copy: TableSyncCopyConfig::default(),
+        invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+    };
+
+    let store = MemoryStore::new();
+    let destination = LoggingDestination;
+
+    println!("Starting pipeline...");
+    let mut pipeline = Pipeline::new(config, store, destination);
+    pipeline.start().await?;
+    pipeline.wait().await?;
+
+    Ok(())
+}
+```
+
+<Callout className="etl-callout" type="info" title="Note">
+  The example reads the standard `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`,
+  and `PGPASSWORD` environment variables, with local defaults where possible.
+  `Pipeline::start()` installs the ETL **source-side schema helpers** before
+  replication begins, even when the tutorial keeps runtime state in
+  `MemoryStore`.
+</Callout>
+
+## Run the pipeline [#run-the-pipeline] [step]
+
+```bash title="Terminal"
+PGPASSWORD=your_password RUST_LOG=info cargo run
+```
+
+You should see ETL startup logs plus messages from `LoggingDestination` during
+the initial sync. The running pipeline then prints each ongoing replication
+batch size.
+
+## Test ongoing replication [#test-ongoing-replication] [step]
+
+In another terminal, make changes to the database:
+
+```sql title="psql"
+\c etl_tutorial
+
+INSERT INTO users (name, email) VALUES ('Charlie Brown', 'charlie@example.com');
+UPDATE users SET name = 'Alice Cooper' WHERE email = 'alice@example.com';
+DELETE FROM users WHERE email = 'bob@example.com';
+```
+
+Your pipeline terminal should show new **ongoing replication batches**.
+
+## Cleanup
+
+Stop the pipeline with `Ctrl+C`, then clean up the database:
+
+```sql title="psql"
+-- Connect to a different database first (e.g., postgres)
+\c postgres
+DROP DATABASE etl_tutorial;
+```
+
+## Next Steps
+
+- [Custom Implementations](/guides/custom-implementations/): Build your own components
+- [Configure Postgres](/guides/configure-postgres/): Production Postgres setup
+- [Architecture](/explanation/architecture/): How ETL works internally

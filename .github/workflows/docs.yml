@@ -17,6 +17,9 @@ permissions:
 jobs:
   build:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    defaults:
+      run:
+        working-directory: site
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -25,8 +28,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: site/package-lock.json
       - name: Install Docs Dependencies
         run: npm ci
+      - name: Install Tutorial Rust Toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Check Rust Tutorials
+        timeout-minutes: 10
+        run: npm run check:tutorials
       - name: Install Docs Smoke Browser
         run: npx playwright install --with-deps chromium
       - name: Build Docs
@@ -38,7 +47,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: dist
+          path: site/out
 
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404

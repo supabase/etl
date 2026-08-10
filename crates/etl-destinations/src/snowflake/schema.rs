@@ -248,7 +248,7 @@ mod tests {
             (&Type::JSONB, "VARIANT"),
             (&Type::OID, "BIGINT"),
             (&Type::BYTEA, "VARCHAR"),
-            // Arrays all map to VARIANT
+            // Arrays all map to ARRAY.
             (&Type::BOOL_ARRAY, "ARRAY"),
             (&Type::INT4_ARRAY, "ARRAY"),
             (&Type::TEXT_ARRAY, "ARRAY"),

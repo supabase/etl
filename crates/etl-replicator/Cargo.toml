@@ -1,6 +1,7 @@
 [package]
 name = "etl-replicator"
 version = "0.1.0"
+description = "Standalone binary for Supabase ETL Postgres replication pipelines."
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

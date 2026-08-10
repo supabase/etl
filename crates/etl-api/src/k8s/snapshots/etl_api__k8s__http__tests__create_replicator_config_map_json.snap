@@ -1,6 +1,5 @@
 ---
 source: crates/etl-api/src/k8s/http.rs
-assertion_line: 2279
 expression: config_map_json
 ---
 {
@@ -13,7 +12,10 @@ expression: config_map_json
   "metadata": {
     "labels": {
       "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
-      "etl.supabase.com/app-type": "etl-replicator-app"
+      "etl.supabase.com/app-type": "etl-replicator-app",
+      "etl.supabase.com/pipeline-id": "42",
+      "etl.supabase.com/replicator-id": "42",
+      "etl.supabase.com/tenant-id": "abcdefghijklmnopqrst"
     },
     "name": "abcdefghijklmnopqrst-42-replicator-config",
     "namespace": "etl-data-plane"

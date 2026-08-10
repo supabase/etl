@@ -50,7 +50,8 @@ use crate::{
         },
     },
     routes::{
-        ErrorMessage, IntoInner, TenantIdError, common::restart_pipeline_replicator_if_running,
+        ErrorMessage, IntoInner, TenantIdError,
+        common::{restart_pipeline_from_endpoint, restart_pipeline_replicator_if_running},
         error_response_with_internal_error, extract_tenant_id, utils as route_utils,
     },
     utils::parse_docker_image_tag,
@@ -1033,7 +1034,7 @@ pub(crate) async fn start_pipeline(
     post,
     path = "/pipelines/{pipeline_id}/restart",
     summary = "Restart a pipeline",
-    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator.",
+    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator. When durable source state shows that the restart will repeat an initial table copy, the endpoint resets the VPA so the copy starts from the initial allocation. If source state cannot be inspected, or all tables completed initial sync, the current VPA recommendation is preserved. System-initiated pod restarts do not use this endpoint and always preserve VPA state.",
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
@@ -1060,7 +1061,7 @@ pub(crate) async fn restart_pipeline(
     let pipeline_id = pipeline_id.into_inner();
 
     let mut connection = pool.acquire().await?;
-    let restarted = restart_pipeline_replicator_if_running(
+    let restarted = restart_pipeline_from_endpoint(
         &mut connection,
         tenant_id,
         pipeline_id,

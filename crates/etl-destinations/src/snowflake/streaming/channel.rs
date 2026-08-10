@@ -408,6 +408,11 @@ impl<C: StreamClient> ChannelHandle<C> {
         }
     }
 
+    /// Returns the Snowflake table owned by this channel.
+    pub(in crate::snowflake) fn table_name(&self) -> &str {
+        &self.table
+    }
+
     /// Opens or reopens the channel while preserving Snowflake's stored offset.
     ///
     /// Opening fences older continuation tokens. If rows are still in flight,

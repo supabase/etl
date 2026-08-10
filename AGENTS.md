@@ -12,7 +12,7 @@
   - `crates/etl-examples/`: examples.
   - `crates/etl-benchmarks/`: benchmarks.
   - `crates/xtask/`: workspace automation commands.
-- Docs live in `docs/`.
+- The Next.js/Fumadocs website lives in `site/`; its documentation content lives in `site/content/docs/`.
 - Local development and ops tooling live in `crates/xtask/` (run via `cargo x`) and `DEVELOPMENT.md`.
 - Tests live next to code in `src/` or `tests/`.
 

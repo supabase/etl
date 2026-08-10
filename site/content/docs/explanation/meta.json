@@ -1,0 +1,6 @@
+{
+  "title": "Concepts",
+  "description": "The architecture, event model, and extension contracts behind Supabase ETL.",
+  "defaultOpen": true,
+  "pages": ["concepts", "architecture", "events", "schema-changes", "traits"]
+}

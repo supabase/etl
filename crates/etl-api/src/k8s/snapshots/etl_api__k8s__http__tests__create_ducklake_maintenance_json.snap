@@ -8,7 +8,10 @@ expression: "serde_json::to_string_pretty(&ducklake_maintenance_json).unwrap()"
   "metadata": {
     "labels": {
       "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
-      "etl.supabase.com/app-type": "etl-ducklake-maintenance-app"
+      "etl.supabase.com/app-type": "etl-ducklake-maintenance-app",
+      "etl.supabase.com/pipeline-id": "24",
+      "etl.supabase.com/replicator-id": "42",
+      "etl.supabase.com/tenant-id": "abcdefghijklmnopqrst"
     },
     "name": "abcdefghijklmnopqrst-42",
     "namespace": "etl-data-plane"

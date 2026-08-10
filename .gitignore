@@ -22,9 +22,11 @@ target/
 .DS_Store
 
 # Docs build directories
-.astro/
-site/
+.next/
+.source/
+out/
 dist/
+*.tsbuildinfo
 
 # venv files
 /bin/
