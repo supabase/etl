@@ -29,8 +29,8 @@ changes:
 | Add a replicated column | Add column |
 | Drop a replicated column | Drop column |
 | Rename a replicated column | Rename column |
-| Change a replicated column default | Column default alteration |
-| Drop a replicated column default | Column default alteration |
+| Change a replicated column default | Drop the previous default, then set the replacement default |
+| Drop a replicated column default | Drop the previous default |
 | Change a replicated column type or type modifier | Detected and ordered as a type alteration, but currently skipped with a warning by BigQuery, ClickHouse, DuckLake, and Snowflake |
 | Drop `NOT NULL` from a replicated column | BigQuery relaxes an existing `REQUIRED` column to `NULLABLE`; other built-in destinations currently leave nullability unchanged |
 | Set `NOT NULL` on a replicated column | Detected in the schema snapshot, but not applied to built-in destinations |
@@ -40,13 +40,16 @@ changes:
 
 When several attributes of the same logical column change at once, the diff
 records one column metadata change with the before and after endpoint schemas.
-The planner then emits one ordered alteration for each changed field. Every
+The planner then emits ordered alterations for the changed fields. Every
 alteration contains its own operation-local `before_column_schema` and
 `after_column_schema`: the after state of one operation is the before state of
-the next operation for that logical column. For example, renaming a column and
-changing its default produces a rename whose after schema has the after name but
-the before default, followed by a default alteration whose before schema already
-has that renamed state.
+the next operation for that logical column. Every default change is one default
+alteration whose before and after expressions distinguish addition, removal,
+and replacement. A destination replacing a default first removes the previous
+default independently of its current compatibility rules, then sets the new
+expression only when currently supported. For example, renaming a column and
+changing its default produces a rename followed by one default alteration
+against the renamed column.
 
 ## How It Works
 
@@ -179,13 +182,15 @@ space, rejects mapped collisions, and produces a `SchemaPlan` that:
 4. Adds columns present only in the after endpoint schema.
 5. Emits existing-column type, nullability, and default alterations using the
    state left by earlier operations. Each alteration changes only the field
-   identified by its kind. BigQuery, ClickHouse, DuckLake, and Snowflake
-   currently warn and skip type alterations.
+   identified by its kind. A default alteration carries both endpoint
+   expressions so each destination can distinguish addition, removal, and
+   replacement. BigQuery, ClickHouse, DuckLake, and Snowflake currently warn and
+   skip type alterations.
 
 Consequently, transient add, drop, or rename operations absent from the after
 snapshot do not create destination DDL. Each changed column field normally
-produces one destination operation; a rename cycle requires exactly one extra
-temporary rename.
+produces one destination operation. A rename cycle requires one extra temporary
+rename.
 
 Destination column-name mapping is not a source diffing rule. PostgreSQL still
 records `A` to `a` as a logical rename because the exact names differ at the
@@ -417,11 +422,16 @@ Destination support may be narrower than parser support:
 | DuckLake | Supports compatible string, numeric, date, time, timestamp, JSON, and UUID literals. Boolean defaults are currently skipped by the DuckLake destination. |
 | Snowflake | `CREATE TABLE` supports compatible string, numeric, boolean, date, time, timestamp, JSON, and UUID literals. `ADD COLUMN` only receives the literal subset Snowflake allows for add-column defaults: string, numeric, and boolean literals. Later default changes on existing columns are skipped. |
 
-When changing a default from one supported expression to an unsupported
-expression, destinations that can safely remove defaults drop the old supported
-default to avoid leaving stale destination behavior behind. Snowflake is the
-exception for defaults introduced by `ADD COLUMN ... DEFAULT`, because Snowflake
-does not allow those defaults to be dropped safely.
+When a source default changes, the shared plan first drops any previous source
+default without re-evaluating whether that old expression is supported by the
+current binary. BigQuery, ClickHouse, and DuckLake make that drop idempotent, so
+upgrading compatibility rules cannot leave a formerly supported destination
+default behind or make an absent default fail the transition. The subsequent
+set is emitted only when the target source schema has a default, and each
+destination applies it only when its current renderer supports the expression
+for that type. Snowflake skips both existing-column actions because it cannot
+set ordinary defaults and cannot safely drop defaults introduced by
+`ADD COLUMN ... DEFAULT` without stored provenance.
 
 ## Diff Semantics
 
@@ -540,9 +550,10 @@ These behaviors are **not full destination DDL semantics** yet:
   destination schema default metadata is not set. If a previously supported
   default becomes unsupported, ETL removes the old destination default where the
   destination supports that operation so stale behavior is not left behind.
-  BigQuery applies default changes in the shared schema-operation order:
-  supported defaults replace the destination default, while unsupported or
-  absent defaults remove it if present.
+  Default replacement is modeled as an idempotent drop followed by a set.
+  BigQuery, ClickHouse, and DuckLake always attempt the drop without using the
+  current compatibility policy to reinterpret the previous expression, then
+  set the target default only when the current destination renderer supports it.
   Snowflake default changes on existing columns are skipped with a warning
   because `ALTER COLUMN SET DEFAULT` is documented only for existing sequence
   defaults, and defaults introduced by `ALTER TABLE ADD COLUMN ... DEFAULT`

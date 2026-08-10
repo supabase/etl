@@ -803,6 +803,132 @@ fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
     SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
 }
 
+/// Stores one schema version whose `status` column has the supplied default.
+async fn store_status_default_schema(
+    store: &NotifyingStore,
+    table_id: TableId,
+    table_name: &TableName,
+    snapshot_id: SnapshotId,
+    default_expression: Option<&str>,
+) -> ReplicatedTableSchema {
+    let schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            table_id,
+            table_name.clone(),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, true)
+                    .with_default_expression_option(default_expression.map(ToOwned::to_owned)),
+            ],
+            snapshot_id,
+        ))
+        .await
+        .unwrap();
+
+    ReplicatedTableSchema::all(schema)
+}
+
+/// Returns whether ClickHouse currently stores a `DEFAULT` for `column_name`.
+async fn clickhouse_column_has_default(
+    database: &ClickHouseTestDatabase,
+    table_name: &str,
+    column_name: &str,
+) -> bool {
+    database
+        .db_client()
+        .query(
+            "select count() from system.columns where database = currentDatabase() and table = ? \
+             and name = ? and default_kind = 'DEFAULT'",
+        )
+        .bind(table_name)
+        .bind(column_name)
+        .fetch_one::<u64>()
+        .await
+        .unwrap()
+        != 0
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_column_default_changes_drop_before_setting_supported_replacement() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let table_id = TableId::new(4245);
+    let table_name = TableName::new("public".to_owned(), "default_changes".to_owned());
+    let initial_schema = store_status_default_schema(
+        &store,
+        table_id,
+        &table_name,
+        test_snapshot_id(100, 100),
+        Some("lower('unsupported')"),
+    )
+    .await;
+    let supported_schema = store_status_default_schema(
+        &store,
+        table_id,
+        &table_name,
+        test_snapshot_id(200, 200),
+        Some("'queued'::text"),
+    )
+    .await;
+    let unsupported_schema = store_status_default_schema(
+        &store,
+        table_id,
+        &table_name,
+        test_snapshot_id(300, 300),
+        Some("lower('unsupported')"),
+    )
+    .await;
+    let supported_again_schema = store_status_default_schema(
+        &store,
+        table_id,
+        &table_name,
+        test_snapshot_id(400, 400),
+        Some("'done'::text"),
+    )
+    .await;
+    let dropped_schema = store_status_default_schema(
+        &store,
+        table_id,
+        &table_name,
+        test_snapshot_id(500, 500),
+        None,
+    )
+    .await;
+    let destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+
+    destination.write_table_rows(&initial_schema, vec![]).await.unwrap();
+    let destination_table_name = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .destination_table_id;
+    assert!(
+        !clickhouse_column_has_default(&clickhouse_db, &destination_table_name, "status").await
+    );
+
+    for (schema, expected_default) in [
+        (supported_schema, true),
+        (unsupported_schema, false),
+        (supported_again_schema, true),
+        (dropped_schema, false),
+    ] {
+        destination
+            .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: schema })])
+            .await
+            .unwrap();
+        assert_eq!(
+            clickhouse_column_has_default(&clickhouse_db, &destination_table_name, "status").await,
+            expected_default
+        );
+    }
+}
+
 /// Retained row shape for interrupted publication-mask recovery.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
 struct RecoveryMaskRow {

@@ -1176,35 +1176,6 @@ where
                         .await?;
                     user_column_names.retain(|name| name != &before_column_schema.name);
                 }
-                SchemaOperation::AlterColumn { alteration }
-                    if alteration.kind() == ColumnAlterationKind::Rename =>
-                {
-                    let before = alteration.before_column_schema();
-                    let after = alteration.after_column_schema();
-                    self.client
-                        .rename_column(clickhouse_table_name, &before.name, &after.name)
-                        .await?;
-                    if let Some(name) =
-                        user_column_names.iter_mut().find(|name| **name == before.name)
-                    {
-                        after.name.clone_into(name);
-                    }
-                }
-                SchemaOperation::AlterColumn { alteration }
-                    if alteration.kind() == ColumnAlterationKind::Type =>
-                {
-                    let before = alteration.before_column_schema();
-                    let after = alteration.after_column_schema();
-                    warn!(
-                        table_name = %clickhouse_table_name,
-                        column_name = %before.name,
-                        before_data_type = before.typ.name(),
-                        before_type_modifier = before.modifier,
-                        after_data_type = after.typ.name(),
-                        after_type_modifier = after.modifier,
-                        "skipping unsupported clickhouse column type change"
-                    );
-                }
                 SchemaOperation::AddColumn { after_column_schema, reason } => {
                     let insertion_index = clickhouse_add_column_insertion_index(
                         &user_column_names,
@@ -1242,67 +1213,70 @@ where
                         .await?;
                     user_column_names.insert(insertion_index, after_column_schema.name.clone());
                 }
-                SchemaOperation::AlterColumn { alteration }
-                    if alteration.kind() == ColumnAlterationKind::Nullability =>
-                {
+                SchemaOperation::AlterColumn { alteration } => {
                     let before = alteration.before_column_schema();
                     let after = alteration.after_column_schema();
-                    warn!(
-                        table_name = %clickhouse_table_name,
-                        column_name = %before.name,
-                        before_nullable = before.nullable,
-                        after_nullable = after.nullable,
-                        "skipping source column nullability change for clickhouse"
-                    );
-                }
-                SchemaOperation::AlterColumn { alteration }
-                    if alteration.kind() == ColumnAlterationKind::Default =>
-                {
-                    let before = alteration.before_column_schema();
-                    let after = alteration.after_column_schema();
-                    let before_default_was_supported =
-                        before.default_expression.as_deref().is_some_and(|default_expression| {
-                            supports_column_default(default_expression, &before.typ)
-                        });
-
-                    if let Some(after_default_expression) = after.default_expression.as_deref() {
-                        if supports_column_default(after_default_expression, &after.typ) {
+                    match alteration.kind() {
+                        ColumnAlterationKind::Rename => {
                             self.client
-                                .set_column_default(
-                                    clickhouse_table_name,
-                                    &before.name,
-                                    &after.typ,
-                                    after_default_expression,
-                                )
+                                .rename_column(clickhouse_table_name, &before.name, &after.name)
                                 .await?;
-                        } else {
+                            if let Some(name) =
+                                user_column_names.iter_mut().find(|name| **name == before.name)
+                            {
+                                after.name.clone_into(name);
+                            }
+                        }
+                        ColumnAlterationKind::Type => {
                             warn!(
                                 table_name = %clickhouse_table_name,
                                 column_name = %before.name,
-                                "skipping unsupported source column default for clickhouse"
+                                before_data_type = before.typ.name(),
+                                before_type_modifier = before.modifier,
+                                after_data_type = after.typ.name(),
+                                after_type_modifier = after.modifier,
+                                "skipping unsupported clickhouse column type change"
                             );
-                            if before_default_was_supported {
+                        }
+                        ColumnAlterationKind::Nullability => {
+                            warn!(
+                                table_name = %clickhouse_table_name,
+                                column_name = %before.name,
+                                before_nullable = before.nullable,
+                                after_nullable = after.nullable,
+                                "skipping source column nullability change for clickhouse"
+                            );
+                        }
+                        ColumnAlterationKind::Default => {
+                            if before.default_expression.is_some() {
                                 self.client
                                     .drop_column_default(clickhouse_table_name, &before.name)
                                     .await?;
                             }
+
+                            if let Some(after_default_expression) =
+                                after.default_expression.as_deref()
+                            {
+                                if supports_column_default(after_default_expression, &after.typ) {
+                                    self.client
+                                        .set_column_default(
+                                            clickhouse_table_name,
+                                            &before.name,
+                                            &after.typ,
+                                            after_default_expression,
+                                        )
+                                        .await?;
+                                } else {
+                                    warn!(
+                                        table_name = %clickhouse_table_name,
+                                        column_name = %before.name,
+                                        "skipping unsupported source column default for clickhouse"
+                                    );
+                                }
+                            }
                         }
-                    } else if before_default_was_supported {
-                        self.client
-                            .drop_column_default(clickhouse_table_name, &before.name)
-                            .await?;
-                    } else if before.default_expression.is_some() {
-                        warn!(
-                            table_name = %clickhouse_table_name,
-                            column_name = %before.name,
-                            "skipping source column default drop for clickhouse because no \
-                             supported destination default was set"
-                        );
                     }
                 }
-                SchemaOperation::AlterColumn { .. } => unreachable!(
-                    "column alteration kind should match one of the supported planner kinds"
-                ),
             }
         }
 

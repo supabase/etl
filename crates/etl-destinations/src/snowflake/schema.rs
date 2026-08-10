@@ -104,11 +104,6 @@ pub(crate) fn add_column_default_clause(column_schema: &ColumnSchema) -> Option<
     default_clause
 }
 
-/// Returns whether a column default can be represented in Snowflake SQL.
-pub(crate) fn supports_column_default(default_expression: &str, typ: &Type) -> bool {
-    snowflake_default_expression(default_expression, typ).is_some()
-}
-
 /// Returns a rendered Snowflake default expression for a column, if supported.
 fn snowflake_default_expression(default_expression: &str, typ: &Type) -> Option<String> {
     parse_default_expression(default_expression, typ)

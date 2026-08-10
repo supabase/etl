@@ -1055,6 +1055,10 @@ impl ColumnAlteration {
             before_column_schema.ordinal_position, after_column_schema.ordinal_position,
             "column alteration states should identify the same logical column"
         );
+        debug_assert_ne!(
+            before_column_schema, after_column_schema,
+            "column alteration should change its identified field"
+        );
         let mut expected_after = before_column_schema.clone();
         match kind {
             ColumnAlterationKind::Rename => {
@@ -1077,7 +1081,6 @@ impl ColumnAlteration {
             expected_after, after_column_schema,
             "column alteration should change only the field identified by its kind"
         );
-
         Self { before_column_schema, after_column_schema, kind }
     }
 
@@ -1373,8 +1376,10 @@ impl SchemaPlan {
     /// must match the one used to create the currently applied schema.
     ///
     /// Drops precede renames, followed by additions and type, nullability, and
-    /// default alterations. Destinations must preserve this exact order and
-    /// must not independently apply the classified diff fields.
+    /// default alterations. A default alteration's before and after expressions
+    /// identify whether the destination must remove, set, or replace a default.
+    /// Destinations must preserve this exact order and must not independently
+    /// apply the classified diff fields.
     pub fn ordered_operations(&self) -> &[SchemaOperation] {
         &self.ordered_operations
     }
@@ -2250,6 +2255,42 @@ mod tests {
     }
 
     #[test]
+    fn schema_plan_emits_one_default_alteration() {
+        for (before_default, after_default) in [
+            (None, Some("'pending'::text")),
+            (Some("'pending'::text"), None),
+            (Some("'pending'::text"), Some("'queued'::text")),
+        ] {
+            let before_schema = create_replicated_schema(vec![
+                text_column("status", 1)
+                    .with_default_expression_option(before_default.map(ToOwned::to_owned)),
+            ]);
+            let after_schema = create_replicated_schema(vec![
+                text_column("status", 1)
+                    .with_default_expression_option(after_default.map(ToOwned::to_owned)),
+            ]);
+
+            let plan =
+                plan_schema_change(&before_schema, &after_schema, ColumnNameMapping::Identity);
+
+            assert_eq!(operation_names(&plan), ["modify-default:status"]);
+            let [SchemaOperation::AlterColumn { alteration }] = plan.ordered_operations() else {
+                panic!("expected one default alteration");
+            };
+            assert_eq!(alteration.kind(), ColumnAlterationKind::Default);
+            assert_eq!(
+                alteration.before_column_schema().default_expression.as_deref(),
+                before_default
+            );
+            assert_eq!(
+                alteration.after_column_schema().default_expression.as_deref(),
+                after_default
+            );
+            assert_operations_converge(&before_schema, &after_schema);
+        }
+    }
+
+    #[test]
     fn schema_diff_ignores_unchanged_column_default() {
         let before_schema = create_replicated_schema(vec![
             ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
@@ -2385,11 +2426,26 @@ mod tests {
                 ColumnAlterationKind::Default,
             ]
         );
+
+        let mut renamed_column = before_column.clone();
+        renamed_column.name = "state".to_owned();
+        let mut retyped_column = renamed_column.clone();
+        retyped_column.typ = Type::VARCHAR;
+        retyped_column.modifier = 24;
+        let mut nullable_column = retyped_column.clone();
+        nullable_column.nullable = true;
+
         assert_eq!(alterations[0].before_column_schema(), &before_column);
+        assert_eq!(alterations[0].after_column_schema(), &renamed_column);
+        assert_eq!(alterations[1].before_column_schema(), &renamed_column);
+        assert_eq!(alterations[1].after_column_schema(), &retyped_column);
+        assert_eq!(alterations[2].before_column_schema(), &retyped_column);
+        assert_eq!(alterations[2].after_column_schema(), &nullable_column);
+        assert_eq!(alterations[3].before_column_schema(), &nullable_column);
+        assert_eq!(alterations[3].after_column_schema(), &after_column);
         for operations in alterations.windows(2) {
             assert_eq!(operations[0].after_column_schema(), operations[1].before_column_schema());
         }
-        assert_eq!(alterations[3].after_column_schema(), &after_column);
     }
 
     #[test]
@@ -2423,7 +2479,7 @@ mod tests {
             before_schema.plan_schema_change(&after_schema, ColumnNameMapping::Identity).unwrap();
         assert_eq!(
             operation_names(&plan),
-            ["rename:status->state", "modify-nullability:state", "modify-default:state"]
+            ["rename:status->state", "modify-nullability:state", "modify-default:state",]
         );
     }
 

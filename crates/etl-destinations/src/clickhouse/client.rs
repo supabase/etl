@@ -10,6 +10,7 @@ use etl::{
     etl_error,
     schema::Type,
 };
+use tracing::debug;
 use url::Url;
 
 use crate::clickhouse::{
@@ -512,12 +513,44 @@ impl ClickHouseClient {
         self.execute_ddl(DdlKind::ModifyColumn, &sql).await
     }
 
-    /// Drops a default expression from a ClickHouse column.
+    /// Drops a default expression from a ClickHouse column when present.
     pub(crate) async fn drop_column_default(
         &self,
         table_name: &str,
         column_name: &str,
     ) -> EtlResult<()> {
+        // ClickHouse returns BAD_ARGUMENTS when REMOVE DEFAULT targets a
+        // column without a default, so make the default-removal step idempotent
+        // with a metadata check while schema DDL is serialized.
+        let schema_secs = floor_secs(self.config.schema_query_timeout);
+        let query = self
+            .inner
+            .query(
+                "select count() from system.columns where database = currentDatabase() and table \
+                 = ? and name = ? and default_kind = 'DEFAULT'",
+            )
+            .with_option("max_execution_time", &schema_secs)
+            .bind(table_name)
+            .bind(column_name);
+        let start = Instant::now();
+        let default_count = timeout_call(
+            ClickHouseOperationKind::SchemaQuery,
+            &self.config,
+            Some(&format!("table: {table_name}, column: {column_name}")),
+            query.fetch_one::<u64>(),
+        )
+        .await?;
+        metrics::histogram!(ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS)
+            .record(start.elapsed().as_secs_f64());
+
+        if default_count == 0 {
+            debug!(
+                table_name,
+                column_name, "clickhouse column has no default; skipping drop default"
+            );
+            return Ok(());
+        }
+
         let sql = build_drop_default_sql(table_name, column_name);
         self.execute_ddl(DdlKind::ModifyColumn, &sql).await
     }

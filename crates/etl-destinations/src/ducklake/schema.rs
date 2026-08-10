@@ -199,11 +199,6 @@ fn quote_numeric_literal_as_string(expression: &str) -> String {
     format!("'{expression}'")
 }
 
-/// Returns whether a column default can be represented in DuckLake SQL.
-pub(super) fn supports_column_default_ducklake(default_expression: &str, typ: &Type) -> bool {
-    ducklake_default_expression(default_expression, typ).is_some()
-}
-
 /// Returns a rendered DuckLake default expression for a column, if supported.
 fn ducklake_default_expression(default_expression: &str, typ: &Type) -> Option<String> {
     parse_default_expression(default_expression, typ)
@@ -450,17 +445,17 @@ mod tests {
     }
 
     #[test]
-    fn build_create_table_sql_qualifies_lake_catalog() {
+    fn build_create_table_sql_qualifies_names_and_omits_absent_defaults() {
         let sql = build_create_table_sql_ducklake(
             &table_name("odd\"table"),
             &[ColumnSchema::new("select".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
         );
 
-        assert!(sql.starts_with(
+        assert_eq!(
+            sql,
             "create schema if not exists \"lake\".\"public\";\ncreate table if not exists \
-             \"lake\".\"public\".\"odd\"\"table\""
-        ));
-        assert!(sql.contains("  \"select\" integer not null"));
+             \"lake\".\"public\".\"odd\"\"table\" (  \"select\" integer not null)"
+        );
     }
 
     #[test]

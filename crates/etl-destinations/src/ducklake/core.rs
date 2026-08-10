@@ -86,7 +86,7 @@ use crate::{
             build_disable_sort_on_insert_sql_ducklake, build_drop_column_sql_ducklake,
             build_drop_default_sql_ducklake, build_rename_column_sql_ducklake,
             build_reset_sorted_by_sql_ducklake, build_set_default_sql_ducklake,
-            build_set_sorted_by_sql_ducklake, supports_column_default_ducklake,
+            build_set_sorted_by_sql_ducklake,
         },
         sql::{qualified_lake_table_name, quote_identifier},
     },
@@ -921,6 +921,60 @@ fn plan_ducklake_schema_ddl(
                 });
                 column_names.remove(index);
             }
+            SchemaOperation::AddColumn { after_column_schema, reason } => {
+                if find_ducklake_column(&column_names, &after_column_schema.name).is_some() {
+                    debug!(
+                        table = %table_name,
+                        column = %after_column_schema.name,
+                        "ducklake add column skipped because destination column already exists"
+                    );
+
+                    if *reason == ColumnPresenceChangeReason::ReplicationMask {
+                        debug!(
+                            table = %table_name,
+                            column = %after_column_schema.name,
+                            "leaving publication-added ducklake column without a default"
+                        );
+                    } else if let Some(default_expression) =
+                        after_column_schema.default_expression.as_deref()
+                    {
+                        let Some(sql) = build_set_default_sql_ducklake(
+                            table_name,
+                            &after_column_schema.name,
+                            &after_column_schema.typ,
+                            default_expression,
+                        ) else {
+                            warn!(
+                                table_name = %table_name,
+                                column_name = %after_column_schema.name,
+                                "skipping unsupported source column default for ducklake"
+                            );
+                            continue;
+                        };
+                        statements.push(DuckLakeSchemaDdlStatement {
+                            sql,
+                            error_description: "DuckLake alter table set default failed",
+                        });
+                    }
+
+                    continue;
+                }
+
+                let mut destination_column_schema = after_column_schema.clone();
+                if *reason == ColumnPresenceChangeReason::ReplicationMask {
+                    destination_column_schema.default_expression = None;
+                    debug!(
+                        table = %table_name,
+                        column = %after_column_schema.name,
+                        "leaving publication-added ducklake column without a default"
+                    );
+                }
+                statements.push(DuckLakeSchemaDdlStatement {
+                    sql: build_add_column_sql_ducklake(table_name, &destination_column_schema),
+                    error_description: "DuckLake alter table add column failed",
+                });
+                column_names.push(after_column_schema.name.clone());
+            }
             SchemaOperation::AlterColumn { alteration }
                 if alteration.kind() == ColumnAlterationKind::Rename =>
             {
@@ -1044,10 +1098,12 @@ fn plan_ducklake_schema_ddl(
                     continue;
                 }
 
-                let before_default_was_supported =
-                    before.default_expression.as_deref().is_some_and(|default_expression| {
-                        supports_column_default_ducklake(default_expression, &before.typ)
+                if before.default_expression.is_some() {
+                    statements.push(DuckLakeSchemaDdlStatement {
+                        sql: build_drop_default_sql_ducklake(table_name, &before.name),
+                        error_description: "DuckLake alter table drop default failed",
                     });
+                }
 
                 if let Some(after_default_expression) = after.default_expression.as_deref() {
                     let Some(sql) = build_set_default_sql_ducklake(
@@ -1061,89 +1117,17 @@ fn plan_ducklake_schema_ddl(
                             column_name = %before.name,
                             "skipping unsupported source column default for ducklake"
                         );
-                        if before_default_was_supported {
-                            statements.push(DuckLakeSchemaDdlStatement {
-                                sql: build_drop_default_sql_ducklake(table_name, &before.name),
-                                error_description: "DuckLake alter table drop default failed",
-                            });
-                        }
                         continue;
                     };
                     statements.push(DuckLakeSchemaDdlStatement {
                         sql,
                         error_description: "DuckLake alter table set default failed",
                     });
-                } else if before_default_was_supported {
-                    statements.push(DuckLakeSchemaDdlStatement {
-                        sql: build_drop_default_sql_ducklake(table_name, &before.name),
-                        error_description: "DuckLake alter table drop default failed",
-                    });
-                } else if before.default_expression.is_some() {
-                    warn!(
-                        table_name = %table_name,
-                        column_name = %before.name,
-                        "skipping source column default drop for ducklake because no supported \
-                         destination default was set"
-                    );
                 }
             }
             SchemaOperation::AlterColumn { .. } => unreachable!(
                 "column alteration kind should match one of the supported planner kinds"
             ),
-            SchemaOperation::AddColumn { after_column_schema, reason } => {
-                if find_ducklake_column(&column_names, &after_column_schema.name).is_some() {
-                    debug!(
-                        table = %table_name,
-                        column = %after_column_schema.name,
-                        "ducklake add column skipped because destination column already exists"
-                    );
-
-                    if *reason == ColumnPresenceChangeReason::ReplicationMask {
-                        debug!(
-                            table = %table_name,
-                            column = %after_column_schema.name,
-                            "leaving publication-added ducklake column without a default"
-                        );
-                    } else if let Some(default_expression) =
-                        after_column_schema.default_expression.as_deref()
-                    {
-                        let Some(sql) = build_set_default_sql_ducklake(
-                            table_name,
-                            &after_column_schema.name,
-                            &after_column_schema.typ,
-                            default_expression,
-                        ) else {
-                            warn!(
-                                table_name = %table_name,
-                                column_name = %after_column_schema.name,
-                                "skipping unsupported source column default for ducklake"
-                            );
-                            continue;
-                        };
-                        statements.push(DuckLakeSchemaDdlStatement {
-                            sql,
-                            error_description: "DuckLake alter table set default failed",
-                        });
-                    }
-
-                    continue;
-                }
-
-                let mut destination_column_schema = after_column_schema.clone();
-                if *reason == ColumnPresenceChangeReason::ReplicationMask {
-                    destination_column_schema.default_expression = None;
-                    debug!(
-                        table = %table_name,
-                        column = %after_column_schema.name,
-                        "leaving publication-added ducklake column without a default"
-                    );
-                }
-                statements.push(DuckLakeSchemaDdlStatement {
-                    sql: build_add_column_sql_ducklake(table_name, &destination_column_schema),
-                    error_description: "DuckLake alter table add column failed",
-                });
-                column_names.push(after_column_schema.name.clone());
-            }
         }
     }
 
@@ -3703,7 +3687,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_ducklake_schema_ddl_skips_unsupported_default_drop() {
+    fn plan_ducklake_schema_ddl_drops_previous_default_without_rechecking_support() {
         let shared_plan = shared_schema_plan(
             SchemaDiff::new(
                 Vec::new(),
@@ -3721,7 +3705,44 @@ mod tests {
         )
         .unwrap();
 
-        assert!(plan.statements.is_empty());
+        assert_eq!(
+            plan.statements.iter().map(|statement| statement.sql.as_str()).collect::<Vec<_>>(),
+            [r#"alter table "lake"."public"."users" alter column "status" drop default"#]
+        );
+        assert_eq!(plan.column_names, vec!["id", "name", "status"]);
+    }
+
+    #[test]
+    fn plan_ducklake_schema_ddl_drops_before_setting_replacement_default() {
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(
+                Vec::new(),
+                Vec::new(),
+                vec![default_change(
+                    "status",
+                    3,
+                    Some("array['unsupported']::text[]"),
+                    Some("'queued'::text"),
+                )],
+            ),
+            ["id", "name", "status"],
+            ["id", "name", "status"],
+        );
+
+        let plan = plan_ducklake_schema_ddl(
+            &ducklake_table_name(),
+            vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
+            &shared_plan,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.statements.iter().map(|statement| statement.sql.as_str()).collect::<Vec<_>>(),
+            [
+                r#"alter table "lake"."public"."users" alter column "status" drop default"#,
+                r#"alter table "lake"."public"."users" alter column "status" set default 'queued'"#,
+            ]
+        );
         assert_eq!(plan.column_names, vec!["id", "name", "status"]);
     }
 

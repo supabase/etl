@@ -454,17 +454,34 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                                 "skipping source column nullability change for snowflake"
                             );
                         }
-                        ColumnAlterationKind::Default => {
-                            if after.default_expression.is_some() {
-                                Self::warn_skipping_column_default_change(table_name, &before.name);
-                            } else {
-                                Self::warn_skipping_column_default_drop(
-                                    table_name,
-                                    before.default_expression.as_deref(),
-                                    before,
-                                );
+                        ColumnAlterationKind::Default => match (
+                            before.default_expression.as_deref(),
+                            after.default_expression.as_deref(),
+                        ) {
+                            (Some(_), None) => warn!(
+                                table_name,
+                                column_name = %before.name,
+                                "skipping source column default removal for snowflake because \
+                                 defaults introduced by alter table add column cannot be dropped \
+                                 safely"
+                            ),
+                            (None, Some(_)) => warn!(
+                                table_name,
+                                column_name = %before.name,
+                                "skipping source column default addition for snowflake because \
+                                 alter column set default is only supported for existing sequence \
+                                 defaults"
+                            ),
+                            (Some(_), Some(_)) => warn!(
+                                table_name,
+                                column_name = %before.name,
+                                "skipping source column default replacement for snowflake because \
+                                 existing defaults cannot be changed safely"
+                            ),
+                            (None, None) => {
+                                unreachable!("default alteration should change the default");
                             }
-                        }
+                        },
                     }
                 }
             }
@@ -472,35 +489,6 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 
         Ok(())
     }
-
-    /// Logs that Snowflake default-change DDL is being skipped.
-    fn warn_skipping_column_default_change(table_name: &str, column_name: &str) {
-        warn!(
-            table_name,
-            column_name,
-            "skipping source column default change for snowflake because alter column set default \
-             is only supported for existing sequence defaults"
-        );
-    }
-
-    /// Logs that Snowflake default-drop DDL is being skipped.
-    fn warn_skipping_column_default_drop(
-        table_name: &str,
-        before_default_expression: Option<&str>,
-        column_schema: &ColumnSchema,
-    ) {
-        if before_default_expression.is_some_and(|default_expression| {
-            schema::supports_column_default(default_expression, &column_schema.typ)
-        }) {
-            warn!(
-                table_name,
-                column_name = %column_schema.name,
-                "skipping source column default removal for snowflake because defaults introduced \
-                 by alter table add column cannot be dropped safely"
-            );
-        }
-    }
-
     /// Applies a source truncate to Snowflake and positions the table's
     /// Snowpipe channel at `truncate_offset`.
     ///

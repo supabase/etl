@@ -949,24 +949,7 @@ where
                             }
                         }
                         ColumnAlterationKind::Default => {
-                            if let Some(default_expression) = column_default_sql(after) {
-                                self.client
-                                    .set_column_default(
-                                        &self.dataset_id,
-                                        &sequenced_bigquery_table_id.to_string(),
-                                        &before.name,
-                                        &default_expression,
-                                    )
-                                    .await?;
-                            } else {
-                                if after.default_expression.is_some() {
-                                    warn!(
-                                        table_id = %table_id,
-                                        column_name = %before.name,
-                                        "skipping unsupported source column default for bigquery"
-                                    );
-                                }
-
+                            if before.default_expression.is_some() {
                                 self.client
                                     .clear_column_default(
                                         &self.dataset_id,
@@ -974,6 +957,25 @@ where
                                         &before.name,
                                     )
                                     .await?;
+                            }
+
+                            if after.default_expression.is_some() {
+                                if let Some(default_expression) = column_default_sql(after) {
+                                    self.client
+                                        .set_column_default(
+                                            &self.dataset_id,
+                                            &sequenced_bigquery_table_id.to_string(),
+                                            &before.name,
+                                            &default_expression,
+                                        )
+                                        .await?;
+                                } else {
+                                    warn!(
+                                        table_id = %table_id,
+                                        column_name = %before.name,
+                                        "skipping unsupported source column default for bigquery"
+                                    );
+                                }
                             }
                         }
                     }

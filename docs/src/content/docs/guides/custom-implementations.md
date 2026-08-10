@@ -25,9 +25,13 @@ and apply its supported operations in order before processing following row
 events. Add operations provide the complete after column schema, drops provide
 the complete before column schema, and each alteration provides adjacent before
 and after column schemas. Apply operations in order: for a logical column, one
-alteration's after schema is the next alteration's before schema. BigQuery,
-ClickHouse, DuckLake, and Snowflake apply column
-adds, drops, renames, and supported default changes. BigQuery also relaxes
+alteration's after schema is the next alteration's before schema. Every default
+change is exposed as one `Default` alteration. Inspect its before and after
+expressions to distinguish addition, removal, and replacement. If a previous
+default exists, make its removal idempotent; if a new default exists, gate only
+setting it on current destination compatibility. BigQuery, ClickHouse, DuckLake,
+and Snowflake apply column adds, drops, renames, and their supported default
+actions. BigQuery also relaxes
 existing required columns to nullable; other shared-planner nullability changes
 and all shared-planner type alterations are currently skipped. Default
 expressions and backfill semantics remain destination-specific. See
