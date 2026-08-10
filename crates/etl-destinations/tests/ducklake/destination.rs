@@ -2167,6 +2167,124 @@ async fn startup_after_restart_recovers_applying_schema_change() {
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
 }
 
+/// Startup recovery must use the recorded previous mask when only the
+/// publication projection changed.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_after_restart_recovers_publication_mask_expansion() {
+    use etl::event::InsertEvent;
+
+    let lake = create_test_lake("startup_after_restart_recovers_publication_mask_expansion").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let columns = vec![
+        ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+        ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+        ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, false)
+            .with_default_expression("'pending'::text".to_owned()),
+    ];
+    let previous_schema = TableSchema::with_snapshot_id(
+        TableId::new(65),
+        TableName::new("public".to_owned(), "restart_mask_expansion".to_owned()),
+        columns.clone(),
+        test_snapshot_id(100, 100),
+    );
+    let target_schema = TableSchema::with_snapshot_id(
+        previous_schema.id,
+        previous_schema.name.clone(),
+        columns,
+        test_snapshot_id(200, 200),
+    );
+    let previous_mask = ReplicationMask::from_bytes(vec![1, 1, 0]);
+    let target_mask = ReplicationMask::from_bytes(vec![1, 1, 1]);
+    let previous_replicated_schema =
+        ReplicatedTableSchema::from_mask(Arc::new(previous_schema.clone()), previous_mask.clone());
+    let target_replicated_schema =
+        ReplicatedTableSchema::from_mask(Arc::new(target_schema.clone()), target_mask.clone());
+    let table_name = table_name_to_ducklake_table_name(&previous_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(previous_schema.clone()).await.unwrap();
+    store.store_table_schema(target_schema.clone()).await.unwrap();
+
+    let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    destination
+        .write_table_rows(
+            &previous_replicated_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let applying_metadata = DestinationTableMetadata::new_applied(
+        table_name.to_metadata_id().unwrap(),
+        previous_schema.snapshot_id,
+        previous_mask,
+    )
+    .with_schema_change(
+        target_schema.snapshot_id,
+        target_mask.clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(previous_schema.id, applying_metadata).await.unwrap();
+
+    destination.shutdown().await.unwrap();
+    drop(destination);
+
+    let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    restarted_destination.startup().await.unwrap();
+    restarted_destination
+        .write_events(vec![Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(200_u64),
+            tx_ordinal: 0,
+            replicated_table_schema: target_replicated_schema,
+            table_row: TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("Bob".to_owned()),
+                Cell::String("pending".to_owned()),
+            ]),
+        })])
+        .await
+        .unwrap();
+    restarted_destination.shutdown().await.unwrap();
+
+    let metadata = store.get_destination_table_metadata(previous_schema.id).await.unwrap().unwrap();
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, target_schema.snapshot_id);
+    assert_eq!(metadata.replication_mask, target_mask);
+    assert_eq!(metadata.previous_snapshot_id, None);
+    assert_eq!(metadata.previous_replication_mask, None);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let rows = conn
+        .prepare(&format!(
+            "select id, status from {} order by id",
+            qualified_lake_table_name(&table_name)
+        ))
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, Option<String>>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![(1, None), (2, Some("pending".to_owned()))]);
+
+    let (is_nullable, column_default): (String, Option<String>) = conn
+        .query_row(
+            &format!(
+                "select is_nullable, column_default from information_schema.columns where \
+                 table_catalog = {} and table_schema = {} and table_name = {} and column_name = {}",
+                quote_literal("lake"),
+                quote_literal(table_name.schema()),
+                quote_literal(table_name.table()),
+                quote_literal("status"),
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(is_nullable, "YES");
+    assert_eq!(column_default.as_deref(), Some("NULL"));
+}
+
 /// Startup should recover when the target rename column already exists and a
 /// stale old physical column is still present.
 #[tokio::test(flavor = "multi_thread")]
