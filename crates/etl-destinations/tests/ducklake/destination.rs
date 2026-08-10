@@ -1550,10 +1550,134 @@ async fn write_events_applies_defaulted_schema_change() {
     assert_eq!(
         rows,
         vec![
-            (1, "Alice".to_owned(), Some("new".to_owned()), Some(15), None),
+            (1, "Alice".to_owned(), Some("new".to_owned()), Some(15), Some(true)),
             (2, "Bob".to_owned(), Some("new".to_owned()), Some(15), Some(true)),
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_reveals_publication_column_nullable_without_default() {
+    use etl::event::{InsertEvent, RelationEvent};
+
+    let lake =
+        create_test_lake("write_events_reveals_publication_column_nullable_without_default").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let columns = || {
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, false)
+                .with_default_expression("'pending'::text".to_owned()),
+        ]
+    };
+    let old_schema = TableSchema::with_snapshot_id(
+        TableId::new(59),
+        TableName::new("public".to_owned(), "publication_default".to_owned()),
+        columns(),
+        test_snapshot_id(59, 59),
+    );
+    let new_schema = TableSchema::with_snapshot_id(
+        old_schema.id,
+        old_schema.name.clone(),
+        columns(),
+        test_snapshot_id(60, 60),
+    );
+    let old_replicated_table_schema = ReplicatedTableSchema::from_mask(
+        Arc::new(old_schema.clone()),
+        ReplicationMask::from_bytes(vec![1, 1, 0]),
+    );
+    let new_replicated_table_schema = ReplicatedTableSchema::from_mask(
+        Arc::new(new_schema.clone()),
+        ReplicationMask::from_bytes(vec![1, 1, 1]),
+    );
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+    store
+        .store_destination_table_metadata(
+            old_schema.id,
+            DestinationTableMetadata::new_applied(
+                table_name.to_metadata_id().unwrap(),
+                old_schema.snapshot_id,
+                old_replicated_table_schema.replication_mask().clone(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                replicated_table_schema: new_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(60_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated_table_schema,
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Bob".to_owned()),
+                    Cell::String("pending".to_owned()),
+                ]),
+            }),
+        ])
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let rows = conn
+        .prepare(&format!(
+            "select id, status from {} order by id",
+            qualified_lake_table_name(&table_name)
+        ))
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, Option<String>>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![(1, None), (2, Some("pending".to_owned()))]);
+
+    let (is_nullable, column_default): (String, Option<String>) = conn
+        .query_row(
+            &format!(
+                "select is_nullable, column_default from information_schema.columns where \
+                 table_catalog = {} and table_schema = {} and table_name = {} and column_name = {}",
+                quote_literal("lake"),
+                quote_literal(table_name.schema()),
+                quote_literal(table_name.table()),
+                quote_literal("status"),
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(is_nullable, "YES");
+    // DuckLake exposes an omitted default as the implicit SQL default `NULL`.
+    assert_eq!(column_default.as_deref(), Some("NULL"));
 }
 
 /// `write_events` repairs physical DuckLake columns when metadata was already

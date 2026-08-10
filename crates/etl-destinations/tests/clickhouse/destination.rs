@@ -828,24 +828,23 @@ async fn store_status_default_schema(
     ReplicatedTableSchema::all(schema)
 }
 
-/// Returns whether ClickHouse currently stores a `DEFAULT` for `column_name`.
-async fn clickhouse_column_has_default(
+/// Returns ClickHouse's stored `DEFAULT` expression for `column_name`.
+async fn clickhouse_column_default_expression(
     database: &ClickHouseTestDatabase,
     table_name: &str,
     column_name: &str,
-) -> bool {
+) -> Option<String> {
     database
         .db_client()
         .query(
-            "select count() from system.columns where database = currentDatabase() and table = ? \
-             and name = ? and default_kind = 'DEFAULT'",
+            "select default_expression from system.columns where database = currentDatabase() and \
+             table = ? and name = ? and default_kind = 'DEFAULT'",
         )
         .bind(table_name)
         .bind(column_name)
-        .fetch_one::<u64>()
+        .fetch_optional::<String>()
         .await
         .unwrap()
-        != 0
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -908,23 +907,27 @@ async fn existing_column_default_changes_drop_before_setting_supported_replaceme
         .unwrap()
         .unwrap()
         .destination_table_id;
-    assert!(
-        !clickhouse_column_has_default(&clickhouse_db, &destination_table_name, "status").await
+    assert_eq!(
+        clickhouse_column_default_expression(&clickhouse_db, &destination_table_name, "status")
+            .await,
+        None
     );
 
     for (schema, expected_default) in [
-        (supported_schema, true),
-        (unsupported_schema, false),
-        (supported_again_schema, true),
-        (dropped_schema, false),
+        (supported_schema, Some("'queued'")),
+        (unsupported_schema, None),
+        (supported_again_schema, Some("'done'")),
+        (dropped_schema, None),
     ] {
         destination
             .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: schema })])
             .await
             .unwrap();
         assert_eq!(
-            clickhouse_column_has_default(&clickhouse_db, &destination_table_name, "status").await,
-            expected_default
+            clickhouse_column_default_expression(&clickhouse_db, &destination_table_name, "status")
+                .await
+                .as_deref(),
+            expected_default,
         );
     }
 }

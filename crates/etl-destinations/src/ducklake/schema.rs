@@ -161,7 +161,12 @@ fn render_ducklake_default_expression(
             matches!(typ, &Type::INTERVAL).then(|| expression.clone())
         }
         DefaultExpression::JsonLiteral(expression) => is_json_type(typ).then(|| expression.clone()),
-        DefaultExpression::BooleanLiteral(_) => None,
+        DefaultExpression::BooleanLiteral(expression) => {
+            // DuckLake accepts only literal add-time defaults. DuckDB parses
+            // bare boolean keywords as expressions for this validation, while
+            // a quoted boolean remains a literal and is coerced to BOOLEAN.
+            matches!(typ, &Type::BOOL).then(|| quote_literal(expression))
+        }
     }
 }
 
@@ -334,6 +339,17 @@ pub(super) fn build_drop_default_sql_ducklake(
     format!("alter table {table_name} alter column {column_name} drop default")
 }
 
+/// Builds a DuckLake `alter table alter column drop not null` statement.
+pub(super) fn build_drop_not_null_sql_ducklake(
+    table_name: &DuckLakeTableName,
+    column_name: &str,
+) -> String {
+    let table_name = qualified_lake_table_name(table_name);
+    let column_name = quote_identifier(column_name);
+
+    format!("alter table {table_name} alter column {column_name} drop not null")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +499,7 @@ mod tests {
     #[test]
     fn ducklake_default_clause_renders_portable_expressions() {
         let cases = [
+            (Type::BOOL, "true", " default 'true'"),
             (Type::TEXT, "true", " default 'true'"),
             (Type::JSONB, "'{}'::jsonb", " default '{}'"),
             (Type::NUMERIC, "42", " default '42'"),
@@ -509,8 +526,6 @@ mod tests {
         }
 
         let unsupported_cases = [
-            (Type::BOOL, "true"),
-            (Type::BOOL, "'true'::text"),
             (Type::INT4, "'abc'::text"),
             (Type::NUMERIC, "10 + 5"),
             (Type::UUID, "gen_random_uuid()"),

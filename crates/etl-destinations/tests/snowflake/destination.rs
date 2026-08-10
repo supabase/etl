@@ -7,8 +7,8 @@ use etl::{
     event::{DeleteEvent, Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
     pipeline::PipelineId,
     schema::{
-        ColumnSchema, PgLsn, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
-        Type,
+        ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
+        TableName, TableSchema, Type,
     },
     store::{SchemaStore, StateStore},
     test_utils::{
@@ -984,6 +984,92 @@ async fn schema_evolution_add_column_defaults() {
                     serde_json::json!("15"),
                     serde_json::json!("true"),
                 ],
+            ]
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn publication_added_column_omits_default_and_remains_nullable() {
+    let harness = TestHarness::new();
+    let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+    let table_id = TableId::new(1013);
+
+    let initial_table_schema = Arc::new(TableSchema::new(
+        table_id,
+        TableName::new("public".to_owned(), src_table.clone()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, false)
+                .with_default_expression("'pending'::text".to_owned()),
+        ],
+    ));
+    let initial_replicated = ReplicatedTableSchema::from_mask(
+        Arc::clone(&initial_table_schema),
+        ReplicationMask::from_bytes(vec![1, 0]),
+    );
+
+    let evolved_table_schema = Arc::new(TableSchema::with_snapshot_id(
+        table_id,
+        TableName::new("public".to_owned(), src_table.clone()),
+        initial_table_schema.column_schemas.clone(),
+        test_snapshot_id(100, 100),
+    ));
+    let evolved_replicated = ReplicatedTableSchema::from_mask(
+        Arc::clone(&evolved_table_schema),
+        ReplicationMask::all(&evolved_table_schema),
+    );
+
+    harness.store.store_table_schema(Arc::unwrap_or_clone(initial_table_schema)).await.unwrap();
+    harness.store.store_table_schema(Arc::unwrap_or_clone(evolved_table_schema)).await.unwrap();
+
+    with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        write_table_copy_and_wait(
+            &harness.destination,
+            &initial_replicated,
+            vec![TableRow::new(vec![Cell::I32(1)])],
+        )
+        .await;
+
+        apply_relation_event(
+            &harness.destination,
+            evolved_replicated.clone(),
+            "publication expansion",
+        )
+        .await;
+
+        invoke_write_events(
+            &harness.destination,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(101_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: evolved_replicated,
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("pending".to_owned())]),
+            })],
+        )
+        .await
+        .unwrap();
+
+        let fqn = format!(
+            "\"{}\".\"{}\".\"{sf_table}\"",
+            harness.config.database(),
+            harness.config.schema()
+        );
+        let rows = query_rows(
+            &harness.sql,
+            &format!("select \"id\", \"status\" from {fqn} order by \"id\""),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![serde_json::json!("1"), serde_json::Value::Null],
+                vec![serde_json::json!("2"), serde_json::json!("pending")],
             ]
         );
     })

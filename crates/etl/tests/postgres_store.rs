@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use etl::{
-    destination::DestinationTableMetadata,
+    destination::{DestinationTableMetadata, DestinationTableSchemaStatus},
     error::ErrorKind,
     etl_error,
     schema::{ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema},
@@ -1283,6 +1283,75 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
         "Loaded replication mask should match inserted bytea"
     );
     assert_eq!(metadata.destination_table_id, "test_dest_table");
+
+    // Rows written before the previous-mask migration load with no recovery
+    // endpoint, then gain one automatically on their next schema transition.
+    let legacy_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert_eq!(legacy_metadata.previous_replication_mask, None);
+    let target_mask = ReplicationMask::from_bytes(vec![1, 1, 1, 1, 0]);
+    let applying_metadata = legacy_metadata.with_schema_change(
+        test_snapshot_id(10, 11),
+        target_mask.clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(table_id, applying_metadata).await.unwrap();
+
+    let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    reloaded_store.load_destination_tables_metadata().await.unwrap();
+    let upgraded_metadata =
+        reloaded_store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert_eq!(
+        upgraded_metadata.previous_replication_mask,
+        Some(ReplicationMask::from_bytes(expected_mask_bytes))
+    );
+    assert_eq!(upgraded_metadata.replication_mask, target_mask);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_metadata_load_rejects_unrecoverable_applying_endpoint() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let table_id = TableId::new(12346);
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
+
+    sqlx::query(
+        r#"
+        insert into etl.destination_tables_metadata
+            (pipeline_id, table_id, destination_table_id, snapshot_id,
+             schema_status, replication_mask)
+        values ($1, $2, 'test_dest_table', '20:21', 'applying', $3::bytea)
+        "#,
+    )
+    .bind(i64::try_from(pipeline_id).unwrap())
+    .bind(SqlxTableId(table_id.into_inner()))
+    .bind(vec![1_u8, 1])
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = store.load_destination_tables_metadata().await.unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::InvalidState);
+
+    sqlx::query(
+        r#"
+        update etl.destination_tables_metadata
+        set previous_snapshot_id = '10:11'
+        where pipeline_id = $1 and table_id = $2
+        "#,
+    )
+    .bind(i64::try_from(pipeline_id).unwrap())
+    .bind(SqlxTableId(table_id.into_inner()))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = store.load_destination_tables_metadata().await.unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::InvalidState);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1402,4 +1471,41 @@ async fn destination_metadata_roundtrip_preserves_composite_snapshot_and_replica
         "Roundtrip should preserve replication mask exactly"
     );
     assert_eq!(loaded_metadata.snapshot_id, snapshot_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_metadata_roundtrip_preserves_previous_logical_endpoint() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let table_id = TableId::new(54322);
+    let target_snapshot_id = SnapshotId::new(PgLsn::from(300), PgLsn::from(150));
+    let target_mask = ReplicationMask::from_bytes(vec![1, 1, 1]);
+    let previous_snapshot_id = SnapshotId::new(PgLsn::from(200), PgLsn::from(100));
+    let previous_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
+    let metadata = DestinationTableMetadata::new_applied(
+        "roundtrip_table".to_owned(),
+        previous_snapshot_id,
+        previous_mask.clone(),
+    )
+    .with_schema_change(
+        target_snapshot_id,
+        target_mask.clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    store.store_destination_table_metadata(table_id, metadata).await.unwrap();
+
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    new_store.load_destination_tables_metadata().await.unwrap();
+    let loaded_metadata =
+        new_store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+
+    assert_eq!(loaded_metadata.snapshot_id, target_snapshot_id);
+    assert_eq!(loaded_metadata.replication_mask, target_mask);
+    assert_eq!(loaded_metadata.previous_snapshot_id, Some(previous_snapshot_id));
+    assert_eq!(loaded_metadata.previous_replication_mask, Some(previous_mask));
+    assert_eq!(loaded_metadata.schema_status, DestinationTableSchemaStatus::Applying);
 }

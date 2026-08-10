@@ -1,7 +1,13 @@
-use etl::schema::{ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression};
+use etl::schema::{
+    ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression,
+    unquote_postgres_string_literal,
+};
 use tracing::warn;
 
-use crate::snowflake::{Error, Result, sql::quote_identifier};
+use crate::snowflake::{
+    Error, Result,
+    sql::{quote_identifier, quote_string_literal},
+};
 
 pub(crate) const CDC_OPERATION_COLUMN: &str = "_cdc_operation";
 pub(crate) const CDC_SEQUENCE_COLUMN: &str = "_cdc_sequence_number";
@@ -137,8 +143,8 @@ fn render_snowflake_default_expression(
     typ: &Type,
 ) -> Option<String> {
     match expression {
-        DefaultExpression::StringLiteral(expression) => {
-            is_snowflake_string_default_type(typ).then(|| expression.clone())
+        DefaultExpression::StringLiteral(expression) if is_snowflake_string_default_type(typ) => {
+            snowflake_string_literal(expression)
         }
         DefaultExpression::NumericLiteral(expression) => {
             if is_snowflake_numeric_default_type(typ) {
@@ -152,28 +158,36 @@ fn render_snowflake_default_expression(
         DefaultExpression::BooleanLiteral(expression) => {
             matches!(typ, &Type::BOOL).then(|| expression.clone())
         }
-        DefaultExpression::DateLiteral(expression) => {
-            matches!(typ, &Type::DATE).then(|| format!("DATE {expression}"))
+        DefaultExpression::DateLiteral(expression) if matches!(typ, &Type::DATE) => {
+            snowflake_string_literal(expression).map(|literal| format!("DATE {literal}"))
         }
-        DefaultExpression::TimeLiteral(expression) => {
-            matches!(typ, &Type::TIME).then(|| format!("TIME {expression}"))
+        DefaultExpression::TimeLiteral(expression) if matches!(typ, &Type::TIME) => {
+            snowflake_string_literal(expression).map(|literal| format!("TIME {literal}"))
         }
-        DefaultExpression::TimeTzLiteral(expression) => {
-            matches!(typ, &Type::TIMETZ).then(|| expression.clone())
+        DefaultExpression::TimeTzLiteral(expression) if matches!(typ, &Type::TIMETZ) => {
+            snowflake_string_literal(expression)
         }
-        DefaultExpression::TimestampLiteral(expression) => {
-            matches!(typ, &Type::TIMESTAMP).then(|| format!("TO_TIMESTAMP_NTZ({expression})"))
+        DefaultExpression::TimestampLiteral(expression) if matches!(typ, &Type::TIMESTAMP) => {
+            snowflake_string_literal(expression)
+                .map(|literal| format!("TO_TIMESTAMP_NTZ({literal})"))
         }
-        DefaultExpression::TimestampTzLiteral(expression) => {
-            matches!(typ, &Type::TIMESTAMPTZ).then(|| format!("TO_TIMESTAMP_TZ({expression})"))
+        DefaultExpression::TimestampTzLiteral(expression) if matches!(typ, &Type::TIMESTAMPTZ) => {
+            snowflake_string_literal(expression)
+                .map(|literal| format!("TO_TIMESTAMP_TZ({literal})"))
         }
-        DefaultExpression::IntervalLiteral(expression) => {
-            matches!(typ, &Type::INTERVAL).then(|| expression.clone())
+        DefaultExpression::IntervalLiteral(expression) if matches!(typ, &Type::INTERVAL) => {
+            snowflake_string_literal(expression)
         }
-        DefaultExpression::JsonLiteral(expression) => {
-            is_json_type(typ).then(|| format!("PARSE_JSON({expression})"))
+        DefaultExpression::JsonLiteral(expression) if is_json_type(typ) => {
+            snowflake_string_literal(expression).map(|literal| format!("PARSE_JSON({literal})"))
         }
+        _ => None,
     }
+}
+
+/// Re-quotes one parser-validated PostgreSQL literal using Snowflake escapes.
+fn snowflake_string_literal(expression: &str) -> Option<String> {
+    unquote_postgres_string_literal(expression).map(|value| quote_string_literal(&value))
 }
 
 /// Returns whether a Postgres type is a Snowflake numeric column.
@@ -414,6 +428,20 @@ mod tests {
 
             assert_eq!(default_clause(&column), None);
         }
+    }
+
+    #[test]
+    fn default_clause_requotes_postgres_backslashes_for_snowflake() {
+        let text_column = ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 1, true)
+            .with_default_expression(r#"'path\d'::text"#.to_owned());
+        let json_column = ColumnSchema::new("payload".to_owned(), Type::JSONB, -1, 2, true)
+            .with_default_expression(r#"'{"pattern":"\d"}'::jsonb"#.to_owned());
+
+        assert_eq!(default_clause(&text_column).as_deref(), Some(r#" DEFAULT 'path\\d'"#));
+        assert_eq!(
+            default_clause(&json_column).as_deref(),
+            Some(r#" DEFAULT PARSE_JSON('{"pattern":"\\d"}')"#)
+        );
     }
 
     #[test]

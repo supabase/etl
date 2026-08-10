@@ -288,6 +288,21 @@ fn is_transient_query_error(error: &BQError) -> RetryDecision {
     }
 }
 
+/// Generates an idempotency key accepted by BigQuery request-ID fields.
+fn generate_bigquery_request_id() -> String {
+    format!("{:032x}", random::<u128>())
+}
+
+/// Ensures local retries of one BigQuery query job share an idempotency key.
+///
+/// BigQuery retains `jobs.query` request IDs for 15 minutes. The bounded retry
+/// policy below is shorter than that window, so one generated ID safely covers
+/// every in-process attempt while preserving an ID supplied by a caller.
+fn with_query_request_id(mut request: QueryRequest) -> QueryRequest {
+    request.request_id.get_or_insert_with(generate_bigquery_request_id);
+    request
+}
+
 /// Returns whether BigQuery rejected `DROP DEFAULT` because no default exists.
 fn is_missing_column_default_error(error: &BQError) -> bool {
     let BQError::ResponseError { error } = error else {
@@ -1443,6 +1458,7 @@ impl BigQueryClient {
 
     /// Executes a BigQuery SQL query while preserving the provider error.
     async fn query_with_bigquery_error(&self, request: QueryRequest) -> Result<ResultSet, BQError> {
+        let request = with_query_request_id(request);
         let query_response = retry_with_backoff(
             QUERY_RETRY_POLICY,
             is_transient_query_error,
@@ -1529,6 +1545,28 @@ mod tests {
         };
 
         assert_eq!(is_transient_query_error(&error), RetryDecision::Retry);
+    }
+
+    #[test]
+    fn query_request_id_is_generated_once_and_survives_cloning() {
+        let request = with_query_request_id(QueryRequest::new("select 1"));
+        let request_id = request.request_id.clone().unwrap();
+        let cloned_request = request.clone();
+
+        assert_eq!(request_id.len(), 32);
+        assert!(request_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(cloned_request.request_id, Some(request_id.clone()));
+        assert_eq!(request.request_id, Some(request_id));
+    }
+
+    #[test]
+    fn query_request_id_preserves_caller_value() {
+        let mut request = QueryRequest::new("select 1");
+        request.request_id = Some("caller-request-id".to_owned());
+
+        let request = with_query_request_id(request);
+
+        assert_eq!(request.request_id.as_deref(), Some("caller-request-id"));
     }
 
     #[test]

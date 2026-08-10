@@ -773,6 +773,7 @@ where
 
         let plan = current_schema
             .plan_schema_change(new_replicated_table_schema, BIGQUERY_COLUMN_NAME_MAPPING)?;
+        validate_bigquery_schema_plan(new_replicated_table_schema, &plan)?;
         let sequenced_bigquery_table_id = metadata.destination_table_id.parse()?;
 
         // Mark as applying before making changes (with the NEW snapshot_id and mask).
@@ -869,7 +870,7 @@ where
                         )
                         .await?;
                 }
-                SchemaOperation::AddColumn { after_column_schema, reason } => {
+                SchemaOperation::AddColumn { after_column_schema, reason: _ } => {
                     self.client
                         .add_column(
                             &self.dataset_id,
@@ -878,18 +879,10 @@ where
                         )
                         .await?;
 
-                    if *reason == ColumnPresenceChangeReason::ReplicationMask {
-                        if after_column_schema.default_expression.is_some() {
-                            warn!(
-                                table_id = %table_id,
-                                column_name = %after_column_schema.name,
-                                "not applying the source default to a publication-added bigquery \
-                                 column; the destination schema will differ from the logical \
-                                 source schema"
-                            );
-                        }
-                    } else if let Some(default_expression) = column_default_sql(after_column_schema)
-                    {
+                    // BigQuery adds the column as nullable, leaving existing rows NULL. SET
+                    // DEFAULT affects only future inserts, so supported defaults are safe for
+                    // both physical table additions and publication-mask additions.
+                    if let Some(default_expression) = column_default_sql(after_column_schema) {
                         self.client
                             .set_column_default(
                                 &self.dataset_id,
@@ -929,7 +922,9 @@ where
                                 before_type_modifier = before.modifier,
                                 after_data_type = after.typ.name(),
                                 after_type_modifier = after.modifier,
-                                "skipping unsupported bigquery column type change"
+                                "bigquery column type changes are currently unsupported; \
+                                 subsequent schema changes and row writes may fail or behave \
+                                 unpredictably until type-change support is implemented"
                             );
                         }
                         ColumnAlterationKind::Nullability => {
@@ -1458,6 +1453,43 @@ fn validate_bigquery_table_capabilities(
 fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<()> {
     replicated_table_schema.validate_destination_column_names(BIGQUERY_COLUMN_NAME_MAPPING)?;
     validate_bigquery_table_capabilities(replicated_table_schema)
+}
+
+/// Validates BigQuery-specific semantics of a schema plan before changing
+/// state.
+///
+/// A PostgreSQL array is a BigQuery `REPEATED` field, which cannot represent
+/// `NULL`. BigQuery initializes existing rows to an empty array when such a
+/// field is added. That would turn an unknown value from publication filtering
+/// into invented data, so this transition requires a table resynchronization.
+fn validate_bigquery_schema_plan(
+    new_schema: &ReplicatedTableSchema,
+    plan: &SchemaPlan,
+) -> EtlResult<()> {
+    for operation in plan.ordered_operations() {
+        let SchemaOperation::AddColumn { after_column_schema, reason } = operation else {
+            continue;
+        };
+
+        if *reason == ColumnPresenceChangeReason::ReplicationMask
+            && is_array_type(&after_column_schema.typ)
+        {
+            bail!(
+                ErrorKind::SourceSchemaError,
+                "BigQuery cannot add a source array through publication filtering",
+                format!(
+                    "Table '{}' column '{}' is an array newly included by the publication. \
+                     BigQuery repeated fields cannot be NULL and initialize existing rows to an \
+                     empty array, so ETL cannot preserve unknown historical values. Resynchronize \
+                     the table to replicate this column.",
+                    new_schema.name(),
+                    after_column_schema.name
+                )
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Rejects source primary-key changes that BigQuery cannot apply in place.
@@ -2437,6 +2469,65 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
         assert_eq!(error.description(), Some("BigQuery cannot represent nullable source arrays"));
+    }
+
+    #[test]
+    fn validate_bigquery_schema_plan_rejects_publication_added_arrays() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("tags".to_owned(), Type::TEXT_ARRAY, -1, 2, false),
+            ],
+        ));
+        let current_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            etl::schema::ReplicationMask::from_bytes(vec![1, 0]),
+            IdentityMask::from_bytes(vec![1, 0]),
+        );
+        let new_schema = ReplicatedTableSchema::from_masks(
+            table_schema,
+            etl::schema::ReplicationMask::from_bytes(vec![1, 1]),
+            IdentityMask::from_bytes(vec![1, 0]),
+        );
+        let plan =
+            current_schema.plan_schema_change(&new_schema, BIGQUERY_COLUMN_NAME_MAPPING).unwrap();
+
+        let error = validate_bigquery_schema_plan(&new_schema, &plan).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(
+            error.description(),
+            Some("BigQuery cannot add a source array through publication filtering")
+        );
+        assert!(error.to_string().contains("unknown historical values"));
+    }
+
+    #[test]
+    fn validate_bigquery_schema_plan_accepts_publication_added_scalars() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        ));
+        let current_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            etl::schema::ReplicationMask::from_bytes(vec![1, 0]),
+            IdentityMask::from_bytes(vec![1, 0]),
+        );
+        let new_schema = ReplicatedTableSchema::from_masks(
+            table_schema,
+            etl::schema::ReplicationMask::from_bytes(vec![1, 1]),
+            IdentityMask::from_bytes(vec![1, 0]),
+        );
+        let plan =
+            current_schema.plan_schema_change(&new_schema, BIGQUERY_COLUMN_NAME_MAPPING).unwrap();
+
+        validate_bigquery_schema_plan(&new_schema, &plan).unwrap();
     }
 
     #[test]

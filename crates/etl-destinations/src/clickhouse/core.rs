@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
@@ -15,8 +11,8 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
-        ColumnAlterationKind, ColumnMetadataChange, ColumnPresenceChangeReason, IdentityType,
-        PgLsn, ReplicatedTableSchema, ReplicationMask, SchemaDiff, SchemaOperation, SchemaPlan,
+        ColumnAlterationKind, ColumnMetadataChange, ColumnPresenceChangeReason, ColumnSchema,
+        IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, SchemaOperation, SchemaPlan,
         TableId, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
@@ -130,6 +126,85 @@ fn expected_clickhouse_column_names(
         .map(|column| column.name)
         .chain(trailing_cdc_column_names(engine).iter().map(|name| (*name).to_owned()))
         .collect()
+}
+
+/// Rejects renames that move a ClickHouse nested subcolumn between parents.
+fn ensure_clickhouse_renames_are_supported(table_name: &str, plan: &SchemaPlan) -> EtlResult<()> {
+    for operation in plan.ordered_operations() {
+        let SchemaOperation::AlterColumn { alteration } = operation else {
+            continue;
+        };
+        if alteration.kind() != ColumnAlterationKind::Rename {
+            continue;
+        }
+
+        let before = alteration.before_column_schema();
+        let after = alteration.after_column_schema();
+        let before_parent = before.name.rsplit_once('.').map(|(parent, _)| parent);
+        let after_parent = after.name.rsplit_once('.').map(|(parent, _)| parent);
+        if before_parent != after_parent {
+            return Err(etl_error!(
+                ErrorKind::SourceSchemaError,
+                "ClickHouse cannot move a nested subcolumn during rename",
+                format!(
+                    "Table '{table_name}' renames column '{}' to '{}', which changes its nested \
+                     parent. Use names under the same parent or resynchronize the table.",
+                    before.name, after.name,
+                )
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns the destination definition for one added source column.
+///
+/// A column newly exposed by the replication mask has no destination values for
+/// historical rows. ClickHouse scalars therefore use `Nullable(T)` without the
+/// source default. ClickHouse cannot represent a top-level nullable array, so a
+/// replication-mask expansion containing an array fails instead of silently
+/// exposing empty arrays for historical rows.
+fn clickhouse_add_column_definition(
+    table_name: &str,
+    after_column_schema: &ColumnSchema,
+    reason: ColumnPresenceChangeReason,
+) -> EtlResult<(ColumnSchema, bool)> {
+    let mut destination_column_schema = after_column_schema.clone();
+    if reason == ColumnPresenceChangeReason::ReplicationMask {
+        if is_array_type(&after_column_schema.typ) {
+            return Err(etl_error!(
+                ErrorKind::SourceSchemaError,
+                "ClickHouse cannot add a publication array column as nullable",
+                format!(
+                    "Table '{table_name}' column '{}' entered the replication mask, but \
+                     ClickHouse does not support Nullable(Array(...)). Resynchronize the table \
+                     with the column included from initial copy.",
+                    after_column_schema.name,
+                )
+            ));
+        }
+
+        destination_column_schema.default_expression = None;
+        return Ok((destination_column_schema, true));
+    }
+
+    let preserve_not_null = !after_column_schema.nullable
+        && after_column_schema.default_expression.as_deref().is_some_and(|default_expression| {
+            supports_column_default(default_expression, &after_column_schema.typ)
+        });
+    Ok((destination_column_schema, !preserve_not_null))
+}
+
+/// Validates add-column policies before any ordered ClickHouse DDL executes.
+fn ensure_clickhouse_additions_are_supported(table_name: &str, plan: &SchemaPlan) -> EtlResult<()> {
+    for operation in plan.ordered_operations() {
+        if let SchemaOperation::AddColumn { after_column_schema, reason } = operation {
+            clickhouse_add_column_definition(table_name, after_column_schema, *reason)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Returns physical user columns after validating the trailing ETL columns.
@@ -277,11 +352,11 @@ fn summarize_column_names<'a>(column_names: impl IntoIterator<Item = &'a str>) -
 ///
 /// RowBinary requires a leading null-marker byte before each `Nullable(T)`
 /// column. The actual nullability of a ClickHouse column can drift from the
-/// source Postgres column: `ALTER TABLE ADD COLUMN` forces the new column to
-/// `Nullable(T)` regardless of the upstream `NOT NULL` constraint, because
-/// ClickHouse cannot backfill a non-null default for existing rows. Deriving
-/// flags from the destination schema therefore matches what ClickHouse expects
-/// on the wire even after schema evolution.
+/// source Postgres column: publication-mask additions use `Nullable(T)` without
+/// a source default so historical rows remain unknown instead of acquiring a
+/// value that was never replicated. Deriving flags from the destination schema
+/// therefore matches what ClickHouse expects on the wire even after schema
+/// evolution.
 ///
 /// The column-count and column-order checks are an integrity guard: if the
 /// destination has otherwise drifted from `ReplicatedTableSchema`, we surface
@@ -786,32 +861,25 @@ where
                             )
                         },
                     )?;
-                // Destination metadata does not retain the previous replication
-                // mask. Reconstruct the previous endpoint from physical columns
-                // instead of assuming that either the target mask or every
-                // previous-schema column was present before the interruption.
                 let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
-                let actual_column_names = actual_columns
-                    .iter()
-                    .map(|column| column.name.as_str())
-                    .collect::<HashSet<_>>();
-                let previous_replication_mask = ReplicationMask::from_bytes(
-                    old_table_schema
-                        .column_schemas
-                        .iter()
-                        .map(|column| {
-                            let destination_name =
-                                CLICKHOUSE_COLUMN_NAME_MAPPING.map_name(&column.name);
-                            u8::from(actual_column_names.contains(destination_name.as_str()))
-                        })
-                        .collect(),
-                );
+                let previous_replication_mask =
+                    metadata.previous_replication_mask.clone().ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "ClickHouse cannot recover pre-migration Applying metadata",
+                            format!(
+                                "Table {table_id} began a schema change before ETL persisted the \
+                                 previous replication mask. Resynchronize the table because the \
+                                 previous logical projection cannot be reconstructed safely."
+                            )
+                        )
+                    })?;
                 let old_schema = ReplicatedTableSchema::from_mask(
                     Arc::clone(&old_table_schema),
                     previous_replication_mask,
                 );
                 let plan = old_schema.plan_schema_change(schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
-                let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
+                ensure_clickhouse_renames_are_supported(clickhouse_table_name, &plan)?;
                 let actual_user_column_names =
                     clickhouse_user_column_names(&actual_columns, self.inserter_config.engine)?;
                 let old_column_names: Vec<_> = old_schema
@@ -1062,6 +1130,8 @@ where
 
         let clickhouse_table_name = &metadata.destination_table_id;
         let plan = current_schema.plan_schema_change(new_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
+        ensure_clickhouse_renames_are_supported(clickhouse_table_name, &plan)?;
+        ensure_clickhouse_additions_are_supported(clickhouse_table_name, &plan)?;
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
             reject_pk_alters_under_replacing_merge_tree(
                 clickhouse_table_name,
@@ -1133,6 +1203,7 @@ where
     ) -> EtlResult<()> {
         let is_replacing_merge_tree =
             matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree);
+        ensure_clickhouse_additions_are_supported(clickhouse_table_name, plan)?;
         if plan.is_empty() {
             if is_replacing_merge_tree {
                 self.refresh_current_view(clickhouse_table_name, after_schema).await?;
@@ -1177,7 +1248,16 @@ where
                     user_column_names.retain(|name| name != &before_column_schema.name);
                 }
                 SchemaOperation::AddColumn { after_column_schema, reason } => {
-                    if !after_column_schema.nullable && !is_array_type(&after_column_schema.typ) {
+                    let (destination_column_schema, force_nullable) =
+                        clickhouse_add_column_definition(
+                            clickhouse_table_name,
+                            after_column_schema,
+                            *reason,
+                        )?;
+                    if force_nullable
+                        && !after_column_schema.nullable
+                        && !is_array_type(&after_column_schema.typ)
+                    {
                         warn!(
                             table_name = %clickhouse_table_name,
                             column_name = %after_column_schema.name,
@@ -1204,24 +1284,23 @@ where
                     let preceding_column_name = insertion_index
                         .checked_sub(1)
                         .map(|index| user_column_names[index].clone());
-                    let mut destination_column_schema = after_column_schema.clone();
-                    if *reason == ColumnPresenceChangeReason::ReplicationMask {
-                        destination_column_schema.default_expression = None;
-                        if after_column_schema.default_expression.is_some() {
-                            warn!(
-                                table_name = %clickhouse_table_name,
-                                column_name = %after_column_schema.name,
-                                "not applying the source default to a publication-added clickhouse \
-                                 column; the destination schema will differ from the logical \
-                                 source schema"
-                            );
-                        }
+                    if *reason == ColumnPresenceChangeReason::ReplicationMask
+                        && after_column_schema.default_expression.is_some()
+                    {
+                        warn!(
+                            table_name = %clickhouse_table_name,
+                            column_name = %after_column_schema.name,
+                            "not applying the source default to a publication-added clickhouse \
+                             column; the destination schema will differ from the logical source \
+                             schema"
+                        );
                     }
                     self.client
                         .add_column(
                             clickhouse_table_name,
                             &destination_column_schema,
                             preceding_column_name.as_deref(),
+                            force_nullable,
                         )
                         .await?;
                     user_column_names.insert(insertion_index, after_column_schema.name.clone());
@@ -1248,17 +1327,24 @@ where
                                 before_type_modifier = before.modifier,
                                 after_data_type = after.typ.name(),
                                 after_type_modifier = after.modifier,
-                                "skipping unsupported clickhouse column type change"
+                                "clickhouse column type changes are currently unsupported; \
+                                 subsequent schema changes and RowBinary writes may fail or behave \
+                                 unpredictably until type-change support is implemented"
                             );
                         }
                         ColumnAlterationKind::Nullability => {
-                            warn!(
-                                table_name = %clickhouse_table_name,
-                                column_name = %before.name,
-                                before_nullable = before.nullable,
-                                after_nullable = after.nullable,
-                                "skipping source column nullability change for clickhouse"
-                            );
+                            if !before.nullable && after.nullable {
+                                self.client
+                                    .drop_column_not_null(clickhouse_table_name, &before.name)
+                                    .await?;
+                            } else {
+                                warn!(
+                                    table_name = %clickhouse_table_name,
+                                    column_name = %before.name,
+                                    "clickhouse does not tighten an existing nullable column to \
+                                     not null; keeping the destination column nullable"
+                                );
+                            }
                         }
                         ColumnAlterationKind::Default => {
                             if before.default_expression.is_some() {
@@ -1939,7 +2025,7 @@ mod tests {
     use super::*;
     use crate::clickhouse::schema::{
         CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME,
-        ETL_VERSION_COLUMN_NAME,
+        ETL_VERSION_COLUMN_NAME, clickhouse_column_type,
     };
 
     /// Creates a synthetic composite snapshot ID for tests.
@@ -1949,6 +2035,71 @@ mod tests {
 
     fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
         ClickHouseTableColumn { name: name.to_owned(), type_name: type_name.to_owned() }
+    }
+
+    #[test]
+    fn replication_mask_addition_is_nullable_and_omits_source_default() {
+        let source_column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, false)
+            .with_default_expression("42".to_owned());
+
+        let (destination_column, force_nullable) = clickhouse_add_column_definition(
+            "events",
+            &source_column,
+            ColumnPresenceChangeReason::ReplicationMask,
+        )
+        .unwrap();
+
+        assert!(force_nullable);
+        assert_eq!(destination_column.default_expression, None);
+        assert_eq!(clickhouse_column_type(&destination_column, force_nullable), "Nullable(Int32)");
+    }
+
+    #[test]
+    fn replication_mask_array_addition_is_rejected() {
+        let source_column = ColumnSchema::new("scores".to_owned(), Type::INT4_ARRAY, -1, 1, false);
+
+        let error = clickhouse_add_column_definition(
+            "events",
+            &source_column,
+            ColumnPresenceChangeReason::ReplicationMask,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn rename_guard_rejects_moving_nested_subcolumns_between_parents() {
+        let before = ColumnSchema::new("old.value".to_owned(), Type::TEXT, -1, 1, true);
+        let after = ColumnSchema::new("new.value".to_owned(), Type::TEXT, -1, 1, true);
+        let change = ColumnMetadataChange::between(&before, &after).unwrap();
+        let plan = SchemaDiff::new(Vec::new(), Vec::new(), vec![change])
+            .plan_for_column_names(
+                vec!["old.value".to_owned()],
+                vec!["new.value".to_owned()],
+                CLICKHOUSE_COLUMN_NAME_MAPPING,
+            )
+            .unwrap();
+
+        let error = ensure_clickhouse_renames_are_supported("events", &plan).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn rename_guard_accepts_nested_subcolumns_under_the_same_parent() {
+        let before = ColumnSchema::new("payload.old".to_owned(), Type::TEXT, -1, 1, true);
+        let after = ColumnSchema::new("payload.new".to_owned(), Type::TEXT, -1, 1, true);
+        let change = ColumnMetadataChange::between(&before, &after).unwrap();
+        let plan = SchemaDiff::new(Vec::new(), Vec::new(), vec![change])
+            .plan_for_column_names(
+                vec!["payload.old".to_owned()],
+                vec!["payload.new".to_owned()],
+                CLICKHOUSE_COLUMN_NAME_MAPPING,
+            )
+            .unwrap();
+
+        ensure_clickhouse_renames_are_supported("events", &plan).unwrap();
     }
 
     #[test]

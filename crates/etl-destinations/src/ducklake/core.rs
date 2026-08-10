@@ -18,8 +18,7 @@ use etl::{
     event::{Event, EventSequenceKey},
     schema::{
         ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, ReplicatedTableSchema,
-        ReplicationMask, SchemaDiff, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName,
-        TableSchema,
+        SchemaDiff, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName, TableSchema,
     },
     store::{DestinationStore, TableStateType},
 };
@@ -84,9 +83,9 @@ use crate::{
         schema::{
             build_add_column_sql_ducklake, build_create_table_sql_ducklake,
             build_disable_sort_on_insert_sql_ducklake, build_drop_column_sql_ducklake,
-            build_drop_default_sql_ducklake, build_rename_column_sql_ducklake,
-            build_reset_sorted_by_sql_ducklake, build_set_default_sql_ducklake,
-            build_set_sorted_by_sql_ducklake,
+            build_drop_default_sql_ducklake, build_drop_not_null_sql_ducklake,
+            build_rename_column_sql_ducklake, build_reset_sorted_by_sql_ducklake,
+            build_set_default_sql_ducklake, build_set_sorted_by_sql_ducklake,
         },
         sql::{qualified_lake_table_name, quote_identifier},
     },
@@ -697,6 +696,47 @@ fn read_ducklake_table_column_names_blocking(
     Ok(column_names)
 }
 
+/// Reads names of currently nullable DuckLake columns.
+///
+/// Call only from a [`run_duckdb_blocking`] closure.
+fn read_ducklake_nullable_column_names_blocking(
+    conn: &duckdb::Connection,
+    table_name: &DuckLakeTableName,
+) -> EtlResult<HashSet<String>> {
+    let sql = format!(
+        "select column_name from information_schema.columns where table_catalog = {} and \
+         table_schema = {} and table_name = {} and is_nullable = 'YES'",
+        quote_literal(LAKE_CATALOG),
+        quote_literal(table_name.schema()),
+        quote_literal(table_name.table())
+    );
+    let mut statement = conn.prepare(&sql).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table nullability lookup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })?;
+    let rows = statement.query_map([], |row| row.get(0)).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table nullability lookup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })?;
+
+    rows.collect::<Result<_, _>>().map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table nullability lookup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })
+}
+
 /// Finds a destination column using DuckLake identifier semantics.
 fn find_ducklake_column(column_names: &[String], column_name: &str) -> Option<usize> {
     column_names.iter().position(|name| DUCKLAKE_COLUMN_NAME_MAPPING.equivalent(name, column_name))
@@ -817,14 +857,11 @@ fn ensure_ducklake_schema_plan_recoverable(
     Ok(())
 }
 
-/// Renders a shared plan against DuckLake's current physical endpoint.
-///
-/// Shared planning owns endpoint name validation and operation order. This
-/// layer preserves that order while using exact physical names and tombstones
-/// to make eligible transaction replays idempotent.
-fn plan_ducklake_schema_ddl(
+/// Renders a shared plan using live DuckLake name and nullability state.
+fn plan_ducklake_schema_ddl_with_nullability(
     table_name: &DuckLakeTableName,
     mut column_names: Vec<String>,
+    mut nullable_column_names: HashSet<String>,
     plan: &SchemaPlan,
 ) -> EtlResult<DuckLakeSchemaDdlPlan> {
     let diff = plan.diff();
@@ -874,6 +911,9 @@ fn plan_ducklake_schema_ddl(
                             ),
                             error_description: "DuckLake alter table rename dropped column failed",
                         });
+                        if nullable_column_names.remove(&before_column_schema.name) {
+                            nullable_column_names.insert(tombstone_name.clone());
+                        }
                         column_names[index] = tombstone_name;
                     }
                     (Some(_), Some(_)) => {
@@ -919,6 +959,7 @@ fn plan_ducklake_schema_ddl(
                     sql: build_drop_column_sql_ducklake(table_name, &before_column_schema.name),
                     error_description: "DuckLake alter table drop column failed",
                 });
+                nullable_column_names.remove(&before_column_schema.name);
                 column_names.remove(index);
             }
             SchemaOperation::AddColumn { after_column_schema, reason } => {
@@ -991,6 +1032,7 @@ fn plan_ducklake_schema_ddl(
                     error_description: "DuckLake alter table add column failed",
                 });
                 column_names.push(after_column_schema.name.clone());
+                nullable_column_names.insert(after_column_schema.name.clone());
             }
             SchemaOperation::AlterColumn { alteration }
                 if alteration.kind() == ColumnAlterationKind::Rename =>
@@ -1010,6 +1052,9 @@ fn plan_ducklake_schema_ddl(
                             ),
                             error_description: "DuckLake alter table rename column failed",
                         });
+                        if nullable_column_names.remove(&before.name) {
+                            nullable_column_names.insert(after.name.clone());
+                        }
                         column_names[index] = after.name.clone();
                     }
                     (None, Some(_)) => {
@@ -1060,6 +1105,7 @@ fn plan_ducklake_schema_ddl(
                             error_description: "DuckLake alter table drop stale rename before \
                                                 column failed",
                         });
+                        nullable_column_names.remove(&before.name);
                         column_names.remove(index);
                     }
                 }
@@ -1076,7 +1122,9 @@ fn plan_ducklake_schema_ddl(
                     before_type_modifier = before.modifier,
                     after_data_type = after.typ.name(),
                     after_type_modifier = after.modifier,
-                    "skipping unsupported ducklake column type change"
+                    "ducklake column type changes are currently unsupported; subsequent schema \
+                     changes and row writes may fail or behave unpredictably until type-change \
+                     support is implemented"
                 );
             }
             SchemaOperation::AlterColumn { alteration }
@@ -1093,13 +1141,28 @@ fn plan_ducklake_schema_ddl(
                     continue;
                 }
 
-                warn!(
-                    table_name = %table_name,
-                    column_name = %before.name,
-                    before_nullable = before.nullable,
-                    after_nullable = after.nullable,
-                    "skipping source column nullability change for ducklake"
-                );
+                if !before.nullable && after.nullable {
+                    if nullable_column_names.contains(&before.name) {
+                        debug!(
+                            table = %table_name,
+                            column = %before.name,
+                            "ducklake column is already nullable"
+                        );
+                    } else {
+                        statements.push(DuckLakeSchemaDdlStatement {
+                            sql: build_drop_not_null_sql_ducklake(table_name, &before.name),
+                            error_description: "DuckLake alter table drop not null failed",
+                        });
+                        nullable_column_names.insert(before.name.clone());
+                    }
+                } else {
+                    warn!(
+                        table_name = %table_name,
+                        column_name = %before.name,
+                        "ducklake does not tighten an existing nullable column to not null; \
+                         keeping the destination column nullable"
+                    );
+                }
             }
             SchemaOperation::AlterColumn { alteration }
                 if alteration.kind() == ColumnAlterationKind::Default =>
@@ -1149,46 +1212,6 @@ fn plan_ducklake_schema_ddl(
     }
 
     Ok(DuckLakeSchemaDdlPlan { statements, column_names })
-}
-
-/// Reconstructs the previous replicated projection from DuckLake's
-/// transactional old-or-target physical state.
-fn previous_ducklake_replication_mask_for_recovery(
-    previous_schema: &TableSchema,
-    target_schema: &TableSchema,
-    target_replication_mask: &ReplicationMask,
-    ducklake_column_names: &[String],
-) -> ReplicationMask {
-    let target_column_by_ordinal: HashMap<_, _> = target_schema
-        .column_schemas
-        .iter()
-        .enumerate()
-        .map(|(index, column)| (column.ordinal_position, (index, column.name.as_str())))
-        .collect();
-    let mask = previous_schema
-        .column_schemas
-        .iter()
-        .map(|previous_column| {
-            let previous_name_exists =
-                find_ducklake_column(ducklake_column_names, &previous_column.name).is_some();
-            let destination_previous_column =
-                DUCKLAKE_COLUMN_NAME_MAPPING.map_column_schema(previous_column);
-            let tombstone_name =
-                dropped_column_tombstone_name_ducklake(&destination_previous_column);
-            let tombstone_exists =
-                find_ducklake_column(ducklake_column_names, &tombstone_name).is_some();
-            let target_name_exists = target_column_by_ordinal
-                .get(&previous_column.ordinal_position)
-                .is_some_and(|(index, target_name)| {
-                    target_replication_mask.as_slice().get(*index) == Some(&1)
-                        && find_ducklake_column(ducklake_column_names, target_name).is_some()
-                });
-
-            u8::from(previous_name_exists || tombstone_exists || target_name_exists)
-        })
-        .collect();
-
-    ReplicationMask::from_bytes(mask)
 }
 
 /// Returns target replicated columns that are missing from DuckLake.
@@ -2043,8 +2066,15 @@ where
 
             let apply_result = (|| -> EtlResult<()> {
                 let column_names = read_ducklake_table_column_names_blocking(conn, &table_name)?;
+                let nullable_column_names =
+                    read_ducklake_nullable_column_names_blocking(conn, &table_name)?;
                 let DuckLakeSchemaDdlPlan { statements, column_names: _column_names } =
-                    plan_ducklake_schema_ddl(&table_name, column_names, &plan)?;
+                    plan_ducklake_schema_ddl_with_nullability(
+                        &table_name,
+                        column_names,
+                        nullable_column_names,
+                        &plan,
+                    )?;
 
                 for statement in statements {
                     execute_ddl(&statement.sql, statement.error_description)?;
@@ -2789,21 +2819,18 @@ where
                 let previous_table_schema = self
                     .load_previous_recovery_table_schema(table_id, previous_snapshot_id)
                     .await?;
-                let table_name_for_read = table_name.clone();
-                let ducklake_column_names = run_duckdb_blocking(
-                    Arc::clone(&self.pool),
-                    Arc::clone(&self.blocking_slots),
-                    move |conn| {
-                        read_ducklake_table_column_names_blocking(conn, &table_name_for_read)
-                    },
-                )
-                .await?;
-                let previous_replication_mask = previous_ducklake_replication_mask_for_recovery(
-                    &previous_table_schema,
-                    target_schema.inner(),
-                    &metadata.replication_mask,
-                    &ducklake_column_names,
-                );
+                let previous_replication_mask =
+                    metadata.previous_replication_mask.clone().ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "DuckLake cannot recover pre-migration Applying metadata",
+                            format!(
+                                "Table {table_id} began a schema change before ETL persisted the \
+                                 previous replication mask. Resynchronize the table because the \
+                                 previous logical projection cannot be reconstructed safely."
+                            )
+                        )
+                    })?;
                 let old_schema = ReplicatedTableSchema::from_mask(
                     previous_table_schema,
                     previous_replication_mask,
@@ -3279,8 +3306,8 @@ mod tests {
         config::{PgConnectionConfig, TcpKeepaliveConfig},
         data::{Cell, PartialTableRow, TableRow},
         schema::{
-            ColumnMetadataChange, ColumnSchema, IdentityMask, PgLsn, ReplicationMask, SchemaDiff,
-            SnapshotId, TableSchema, Type as PgType,
+            ColumnMetadataChange, ColumnSchema, IdentityMask, ReplicationMask, SchemaDiff,
+            TableSchema, Type as PgType,
         },
         store::{MemoryStore, SchemaStore},
     };
@@ -3519,6 +3546,51 @@ mod tests {
         .unwrap()
     }
 
+    fn plan_ducklake_schema_ddl(
+        table_name: &DuckLakeTableName,
+        column_names: Vec<String>,
+        plan: &SchemaPlan,
+    ) -> EtlResult<DuckLakeSchemaDdlPlan> {
+        plan_ducklake_schema_ddl_with_nullability(table_name, column_names, HashSet::new(), plan)
+    }
+
+    #[test]
+    fn ducklake_nullability_relaxation_is_idempotent_against_physical_state() {
+        let before = ColumnSchema::new("value".to_owned(), PgType::TEXT, -1, 1, false);
+        let after = ColumnSchema::new("value".to_owned(), PgType::TEXT, -1, 1, true);
+        let change = ColumnMetadataChange::between(&before, &after).unwrap();
+        let plan = shared_schema_plan(
+            SchemaDiff::new(Vec::new(), Vec::new(), vec![change]),
+            ["value"],
+            ["value"],
+        );
+
+        let old_state = plan_ducklake_schema_ddl_with_nullability(
+            &ducklake_table_name(),
+            vec!["value".to_owned()],
+            HashSet::new(),
+            &plan,
+        )
+        .unwrap();
+        let target_state = plan_ducklake_schema_ddl_with_nullability(
+            &ducklake_table_name(),
+            vec!["value".to_owned()],
+            HashSet::from(["value".to_owned()]),
+            &plan,
+        )
+        .unwrap();
+
+        assert_eq!(
+            old_state.statements,
+            vec![DuckLakeSchemaDdlStatement {
+                sql: r#"alter table "lake"."public"."users" alter column "value" drop not null"#
+                    .to_owned(),
+                error_description: "DuckLake alter table drop not null failed",
+            }]
+        );
+        assert!(target_state.statements.is_empty());
+    }
+
     #[test]
     fn key_row_from_updated_partial_row_uses_alternative_identity_columns() {
         let replicated_table_schema = make_alternative_identity_schema();
@@ -3701,6 +3773,36 @@ mod tests {
             ]
         );
         assert_eq!(plan.column_names, vec!["id", "name", "status"]);
+    }
+
+    #[test]
+    fn plan_ducklake_schema_ddl_adds_publication_column_nullable_without_default() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 2, false)
+                    .with_default_expression("'pending'::text".to_owned()),
+            ],
+        ));
+        let before = ReplicatedTableSchema::from_mask(
+            Arc::clone(&table_schema),
+            ReplicationMask::from_bytes(vec![1, 0]),
+        );
+        let after =
+            ReplicatedTableSchema::from_mask(table_schema, ReplicationMask::from_bytes(vec![1, 1]));
+        let shared_plan = before.plan_schema_change(&after, DUCKLAKE_COLUMN_NAME_MAPPING).unwrap();
+
+        let plan =
+            plan_ducklake_schema_ddl(&ducklake_table_name(), vec!["id".to_owned()], &shared_plan)
+                .unwrap();
+
+        assert_eq!(
+            plan.statements.iter().map(|statement| statement.sql.as_str()).collect::<Vec<_>>(),
+            [r#"alter table "lake"."public"."users" add column "status" varchar"#]
+        );
+        assert_eq!(plan.column_names, vec!["id", "status"]);
     }
 
     #[test]
@@ -4059,99 +4161,6 @@ mod tests {
             missing_columns.iter().map(|column| column.name.as_str()).collect();
 
         assert_eq!(missing_column_names, vec!["email"]);
-    }
-
-    #[test]
-    fn previous_replication_mask_for_recovery_matches_previous_schema_width() {
-        let previous_schema = TableSchema::new(
-            TableId::new(4),
-            TableName::new("public".to_owned(), "users".to_owned()),
-            vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, true),
-            ],
-        );
-        let target_schema = TableSchema::with_snapshot_id(
-            previous_schema.id,
-            previous_schema.name.clone(),
-            vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, true),
-                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
-            ],
-            SnapshotId::at_lsn(PgLsn::from(42_u64)),
-        );
-        let target_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
-
-        let previous_mask = previous_ducklake_replication_mask_for_recovery(
-            &previous_schema,
-            &target_schema,
-            &target_mask,
-            &["id".to_owned()],
-        );
-
-        assert_eq!(previous_mask.to_bytes(), vec![1, 0]);
-    }
-
-    #[test]
-    fn previous_replication_mask_for_recovery_keeps_removed_columns_for_drop_diff() {
-        let previous_schema = TableSchema::new(
-            TableId::new(5),
-            TableName::new("public".to_owned(), "users".to_owned()),
-            vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
-                ColumnSchema::new("old_col".to_owned(), PgType::TEXT, -1, 3, true),
-            ],
-        );
-        let target_schema = TableSchema::with_snapshot_id(
-            previous_schema.id,
-            previous_schema.name.clone(),
-            vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
-            ],
-            SnapshotId::at_lsn(PgLsn::from(43_u64)),
-        );
-        let target_mask = ReplicationMask::from_bytes(vec![1, 1]);
-
-        let previous_mask = previous_ducklake_replication_mask_for_recovery(
-            &previous_schema,
-            &target_schema,
-            &target_mask,
-            &["id".to_owned(), "name".to_owned(), "old_col".to_owned()],
-        );
-
-        assert_eq!(previous_mask.to_bytes(), vec![1, 1, 1]);
-    }
-
-    #[test]
-    fn previous_replication_mask_for_recovery_distinguishes_mask_contraction_states() {
-        let schema = TableSchema::new(
-            TableId::new(6),
-            TableName::new("public".to_owned(), "users".to_owned()),
-            vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, true),
-            ],
-        );
-        let target_mask = ReplicationMask::from_bytes(vec![1, 0]);
-
-        let before_ddl = previous_ducklake_replication_mask_for_recovery(
-            &schema,
-            &schema,
-            &target_mask,
-            &["id".to_owned(), "hidden".to_owned()],
-        );
-        let after_ddl = previous_ducklake_replication_mask_for_recovery(
-            &schema,
-            &schema,
-            &target_mask,
-            &["id".to_owned()],
-        );
-
-        assert_eq!(before_ddl.to_bytes(), vec![1, 1]);
-        assert_eq!(after_ddl.to_bytes(), vec![1, 0]);
     }
 
     fn path_to_file_url(path: &Path) -> Url {

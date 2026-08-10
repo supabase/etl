@@ -1784,7 +1784,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
             ("name".to_owned(), "String".to_owned()),
             ("age".to_owned(), "Int32".to_owned()),
             ("email".to_owned(), "Nullable(String)".to_owned()),
-            ("score".to_owned(), "Nullable(Int32)".to_owned()),
+            ("score".to_owned(), "Int32".to_owned()),
         ]
     );
 

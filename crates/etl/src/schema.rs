@@ -12,7 +12,9 @@ use std::{
 };
 
 pub use etl_postgres::{
-    default_expression::{DefaultExpression, parse_default_expression},
+    default_expression::{
+        DefaultExpression, parse_default_expression, unquote_postgres_string_literal,
+    },
     schema::{
         ColumnSchema, NumericModifiers, SchemaError, SnapshotId, TableId, TableName, TableSchema,
         numeric_modifiers,

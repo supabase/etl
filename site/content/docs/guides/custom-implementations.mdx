@@ -29,24 +29,26 @@ ETL delivers data to destinations in **two phases**:
 </Callout>
 
 Schema changes are surfaced through `Event::Relation`. If your destination
-keeps physical schemas, flush pending writes before handling a relation event,
-compare the before and after schemas, build a destination-aware schema plan,
-and apply its supported operations in order before processing following row
-events. Add operations provide the complete after column schema, drops provide
-the complete before column schema, and each alteration provides adjacent before
-and after column schemas. Apply operations in order: for a logical column, one
-alteration's after schema is the next alteration's before schema. Every default
-change is exposed as one `Default` alteration. Inspect its before and after
-expressions to distinguish addition, removal, and replacement. If a previous
-default exists, make its removal idempotent; if a new default exists, gate only
-setting it on current destination compatibility. BigQuery, ClickHouse, DuckLake,
-and Snowflake apply column adds, drops, renames, and their supported default
-actions. BigQuery also relaxes
-existing required columns to nullable; other shared-planner nullability changes
-and all shared-planner type alterations are currently skipped. Default
-expressions and backfill semantics remain destination-specific. See
-[Schema Changes](/explanation/schema-changes/) for the current semantics and
-limitations.
+keeps physical schemas, flush writes using the previous schema, build a
+destination-aware plan, validate the complete plan, and apply its operations in
+the supplied order before processing following rows. Each alteration contains
+adjacent before and after column schemas. A default addition, removal, or
+replacement is one `Default` alteration; remove the old default idempotently,
+then set the new one only when currently supported.
+
+The `reason` carried by `SchemaOperation::AddColumn` distinguishes a physical
+PostgreSQL table addition from a column newly exposed by a publication
+replication mask. For a replication-mask addition, always create the destination
+column as nullable: its historical values were never replicated, even when the
+source column is `NOT NULL`. Keep those existing values `NULL`. Install source
+default metadata only if the destination guarantees that setting the default
+affects future writes without changing or virtually projecting values for
+existing rows. If the destination type cannot be nullable, reject the schema
+change before DDL and require resynchronization. Future ETL row events already
+contain the value evaluated by PostgreSQL.
+
+See [Schema Changes](/explanation/schema-changes/) for built-in destination
+behavior, recovery rules, and current limitations.
 
 ## Create the project [#create-the-project] [step]
 

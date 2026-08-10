@@ -133,8 +133,9 @@ fn build_add_column_sql(
     table_name: &str,
     column: &etl::schema::ColumnSchema,
     after_column: Option<&str>,
+    force_nullable: bool,
 ) -> String {
-    let col_type = clickhouse_column_type(column, true);
+    let col_type = clickhouse_column_type(column, force_nullable);
     let default_clause = clickhouse_default_clause(column).unwrap_or_default();
     let table_name = quote_identifier(table_name);
     let column_name = quote_identifier(&column.name);
@@ -184,6 +185,24 @@ fn build_drop_default_sql(table_name: &str, column_name: &str) -> String {
     let column_name = quote_identifier(column_name);
 
     format!("ALTER TABLE {table_name} MODIFY COLUMN {column_name} REMOVE DEFAULT")
+}
+
+/// Builds the SQL used to relax a scalar column to `Nullable`.
+fn build_drop_not_null_sql(
+    table_name: &str,
+    column_name: &str,
+    physical_type: &str,
+) -> Option<String> {
+    if physical_type.starts_with("Nullable(") {
+        return None;
+    }
+
+    let table_name = quote_identifier(table_name);
+    let column_name = quote_identifier(column_name);
+    Some(format!(
+        "ALTER TABLE {table_name} MODIFY COLUMN {column_name} Nullable({physical_type}) SETTINGS \
+         mutations_sync = 2"
+    ))
 }
 
 /// Builds the SQL used to truncate a ClickHouse table.
@@ -458,9 +477,6 @@ impl ClickHouseClient {
 
     /// Adds a column to an existing ClickHouse table.
     ///
-    /// New columns are always Nullable since ClickHouse cannot backfill
-    /// existing rows with a NOT NULL default.
-    ///
     /// `after_column` controls placement: `Some(name)` inserts the new column
     /// immediately AFTER `name`, `None` inserts it FIRST (used when the table
     /// has no user columns yet). Either way the new column lands before the
@@ -471,8 +487,9 @@ impl ClickHouseClient {
         table_name: &str,
         column: &etl::schema::ColumnSchema,
         after_column: Option<&str>,
+        force_nullable: bool,
     ) -> EtlResult<()> {
-        let sql = build_add_column_sql(table_name, column, after_column);
+        let sql = build_add_column_sql(table_name, column, after_column, force_nullable);
         self.execute_ddl(DdlKind::AddColumn, &sql).await
     }
 
@@ -552,6 +569,28 @@ impl ClickHouseClient {
         }
 
         let sql = build_drop_default_sql(table_name, column_name);
+        self.execute_ddl(DdlKind::ModifyColumn, &sql).await
+    }
+
+    /// Relaxes an existing scalar column to nullable when needed.
+    pub(crate) async fn drop_column_not_null(
+        &self,
+        table_name: &str,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let columns = self.table_columns(table_name).await?;
+        let column = columns.iter().find(|column| column.name == column_name).ok_or_else(|| {
+            etl_error!(
+                ErrorKind::CorruptedTableSchema,
+                "ClickHouse destination column for nullability change is missing",
+                format!("Table '{table_name}', column '{column_name}'")
+            )
+        })?;
+        let Some(sql) = build_drop_not_null_sql(table_name, column_name, &column.type_name) else {
+            debug!(table_name, column_name, "clickhouse column is already nullable");
+            return Ok(());
+        };
+
         self.execute_ddl(DdlKind::ModifyColumn, &sql).await
     }
 
@@ -703,7 +742,7 @@ mod tests {
     #[test]
     fn add_column_sql_quotes_identifiers() {
         let column = column_schema("new\"column");
-        let sql = build_add_column_sql("table\"name", &column, Some("old\"column"));
+        let sql = build_add_column_sql("table\"name", &column, Some("old\"column"), true);
 
         assert_eq!(
             sql,
@@ -715,7 +754,7 @@ mod tests {
     #[test]
     fn add_column_sql_uses_first_when_anchor_is_none() {
         let column = column_schema("only_col");
-        let sql = build_add_column_sql("test_table", &column, None);
+        let sql = build_add_column_sql("test_table", &column, None, true);
 
         assert_eq!(
             sql,
@@ -729,12 +768,25 @@ mod tests {
         let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, false)
             .with_primary_key(1)
             .with_default_expression("42".to_owned());
-        let sql = build_add_column_sql("test_table", &column, Some("id"));
+        let sql = build_add_column_sql("test_table", &column, Some("id"), true);
 
         assert_eq!(
             sql,
             "ALTER TABLE \"test_table\" ADD COLUMN IF NOT EXISTS \"score\" Nullable(Int32) \
              DEFAULT 42 AFTER \"id\""
+        );
+    }
+
+    #[test]
+    fn add_column_sql_can_preserve_not_null_with_supported_default() {
+        let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, false)
+            .with_default_expression("42".to_owned());
+        let sql = build_add_column_sql("test_table", &column, Some("id"), false);
+
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"test_table\" ADD COLUMN IF NOT EXISTS \"score\" Int32 DEFAULT 42 AFTER \
+             \"id\""
         );
     }
 
@@ -754,6 +806,18 @@ mod tests {
             sql,
             "ALTER TABLE \"table\\\"name\" MODIFY COLUMN \"old\\\"column\" REMOVE DEFAULT"
         );
+    }
+
+    #[test]
+    fn drop_not_null_sql_uses_actual_type_and_waits_for_mutation() {
+        assert_eq!(
+            build_drop_not_null_sql("table\"name", "old\"column", "Int32").as_deref(),
+            Some(
+                "ALTER TABLE \"table\\\"name\" MODIFY COLUMN \"old\\\"column\" Nullable(Int32) \
+                 SETTINGS mutations_sync = 2"
+            )
+        );
+        assert_eq!(build_drop_not_null_sql("test_table", "value", "Nullable(Int32)"), None);
     }
 
     #[test]

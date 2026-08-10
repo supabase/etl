@@ -12,7 +12,7 @@ use tokio::{
     sync::{Mutex, RwLock},
     time::{Instant, sleep},
 };
-use tracing::warn;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::snowflake::{
@@ -320,6 +320,34 @@ impl Client<AuthManager<HttpExchanger>> {
             return Err(Error::SchemaNotFound { database, schema });
         }
 
+        let resp = sql
+            .execute_statement("SHOW PARAMETERS LIKE 'QUOTED_IDENTIFIERS_IGNORE_CASE' IN SESSION")
+            .await?;
+        let ignore_quoted_identifier_case = resp.data.as_deref().and_then(|rows| {
+            rows.iter().find_map(|row| {
+                let name = row.first()?.as_str()?;
+                name.eq_ignore_ascii_case("QUOTED_IDENTIFIERS_IGNORE_CASE")
+                    .then(|| row.get(1)?.as_str())
+                    .flatten()
+            })
+        });
+        match ignore_quoted_identifier_case {
+            Some(value) if value.eq_ignore_ascii_case("false") => {}
+            Some(_) => {
+                return Err(Error::Config(
+                    "QUOTED_IDENTIFIERS_IGNORE_CASE must be FALSE so quoted source column names \
+                     retain their exact case"
+                        .to_owned(),
+                ));
+            }
+            None => {
+                return Err(Error::Config(
+                    "Could not determine the effective QUOTED_IDENTIFIERS_IGNORE_CASE setting"
+                        .to_owned(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -459,8 +487,9 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                                     table_name,
                                     column_name = %after_column_schema.name,
                                     "not applying the source default to a publication-added \
-                                     snowflake column; the destination schema will differ from the \
-                                     logical source schema"
+                                     snowflake column because snowflake would populate historical \
+                                     destination rows; adding the column as nullable without a \
+                                     default"
                                 );
                             }
                             None
@@ -493,17 +522,26 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                                 before_type_modifier = before.modifier,
                                 after_data_type = after.typ.name(),
                                 after_type_modifier = after.modifier,
-                                "skipping unsupported snowflake column type change"
+                                "snowflake column type changes are currently unsupported; \
+                                 subsequent schema changes and row writes may fail or behave \
+                                 unpredictably until type-change support is implemented"
                             );
                         }
                         ColumnAlterationKind::Nullability => {
-                            warn!(
-                                table_name,
-                                column_name = %before.name,
-                                before_nullable = before.nullable,
-                                after_nullable = after.nullable,
-                                "skipping source column nullability change for snowflake"
-                            );
+                            if after.nullable {
+                                debug!(
+                                    table_name,
+                                    column_name = %before.name,
+                                    "snowflake destination column is already nullable"
+                                );
+                            } else {
+                                warn!(
+                                    table_name,
+                                    column_name = %before.name,
+                                    "snowflake keeps source columns nullable so key-only delete \
+                                     records remain writable"
+                                );
+                            }
                         }
                         ColumnAlterationKind::Default => match (
                             before.default_expression.as_deref(),

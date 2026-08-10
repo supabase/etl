@@ -171,11 +171,21 @@ the measured workload so long-running streaming remains efficient. This is the
 interim phase model until the replicator can explicitly signal copy and
 streaming transitions to autoscaling.
 
-Restarting a running replicator deliberately preserves its VPA recommendation:
-a restart refreshes the process and configuration but is not an autoscaling
-phase transition. To discard the recommendation and return to the max-sized
-initial allocation, stop the pipeline and then start it again. Stop deletes the
-StatefulSet and VPA; start recreates both with fresh recommendation history.
+The explicit pipeline restart endpoint uses durable table state to predict
+whether the restart will repeat an initial table copy. If any table is before
+`SyncDone` and is not stopped in an error state, the endpoint deletes the VPA
+before reconciling the pipeline. Reconciliation then recreates the VPA with no
+steady-state recommendation history, so the restarted Pod begins with the
+initial copy allocation. `SyncDone` and `Ready` tables keep their destination
+data across restart and therefore preserve the existing VPA. This source-state
+inspection is deliberately best-effort: connection, query, or state-decoding
+failures preserve the VPA rather than making the restart less reliable.
+
+This behavior belongs to the explicit API action by design. Kubernetes- or
+controller-initiated Pod restarts do not reset the VPA, so the orchestrator can
+continue using its learned recommendation. Stopping and starting a pipeline
+still resets autoscaling unconditionally: stop deletes the StatefulSet and VPA,
+and start recreates both with fresh recommendation history.
 
 ### Encryption Keys
 

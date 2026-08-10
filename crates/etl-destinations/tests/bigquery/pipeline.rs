@@ -20,7 +20,7 @@ use etl::{
 use etl_destinations::bigquery::test_utils::{
     setup_bigquery_database, skip_if_missing_bigquery_env_vars,
 };
-use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::{Rng, distr::Alphanumeric, random};
 use tokio::time::sleep;
@@ -2223,6 +2223,143 @@ async fn schema_change_add_column_defaults() {
                 id: 2,
                 name: "Bob".to_owned(),
                 status: Some("new".to_owned()),
+                score: Some(15),
+                active: Some(true),
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_mask_adds_nullable_columns_with_future_only_defaults() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for publication column lists");
+        return;
+    }
+
+    let bigquery_database = setup_bigquery_database().await;
+    let table_name = test_table_name("publication_defaults");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("name", "text not null"),
+                ("status", "text not null default 'pending'::text"),
+                ("score", "integer not null default 15"),
+                ("active", "boolean not null default true"),
+            ],
+        )
+        .await
+        .unwrap();
+    let publication_name = "test_pub_bq_publication_defaults";
+    database
+        .run_sql(&format!(
+            "create publication {publication_name} for table {} (id, name)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Alice')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
+        .await;
+    database
+        .run_sql(&format!(
+            "alter publication {publication_name} set table {} (id, name, status, score, active)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Bob')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    events_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let destination_metadata =
+        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
+    let defaults = bigquery_database
+        .query_column_defaults_by_id(&destination_metadata.destination_table_id)
+        .await;
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "status")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("'pending'")
+    );
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "score")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("15")
+    );
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "active")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("true")
+    );
+
+    let rows = bigquery_database.query_table(table_name).await.unwrap();
+    let mut rows = parse_bigquery_table_rows::<BigQueryDefaultsRow>(rows);
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            BigQueryDefaultsRow {
+                id: 1,
+                name: "Alice".to_owned(),
+                status: None,
+                score: None,
+                active: None,
+            },
+            BigQueryDefaultsRow {
+                id: 2,
+                name: "Bob".to_owned(),
+                status: Some("pending".to_owned()),
                 score: Some(15),
                 active: Some(true),
             },
