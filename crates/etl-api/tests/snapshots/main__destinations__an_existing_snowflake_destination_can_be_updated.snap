@@ -5,14 +5,6 @@ expression: response.config
 Snowflake {
     account_id: "updatedorg-updatedaccount",
     user: "updated_etl_user",
-    private_key: SerializableSecretString(
-        SecretBox<str>([REDACTED]),
-    ),
-    private_key_passphrase: Some(
-        SerializableSecretString(
-            SecretBox<str>([REDACTED]),
-        ),
-    ),
     database: "updated_database",
     schema: "updated_schema",
     role: Some(
