@@ -618,11 +618,11 @@ async fn array_values_roundtrip_through_destination() {
     let table = PropertyTable::create(
         "proparrays",
         &[
-            ("ai", Type::INT8_ARRAY, true),
-            ("at", Type::TEXT_ARRAY, true),
-            ("af", Type::FLOAT8_ARRAY, true),
-            ("ab", Type::BYTEA_ARRAY, true),
-            ("ad", Type::DATE_ARRAY, true),
+            ("ai", Type::INT8_ARRAY, false),
+            ("at", Type::TEXT_ARRAY, false),
+            ("af", Type::FLOAT8_ARRAY, false),
+            ("ab", Type::BYTEA_ARRAY, false),
+            ("ad", Type::DATE_ARRAY, false),
         ],
     )
     .await;

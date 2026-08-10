@@ -1617,7 +1617,7 @@ struct AddColumnRow {
     name: String,
     age: i32,
     email: Option<String>,
-    score: Option<i32>,
+    score: i32,
 }
 
 /// Row struct for the defaulted ADD COLUMN test.
@@ -1796,14 +1796,14 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[0].name, "Alice");
     assert_eq!(rows[0].age, 25);
     assert_eq!(rows[0].email, None);
-    assert_eq!(rows[0].score, Some(0));
+    assert_eq!(rows[0].score, 0);
 
     // Bob: post-change row, added columns present.
     assert_eq!(rows[1].id, 2);
     assert_eq!(rows[1].name, "Bob");
     assert_eq!(rows[1].age, 30);
     assert_eq!(rows[1].email, Some("bob@example.com".to_owned()));
-    assert_eq!(rows[1].score, Some(7));
+    assert_eq!(rows[1].score, 7);
 
     if let Some(view_rows) = current_view_rows {
         assert_eq!(view_rows, rows);
