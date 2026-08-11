@@ -1018,7 +1018,7 @@ async fn table_nullable_scalar_columns() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_nullable_array_columns() {
+async fn table_nullable_array_columns_are_rejected() {
     if skip_if_missing_bigquery_env_vars() {
         return;
     }
@@ -1029,213 +1029,37 @@ async fn table_nullable_array_columns() {
     let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_database().await;
     let table_name = test_table_name("nullable_cols_array");
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[
-                ("b_arr", "bool[]"),
-                ("t_arr", "text[]"),
-                ("i2_arr", "int2[]"),
-                ("i4_arr", "int4[]"),
-                ("i8_arr", "int8[]"),
-                ("f4_arr", "float4[]"),
-                ("f8_arr", "float8[]"),
-                ("n_arr", "numeric[]"),
-                ("by_arr", "bytea[]"),
-                ("d_arr", "date[]"),
-                ("ti_arr", "time[]"),
-                ("ts_arr", "timestamp[]"),
-                ("tstz_arr", "timestamptz[]"),
-                ("u_arr", "uuid[]"),
-                ("j_arr", "json[]"),
-                ("jb_arr", "jsonb[]"),
-                ("o_arr", "oid[]"),
-            ],
-        )
-        .await
-        .unwrap();
+    let table_id =
+        database.create_table(table_name.clone(), true, &[("values", "integer[]")]).await.unwrap();
+
+    let publication_name = "test_pub_array";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
-
-    let publication_name = "test_pub_array".to_owned();
-    database
-        .create_publication(&publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
+    let destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let table_errored_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name,
+        publication_name.to_owned(),
         store.clone(),
-        destination.clone(),
+        destination,
     );
-
-    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     pipeline.start().await.unwrap();
-
-    table_sync_complete_notify.notified().await;
-
-    // insert with null arrays
-    let events_notify = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
-        .await;
-
-    database
-        .insert_values(
-            table_name.clone(),
-            &[
-                "b_arr", "t_arr", "i2_arr", "i4_arr", "i8_arr", "f4_arr", "f8_arr", "n_arr",
-                "by_arr", "d_arr", "ti_arr", "ts_arr", "tstz_arr", "u_arr", "j_arr", "jb_arr",
-                "o_arr",
-            ],
-            &[
-                &Option::<Vec<bool>>::None,
-                &Option::<Vec<String>>::None,
-                &Option::<Vec<i16>>::None,
-                &Option::<Vec<i32>>::None,
-                &Option::<Vec<i64>>::None,
-                &Option::<Vec<f32>>::None,
-                &Option::<Vec<f64>>::None,
-                &Option::<Vec<PgNumeric>>::None,
-                &Option::<Vec<Vec<u8>>>::None,
-                &Option::<Vec<NaiveDate>>::None,
-                &Option::<Vec<NaiveTime>>::None,
-                &Option::<Vec<NaiveDateTime>>::None,
-                &Option::<Vec<DateTime<Utc>>>::None,
-                &Option::<Vec<uuid::Uuid>>::None,
-                &Option::<Vec<serde_json::Value>>::None,
-                &Option::<Vec<serde_json::Value>>::None,
-                &Option::<Vec<u32>>::None,
-            ],
-        )
-        .await
-        .unwrap();
-
-    events_notify.notified().await;
-
-    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
-    let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
-    // null arrays are returned as empty arrays by big query: See this section:
-    // https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#array_nulls
-    assert_eq!(parsed_table_rows, vec![NullableColsArray::all_empty(1),]);
-
-    // update with array values
-    let events_notify = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
-        .await;
-
-    // Define test array values
-    let updated_bool_arr = vec![true, false, true];
-    let updated_text_arr = vec!["hello".to_owned(), "world".to_owned()];
-    let updated_i2_arr = vec![1i16, 2i16, 3i16];
-    let updated_i4_arr = vec![100i32, 200i32];
-    let updated_i8_arr = vec![1000i64, 2000i64, 3000i64];
-    let updated_f4_arr = vec![1.5f32, 2.5f32];
-    let updated_f8_arr = vec![std::f64::consts::PI, std::f64::consts::E];
-    let updated_n_arr =
-        vec![PgNumeric::from_str("3.141").unwrap(), PgNumeric::from_str("2.718").unwrap()];
-    let updated_bytes_arr = vec![b"test_bytes1".to_vec(), b"test_bytes2".to_vec()];
-    let updated_date_arr = vec![
-        NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
-    ];
-    let updated_time_arr = vec![
-        NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
-        NaiveTime::from_hms_opt(17, 30, 0).unwrap(),
-    ];
-    let base_date = NaiveDate::from_ymd_opt(2023, 6, 15).unwrap();
-    let updated_timestamp_arr = vec![
-        NaiveDateTime::new(base_date, NaiveTime::from_hms_opt(10, 30, 0).unwrap()),
-        NaiveDateTime::new(base_date, NaiveTime::from_hms_opt(15, 45, 0).unwrap()),
-    ];
-    let updated_timestamptz_arr = vec![
-        DateTime::<Utc>::from_naive_utc_and_offset(updated_timestamp_arr[0], Utc),
-        DateTime::<Utc>::from_naive_utc_and_offset(updated_timestamp_arr[1], Utc),
-    ];
-    let updated_uuid_arr = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
-    let updated_json_arr =
-        vec![serde_json::json!({"key1": "value1"}), serde_json::json!({"key2": "value2"})];
-    let updated_jsonb_arr =
-        vec![serde_json::json!({"jsonb1": "data1"}), serde_json::json!({"jsonb2": "data2"})];
-    let updated_oid_arr = vec![12345u32, 67890u32];
-
-    database
-        .update_values(
-            table_name.clone(),
-            &[
-                "b_arr", "t_arr", "i2_arr", "i4_arr", "i8_arr", "f4_arr", "f8_arr", "n_arr",
-                "by_arr", "d_arr", "ti_arr", "ts_arr", "tstz_arr", "u_arr", "j_arr", "jb_arr",
-                "o_arr",
-            ],
-            &[
-                &Some(updated_bool_arr.clone()),
-                &Some(updated_text_arr.clone()),
-                &Some(updated_i2_arr.clone()),
-                &Some(updated_i4_arr.clone()),
-                &Some(updated_i8_arr.clone()),
-                &Some(updated_f4_arr.clone()),
-                &Some(updated_f8_arr.clone()),
-                &Some(updated_n_arr.clone()),
-                &Some(updated_bytes_arr.clone()),
-                &Some(updated_date_arr.clone()),
-                &Some(updated_time_arr.clone()),
-                &Some(updated_timestamp_arr.clone()),
-                &Some(updated_timestamptz_arr.clone()),
-                &Some(updated_uuid_arr.clone()),
-                &Some(updated_json_arr.clone()),
-                &Some(updated_jsonb_arr.clone()),
-                &Some(updated_oid_arr.clone()),
-            ],
-        )
-        .await
-        .unwrap();
-
-    events_notify.notified().await;
-
-    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
-    let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
-
-    let expected_row = NullableColsArray::with_non_null_values(
-        1,
-        updated_bool_arr,
-        updated_text_arr,
-        updated_i2_arr,
-        updated_i4_arr,
-        updated_i8_arr,
-        updated_f4_arr,
-        updated_f8_arr,
-        updated_n_arr,
-        updated_bytes_arr,
-        updated_date_arr,
-        updated_time_arr,
-        updated_timestamp_arr,
-        updated_timestamptz_arr,
-        updated_uuid_arr,
-        updated_json_arr,
-        updated_jsonb_arr,
-        updated_oid_arr,
-    );
-
-    assert_eq!(parsed_table_rows, vec![expected_row]);
-
-    // delete
-    let events_notify = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
-        .await;
-
-    database.delete_values(table_name.clone(), &["id"], &["'1'"], "").await.unwrap();
-
-    events_notify.notified().await;
-
-    assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
-
+    table_errored_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    match table_state {
+        TableState::Errored { reason, .. } => {
+            assert!(reason.contains("nullable source arrays"));
+        }
+        other => panic!("expected Errored state, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1768,8 +1592,10 @@ async fn table_array_with_null_values() {
     let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_database().await;
     let table_name = test_table_name("array_with_nulls");
-    let table_id =
-        database.create_table(table_name.clone(), true, &[("int_array", "int4[]")]).await.unwrap();
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("int_array", "int4[] not null")])
+        .await
+        .unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();

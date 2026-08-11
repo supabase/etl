@@ -63,14 +63,14 @@ const DATE_2024_01_15_DAYS: i32 = 19737;
 /// Microseconds from epoch for `2024-01-15 12:00:00 UTC`.
 const TS_2024_01_15_12_00_US: i64 = 1_705_320_000_000_000;
 
-/// Tests that all Postgres column types (including nullable arrays) round-trip
+/// Tests that all supported Postgres column types round-trip
 /// correctly through the ClickHouse RowBinary encoding.
 ///
 /// # GIVEN
 ///
 /// A Postgres table covering every supported column type -- scalars (integers,
 /// floats, numeric, boolean, text, varchar, date, timestamp, timestamptz, time,
-/// interval, jsonb, json, bytea, inet, cidr, macaddr, uuid) and nullable array
+/// interval, jsonb, json, bytea, inet, cidr, macaddr, uuid) and array
 /// columns (`integer[]`, `text[]`). Two rows are inserted before the pipeline
 /// starts:
 ///
@@ -90,12 +90,8 @@ const TS_2024_01_15_12_00_US: i64 = 1_705_320_000_000_000;
 ///
 /// # Regression
 ///
-/// Row 2's non-empty arrays specifically catch the nullable-array encoding bug
-/// where `nullable_flags[i] = true` for array columns caused
-/// `rb_encode_nullable` to prepend an extra null-indicator byte. ClickHouse
-/// read that byte as `varint(0)` (empty array) and then parsed the actual
-/// element bytes as subsequent column data, failing with "Cannot read all data"
-/// at row 2.
+/// Row 2's non-empty arrays specifically catch array-length encoding bugs that
+/// can misalign the remaining RowBinary column data.
 #[tokio::test(flavor = "multi_thread")]
 async fn all_types_table_copy_merge_tree() {
     all_types_table_copy_inner(ClickHouseEngine::MergeTree).await;
@@ -136,11 +132,10 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
                 ("interval_col", "interval not null"),
                 ("jsonb_col", "jsonb not null"),
                 ("json_col", "json not null"),
-                // Nullable array columns (key for the regression test).
-                // These are intentionally nullable so that nullable_flags[i] would
-                // have been set to `true` before the fix, triggering the bug.
-                ("integer_array_col", "integer[]"),
-                ("text_array_col", "text[]"),
+                // Array columns are top-level non-nullable because ClickHouse cannot
+                // distinguish a NULL array from an empty array.
+                ("integer_array_col", "integer[] not null"),
+                ("text_array_col", "text[] not null"),
                 // Other types
                 ("bytea_col", "bytea not null"),
                 ("inet_col", "inet not null"),
@@ -290,12 +285,12 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
     assert_eq!(
         r2.integer_array_col,
         vec![Some(1), Some(2), Some(3)],
-        "row 2 integer_array_col mismatch -- nullable-array encoding bug likely present"
+        "row 2 integer_array_col mismatch -- array encoding bug likely present"
     );
     assert_eq!(
         r2.text_array_col,
         vec![Some("alpha".to_owned()), Some("beta".to_owned())],
-        "row 2 text_array_col mismatch -- nullable-array encoding bug likely present"
+        "row 2 text_array_col mismatch -- array encoding bug likely present"
     );
 }
 
@@ -386,8 +381,9 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
 ///
 /// # GIVEN
 ///
-/// A Postgres table with nullable scalar columns and nullable array columns,
-/// populated with four rows that exercise encoding boundary conditions:
+/// A Postgres table with nullable scalar columns and non-nullable array
+/// columns, populated with four rows that exercise encoding boundary
+/// conditions:
 ///
 /// 1. **All NULLs** -- nullable scalars are NULL, arrays are empty.
 /// 2. **NULL elements inside arrays** -- `{1, NULL, 3}`, `{'a', NULL, 'c'}`.
@@ -431,10 +427,10 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
             table_name.clone(),
             true,
             &[
-                ("nullable_text", "text"),      // nullable
-                ("nullable_int", "integer"),    // nullable
-                ("int_array_col", "integer[]"), // Array(Nullable(Int32))
-                ("text_array_col", "text[]"),   // Array(Nullable(String))
+                ("nullable_text", "text"),               // nullable
+                ("nullable_int", "integer"),             // nullable
+                ("int_array_col", "integer[] not null"), // Array(Nullable(Int32))
+                ("text_array_col", "text[] not null"),   // Array(Nullable(String))
             ],
         )
         .await
@@ -1352,7 +1348,7 @@ const DEFAULT_IDENTITY_TABLE: &str = "test_default__identity__delete";
 ///   boolean, text, varchar, date, timestamp, timestamptz, time, jsonb, bytea,
 ///   uuid
 /// - Nullable scalars: text, integer
-/// - Nullable arrays: integer[], text[]
+/// - Non-nullable arrays with nullable elements: integer[], text[]
 /// Two rows inserted and copied to ClickHouse.
 ///
 /// # WHEN
@@ -1407,8 +1403,8 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
                 ("uuid_col", "uuid not null"),
                 ("nullable_text", "text"),
                 ("nullable_int", "integer"),
-                ("int_array_col", "integer[]"),
-                ("text_array_col", "text[]"),
+                ("int_array_col", "integer[] not null"),
+                ("text_array_col", "text[] not null"),
             ],
         )
         .await
