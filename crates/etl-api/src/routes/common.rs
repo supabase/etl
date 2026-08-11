@@ -4,10 +4,7 @@ use crate::{
     data::pipelines::read_pipeline_components,
     k8s::{
         K8sClient, SourceTlsConfig,
-        core::{
-            create_or_update_pipeline_resources_in_k8s, reset_replicator_vertical_pod_autoscaler,
-            should_reconcile_replicator_resources,
-        },
+        core::{create_or_update_pipeline_resources_in_k8s, should_reconcile_replicator_resources},
     },
     routes::pipelines::PipelineError,
     validation::{self, ValidationContext, ValidationError, ValidationFailure},
@@ -17,11 +14,9 @@ use crate::{
 ///
 /// Update endpoints that can change source, destination, pipeline, image, or
 /// runtime resource configuration should call this after persisting the new API
-/// state. The helper resets the old VPA recommendation, materializes the latest
-/// Kubernetes resources, and relies on the StatefulSet materialization to
-/// change the pod template restart annotation. The replacement Pod therefore
-/// starts from the max-sized template allocation before fresh VPA
-/// recommendations converge it toward observed usage.
+/// state. The helper materializes the latest Kubernetes resources and relies on
+/// the StatefulSet materialization to change the pod template restart
+/// annotation.
 ///
 /// This forced recreation is part of the contract. The replicator loads its
 /// mounted config and secret-backed environment when the process starts, so a
@@ -46,12 +41,6 @@ pub(crate) async fn restart_pipeline_replicator_if_running(
     if !should_reconcile_replicator_resources(k8s_client, tenant_id, replicator.id).await? {
         return Ok(false);
     }
-
-    // An existing VPA recommendation would otherwise mutate the replacement
-    // Pod back to its streaming allocation during admission. A deliberate
-    // restart may begin another table copy, so reset recommendation history and
-    // let the StatefulSet template provide the initial max-sized allocation.
-    reset_replicator_vertical_pod_autoscaler(k8s_client, tenant_id, replicator.id).await?;
 
     create_or_update_pipeline_resources_in_k8s(
         k8s_client,

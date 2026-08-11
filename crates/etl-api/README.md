@@ -162,10 +162,20 @@ fall back to a disruption-aware Pod recreation. `minReplicas: 1` permits that
 fallback for the single-replica StatefulSet. The global defaults should normally
 match the autoscaling maximum, so a new replicator begins with the full copy
 allocation. Explicit destination and pipeline overrides remain authoritative.
-Before deliberately restarting a running replicator, the API resets its VPA
-recommendation. The replacement Pod therefore starts from the max-sized
-StatefulSet template for a possible new table-copy phase, after which a fresh
-recommendation converges it back toward observed usage.
+
+This max-first behavior is intentional for the current design. A fresh pipeline
+starts oversized to absorb the initial burst of data without an early OOM and
+to give table copy as much throughput as the configured operating envelope
+allows. After a short observation period, VPA converges CPU and memory toward
+the measured workload so long-running streaming remains efficient. This is the
+interim phase model until the replicator can explicitly signal copy and
+streaming transitions to autoscaling.
+
+Restarting a running replicator deliberately preserves its VPA recommendation:
+a restart refreshes the process and configuration but is not an autoscaling
+phase transition. To discard the recommendation and return to the max-sized
+initial allocation, stop the pipeline and then start it again. Stop deletes the
+StatefulSet and VPA; start recreates both with fresh recommendation history.
 
 ### Encryption Keys
 

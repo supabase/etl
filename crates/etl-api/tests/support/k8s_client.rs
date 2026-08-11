@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 pub(crate) struct MockK8sState {
     pod_status: Arc<RwLock<PodStatus>>,
     create_calls: Arc<AtomicUsize>,
+    vpa_delete_calls: Arc<AtomicUsize>,
     ducklake_maintenance_create_calls: Arc<AtomicUsize>,
     last_replicator_resources: Arc<RwLock<Option<ReplicatorResourcesConfig>>>,
 }
@@ -28,6 +29,7 @@ impl Default for MockK8sState {
         Self {
             pod_status: Arc::new(RwLock::new(PodStatus::Started)),
             create_calls: Arc::new(AtomicUsize::new(0)),
+            vpa_delete_calls: Arc::new(AtomicUsize::new(0)),
             ducklake_maintenance_create_calls: Arc::new(AtomicUsize::new(0)),
             last_replicator_resources: Arc::new(RwLock::new(None)),
         }
@@ -41,6 +43,10 @@ impl MockK8sState {
 
     pub(crate) fn create_calls(&self) -> usize {
         self.create_calls.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn vpa_delete_calls(&self) -> usize {
+        self.vpa_delete_calls.load(Ordering::Relaxed)
     }
 
     pub(crate) fn ducklake_maintenance_create_calls(&self) -> usize {
@@ -194,6 +200,7 @@ impl K8sClient for MockK8sClient {
         &self,
         _prefix: &str,
     ) -> Result<(), K8sError> {
+        self.state.vpa_delete_calls.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 

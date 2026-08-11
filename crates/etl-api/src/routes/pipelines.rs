@@ -1033,7 +1033,7 @@ pub(crate) async fn start_pipeline(
     post,
     path = "/pipelines/{pipeline_id}/restart",
     summary = "Restart a pipeline",
-    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator.",
+    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator while preserving its current VPA recommendation. Stop and start the pipeline to reset autoscaling and return to the initial allocation.",
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")

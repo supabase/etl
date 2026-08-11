@@ -85,7 +85,10 @@ pub struct K8sConfig {
 ///
 /// The API applies these bounds both to the initial StatefulSet allocation and
 /// to the per-pipeline VPA policy, keeping the VPA object as the source of
-/// truth for the workload's operating envelope.
+/// truth for the workload's operating envelope. Global replicator resources
+/// should normally match the maximum bounds: fresh pipelines intentionally
+/// start oversized for initial-copy throughput and burst safety, then VPA
+/// converges them toward their steady-state usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct ReplicatorAutoscalingConfig {
     /// Minimum replicator memory allocation, in Mi.
