@@ -10,7 +10,7 @@ use etl_api::{
     configs::pipeline::ReplicatorResourcesConfig,
     k8s::{
         DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile,
-        ReplicatorStatefulSetConfig,
+        ReplicatorStatefulSetConfig, ReplicatorVerticalPodAutoscalerConfig,
     },
 };
 use tokio::sync::RwLock;
@@ -178,7 +178,22 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_replicator_vertical_pod_autoscaler(
+        &self,
+        _config: ReplicatorVerticalPodAutoscalerConfig,
+    ) -> Result<(), K8sError> {
+        self.record_create_call();
+        Ok(())
+    }
+
     async fn delete_replicator_stateful_set(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn delete_replicator_vertical_pod_autoscaler(
+        &self,
+        _prefix: &str,
+    ) -> Result<(), K8sError> {
         Ok(())
     }
 

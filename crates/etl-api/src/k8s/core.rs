@@ -28,7 +28,7 @@ use crate::{
     k8s::{
         DestinationType, K8sClient, K8sError, KubernetesMaintenanceMaterializer, PodStatus,
         ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
-        ducklake_maintenance_policy_from_config,
+        ReplicatorVerticalPodAutoscalerConfig, ducklake_maintenance_policy_from_config,
     },
 };
 
@@ -183,7 +183,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     create_or_update_replicator_stateful_set(
         k8s_client,
         ReplicatorStatefulSetConfig {
-            prefix,
+            prefix: prefix.clone(),
             tenant_id: tenant_id.to_owned(),
             pipeline_id: pipeline.id,
             replicator_image,
@@ -194,6 +194,20 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         },
     )
     .await?;
+    // Keep the VPA after the StatefulSet in this sequence. On initial creation,
+    // and after an intentional restart resets the VPA, this lets the new Pod
+    // start from the max-sized resources in the StatefulSet template before a
+    // fresh recommendation can converge it down. A future explicit copy-phase
+    // signal can use the same reset-to-maximum transition.
+    k8s_client
+        .create_or_update_replicator_vertical_pod_autoscaler(
+            ReplicatorVerticalPodAutoscalerConfig {
+                prefix: prefix.clone(),
+                tenant_id: tenant_id.to_owned(),
+                pipeline_id: pipeline.id,
+            },
+        )
+        .await?;
 
     Ok(())
 }
@@ -210,10 +224,30 @@ pub async fn delete_pipeline_resources_in_k8s(
 ) -> Result<(), K8sCoreError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
+    k8s_client.delete_replicator_vertical_pod_autoscaler(&prefix).await?;
     k8s_client.delete_ducklake_maintenance(&prefix).await?;
     delete_dynamic_replicator_secrets(k8s_client, &prefix).await?;
     delete_replicator_config(k8s_client, &prefix).await?;
     delete_replicator_stateful_set(k8s_client, &prefix).await?;
+
+    Ok(())
+}
+
+/// Deletes the per-pipeline VPA before intentionally restarting a running
+/// replicator.
+///
+/// VPA recommendations survive ordinary StatefulSet rollouts and are applied
+/// by the admission controller to replacement Pods. Resetting the VPA gives
+/// the replacement Pod the max-sized resources persisted in the StatefulSet
+/// template, providing headroom for a new table-copy phase. Reconciliation
+/// recreates the VPA immediately afterwards so usage-based sizing resumes.
+pub async fn reset_replicator_vertical_pod_autoscaler(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    replicator_id: i64,
+) -> Result<(), K8sCoreError> {
+    let prefix = create_k8s_object_prefix(tenant_id, replicator_id);
+    k8s_client.delete_replicator_vertical_pod_autoscaler(&prefix).await?;
 
     Ok(())
 }
@@ -771,7 +805,22 @@ mod tests {
             Ok(())
         }
 
+        async fn create_or_update_replicator_vertical_pod_autoscaler(
+            &self,
+            _config: ReplicatorVerticalPodAutoscalerConfig,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
         async fn delete_replicator_stateful_set(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_replicator_vertical_pod_autoscaler(
+            &self,
+            prefix: &str,
+        ) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("delete-vpa:{prefix}"));
             Ok(())
         }
 
@@ -882,6 +931,15 @@ mod tests {
             should_reconcile_replicator_resources(&client, "tenant-42", 4).await.unwrap();
 
         assert!(!should_reconcile);
+    }
+
+    #[tokio::test]
+    async fn restart_resets_the_existing_vpa_recommendation() {
+        let client = RecordingK8sClient::default();
+
+        reset_replicator_vertical_pod_autoscaler(&client, "tenant-42", 4).await.unwrap();
+
+        assert_eq!(client.calls(), vec!["delete-vpa:tenant-42-4"]);
     }
 
     #[tokio::test]

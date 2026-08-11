@@ -40,6 +40,8 @@ Before running the API, you must have:
   context.
 - The configured replicator namespace and ServiceAccount already created in
   that cluster.
+- The `autoscaling.k8s.io/v1` Vertical Pod Autoscaler CRDs installed. The API
+  checks this prerequisite at startup before it can create pipeline workloads.
 
 ETL API validates its Kubernetes connection and shared prerequisites during
 startup. It exits instead of serving requests when Kubernetes initialization or
@@ -104,12 +106,13 @@ k8s:
       value: data
       effect: NoSchedule
   replicator_resources:
-    cpu_request_millicores: 500
-    memory_request_mib: 2000
-    destinations:
-      ducklake:
-        cpu_request_millicores: 1000
-        memory_request_mib: 4000
+    cpu_request_millicores: 2000
+    memory_request_mib: 8192
+  replicator_autoscaling:
+    min_cpu_millicores: 250
+    max_cpu_millicores: 2000
+    min_memory_mib: 768
+    max_memory_mib: 8192
   vector_image: timberio/vector:0.55.0-distroless-libc
   vector_resources:
     cpu_request_millicores: 75
@@ -148,9 +151,21 @@ replicator_resources:
 
 All pipeline resource fields are optional. Request precedence is pipeline
 override, destination-kind default, then global default. If a limit is omitted,
-it matches the final request. Before Kubernetes resources are applied, final
-requests are clamped to at least `1m` CPU and `1Mi` memory, and final limits are
-clamped so they are never below their paired requests.
+it matches the final request. If a limit is supplied, the larger of the request
+and limit becomes the allocation emitted as both request and limit. The
+allocation is clamped to `replicator_autoscaling` bounds. The same bounds are
+written to the VPA resource policy. CPU/memory requests always equal limits so
+every generated replicator Pod has Kubernetes Guaranteed QoS. VPA controls both
+requests and limits, preserving their initial 1:1 ratio while applying
+recommendations with `InPlaceOrRecreate`; blocked in-place updates may therefore
+fall back to a disruption-aware Pod recreation. `minReplicas: 1` permits that
+fallback for the single-replica StatefulSet. The global defaults should normally
+match the autoscaling maximum, so a new replicator begins with the full copy
+allocation. Explicit destination and pipeline overrides remain authoritative.
+Before deliberately restarting a running replicator, the API resets its VPA
+recommendation. The replacement Pod therefore starts from the max-sized
+StatefulSet template for a possible new table-copy phase, after which a fresh
+recommendation converges it back toward observed usage.
 
 ### Encryption Keys
 

@@ -17,7 +17,7 @@ use k8s_openapi::{
 };
 use kube::{
     Client,
-    api::{Api, DeleteParams, Patch, PatchParams},
+    api::{Api, DeleteParams, ListParams, Patch, PatchParams},
     core::{ApiResource, DynamicObject, GroupVersionKind},
 };
 use serde_json::json;
@@ -27,7 +27,10 @@ use tracing::debug;
 #[cfg(test)]
 use crate::config::DefaultReplicatorResourcesConfig;
 use crate::{
-    config::{DefaultVectorResourcesConfig, K8sConfig, ResolvedReplicatorResourcesConfig},
+    config::{
+        DefaultVectorResourcesConfig, K8sConfig, ReplicatorAutoscalingConfig,
+        ResolvedReplicatorResourcesConfig,
+    },
     configs::{
         log::LogLevel,
         pipeline::{DuckLakeMaintenanceConfig, ReplicatorResourcesConfig},
@@ -35,6 +38,7 @@ use crate::{
     k8s::{
         DestinationType, DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodPhase,
         PodStatus, ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
+        ReplicatorVerticalPodAutoscalerConfig,
     },
 };
 
@@ -116,6 +120,12 @@ const DUCKLAKE_MAINTENANCE_GROUP: &str = "etl.supabase.com";
 const DUCKLAKE_MAINTENANCE_VERSION: &str = "v1alpha1";
 /// DuckLake maintenance CRD kind.
 const DUCKLAKE_MAINTENANCE_KIND: &str = "DuckLakeMaintenance";
+/// Vertical Pod Autoscaler CRD group.
+const VERTICAL_POD_AUTOSCALER_GROUP: &str = "autoscaling.k8s.io";
+/// Vertical Pod Autoscaler CRD version.
+const VERTICAL_POD_AUTOSCALER_VERSION: &str = "v1";
+/// Vertical Pod Autoscaler CRD kind.
+const VERTICAL_POD_AUTOSCALER_KIND: &str = "VerticalPodAutoscaler";
 
 /// Minimum Kubernetes CPU quantity emitted by the API, in millicores.
 const MIN_K8S_CPU_MILLICORES: i32 = 1;
@@ -144,6 +154,7 @@ impl ReplicatorStatefulSetResourcesConfig {
             k8s_config.replicator_resources_for(DestinationKind::BigQuery);
         Self::from_default_resources(
             &default_replicator_resources,
+            &k8s_config.replicator_autoscaling,
             &k8s_config.vector_resources,
             None,
         )
@@ -153,29 +164,22 @@ impl ReplicatorStatefulSetResourcesConfig {
     /// pipeline-level replicator resource overrides.
     ///
     /// Request precedence is pipeline override first, then the mandatory API
-    /// default from `k8s.replicator_resources`. Limit precedence is explicit
-    /// pipeline limit first, then the final request. Vector requests come from
-    /// `k8s.vector_resources`, and Vector limits match those requests. Keeping
-    /// both CPU and memory limits equal to requests for every container lets
-    /// the pod qualify for Kubernetes Guaranteed QoS unless the pipeline opts
-    /// into different replicator limits.
+    /// default from `k8s.replicator_resources`. An explicit pipeline limit is
+    /// treated as another allocation floor. The larger value is emitted as
+    /// both request and limit, just as Vector limits match Vector requests, so
+    /// every generated Pod qualifies for Kubernetes Guaranteed QoS.
     fn from_default_resources(
         default_replicator_resources: &ResolvedReplicatorResourcesConfig,
+        autoscaling: &ReplicatorAutoscalingConfig,
         default_vector_resources: &DefaultVectorResourcesConfig,
         pipeline_replicator_resources: Option<&ReplicatorResourcesConfig>,
     ) -> Result<Self, K8sError> {
-        let replicator_memory_request = clamp_k8s_resource_quantity(
-            pipeline_replicator_resources
-                .and_then(|config| config.memory_request_mib)
-                .unwrap_or(default_replicator_resources.memory_request_mib),
-            MIN_K8S_MEMORY_MIB,
-        );
-        let replicator_cpu_request = clamp_k8s_resource_quantity(
-            pipeline_replicator_resources
-                .and_then(|config| config.cpu_request_millicores)
-                .unwrap_or(default_replicator_resources.cpu_request_millicores),
-            MIN_K8S_CPU_MILLICORES,
-        );
+        let replicator_memory_request = pipeline_replicator_resources
+            .and_then(|config| config.memory_request_mib)
+            .unwrap_or(default_replicator_resources.memory_request_mib);
+        let replicator_cpu_request = pipeline_replicator_resources
+            .and_then(|config| config.cpu_request_millicores)
+            .unwrap_or(default_replicator_resources.cpu_request_millicores);
         let vector_memory_request = clamp_k8s_resource_quantity(
             default_vector_resources.memory_request_mib,
             MIN_K8S_MEMORY_MIB,
@@ -185,28 +189,22 @@ impl ReplicatorStatefulSetResourcesConfig {
             MIN_K8S_CPU_MILLICORES,
         );
 
-        // Keep default limits equal to requests so long-running pipelines get
-        // Guaranteed QoS. A pipeline-level limit override is an intentional
-        // opt-out for workloads that need extra replicator headroom. The
-        // replicator memory monitor reads the container cgroup limit through
-        // sysinfo, so batch budgets and memory backpressure scale with this
-        // default limit.
+        // Keep requests and limits equal even when a pipeline supplies a
+        // larger historical limit. The replicator memory monitor reads the
+        // container cgroup limit through sysinfo, so batch budgets and memory
+        // backpressure scale with this single allocation value.
         let replicator_memory_limit = pipeline_replicator_resources
             .and_then(|config| config.memory_limit_mib)
             .unwrap_or(replicator_memory_request);
-        let replicator_memory_limit = clamp_k8s_resource_limit(
-            replicator_memory_limit,
-            replicator_memory_request,
-            MIN_K8S_MEMORY_MIB,
-        );
+        let replicator_memory_allocation = replicator_memory_request
+            .max(replicator_memory_limit)
+            .clamp(autoscaling.min_memory_mib, autoscaling.max_memory_mib);
         let replicator_cpu_limit = pipeline_replicator_resources
             .and_then(|config| config.cpu_limit_millicores)
             .unwrap_or(replicator_cpu_request);
-        let replicator_cpu_limit = clamp_k8s_resource_limit(
-            replicator_cpu_limit,
-            replicator_cpu_request,
-            MIN_K8S_CPU_MILLICORES,
-        );
+        let replicator_cpu_allocation = replicator_cpu_request
+            .max(replicator_cpu_limit)
+            .clamp(autoscaling.min_cpu_millicores, autoscaling.max_cpu_millicores);
 
         // Sidecars participate in pod QoS too, so Vector must also keep
         // limits equal to requests for the pod to stay Guaranteed.
@@ -214,10 +212,10 @@ impl ReplicatorStatefulSetResourcesConfig {
         let vector_cpu_limit = vector_cpu_request;
 
         Ok(Self {
-            replicator_memory_limit: format!("{replicator_memory_limit}Mi"),
-            replicator_memory_request: format!("{replicator_memory_request}Mi"),
-            replicator_cpu_limit: format!("{replicator_cpu_limit}m"),
-            replicator_cpu_request: format!("{replicator_cpu_request}m"),
+            replicator_memory_limit: format!("{replicator_memory_allocation}Mi"),
+            replicator_memory_request: format!("{replicator_memory_allocation}Mi"),
+            replicator_cpu_limit: format!("{replicator_cpu_allocation}m"),
+            replicator_cpu_request: format!("{replicator_cpu_allocation}m"),
             vector_memory_limit: format!("{vector_memory_limit}Mi"),
             vector_memory_request: format!("{vector_memory_request}Mi"),
             vector_cpu_limit: format!("{vector_cpu_limit}m"),
@@ -229,11 +227,6 @@ impl ReplicatorStatefulSetResourcesConfig {
 /// Clamps a Kubernetes resource quantity to the smallest value this API emits.
 fn clamp_k8s_resource_quantity(value: i32, minimum: i32) -> i32 {
     value.max(minimum)
-}
-
-/// Clamps a Kubernetes resource limit so it can satisfy its paired request.
-fn clamp_k8s_resource_limit(limit: i32, request: i32, minimum: i32) -> i32 {
-    limit.max(request).max(minimum)
 }
 
 #[cfg(test)]
@@ -252,6 +245,7 @@ fn test_k8s_config(environment: &Environment) -> K8sConfig {
             cpu_request_millicores,
             destinations: Default::default(),
         },
+        replicator_autoscaling: ReplicatorAutoscalingConfig::default(),
         vector_image: "timberio/vector:0.55.0-distroless-libc".to_owned(),
         vector_resources: DefaultVectorResourcesConfig {
             memory_request_mib: 192,
@@ -273,6 +267,7 @@ pub struct HttpK8sClient {
     stateful_sets_api: Api<StatefulSet>,
     pods_api: Api<Pod>,
     ducklake_maintenance_api: Api<DynamicObject>,
+    vertical_pod_autoscalers_api: Api<DynamicObject>,
     k8s_config: K8sConfig,
 }
 
@@ -292,9 +287,14 @@ impl HttpK8sClient {
             Api::namespaced(client.clone(), replicator_namespace);
         let pods_api: Api<Pod> = Api::namespaced(client.clone(), replicator_namespace);
         let ducklake_maintenance_api: Api<DynamicObject> = Api::namespaced_with(
-            client,
+            client.clone(),
             replicator_namespace,
             &ducklake_maintenance_api_resource(),
+        );
+        let vertical_pod_autoscalers_api: Api<DynamicObject> = Api::namespaced_with(
+            client,
+            replicator_namespace,
+            &vertical_pod_autoscaler_api_resource(),
         );
 
         Ok(HttpK8sClient {
@@ -305,6 +305,7 @@ impl HttpK8sClient {
             stateful_sets_api,
             pods_api,
             ducklake_maintenance_api,
+            vertical_pod_autoscalers_api,
             k8s_config,
         })
     }
@@ -316,6 +317,7 @@ impl HttpK8sClient {
     pub async fn preflight(&self) -> Result<(), K8sPreflightError> {
         self.ensure_replicator_namespace().await?;
         self.ensure_replicator_service_account().await?;
+        self.ensure_vertical_pod_autoscaler_api().await?;
 
         Ok(())
     }
@@ -350,6 +352,21 @@ impl HttpK8sClient {
             Err(source) => Err(K8sPreflightError::ReplicatorServiceAccountCheck {
                 namespace: namespace.clone(),
                 service_account_name: service_account_name.clone(),
+                source,
+            }),
+        }
+    }
+
+    /// Ensures VPAs can be materialized before serving requests.
+    async fn ensure_vertical_pod_autoscaler_api(&self) -> Result<(), K8sPreflightError> {
+        let namespace = &self.k8s_config.replicator_namespace;
+        match self.vertical_pod_autoscalers_api.list(&ListParams::default().limit(1)).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                Err(K8sPreflightError::MissingVerticalPodAutoscalerApi)
+            }
+            Err(source) => Err(K8sPreflightError::VerticalPodAutoscalerApiCheck {
+                namespace: namespace.clone(),
                 source,
             }),
         }
@@ -461,6 +478,23 @@ pub enum K8sPreflightError {
         namespace: String,
         /// Configured replicator ServiceAccount name.
         service_account_name: String,
+        /// Kubernetes API error.
+        #[source]
+        source: kube::Error,
+    },
+    /// The VPA CustomResourceDefinition is not registered in the cluster.
+    #[error(
+        "Kubernetes VerticalPodAutoscaler v1 API is missing. Install the VPA CRDs before starting \
+         etl-api."
+    )]
+    MissingVerticalPodAutoscalerApi,
+    /// Checking the namespaced VPA API failed.
+    #[error(
+        "Failed to check the Kubernetes VerticalPodAutoscaler v1 API in namespace `{namespace}`"
+    )]
+    VerticalPodAutoscalerApiCheck {
+        /// Configured replicator namespace.
+        namespace: String,
         /// Kubernetes API error.
         #[source]
         source: kube::Error,
@@ -771,6 +805,7 @@ impl K8sClient for HttpK8sClient {
             self.k8s_config.replicator_resources_for(request.destination_type.kind());
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
             &default_replicator_resources,
+            &self.k8s_config.replicator_autoscaling,
             &self.k8s_config.vector_resources,
             request.replicator_resources.as_ref(),
         )?;
@@ -833,6 +868,28 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_replicator_vertical_pod_autoscaler(
+        &self,
+        request: ReplicatorVerticalPodAutoscalerConfig,
+    ) -> Result<(), K8sError> {
+        debug!("patching vertical pod autoscaler");
+
+        let name = create_stateful_set_name(&request.prefix);
+        let vertical_pod_autoscaler = create_replicator_vertical_pod_autoscaler_json(
+            &self.k8s_config,
+            &request.prefix,
+            &request.tenant_id,
+            request.pipeline_id,
+            &name,
+        )?;
+        let pp = PatchParams::apply(FIELD_MANAGER).force();
+        self.vertical_pod_autoscalers_api
+            .patch(&name, &pp, &Patch::Apply(vertical_pod_autoscaler))
+            .await?;
+
+        Ok(())
+    }
+
     async fn delete_replicator_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting stateful set");
 
@@ -842,6 +899,21 @@ impl K8sClient for HttpK8sClient {
                 self.stateful_sets_api.delete(&stateful_set_name, &dp).await,
             )?;
         }
+
+        Ok(())
+    }
+
+    async fn delete_replicator_vertical_pod_autoscaler(
+        &self,
+        prefix: &str,
+    ) -> Result<(), K8sError> {
+        debug!("deleting vertical pod autoscaler");
+
+        let name = create_stateful_set_name(prefix);
+        let dp = DeleteParams::default();
+        Self::handle_delete_with_404_ignore(
+            self.vertical_pod_autoscalers_api.delete(&name, &dp).await,
+        )?;
 
         Ok(())
     }
@@ -1008,6 +1080,14 @@ fn ducklake_maintenance_api_resource() -> ApiResource {
         DUCKLAKE_MAINTENANCE_GROUP,
         DUCKLAKE_MAINTENANCE_VERSION,
         DUCKLAKE_MAINTENANCE_KIND,
+    ))
+}
+
+fn vertical_pod_autoscaler_api_resource() -> ApiResource {
+    ApiResource::from_gvk(&GroupVersionKind::gvk(
+        VERTICAL_POD_AUTOSCALER_GROUP,
+        VERTICAL_POD_AUTOSCALER_VERSION,
+        VERTICAL_POD_AUTOSCALER_KIND,
     ))
 }
 
@@ -1772,6 +1852,11 @@ fn create_replicator_stateful_set_json(
       },
       "spec": {
         "replicas": 1,
+        // The VPA controller's blocked-resize fallback updates this Pod template and relies on the
+        // StatefulSet controller to terminate and recreate the Pod gracefully.
+        "updateStrategy": {
+          "type": "RollingUpdate"
+        },
         "selector": {
           "matchLabels": {
             "etl.supabase.com/app-name": replicator_app_name,
@@ -1807,6 +1892,16 @@ fn create_replicator_stateful_set_json(
               {
                 "name": replicator_container_name,
                 "image": replicator_image,
+                "resizePolicy": [
+                  {
+                    "resourceName": "cpu",
+                    "restartPolicy": "NotRequired"
+                  },
+                  {
+                    "resourceName": "memory",
+                    "restartPolicy": "NotRequired"
+                  }
+                ],
                 "securityContext": {
                   "allowPrivilegeEscalation": false,
                   "capabilities": {
@@ -1838,6 +1933,65 @@ fn create_replicator_stateful_set_json(
         }
       }
     })
+}
+
+fn create_replicator_vertical_pod_autoscaler_json(
+    k8s_config: &K8sConfig,
+    prefix: &str,
+    tenant_id: &str,
+    pipeline_id: i64,
+    stateful_set_name: &str,
+) -> Result<DynamicObject, serde_json::Error> {
+    let replicator_app_name = create_replicator_app_name(prefix);
+    let replicator_container_name = create_replicator_container_name(prefix);
+
+    serde_json::from_value(json!({
+      "apiVersion": format!("{VERTICAL_POD_AUTOSCALER_GROUP}/{VERTICAL_POD_AUTOSCALER_VERSION}"),
+      "kind": VERTICAL_POD_AUTOSCALER_KIND,
+      "metadata": {
+        "name": stateful_set_name,
+        "namespace": &k8s_config.replicator_namespace,
+        "labels": {
+          "etl.supabase.com/app-name": replicator_app_name,
+          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
+          "etl.supabase.com/pipeline-id": pipeline_id.to_string(),
+          "etl.supabase.com/tenant-id": tenant_id
+        }
+      },
+      "spec": {
+        "targetRef": {
+          "apiVersion": "apps/v1",
+          "kind": "StatefulSet",
+          "name": stateful_set_name
+        },
+        "updatePolicy": {
+          "updateMode": "InPlaceOrRecreate",
+          "minReplicas": 1
+        },
+        "resourcePolicy": {
+          "containerPolicies": [
+            {
+              "containerName": replicator_container_name,
+              "mode": "Auto",
+              "controlledResources": ["cpu", "memory"],
+              "controlledValues": "RequestsAndLimits",
+              "minAllowed": {
+                "cpu": format!("{}m", k8s_config.replicator_autoscaling.min_cpu_millicores),
+                "memory": format!("{}Mi", k8s_config.replicator_autoscaling.min_memory_mib)
+              },
+              "maxAllowed": {
+                "cpu": format!("{}m", k8s_config.replicator_autoscaling.max_cpu_millicores),
+                "memory": format!("{}Mi", k8s_config.replicator_autoscaling.max_memory_mib)
+              }
+            },
+            {
+              "containerName": "*",
+              "mode": "Off"
+            }
+          ]
+        }
+      }
+    }))
 }
 
 fn get_restarted_at_annotation_value() -> String {
@@ -1999,9 +2153,9 @@ mod tests {
             ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Staging).unwrap();
 
         assert_eq!(prod.replicator_cpu_request, "500m");
-        assert_eq!(prod.replicator_memory_request, "500Mi");
-        assert_eq!(staging.replicator_cpu_request, "125m");
-        assert_eq!(staging.replicator_memory_request, "250Mi");
+        assert_eq!(prod.replicator_memory_request, "768Mi");
+        assert_eq!(staging.replicator_cpu_request, "250m");
+        assert_eq!(staging.replicator_memory_request, "768Mi");
         assert_eq!(prod.vector_cpu_request, "75m");
         assert_eq!(prod.vector_memory_request, "192Mi");
         assert_eq!(prod.vector_cpu_limit, "75m");
@@ -2021,6 +2175,7 @@ mod tests {
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
             &default_replicator_resources,
+            &k8s_config.replicator_autoscaling,
             &k8s_config.vector_resources,
             Some(&overrides),
         )
@@ -2046,19 +2201,20 @@ mod tests {
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
             &default_replicator_resources,
+            &k8s_config.replicator_autoscaling,
             &k8s_config.vector_resources,
             Some(&overrides),
         )
         .unwrap();
 
-        assert_eq!(stateful_set_resources.replicator_cpu_request, "750m");
-        assert_eq!(stateful_set_resources.replicator_memory_request, "1536Mi");
+        assert_eq!(stateful_set_resources.replicator_cpu_request, "1000m");
+        assert_eq!(stateful_set_resources.replicator_memory_request, "2048Mi");
         assert_eq!(stateful_set_resources.replicator_cpu_limit, "1000m");
         assert_eq!(stateful_set_resources.replicator_memory_limit, "2048Mi");
     }
 
     #[test]
-    fn test_replicator_stateful_set_resources_clamps_to_kubernetes_minimums() {
+    fn test_replicator_stateful_set_resources_clamps_to_autoscaling_minimums() {
         let overrides = ReplicatorResourcesConfig {
             cpu_request_millicores: Some(0),
             memory_request_mib: Some(-20),
@@ -2082,15 +2238,16 @@ mod tests {
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
             &default_replicator_resources,
+            &k8s_config.replicator_autoscaling,
             &k8s_config.vector_resources,
             Some(&overrides),
         )
         .unwrap();
 
-        assert_eq!(stateful_set_resources.replicator_cpu_request, "1m");
-        assert_eq!(stateful_set_resources.replicator_memory_request, "1Mi");
-        assert_eq!(stateful_set_resources.replicator_cpu_limit, "1m");
-        assert_eq!(stateful_set_resources.replicator_memory_limit, "1Mi");
+        assert_eq!(stateful_set_resources.replicator_cpu_request, "250m");
+        assert_eq!(stateful_set_resources.replicator_memory_request, "768Mi");
+        assert_eq!(stateful_set_resources.replicator_cpu_limit, "250m");
+        assert_eq!(stateful_set_resources.replicator_memory_limit, "768Mi");
         assert_eq!(stateful_set_resources.vector_cpu_request, "1m");
         assert_eq!(stateful_set_resources.vector_memory_request, "1Mi");
         assert_eq!(stateful_set_resources.vector_cpu_limit, "1m");
@@ -2111,6 +2268,7 @@ mod tests {
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
             &default_replicator_resources,
+            &k8s_config.replicator_autoscaling,
             &k8s_config.vector_resources,
             Some(&overrides),
         )
@@ -2141,6 +2299,7 @@ mod tests {
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
             &default_replicator_resources,
+            &k8s_config.replicator_autoscaling,
             &k8s_config.vector_resources,
             None,
         )
@@ -2150,6 +2309,33 @@ mod tests {
         assert_eq!(stateful_set_resources.vector_memory_request, "192Mi");
         assert_eq!(stateful_set_resources.vector_cpu_limit, "80m");
         assert_eq!(stateful_set_resources.vector_memory_limit, "192Mi");
+    }
+
+    #[test]
+    fn default_replicator_allocation_can_start_at_the_autoscaling_maximum() {
+        let k8s_config = K8sConfig {
+            replicator_resources: DefaultReplicatorResourcesConfig {
+                cpu_request_millicores: 2_000,
+                memory_request_mib: 8_192,
+                destinations: Default::default(),
+            },
+            ..default_k8s_config()
+        };
+        let default_replicator_resources =
+            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
+
+        let resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
+            &default_replicator_resources,
+            &k8s_config.replicator_autoscaling,
+            &k8s_config.vector_resources,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resources.replicator_cpu_request, "2000m");
+        assert_eq!(resources.replicator_memory_request, "8192Mi");
+        assert_eq!(resources.replicator_cpu_limit, resources.replicator_cpu_request);
+        assert_eq!(resources.replicator_memory_limit, resources.replicator_memory_request);
     }
 
     #[test]
@@ -2483,6 +2669,7 @@ mod tests {
 
         let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
             &default_replicator_resources,
+            &k8s_config.replicator_autoscaling,
             &k8s_config.vector_resources,
             Some(&overrides),
         )
@@ -3079,6 +3266,86 @@ mod tests {
         assert_eq!(
             configured.pointer("/spec/template/spec/tolerations/0/effect"),
             Some(&json!("CustomEffect"))
+        );
+    }
+
+    #[test]
+    fn replicator_stateful_set_allows_in_place_cpu_and_memory_resize() {
+        let resources =
+            ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Dev).unwrap();
+        let stateful_set = create_replicator_stateful_set_json(
+            &default_k8s_config(),
+            "tenant-1-42",
+            "tenant-1",
+            42,
+            "tenant-1-42-replicator",
+            "example.com/replicator:latest",
+            Vec::new(),
+            json!({}),
+            json!([]),
+            json!([]),
+            Vec::new(),
+            Vec::new(),
+            &resources,
+        );
+
+        assert_eq!(
+            stateful_set.pointer("/spec/template/spec/containers/0/resizePolicy"),
+            Some(&json!([
+                {"resourceName": "cpu", "restartPolicy": "NotRequired"},
+                {"resourceName": "memory", "restartPolicy": "NotRequired"}
+            ]))
+        );
+        assert_eq!(
+            stateful_set.pointer("/spec/updateStrategy/type"),
+            Some(&json!("RollingUpdate"))
+        );
+    }
+
+    #[test]
+    fn replicator_vertical_pod_autoscaler_applies_requests_and_limits_in_place() {
+        let autoscaler = create_replicator_vertical_pod_autoscaler_json(
+            &default_k8s_config(),
+            "tenant-1-42",
+            "tenant-1",
+            42,
+            "tenant-1-42-replicator",
+        )
+        .unwrap();
+        let autoscaler = serde_json::to_value(autoscaler).unwrap();
+
+        assert_eq!(
+            autoscaler.pointer("/spec/updatePolicy/updateMode"),
+            Some(&json!("InPlaceOrRecreate"))
+        );
+        assert_eq!(autoscaler.pointer("/spec/updatePolicy/minReplicas"), Some(&json!(1)));
+        assert_eq!(
+            autoscaler.pointer("/spec/targetRef"),
+            Some(&json!({
+                "apiVersion": "apps/v1",
+                "kind": "StatefulSet",
+                "name": "tenant-1-42-replicator"
+            }))
+        );
+        assert_eq!(
+            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/containerName"),
+            Some(&json!("tenant-1-42-replicator"))
+        );
+        assert_eq!(
+            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/minAllowed"),
+            Some(&json!({"cpu": "250m", "memory": "768Mi"}))
+        );
+        assert_eq!(
+            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/maxAllowed"),
+            Some(&json!({"cpu": "2000m", "memory": "8192Mi"}))
+        );
+        assert_eq!(
+            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/controlledValues"),
+            Some(&json!("RequestsAndLimits"))
+        );
+        assert_eq!(
+            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/1/mode"),
+            Some(&json!("Off"))
         );
     }
 
