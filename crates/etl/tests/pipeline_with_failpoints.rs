@@ -632,15 +632,31 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
 
     finished_copy_notify.notified().await;
 
+    let initial_commit_count = destination
+        .get_events()
+        .await
+        .iter()
+        .filter(|event| matches!(event, Event::Commit(_)))
+        .count() as u64;
+    let apply_commits_notify = destination
+        .wait_for_events(vec![EventCondition::AnyCount(
+            EventType::Commit,
+            initial_commit_count + catchup_rows as u64,
+        )])
+        .await;
+
     // Rows inserted while the worker is paused after copy must be replayed by
-    // table-sync streaming.
+    // table-sync streaming. The apply worker skips those row events while
+    // table sync owns the table, but still writes each transaction's commit.
+    // Acknowledging the commits proves that apply already consumed the
+    // preceding relation and row messages before handoff.
     insert_users_data(
         &mut database,
         &users_schema.name,
         copied_rows + 1..=copied_rows + catchup_rows,
     )
     .await;
-    wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
+    apply_commits_notify.notified().await;
 
     let all_rows_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(
