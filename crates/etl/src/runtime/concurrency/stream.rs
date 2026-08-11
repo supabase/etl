@@ -270,10 +270,6 @@ where
             return Poll::Pending;
         }
 
-        // Snapshot the byte budget once per poll; it refreshes on its own
-        // 100ms cadence, so a per-item read only adds clock lookups.
-        let max_batch_size_bytes = this.cached_batch_budget.current_batch_size_bytes();
-
         // PRIORITY 2: Poll underlying stream for new items.
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -308,8 +304,13 @@ where
                         return Poll::Ready(Some(Ok(std::mem::take(this.items))));
                     }
 
-                    // If byte budget is reached we want to return the accumulated data.
-                    if *this.current_batch_size_hint_bytes >= max_batch_size_bytes {
+                    // Consult the cached budget after every decoded item. A PostgreSQL COPY
+                    // stream can yield many ready rows during one outer poll, so checking only
+                    // once per poll would delay adaptation to a changed cgroup limit or active
+                    // stream count.
+                    if *this.current_batch_size_hint_bytes
+                        >= this.cached_batch_budget.current_batch_size_bytes()
+                    {
                         *this.reset_timer = true;
                         *this.current_batch_size_hint_bytes = 0;
 
@@ -436,6 +437,42 @@ mod tests {
                 }
                 _ => Poll::Pending,
             }
+        }
+    }
+
+    pin_project! {
+        struct ShrinksMemoryBetweenReadyItems {
+            emitted: usize,
+            memory: MemoryMonitor,
+        }
+    }
+
+    impl ShrinksMemoryBetweenReadyItems {
+        fn new(memory: MemoryMonitor) -> Self {
+            Self { emitted: 0, memory }
+        }
+    }
+
+    impl Stream for ShrinksMemoryBetweenReadyItems {
+        type Item = Result<SizedToken, &'static str>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let item = match self.emitted {
+                0 => SizedToken { value: 1, bytes: 400 },
+                1 => {
+                    self.memory.set_total_memory_bytes_for_test(500);
+                    // The production cache deliberately refreshes at most every 100ms. Keep
+                    // yielding ready items across that boundary to prove the outer batch poll
+                    // observes the new budget without relying on an inner `Pending` wakeup.
+                    std::thread::sleep(Duration::from_millis(110));
+                    SizedToken { value: 2, bytes: 100 }
+                }
+                2 => SizedToken { value: 3, bytes: 100 },
+                _ => return Poll::Ready(None),
+            };
+            self.emitted += 1;
+
+            Poll::Ready(Some(Ok(item)))
         }
     }
 
@@ -803,6 +840,33 @@ mod tests {
 
         let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         assert_eq!(first, Some(Ok(items)));
+    }
+
+    #[tokio::test]
+    async fn refreshes_cached_budget_between_ready_items() {
+        let memory = MemoryMonitor::new_for_test();
+        memory.set_total_memory_bytes_for_test(5_000);
+        let cached_budget = BatchBudgetController::new(1, memory.clone(), 0.2, 10_000).cached();
+        let batch_config = test_batch_config(10_000);
+        let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
+            ShrinksMemoryBetweenReadyItems::new(memory),
+            "test_stream",
+            batch_config,
+            None,
+            cached_budget,
+        ));
+
+        // The initial budget is 1,000 bytes. While the same outer poll drains ready
+        // rows, total memory shrinks and the refreshed budget becomes 100 bytes. The
+        // first two rows must therefore flush before the third row is consumed.
+        let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        assert_eq!(
+            first,
+            Some(Ok(vec![
+                SizedToken { value: 1, bytes: 400 },
+                SizedToken { value: 2, bytes: 100 },
+            ]))
+        );
     }
 
     #[tokio::test(start_paused = true)]
