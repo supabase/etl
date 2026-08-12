@@ -59,12 +59,17 @@ pub(crate) fn serialize_row(
     row: &TableRow,
     cdc: CdcMeta<'_>,
 ) -> Result<()> {
-    let serializable = RowSerializer {
-        cols,
-        cells: row.values(),
-        operation: cdc.operation.as_str(),
-        sequence: cdc.sequence,
-    };
+    let cells = row.values();
+    if cells.len() != cols.len() {
+        return Err(Error::Encoding(format!(
+            "Row value count ({}) does not match column count ({}).",
+            cells.len(),
+            cols.len()
+        )));
+    }
+
+    let serializable =
+        RowSerializer { cols, cells, operation: cdc.operation.as_str(), sequence: cdc.sequence };
     serde_json::to_writer(&mut *writer, &serializable)
         .map_err(|e| Error::Encoding(e.to_string()))?;
     writer.write_all(b"\n").map_err(|e| Error::Encoding(e.to_string()))?;
