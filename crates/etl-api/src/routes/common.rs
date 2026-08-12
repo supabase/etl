@@ -14,10 +14,9 @@ use crate::{
 ///
 /// Update endpoints that can change source, destination, pipeline, image, or
 /// runtime resource configuration should call this after persisting the new API
-/// state. The helper first materializes the latest Kubernetes Secrets,
-/// ConfigMap, maintenance resources, and StatefulSet from that state. It then
-/// relies on the StatefulSet materialization to change the pod template restart
-/// annotation, which intentionally kicks off pod recreation.
+/// state. The helper materializes the latest Kubernetes resources and relies on
+/// the StatefulSet materialization to change the pod template restart
+/// annotation.
 ///
 /// This forced recreation is part of the contract. The replicator loads its
 /// mounted config and secret-backed environment when the process starts, so a

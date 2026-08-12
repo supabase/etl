@@ -71,11 +71,45 @@ pub struct K8sConfig {
     /// replicator pod unless a destination-kind default or pipeline-level
     /// override supplies one of those request values.
     pub replicator_resources: DefaultReplicatorResourcesConfig,
+    /// CPU and memory bounds shared by generated VPAs and StatefulSets.
+    #[serde(default)]
+    pub replicator_autoscaling: ReplicatorAutoscalingConfig,
     /// Vector image used by the logging sidecar.
     #[serde(default = "default_vector_image")]
     pub vector_image: String,
     /// Default request sizing for the Vector sidecar.
     pub vector_resources: DefaultVectorResourcesConfig,
+}
+
+/// Resource bounds enforced for autoscaled replicator containers.
+///
+/// The API applies these bounds both to the initial StatefulSet allocation and
+/// to the per-pipeline VPA policy, keeping the VPA object as the source of
+/// truth for the workload's operating envelope. Global replicator resources
+/// should normally match the maximum bounds: fresh pipelines intentionally
+/// start oversized for initial-copy throughput and burst safety, then VPA
+/// converges them toward their steady-state usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ReplicatorAutoscalingConfig {
+    /// Minimum replicator memory allocation, in Mi.
+    pub min_memory_mib: i32,
+    /// Maximum replicator memory allocation, in Mi.
+    pub max_memory_mib: i32,
+    /// Minimum replicator CPU allocation, in millicores.
+    pub min_cpu_millicores: i32,
+    /// Maximum replicator CPU allocation, in millicores.
+    pub max_cpu_millicores: i32,
+}
+
+impl Default for ReplicatorAutoscalingConfig {
+    fn default() -> Self {
+        Self {
+            min_memory_mib: 768,
+            max_memory_mib: 8 * 1024,
+            min_cpu_millicores: 250,
+            max_cpu_millicores: 2_000,
+        }
+    }
 }
 
 fn default_replicator_namespace() -> String {
@@ -167,7 +201,27 @@ impl ApiConfig {
     /// Validates API service configuration.
     pub fn validate(&self) -> Result<(), String> {
         self.k8s.replicator_resources.validate()?;
+        self.k8s.replicator_autoscaling.validate()?;
         self.k8s.vector_resources.validate()?;
+
+        Ok(())
+    }
+}
+
+impl ReplicatorAutoscalingConfig {
+    /// Validates that autoscaling bounds are positive and ordered.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_positive_request("K8s autoscaling minimum memory", self.min_memory_mib)?;
+        validate_positive_request("K8s autoscaling maximum memory", self.max_memory_mib)?;
+        validate_positive_request("K8s autoscaling minimum cpu", self.min_cpu_millicores)?;
+        validate_positive_request("K8s autoscaling maximum cpu", self.max_cpu_millicores)?;
+
+        if self.min_memory_mib > self.max_memory_mib {
+            return Err("K8s autoscaling minimum memory must not exceed maximum memory".to_owned());
+        }
+        if self.min_cpu_millicores > self.max_cpu_millicores {
+            return Err("K8s autoscaling minimum cpu must not exceed maximum cpu".to_owned());
+        }
 
         Ok(())
     }
@@ -461,6 +515,22 @@ mod tests {
                 cpu_request_millicores: 500,
             }
         );
+        assert_eq!(config.replicator_autoscaling, ReplicatorAutoscalingConfig::default());
+    }
+
+    #[test]
+    fn replicator_autoscaling_bounds_must_be_positive_and_ordered() {
+        let invalid = ReplicatorAutoscalingConfig {
+            min_memory_mib: 1024,
+            max_memory_mib: 512,
+            min_cpu_millicores: 300,
+            max_cpu_millicores: 200,
+        };
+
+        assert!(invalid.validate().unwrap_err().contains("minimum memory"));
+
+        let invalid = ReplicatorAutoscalingConfig { min_memory_mib: 0, ..Default::default() };
+        assert!(invalid.validate().unwrap_err().contains("must be greater than 0"));
     }
 
     #[test]

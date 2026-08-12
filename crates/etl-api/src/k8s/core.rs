@@ -28,7 +28,7 @@ use crate::{
     k8s::{
         DestinationType, K8sClient, K8sError, KubernetesMaintenanceMaterializer, PodStatus,
         ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
-        ducklake_maintenance_policy_from_config,
+        ReplicatorVerticalPodAutoscalerConfig, ducklake_maintenance_policy_from_config,
     },
 };
 
@@ -183,7 +183,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     create_or_update_replicator_stateful_set(
         k8s_client,
         ReplicatorStatefulSetConfig {
-            prefix,
+            prefix: prefix.clone(),
             tenant_id: tenant_id.to_owned(),
             pipeline_id: pipeline.id,
             replicator_image,
@@ -194,6 +194,15 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         },
     )
     .await?;
+    k8s_client
+        .create_or_update_replicator_vertical_pod_autoscaler(
+            ReplicatorVerticalPodAutoscalerConfig {
+                prefix: prefix.clone(),
+                tenant_id: tenant_id.to_owned(),
+                pipeline_id: pipeline.id,
+            },
+        )
+        .await?;
 
     Ok(())
 }
@@ -210,6 +219,7 @@ pub async fn delete_pipeline_resources_in_k8s(
 ) -> Result<(), K8sCoreError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
+    k8s_client.delete_replicator_vertical_pod_autoscaler(&prefix).await?;
     k8s_client.delete_ducklake_maintenance(&prefix).await?;
     delete_dynamic_replicator_secrets(k8s_client, &prefix).await?;
     delete_replicator_config(k8s_client, &prefix).await?;
@@ -771,7 +781,22 @@ mod tests {
             Ok(())
         }
 
+        async fn create_or_update_replicator_vertical_pod_autoscaler(
+            &self,
+            _config: ReplicatorVerticalPodAutoscalerConfig,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
         async fn delete_replicator_stateful_set(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_replicator_vertical_pod_autoscaler(
+            &self,
+            prefix: &str,
+        ) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("delete-vpa:{prefix}"));
             Ok(())
         }
 

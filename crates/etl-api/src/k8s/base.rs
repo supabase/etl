@@ -76,6 +76,17 @@ pub struct ReplicatorStatefulSetConfig {
     pub log_level: LogLevel,
 }
 
+/// Replicator Vertical Pod Autoscaler materialization input.
+#[derive(Debug, Clone)]
+pub struct ReplicatorVerticalPodAutoscalerConfig {
+    /// Existing Kubernetes resource prefix.
+    pub prefix: String,
+    /// Tenant id that owns the replicator.
+    pub tenant_id: String,
+    /// Pipeline id that owns the replicator.
+    pub pipeline_id: i64,
+}
+
 /// The type of destination storage system for replication.
 ///
 /// Determines which destination-specific resources and configurations are
@@ -315,10 +326,23 @@ pub trait K8sClient: Send + Sync {
         config: ReplicatorStatefulSetConfig,
     ) -> Result<(), K8sError>;
 
+    /// Creates or updates the Vertical Pod Autoscaler for the replicator
+    /// `StatefulSet`.
+    async fn create_or_update_replicator_vertical_pod_autoscaler(
+        &self,
+        config: ReplicatorVerticalPodAutoscalerConfig,
+    ) -> Result<(), K8sError>;
+
     /// Deletes the replicator `StatefulSet`.
     ///
     /// Does nothing if the stateful set does not exist.
     async fn delete_replicator_stateful_set(&self, prefix: &str) -> Result<(), K8sError>;
+
+    /// Deletes the replicator Vertical Pod Autoscaler.
+    ///
+    /// Does nothing if the autoscaler does not exist.
+    async fn delete_replicator_vertical_pod_autoscaler(&self, prefix: &str)
+    -> Result<(), K8sError>;
 
     /// Returns whether the replicator `StatefulSet` exists.
     async fn replicator_stateful_set_exists(&self, prefix: &str) -> Result<bool, K8sError>;
