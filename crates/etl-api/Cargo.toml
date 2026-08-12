@@ -53,6 +53,7 @@ metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 pg_escape = { workspace = true }
 rand = { workspace = true, features = ["std"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
+tokio-rustls = { workspace = true, features = ["aws-lc-rs", "logging", "tls12"] }
 secrecy = { workspace = true }
 sentry = { workspace = true, features = ["tower-http", "tower-axum-matched-path"] }
 serde = { workspace = true, features = ["derive"] }

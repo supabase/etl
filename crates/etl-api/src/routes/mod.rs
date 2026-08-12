@@ -17,6 +17,7 @@ pub mod health_check;
 pub mod images;
 pub mod metrics;
 pub mod pipelines;
+pub mod runtime_config;
 pub mod sources;
 pub mod tenants;
 pub mod tenants_sources;

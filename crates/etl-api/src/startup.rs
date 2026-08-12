@@ -1,10 +1,16 @@
-use std::{io, net::TcpListener, sync::Arc};
+use std::{
+    io,
+    net::{SocketAddr, TcpListener},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::Context;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use axum::{
     Extension, Router, middleware,
     routing::{get, post, put},
+    serve::Listener,
 };
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::{
@@ -14,6 +20,8 @@ use etl_config::{
 use etl_telemetry::metrics::init_metrics_handle;
 use kube::config::KubeConfigOptions;
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
@@ -22,7 +30,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     authentication::auth_validator,
-    config::{ApiConfig, EncryptionKeyConfig},
+    config::{ApiConfig, EncryptionKeyConfig, InternalTlsSettings},
     configs::encryption,
     data::publications::Publication,
     feature_flags::{FeatureFlagsClient, init_feature_flags},
@@ -57,6 +65,7 @@ use crate::{
             rollback_tables, start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
             update_pipeline_version, validate_pipeline,
         },
+        runtime_config::{resolve_runtime_config, resolve_tenant_runtime_config},
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
             UpdateSourceRequest, ValidateSourceRequest, ValidateSourceResponse, create_source,
@@ -88,6 +97,74 @@ use crate::{
 /// Running API server task.
 pub type Server = tokio::task::JoinHandle<io::Result<()>>;
 
+/// Public and cluster-internal listeners used by the API application.
+pub struct ApplicationListeners {
+    /// Listener serving the public API surface.
+    pub public: TcpListener,
+    /// Listener serving cluster-internal routes.
+    pub internal: TcpListener,
+}
+
+struct TlsListener {
+    listener: TokioTcpListener,
+    acceptor: TlsAcceptor,
+}
+
+impl Listener for TlsListener {
+    type Io = TlsStream<TcpStream>;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (stream, address) = match self.listener.accept().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    error!(%error, "failed to accept internal API TCP connection");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            match self.acceptor.accept(stream).await {
+                Ok(stream) => return (stream, address),
+                Err(error) => {
+                    tracing::debug!(%error, %address, "rejected internal API TLS connection");
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+fn internal_tls_acceptor(settings: &InternalTlsSettings) -> anyhow::Result<TlsAcceptor> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+
+    let certificates = CertificateDer::pem_file_iter(&settings.cert_path)
+        .with_context(|| {
+            format!("Opening internal API TLS certificate {}", settings.cert_path.display())
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| {
+            format!("Reading internal API TLS certificate {}", settings.cert_path.display())
+        })?;
+    let private_key = PrivateKeyDer::from_pem_file(&settings.key_path).with_context(|| {
+        format!("Reading internal API TLS private key {}", settings.key_path.display())
+    })?;
+    let server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+        .context("Building internal API TLS server configuration")?;
+
+    Ok(TlsAcceptor::from(Arc::new(server_config)))
+}
+
+fn internal_runtime_routes_enabled(environment: Environment, tls_enabled: bool) -> bool {
+    matches!(environment, Environment::Dev) || tls_enabled
+}
+
 /// Minimum number of connections for the API metadata database pool.
 ///
 /// The API pool is lazy and should not keep metadata database connections open
@@ -100,6 +177,7 @@ const MIN_DATABASE_POOL_CONNECTIONS: u32 = 0;
 /// shutdown.
 pub struct Application {
     port: u16,
+    internal_port: u16,
     server: Server,
 }
 
@@ -114,6 +192,10 @@ impl Application {
         let address = format!("{}:{}", config.application.host, config.application.port);
         let listener = TcpListener::bind(address)?;
         let port = listener.local_addr()?.port();
+        let internal_address =
+            format!("{}:{}", config.application.host, config.application.internal_port);
+        let internal_listener = TcpListener::bind(internal_address)?;
+        let internal_port = internal_listener.local_addr()?.port();
 
         let encryption_keyring = build_encryption_keyring(&config)?;
 
@@ -133,7 +215,7 @@ impl Application {
 
         let server = run(
             config,
-            listener,
+            ApplicationListeners { public: listener, internal: internal_listener },
             connection_pool,
             encryption_keyring,
             k8s_client,
@@ -141,7 +223,7 @@ impl Application {
             feature_flags_client,
         )?;
 
-        Ok(Self { port, server })
+        Ok(Self { port, internal_port, server })
     }
 
     /// Runs database migrations using the provided configuration.
@@ -158,6 +240,11 @@ impl Application {
     /// Returns the port the server is listening on.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Returns the port the cluster-internal server is listening on.
+    pub fn internal_port(&self) -> u16 {
+        self.internal_port
     }
 
     /// Runs the server until it receives a shutdown signal.
@@ -255,13 +342,20 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 /// before the server starts accepting requests.
 pub fn run(
     config: ApiConfig,
-    listener: TcpListener,
+    listeners: ApplicationListeners,
     connection_pool: PgPool,
     encryption_keyring: encryption::EncryptionKeyring,
     k8s_client: Arc<dyn K8sClient>,
     source_tls_config: SourceTlsConfig,
     feature_flags_client: Option<FeatureFlagsClient>,
 ) -> Result<Server, anyhow::Error> {
+    let ApplicationListeners { public: listener, internal: internal_listener } = listeners;
+    let internal_tls_acceptor =
+        config.application.internal_tls.as_ref().map(internal_tls_acceptor).transpose()?;
+    let internal_runtime_routes_enabled = internal_runtime_routes_enabled(
+        Environment::load().context("Failed to load application environment")?,
+        internal_tls_acceptor.is_some(),
+    );
     let prometheus_handle = init_metrics_handle()?;
     let config = Arc::new(config);
     let encryption_keyring = Arc::new(encryption_keyring);
@@ -456,6 +550,15 @@ pub fn run(
         .merge(sensitive_routes)
         .layer(middleware::from_fn_with_state(Arc::clone(&config), auth_validator));
 
+    let internal_routes = Router::new()
+        .route("/runtime-config/resolve", post(resolve_tenant_runtime_config))
+        .route(
+            "/destinations/{destination_id}/runtime-config/resolve",
+            post(resolve_runtime_config),
+        )
+        .layer(middleware::from_fn(mark_sensitive_sentry_scope))
+        .layer(middleware::from_fn_with_state(Arc::clone(&config), auth_validator));
+
     let trace_layer = TraceLayer::new_for_http()
         .make_span_with(span_builder::make_span)
         .on_request(span_builder::on_request)
@@ -474,18 +577,18 @@ pub fn run(
         .route("/metrics", get(metrics))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", openapi))
         .nest("/v1", v1_routes)
-        .layer(Extension(prometheus_handle))
+        .layer(Extension(prometheus_handle.clone()))
         .layer(Extension(Arc::clone(&config)))
-        .layer(Extension(connection_pool))
+        .layer(Extension(connection_pool.clone()))
         .layer(Extension(Arc::clone(&encryption_keyring)))
         .layer(middleware::from_fn(record_http_metrics))
         .layer(middleware::from_fn(capture_server_errors))
-        .layer(sentry_layer)
-        .layer(trace_layer);
+        .layer(sentry_layer.clone())
+        .layer(trace_layer.clone());
 
-    let app = app.layer(Extension(k8s_client));
+    let app = app.layer(Extension(Arc::clone(&k8s_client)));
 
-    let app = app.layer(Extension(source_tls_config));
+    let app = app.layer(Extension(Arc::clone(&source_tls_config)));
 
     let app = if let Some(feature_flags_client) = feature_flags_client {
         app.layer(Extension(feature_flags_client))
@@ -493,9 +596,57 @@ pub fn run(
         app
     };
 
+    let internal_app = Router::new().route("/health_check", get(health_check));
+    let internal_app = if internal_runtime_routes_enabled {
+        internal_app.nest("/v1/internal", internal_routes)
+    } else {
+        info!("internal runtime routes disabled because internal TLS is not configured");
+        internal_app
+    };
+    let internal_app = internal_app
+        .layer(Extension(prometheus_handle))
+        .layer(Extension(config))
+        .layer(Extension(connection_pool))
+        .layer(Extension(encryption_keyring))
+        .layer(Extension(k8s_client))
+        .layer(Extension(source_tls_config))
+        .layer(middleware::from_fn(record_http_metrics))
+        .layer(middleware::from_fn(capture_server_errors))
+        .layer(sentry_layer)
+        .layer(trace_layer);
+
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
-    let server = tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
+    internal_listener.set_nonblocking(true)?;
+    let internal_listener = tokio::net::TcpListener::from_std(internal_listener)?;
+    let server = tokio::spawn(async move {
+        let public_server = axum::serve(listener, app.into_make_service());
+        if let Some(acceptor) = internal_tls_acceptor {
+            let internal_server = axum::serve(
+                TlsListener { listener: internal_listener, acceptor },
+                internal_app.into_make_service(),
+            );
+            tokio::try_join!(public_server, internal_server).map(|_| ())
+        } else {
+            let internal_server = axum::serve(internal_listener, internal_app.into_make_service());
+            tokio::try_join!(public_server, internal_server).map(|_| ())
+        }
+    });
 
     Ok(server)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::internal_runtime_routes_enabled;
+    use etl_config::Environment;
+
+    #[test]
+    fn internal_runtime_routes_require_tls_outside_development() {
+        assert!(internal_runtime_routes_enabled(Environment::Dev, false));
+        assert!(internal_runtime_routes_enabled(Environment::Staging, true));
+        assert!(internal_runtime_routes_enabled(Environment::Prod, true));
+        assert!(!internal_runtime_routes_enabled(Environment::Staging, false));
+        assert!(!internal_runtime_routes_enabled(Environment::Prod, false));
+    }
 }
