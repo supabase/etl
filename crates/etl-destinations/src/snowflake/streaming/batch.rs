@@ -354,6 +354,44 @@ mod tests {
     }
 
     #[test]
+    fn row_column_count_mismatch_rejected() {
+        let cols = [col("id"), col("name")];
+        let cases = [
+            (TableRow::new(vec![Cell::I32(1)]), 1),
+            (
+                TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("Alice".into()),
+                    Cell::String("extra".into()),
+                ]),
+                3,
+            ),
+        ];
+
+        for (row, row_value_count) in cases {
+            let mut builder = RowBatchBuilder::new();
+            let err = builder
+                .push_row(
+                    &cols,
+                    &row,
+                    CdcMeta::new(CdcOperation::Insert, "0"),
+                    &OffsetToken::zero(),
+                )
+                .unwrap_err();
+
+            assert!(matches!(
+                err,
+                Error::Encoding(message)
+                    if message
+                        == format!(
+                            "Row value count ({row_value_count}) does not match column count (2)."
+                        )
+            ));
+            assert!(builder.finish().unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn end_offset_tracks_last_row() {
         let cols = [col("id")];
         let mut builder = RowBatchBuilder::new();
