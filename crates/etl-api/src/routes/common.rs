@@ -98,9 +98,7 @@ async fn restart_will_repeat_table_copy(
             let state: TableState =
                 serde_json::from_value(metadata).map_err(PipelineError::InvalidTableState)?;
 
-            // SyncDone and Ready keep their existing destination data after a
-            // restart. Other lifecycle states will repeat the copy (besides Errored).
-            if !state.as_type().has_completed_table_sync() {
+            if !state.as_type().would_perform_table_copy() {
                 return Ok(true);
             }
         }
