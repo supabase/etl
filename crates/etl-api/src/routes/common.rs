@@ -31,7 +31,7 @@ use crate::{
 /// up those changes.
 ///
 /// Before reconciliation, this best-effort checks durable source state. If the
-/// restart will repeat an initial table copy, it resets the VPA so
+/// restart will repeat an initial table sync, it resets the VPA so
 /// reconciliation recreates it without a steady-state recommendation. Source
 /// inspection failures preserve the existing VPA and do not block restart.
 /// Kubernetes-initiated Pod restarts do not call this helper and preserve VPA
@@ -56,7 +56,7 @@ pub(crate) async fn restart_pipeline_replicator_if_running(
         return Ok(false);
     }
 
-    if restart_will_repeat_table_copy(pipeline_id, source.id, &source.config, source_tls_config)
+    if restart_will_repeat_table_sync(pipeline_id, source.id, &source.config, source_tls_config)
         .await
     {
         let resource_prefix = create_k8s_object_prefix(tenant_id, replicator.id);
@@ -79,7 +79,7 @@ pub(crate) async fn restart_pipeline_replicator_if_running(
     Ok(true)
 }
 
-async fn restart_will_repeat_table_copy(
+async fn restart_will_repeat_table_sync(
     pipeline_id: i64,
     source_id: i64,
     source_config: &StoredSourceConfig,
@@ -98,7 +98,7 @@ async fn restart_will_repeat_table_copy(
             let state: TableState =
                 serde_json::from_value(metadata).map_err(PipelineError::InvalidTableState)?;
 
-            if !state.as_type().would_perform_table_copy() {
+            if !state.as_type().would_perform_table_sync() {
                 return Ok(true);
             }
         }
@@ -108,13 +108,13 @@ async fn restart_will_repeat_table_copy(
     .await;
 
     match result {
-        Ok(will_repeat_copy) => will_repeat_copy,
+        Ok(will_repeat_sync) => will_repeat_sync,
         Err(error) => {
             warn!(
                 pipeline_id,
                 source_id,
                 error = %error,
-                "failed to determine whether pipeline restart will repeat table copy, preserving vertical pod autoscaler",
+                "failed to determine whether pipeline restart will repeat table sync, preserving vertical pod autoscaler",
             );
             false
         }
