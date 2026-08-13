@@ -28,6 +28,12 @@ pub enum Error {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    #[error("Snowflake table '{table_name}' is missing column '{column_name}'")]
+    MissingTableColumn { table_name: String, column_name: String },
+
+    #[error("Snowflake table '{table_name}' has unexpected column '{column_name}'")]
+    UnexpectedTableColumn { table_name: String, column_name: String },
+
     #[error("database '{0}' not found")]
     DatabaseNotFound(String),
 
@@ -88,15 +94,25 @@ impl Error {
             Self::Snowpipe(SnowpipeError::ApiStatus { .. }) => AppendFailureType::SnowpipeApi,
             Self::Snowpipe(SnowpipeError::HttpStatus { .. }) => AppendFailureType::Provider,
             Self::Encoding(_) => AppendFailureType::Encoding,
-            Self::Config(_) | Self::DatabaseNotFound(_) | Self::SchemaNotFound { .. } => {
-                AppendFailureType::Configuration
-            }
+            Self::Config(_)
+            | Self::MissingTableColumn { .. }
+            | Self::UnexpectedTableColumn { .. }
+            | Self::DatabaseNotFound(_)
+            | Self::SchemaNotFound { .. } => AppendFailureType::Configuration,
         }
     }
 }
 
 impl From<Error> for EtlError {
     fn from(err: Error) -> Self {
+        if matches!(&err, Error::MissingTableColumn { .. } | Error::UnexpectedTableColumn { .. }) {
+            return etl::etl_error!(
+                ErrorKind::CorruptedTableSchema,
+                "Snowflake table schema is incompatible",
+                source: err
+            );
+        }
+
         let (kind, description) = match &err {
             Error::HttpTransport(_) => {
                 (ErrorKind::DestinationError, "Snowflake HTTP transport error")
@@ -111,6 +127,9 @@ impl From<Error> for EtlError {
             Error::Channel(_) => (ErrorKind::DestinationError, "Snowflake channel error"),
             Error::Encoding(_) => (ErrorKind::InvalidData, "Snowflake encoding error"),
             Error::Config(_) => (ErrorKind::ConfigError, "Snowflake configuration error"),
+            Error::MissingTableColumn { .. } | Error::UnexpectedTableColumn { .. } => {
+                unreachable!("schema errors return above")
+            }
             Error::DatabaseNotFound(_) => (ErrorKind::ConfigError, "Snowflake database not found"),
             Error::SchemaNotFound { .. } => (ErrorKind::ConfigError, "Snowflake schema not found"),
         };
@@ -211,7 +230,23 @@ struct SnowpipeErrorResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
+
+    #[test]
+    fn table_schema_error_is_preserved() {
+        let error = Error::MissingTableColumn {
+            table_name: "events".to_owned(),
+            column_name: "id".to_owned(),
+        };
+
+        let error = EtlError::from(error);
+        let source = error.source().expect("Snowflake error should be preserved");
+
+        assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+        assert_eq!(source.to_string(), "Snowflake table 'events' is missing column 'id'");
+    }
 
     #[test]
     fn response_errors_are_classified_by_stable_protocol_signals() {

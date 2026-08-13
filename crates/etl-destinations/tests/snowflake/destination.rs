@@ -95,6 +95,17 @@ async fn write_table_copy_and_wait(
     assert_eq!(barrier, DestinationWriteStatus::Durable);
 }
 
+/// Initializes an empty table through the initial-copy path.
+async fn initialize_empty_table(
+    destination: &SnowflakeTestDestination,
+    schema: &ReplicatedTableSchema,
+) {
+    let status = invoke_write_table_rows(destination, schema, vec![])
+        .await
+        .expect("empty table-copy initialization failed");
+    assert_eq!(status, DestinationWriteStatus::Durable);
+}
+
 async fn poll_and_query_rows(
     destination: &SnowflakeTestDestination,
     harness: &TestHarness,
@@ -402,6 +413,8 @@ async fn write_events_insert_update_delete() {
     // Send Insert, Update (Full), Delete (Full) events.
     // Poll and verify 3 rows with operations "insert", "update", "delete".
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        initialize_empty_table(&harness.destination, &schema).await;
+
         invoke_write_events(
             &harness.destination,
             WriteEventsDurability::MayDefer,
@@ -480,6 +493,8 @@ async fn whole_transaction_replay_restores_post_truncate_rows() {
     harness.store.store_table_schema(table_schema).await.unwrap();
 
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        initialize_empty_table(&harness.destination, &schema).await;
+
         let first_status = invoke_write_events(
             &harness.destination,
             WriteEventsDurability::RequireDurable,
@@ -572,6 +587,8 @@ async fn write_events_delete_key_only() {
     // Delete event with `OldTableRow::Key`.
     // Verify the delete row has PK value present but non-PK columns are NULL.
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        initialize_empty_table(&harness.destination, &schema).await;
+
         invoke_write_events(
             &harness.destination,
             WriteEventsDurability::MayDefer,
@@ -600,6 +617,78 @@ async fn write_events_delete_key_only() {
         assert_eq!(&rows[0][0], &serde_json::Value::String("42".into()),);
         assert_eq!(&rows[0][1], &serde_json::Value::Null);
         assert_eq!(&rows[0][2], &serde_json::Value::String("delete".into()),);
+    })
+    .await;
+}
+
+/// A fresh process must validate the physical table before accepting DML.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn cold_open_rejects_unexpected_column() {
+    let harness = TestHarness::new();
+    let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+
+    let table_id = TableId::new(1016);
+    let table_schema = make_table_schema(1016, "public", &src_table);
+    let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
+    harness.store.store_table_schema(table_schema).await.unwrap();
+
+    with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        write_table_copy_and_wait(
+            &harness.destination,
+            &schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())])],
+        )
+        .await;
+
+        let fqn = format!(
+            "\"{}\".\"{}\".\"{sf_table}\"",
+            harness.config.database(),
+            harness.config.schema()
+        );
+        harness
+            .sql
+            .execute_ddl(&format!("alter table {fqn} add column \"unexpected\" varchar"))
+            .await
+            .expect("out-of-band alter table failed");
+
+        let restarted_destination = Destination::new(
+            Client::new(build_auth(), PipelineId::from(1_u64)),
+            harness.store.clone(),
+        );
+        let error = invoke_write_events(
+            &restarted_destination,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(10_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: schema,
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Rejected".into())]),
+            })],
+        )
+        .await
+        .expect_err("a cold open must reject an unexpected physical column before append");
+        assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+
+        let rows = query_rows(
+            &harness.sql,
+            &format!("select \"id\", \"name\" from {fqn} order by \"id\""),
+        )
+        .await
+        .expect("query after physical drift rejection failed");
+        assert_eq!(rows, vec![vec![serde_json::json!("1"), serde_json::json!("Alice")]]);
+
+        let columns = column_names(&harness.sql, &fqn).await;
+        assert!(columns.iter().any(|column| column == "unexpected"));
+
+        let metadata = harness
+            .store
+            .get_applied_destination_table_metadata(table_id)
+            .await
+            .unwrap()
+            .expect("destination metadata should remain applied");
+        assert_eq!(metadata.snapshot_id, SnapshotId::initial());
     })
     .await;
 }
