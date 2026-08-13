@@ -7,6 +7,7 @@ mod images;
 mod metrics;
 mod missing_etl_tables;
 mod pipelines;
+mod runtime_config;
 mod sources;
 mod tenants;
 mod tenants_sources;
