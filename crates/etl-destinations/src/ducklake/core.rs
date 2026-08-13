@@ -1902,7 +1902,7 @@ where
                     )
                 )
             })?;
-        let table_name = DuckLakeTableName::from_metadata_id(metadata.destination_table_id())?;
+        let table_name = DuckLakeTableName::from_metadata_id(metadata.table_id())?;
         let metadata = if metadata.is_pending() {
             self.recover_pending_metadata(
                 table_id,
@@ -2297,7 +2297,7 @@ where
                 continue;
             };
 
-            let table_name = DuckLakeTableName::from_metadata_id(metadata.destination_table_id())?;
+            let table_name = DuckLakeTableName::from_metadata_id(metadata.table_id())?;
             if metadata.is_pending() {
                 self.recover_pending_metadata(table_id, &table_name, metadata, None).await?;
                 continue;
@@ -2803,7 +2803,7 @@ where
         let target_schema =
             self.target_schema_for_recovery(table_id, &metadata, target_schema).await?;
 
-        match metadata.schema().clone() {
+        match metadata.table_schema().clone() {
             DestinationTableSchema::Applying {
                 previous_snapshot_id,
                 previous_replication_mask,
@@ -2853,7 +2853,7 @@ where
         let metadata = self.store.get_destination_table_metadata(table_id).await?;
         let table_name = metadata.as_ref().map_or_else(
             || table_name_to_ducklake_table_name(replicated_table_schema.name()),
-            |metadata| DuckLakeTableName::from_metadata_id(metadata.destination_table_id()),
+            |metadata| DuckLakeTableName::from_metadata_id(metadata.table_id()),
         )?;
 
         if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_pending)
@@ -2876,7 +2876,7 @@ where
         let metadata = self.store.get_destination_table_metadata(table_id).await?;
         let table_name = metadata.as_ref().map_or_else(
             || table_name_to_ducklake_table_name(replicated_table_schema.name()),
-            |metadata| DuckLakeTableName::from_metadata_id(metadata.destination_table_id()),
+            |metadata| DuckLakeTableName::from_metadata_id(metadata.table_id()),
         )?;
 
         if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_pending)
@@ -2961,7 +2961,7 @@ where
         let table_id = replicated_table_schema.id();
 
         if let Some(existing) = self.store.get_destination_table_metadata(table_id).await? {
-            return DuckLakeTableName::from_metadata_id(existing.destination_table_id());
+            return DuckLakeTableName::from_metadata_id(existing.table_id());
         }
 
         table_name_to_ducklake_table_name(replicated_table_schema.name())

@@ -903,7 +903,7 @@ async fn existing_column_default_changes_drop_before_setting_supported_replaceme
     destination.write_table_rows(&initial_schema, vec![]).await.unwrap();
     let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
-    let destination_table_name = metadata.destination_table_id().to_owned();
+    let destination_table_name = metadata.table_id().to_owned();
     assert_eq!(
         clickhouse_column_default_expression(&clickhouse_db, &destination_table_name, "status")
             .await,
@@ -1115,7 +1115,7 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         .unwrap()
         .expect("metadata should exist after table creation");
     assert!(applied_metadata.is_applied());
-    let clickhouse_table_name = applied_metadata.destination_table_id().to_owned();
+    let clickhouse_table_name = applied_metadata.table_id().to_owned();
     let interrupted_metadata = DestinationTableMetadata::new_applied(
         clickhouse_table_name.clone(),
         test_snapshot_id(100_u64, 100_u64),
@@ -1210,7 +1210,7 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
         .unwrap()
         .expect("metadata should exist after table creation");
     assert!(applied_metadata.is_applied());
-    let clickhouse_table_name = applied_metadata.destination_table_id().to_owned();
+    let clickhouse_table_name = applied_metadata.table_id().to_owned();
     let interrupted_metadata = DestinationTableMetadata::new_applied(
         clickhouse_table_name.clone(),
         test_snapshot_id(100_u64, 100_u64),

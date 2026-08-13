@@ -842,7 +842,7 @@ where
 
         ensure_clickhouse_recovery_schema_matches(table_id, schema, &metadata)?;
 
-        match metadata.schema().clone() {
+        match metadata.table_schema().clone() {
             DestinationTableSchema::Applying {
                 previous_snapshot_id,
                 previous_replication_mask,
@@ -1069,7 +1069,7 @@ where
         // snapshot ID and replication mask. It can therefore resume an
         // interrupted change without inventing a DML event sequence key.
         if metadata.is_pending() {
-            let clickhouse_table_name = metadata.destination_table_id().to_owned();
+            let clickhouse_table_name = metadata.table_id().to_owned();
             self.recover_pending_metadata(table_id, &clickhouse_table_name, new_schema, metadata)
                 .await?;
             return Ok(());
@@ -1127,7 +1127,7 @@ where
             current_replication_mask.clone(),
         );
 
-        let clickhouse_table_name = metadata.destination_table_id();
+        let clickhouse_table_name = metadata.table_id();
         let plan = current_schema.plan_schema_change(new_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
         ensure_clickhouse_renames_are_supported(clickhouse_table_name, &plan)?;
         ensure_clickhouse_additions_are_supported(clickhouse_table_name, &plan)?;

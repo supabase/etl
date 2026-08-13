@@ -485,12 +485,12 @@ impl StateStore for PostgresStore {
     ) -> EtlResult<()> {
         debug!(
             %table_id,
-            destination_table_id = %metadata.destination_table_id(),
+            destination_table_id = %metadata.table_id(),
             "storing destination table metadata"
         );
 
         let (previous_snapshot_id, previous_replication_mask, schema_status) =
-            match metadata.schema() {
+            match metadata.table_schema() {
                 DestinationTableSchema::Creating { .. } => (
                     None,
                     None,
@@ -517,7 +517,7 @@ impl StateStore for PostgresStore {
             &self.pool,
             self.pipeline_id as i64,
             table_id,
-            metadata.destination_table_id(),
+            metadata.table_id(),
             metadata.snapshot_id(),
             metadata.replication_mask().as_slice(),
             previous_snapshot_id,

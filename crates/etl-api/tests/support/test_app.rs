@@ -29,7 +29,7 @@ use etl_api::{
         tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest},
         tenants_sources::CreateTenantSourceRequest,
     },
-    startup::run,
+    startup::{ApplicationListeners, run},
 };
 use etl_config::{
     Environment,
@@ -49,6 +49,7 @@ use crate::support::{
 
 pub(crate) struct TestApp {
     pub address: String,
+    pub internal_address: String,
     pub api_client: reqwest::Client,
     pub api_key: String,
     config: ApiConfig,
@@ -282,6 +283,47 @@ impl TestApp {
 
     pub(crate) async fn read_all_destinations(&self, tenant_id: &str) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/destinations", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
+    }
+
+    pub(crate) async fn resolve_runtime_config(
+        &self,
+        tenant_id: &str,
+        destination_id: i64,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!(
+            "{}/v1/internal/destinations/{destination_id}/config",
+            &self.internal_address
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub(crate) async fn resolve_tenant_runtime_config(
+        &self,
+        tenant_id: &str,
+        destination_kind: &str,
+        destination_name: &str,
+    ) -> reqwest::Response {
+        let mut url = reqwest::Url::parse(&self.internal_address)
+            .expect("internal test application address should be a valid URL");
+        url.path_segments_mut()
+            .expect("internal test application address should be a base URL")
+            .extend([
+                "v1",
+                "internal",
+                "destinations",
+                destination_kind,
+                destination_name,
+                "config",
+            ]);
+
+        self.get_authenticated(url)
             .header("tenant_id", tenant_id)
             .send()
             .await
@@ -609,6 +651,9 @@ async fn spawn_test_app_with_services(
     let listener =
         TcpListener::bind(format!("{base_address}:0")).expect("failed to bind random port");
     let port = listener.local_addr().unwrap().port();
+    let internal_listener =
+        TcpListener::bind(format!("{base_address}:0")).expect("failed to bind random port");
+    let internal_port = internal_listener.local_addr().unwrap().port();
 
     let database_config = get_test_db_config();
     let api_db_pool = create_etl_api_database(&database_config).await;
@@ -627,7 +672,12 @@ async fn spawn_test_app_with_services(
 
     let config = ApiConfig {
         database: database_config,
-        application: ApplicationSettings { host: base_address.to_owned(), port },
+        application: ApplicationSettings {
+            host: base_address.to_owned(),
+            port,
+            internal_port,
+            internal_tls: None,
+        },
         k8s: K8sConfig {
             replicator_namespace: "etl-data-plane".to_owned(),
             replicator_service_account_name: "etl-replicator".to_owned(),
@@ -667,7 +717,7 @@ async fn spawn_test_app_with_services(
 
     let server = run(
         config.clone(),
-        listener,
+        ApplicationListeners { public: listener, internal: internal_listener },
         api_db_pool,
         encryption_keyring,
         k8s_client,
@@ -678,6 +728,7 @@ async fn spawn_test_app_with_services(
 
     TestApp {
         address: format!("http://{base_address}:{port}"),
+        internal_address: format!("http://{base_address}:{internal_port}"),
         api_client: reqwest::Client::new(),
         api_key,
         config,

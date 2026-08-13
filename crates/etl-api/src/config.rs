@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, path::PathBuf};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::{
@@ -330,15 +330,32 @@ impl Config for ApiConfig {
 pub struct ApplicationSettings {
     /// Host address the API listens on.
     pub host: String,
-    /// Port number the API listens on.
+    /// Port number the public API listens on.
     pub port: u16,
+    /// Port number the cluster-internal API listens on.
+    pub internal_port: u16,
+    /// Optional TLS certificate and private key for the cluster-internal
+    /// listener.
+    #[serde(default)]
+    pub internal_tls: Option<InternalTlsSettings>,
+}
+
+/// TLS files used by the cluster-internal API listener.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InternalTlsSettings {
+    /// PEM-encoded server certificate chain.
+    pub cert_path: PathBuf,
+    /// PEM-encoded server private key.
+    pub key_path: PathBuf,
 }
 
 impl fmt::Display for ApplicationSettings {
     /// Formats application settings for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "    host: {}", self.host)?;
-        writeln!(f, "    port: {}", self.port)
+        writeln!(f, "    port: {}", self.port)?;
+        writeln!(f, "    internal_port: {}", self.internal_port)?;
+        writeln!(f, "    internal_tls: {}", self.internal_tls.is_some())
     }
 }
 
@@ -457,6 +474,31 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn internal_listener_tls_configuration_is_optional() {
+        let plaintext: ApplicationSettings = serde_json::from_value(json!({
+            "host": "127.0.0.1",
+            "port": 8080,
+            "internal_port": 8081
+        }))
+        .unwrap();
+        assert!(plaintext.internal_tls.is_none());
+
+        let tls: ApplicationSettings = serde_json::from_value(json!({
+            "host": "127.0.0.1",
+            "port": 8080,
+            "internal_port": 8081,
+            "internal_tls": {
+                "cert_path": "/etc/etl-api/internal-tls/tls.crt",
+                "key_path": "/etc/etl-api/internal-tls/tls.key"
+            }
+        }))
+        .unwrap();
+        let tls = tls.internal_tls.unwrap();
+        assert_eq!(tls.cert_path, PathBuf::from("/etc/etl-api/internal-tls/tls.crt"));
+        assert_eq!(tls.key_path, PathBuf::from("/etc/etl-api/internal-tls/tls.key"));
+    }
 
     #[test]
     fn destination_replicator_resources_override_selected_global_fields() {

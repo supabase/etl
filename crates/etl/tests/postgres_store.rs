@@ -810,7 +810,7 @@ async fn multiple_pipelines_isolation() {
             .get_destination_table_metadata(table_id)
             .await
             .unwrap()
-            .map(|m| m.destination_table_id().to_owned()),
+            .map(|m| m.table_id().to_owned()),
         Some("pipeline1_table".to_owned())
     );
     assert_eq!(
@@ -818,7 +818,7 @@ async fn multiple_pipelines_isolation() {
             .get_destination_table_metadata(table_id)
             .await
             .unwrap()
-            .map(|m| m.destination_table_id().to_owned()),
+            .map(|m| m.table_id().to_owned()),
         Some("pipeline2_table".to_owned())
     );
 
@@ -830,7 +830,7 @@ async fn multiple_pipelines_isolation() {
             .get_destination_table_metadata(table_id)
             .await
             .unwrap()
-            .map(|m| m.destination_table_id().to_owned()),
+            .map(|m| m.table_id().to_owned()),
         Some("pipeline1_table".to_owned())
     );
 }
@@ -1280,12 +1280,12 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
         &expected_mask_bytes,
         "Loaded replication mask should match inserted bytea"
     );
-    assert_eq!(metadata.destination_table_id(), "test_dest_table");
+    assert_eq!(metadata.table_id(), "test_dest_table");
 
     // Rows written before the previous-mask migration load with no recovery
     // endpoint, then gain one automatically on their next schema transition.
     let legacy_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-    assert!(matches!(legacy_metadata.schema(), DestinationTableSchema::Applied { .. }));
+    assert!(matches!(legacy_metadata.table_schema(), DestinationTableSchema::Applied { .. }));
     let target_mask = ReplicationMask::from_bytes(vec![1, 1, 1, 1, 0]);
     let applying_metadata =
         legacy_metadata.with_schema_change(test_snapshot_id(10, 11), target_mask.clone());
@@ -1296,7 +1296,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     let upgraded_metadata =
         reloaded_store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(matches!(
-        upgraded_metadata.schema(),
+        upgraded_metadata.table_schema(),
         DestinationTableSchema::Applying { previous_replication_mask, .. }
             if previous_replication_mask.as_slice() == expected_mask_bytes
     ));
@@ -1333,7 +1333,7 @@ async fn destination_metadata_loads_creating_and_rejects_incomplete_applying() {
     reloaded_store.load_destination_tables_metadata().await.unwrap();
     let metadata = reloaded_store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(metadata.is_creating());
-    assert!(matches!(metadata.schema(), DestinationTableSchema::Creating { .. }));
+    assert!(matches!(metadata.table_schema(), DestinationTableSchema::Creating { .. }));
 
     sqlx::query(
         r#"
@@ -1430,7 +1430,7 @@ async fn replication_mask_various_patterns() {
             expected_mask,
             metadata.replication_mask().as_slice()
         );
-        assert_eq!(metadata.destination_table_id(), *dest_name, "Destination table ID mismatch");
+        assert_eq!(metadata.table_id(), *dest_name, "Destination table ID mismatch");
     }
 }
 
@@ -1502,7 +1502,7 @@ async fn destination_metadata_roundtrip_preserves_previous_logical_endpoint() {
     assert_eq!(loaded_metadata.snapshot_id(), target_snapshot_id);
     assert_eq!(loaded_metadata.replication_mask(), &target_mask);
     assert!(matches!(
-        loaded_metadata.schema(),
+        loaded_metadata.table_schema(),
         DestinationTableSchema::Applying {
             previous_snapshot_id: loaded_previous_snapshot_id,
             previous_replication_mask,

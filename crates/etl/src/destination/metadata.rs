@@ -57,64 +57,64 @@ impl DestinationTableSchema {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestinationTableMetadata {
     /// The name or identifier of the table in the destination system.
-    destination_table_id: String,
+    table_id: String,
     /// The schema state stored for the destination table.
-    schema: DestinationTableSchema,
+    table_schema: DestinationTableSchema,
 }
 
 impl DestinationTableMetadata {
     /// Creates metadata for a table being created at the destination.
     pub fn new_creating(
-        destination_table_id: String,
+        table_id: String,
         snapshot_id: SnapshotId,
         replication_mask: ReplicationMask,
     ) -> Self {
         Self {
-            destination_table_id,
-            schema: DestinationTableSchema::Creating { snapshot_id, replication_mask },
+            table_id,
+            table_schema: DestinationTableSchema::Creating { snapshot_id, replication_mask },
         }
     }
 
     /// Creates metadata for a table whose schema has been applied.
     pub fn new_applied(
-        destination_table_id: String,
+        table_id: String,
         snapshot_id: SnapshotId,
         replication_mask: ReplicationMask,
     ) -> Self {
         Self {
-            destination_table_id,
-            schema: DestinationTableSchema::Applied { snapshot_id, replication_mask },
+            table_id,
+            table_schema: DestinationTableSchema::Applied { snapshot_id, replication_mask },
         }
     }
 
     /// Returns the destination-specific table identifier.
-    pub fn destination_table_id(&self) -> &str {
-        &self.destination_table_id
+    pub fn table_id(&self) -> &str {
+        &self.table_id
     }
 
     /// Returns the destination table schema metadata.
-    pub fn schema(&self) -> &DestinationTableSchema {
-        &self.schema
+    pub fn table_schema(&self) -> &DestinationTableSchema {
+        &self.table_schema
     }
 
     /// Returns the current or target source schema snapshot.
     pub fn snapshot_id(&self) -> SnapshotId {
-        self.schema.snapshot_id()
+        self.table_schema.snapshot_id()
     }
 
     /// Returns the columns replicated from the current or target snapshot.
     pub fn replication_mask(&self) -> &ReplicationMask {
-        self.schema.replication_mask()
+        self.table_schema.replication_mask()
     }
 
     /// Returns true if the destination table is being created.
     pub fn is_creating(&self) -> bool {
-        matches!(self.schema, DestinationTableSchema::Creating { .. })
+        matches!(self.table_schema, DestinationTableSchema::Creating { .. })
     }
 
     /// Returns true if a schema change from a previous schema is in progress.
     pub fn is_applying(&self) -> bool {
-        matches!(self.schema, DestinationTableSchema::Applying { .. })
+        matches!(self.table_schema, DestinationTableSchema::Applying { .. })
     }
 
     /// Returns true if destination setup or a schema change is incomplete.
@@ -124,12 +124,12 @@ impl DestinationTableMetadata {
 
     /// Returns true if the current schema has been applied.
     pub fn is_applied(&self) -> bool {
-        matches!(self.schema, DestinationTableSchema::Applied { .. })
+        matches!(self.table_schema, DestinationTableSchema::Applied { .. })
     }
 
     /// Transitions this metadata to applied state.
     pub fn to_applied(mut self) -> Self {
-        let (snapshot_id, replication_mask) = match self.schema {
+        let (snapshot_id, replication_mask) = match self.table_schema {
             DestinationTableSchema::Creating { snapshot_id, replication_mask }
             | DestinationTableSchema::Applying { snapshot_id, replication_mask, .. }
             | DestinationTableSchema::Applied { snapshot_id, replication_mask } => {
@@ -137,7 +137,7 @@ impl DestinationTableMetadata {
             }
         };
 
-        self.schema = DestinationTableSchema::Applied { snapshot_id, replication_mask };
+        self.table_schema = DestinationTableSchema::Applied { snapshot_id, replication_mask };
 
         self
     }
@@ -148,7 +148,7 @@ impl DestinationTableMetadata {
         snapshot_id: SnapshotId,
         replication_mask: ReplicationMask,
     ) -> Self {
-        let (previous_snapshot_id, previous_replication_mask) = match self.schema {
+        let (previous_snapshot_id, previous_replication_mask) = match self.table_schema {
             DestinationTableSchema::Creating { snapshot_id, replication_mask }
             | DestinationTableSchema::Applying { snapshot_id, replication_mask, .. }
             | DestinationTableSchema::Applied { snapshot_id, replication_mask } => {
@@ -156,7 +156,7 @@ impl DestinationTableMetadata {
             }
         };
 
-        self.schema = DestinationTableSchema::Applying {
+        self.table_schema = DestinationTableSchema::Applying {
             snapshot_id,
             replication_mask,
             previous_snapshot_id,
@@ -183,7 +183,7 @@ mod tests {
         );
 
         assert_eq!(
-            metadata.schema(),
+            metadata.table_schema(),
             &DestinationTableSchema::Creating { snapshot_id, replication_mask }
         );
     }
@@ -203,7 +203,7 @@ mod tests {
         .with_schema_change(snapshot_id, replication_mask.clone());
 
         assert_eq!(
-            metadata.schema(),
+            metadata.table_schema(),
             &DestinationTableSchema::Applying {
                 snapshot_id,
                 replication_mask,
@@ -226,7 +226,7 @@ mod tests {
         .to_applied();
 
         assert_eq!(
-            metadata.schema(),
+            metadata.table_schema(),
             &DestinationTableSchema::Applied { snapshot_id, replication_mask }
         );
     }

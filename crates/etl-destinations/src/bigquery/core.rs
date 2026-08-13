@@ -172,7 +172,7 @@ fn metadata_sequenced_table_id_for_base(
     base_bigquery_table_id: &BigQueryTableId,
 ) -> EtlResult<SequencedBigQueryTableId> {
     let sequenced_bigquery_table_id =
-        metadata.destination_table_id().parse::<SequencedBigQueryTableId>()?;
+        metadata.table_id().parse::<SequencedBigQueryTableId>()?;
 
     if !sequenced_bigquery_table_id.belongs_to_base(base_bigquery_table_id) {
         bail!(
@@ -181,7 +181,7 @@ fn metadata_sequenced_table_id_for_base(
             format!(
                 "Destination table metadata points to '{}', but reset copy cleanup expected a \
                  sequenced table for '{}'",
-                metadata.destination_table_id(),
+                metadata.table_id(),
                 base_bigquery_table_id
             )
         );
@@ -192,7 +192,7 @@ fn metadata_sequenced_table_id_for_base(
 
 /// Ensures BigQuery metadata is ready for streaming operations.
 fn ensure_bigquery_metadata_applied(metadata: &DestinationTableMetadata) -> EtlResult<()> {
-    if matches!(metadata.schema(), DestinationTableSchema::Applied { .. }) {
+    if matches!(metadata.table_schema(), DestinationTableSchema::Applied { .. }) {
         return Ok(());
     }
 
@@ -201,8 +201,8 @@ fn ensure_bigquery_metadata_applied(metadata: &DestinationTableMetadata) -> EtlR
         "BigQuery destination table schema is not applied",
         format!(
             "Table '{}' has schema state '{:?}'; resynchronize the table to recover",
-            metadata.destination_table_id(),
-            metadata.schema()
+            metadata.table_id(),
+            metadata.table_schema()
         )
     ))
 }
@@ -461,7 +461,7 @@ where
         }
 
         let sequenced_bigquery_table_id = match &existing_metadata {
-            Some(metadata) => metadata.destination_table_id().parse()?,
+            Some(metadata) => metadata.table_id().parse()?,
             None => SequencedBigQueryTableId::new(bigquery_table_id.clone()),
         };
 
@@ -552,7 +552,7 @@ where
         };
         ensure_bigquery_metadata_applied(&metadata)?;
 
-        let sequenced_bigquery_table_id = metadata.destination_table_id().parse()?;
+        let sequenced_bigquery_table_id = metadata.table_id().parse()?;
 
         Ok(Some(sequenced_bigquery_table_id))
     }
@@ -791,7 +791,7 @@ where
         let plan = current_schema
             .plan_schema_change(new_replicated_table_schema, BIGQUERY_COLUMN_NAME_MAPPING)?;
         validate_bigquery_schema_plan(new_replicated_table_schema, &plan)?;
-        let sequenced_bigquery_table_id = metadata.destination_table_id().parse()?;
+        let sequenced_bigquery_table_id = metadata.table_id().parse()?;
 
         // Mark as applying before making changes (with the NEW snapshot_id and mask).
         //
@@ -800,7 +800,7 @@ where
         // state and manual intervention may be required. The previous endpoint is
         // stored for debugging purposes but automatic recovery is not possible.
         let updated_metadata = DestinationTableMetadata::new_applied(
-            metadata.destination_table_id().to_owned(),
+            metadata.table_id().to_owned(),
             current_snapshot_id,
             current_replication_mask.clone(),
         )

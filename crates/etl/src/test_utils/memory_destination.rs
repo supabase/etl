@@ -100,7 +100,7 @@ where
                 metadata.to_applied()
             }
             Some(metadata) => DestinationTableMetadata::new_applied(
-                metadata.destination_table_id().to_owned(),
+                metadata.table_id().to_owned(),
                 replicated_table_schema.inner().snapshot_id,
                 replicated_table_schema.replication_mask().clone(),
             ),

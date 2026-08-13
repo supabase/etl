@@ -201,7 +201,7 @@ where
             {
                 warn!(
                     table_id = table_id.0,
-                    destination_table_id = %current_metadata.destination_table_id(),
+                    destination_table_id = %current_metadata.table_id(),
                     snapshot_id = %current_metadata.snapshot_id(),
                     "dropping pre-existing destination table before table copy"
                 );

@@ -49,6 +49,10 @@ struct TestHarness {
 
 impl TestHarness {
     fn new() -> Self {
+        Self::with_pipeline_id(1)
+    }
+
+    fn with_pipeline_id(pipeline_id: PipelineId) -> Self {
         let config = load_test_config().clone_without_credentials();
         let auth = build_auth();
         let sql = SqlClient::new(
@@ -57,7 +61,6 @@ impl TestHarness {
             reqwest::Client::new(),
         );
         let store = NotifyingStore::new();
-        let pipeline_id: PipelineId = 1;
 
         let client = Client::new(Arc::clone(&auth), pipeline_id);
         let destination = Destination::new(client, store.clone());
@@ -375,6 +378,74 @@ async fn write_table_rows_empty() {
 
         let exists = harness.sql.table_exists(&sf_table).await.unwrap();
         assert!(exists, "table should have been created even with empty row set");
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn fresh_generation_rejects_existing_table_without_destination_metadata() {
+    let first = TestHarness::with_pipeline_id(1);
+    let second = TestHarness::with_pipeline_id(2);
+    let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+    let table_id = TableId::new(1013);
+
+    let retained_table_schema = TableSchema::new(
+        table_id,
+        TableName::new("public".to_owned(), src_table.clone()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("ddl_col_2_1".to_owned(), Type::TEXT, -1, 2, true),
+        ],
+    );
+    let retained_schema = ReplicatedTableSchema::all(Arc::new(retained_table_schema.clone()));
+    first.store.store_table_schema(retained_table_schema).await.unwrap();
+
+    let fresh_table_schema = TableSchema::new(
+        table_id,
+        TableName::new("public".to_owned(), src_table),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("ddl_col_2_1".to_owned(), Type::TEXT, -1, 2, true),
+        ],
+    );
+    let fresh_schema = ReplicatedTableSchema::all(Arc::new(fresh_table_schema.clone()));
+    second.store.store_table_schema(fresh_table_schema).await.unwrap();
+
+    with_table_cleanup(&first.sql, &[&sf_table], || async {
+        write_table_copy_and_wait(
+            &first.destination,
+            &retained_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("retained".to_owned())])],
+        )
+        .await;
+
+        let fqn =
+            format!("\"{}\".\"{}\".\"{sf_table}\"", first.config.database(), first.config.schema());
+
+        let error = invoke_write_table_rows(
+            &second.destination,
+            &fresh_schema,
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("fresh".to_owned())])],
+        )
+        .await
+        .expect_err("fresh pipeline should reject a retained Snowflake table");
+
+        assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+        assert_eq!(error.description(), Some("Snowflake destination table already exists"));
+        let detail = error.detail().expect("ownership rejection should explain the conflict");
+        assert!(detail.contains(&sf_table));
+        assert!(detail.contains("no destination metadata proving ownership"));
+        assert!(second.store.get_destination_table_metadata(table_id).await.unwrap().is_none());
+
+        let rows = query_rows(
+            &first.sql,
+            &format!("select \"id\", \"ddl_col_2_1\" from {fqn} order by \"id\""),
+        )
+        .await
+        .expect("query after rejected setup failed");
+        assert_eq!(rows, vec![vec![serde_json::json!("1"), serde_json::json!("retained")]]);
     })
     .await;
 }

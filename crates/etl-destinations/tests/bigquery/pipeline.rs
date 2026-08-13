@@ -2009,7 +2009,7 @@ async fn schema_change_add_column_defaults() {
         store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(destination_metadata.is_applied());
     let defaults = bigquery_database
-        .query_column_defaults_by_id(destination_metadata.destination_table_id())
+        .query_column_defaults_by_id(destination_metadata.table_id())
         .await;
     assert_eq!(
         defaults
@@ -2147,7 +2147,7 @@ async fn publication_mask_adds_nullable_columns_with_future_only_defaults() {
         store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(destination_metadata.is_applied());
     let defaults = bigquery_database
-        .query_column_defaults_by_id(destination_metadata.destination_table_id())
+        .query_column_defaults_by_id(destination_metadata.table_id())
         .await;
     assert_eq!(
         defaults
@@ -2343,7 +2343,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
         store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(destination_metadata.is_applied());
     let defaults = bigquery_database
-        .query_column_defaults_by_id(destination_metadata.destination_table_id())
+        .query_column_defaults_by_id(destination_metadata.table_id())
         .await;
     assert_eq!(
         defaults

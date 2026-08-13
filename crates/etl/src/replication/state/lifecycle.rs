@@ -386,6 +386,12 @@ impl TableStateType {
         matches!(self, Self::SyncDone | Self::Ready)
     }
 
+    /// Returns `true` if a table with this state would perform the initial
+    /// table sync, `false` otherwise.
+    pub fn would_perform_table_sync(&self) -> bool {
+        !matches!(self, Self::SyncDone | Self::Ready | Self::Errored)
+    }
+
     /// Returns `true` if a table with this state is in error, `false`
     /// otherwise.
     pub fn is_errored(&self) -> bool {

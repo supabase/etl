@@ -1033,7 +1033,7 @@ pub(crate) async fn start_pipeline(
     post,
     path = "/pipelines/{pipeline_id}/restart",
     summary = "Restart a pipeline",
-    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator while preserving its current VPA recommendation. Stop and start the pipeline to reset autoscaling and return to the initial allocation.",
+    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator. When durable source state shows that the restart will repeat an initial table copy, the endpoint resets the VPA so the copy starts from the initial allocation. If source state cannot be inspected, or all tables completed initial sync, the current VPA recommendation is preserved. System-initiated pod restarts do not use this endpoint and always preserve VPA state.",
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")

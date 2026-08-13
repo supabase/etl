@@ -2244,7 +2244,7 @@ async fn startup_after_restart_recovers_publication_mask_expansion() {
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id(), target_schema.snapshot_id);
     assert_eq!(metadata.replication_mask(), &target_mask);
-    assert!(matches!(metadata.schema(), DestinationTableSchema::Applied { .. }));
+    assert!(matches!(metadata.table_schema(), DestinationTableSchema::Applied { .. }));
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let rows = conn
@@ -2433,7 +2433,7 @@ async fn startup_after_restart_rejects_applying_schema_change_with_pruned_previo
     assert!(metadata.is_applying());
     assert_eq!(metadata.snapshot_id(), new_schema.snapshot_id);
     assert!(matches!(
-        metadata.schema(),
+        metadata.table_schema(),
         DestinationTableSchema::Applying { previous_snapshot_id, .. }
             if *previous_snapshot_id == missing_previous_snapshot_id
     ));

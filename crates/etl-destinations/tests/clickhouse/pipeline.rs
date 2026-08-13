@@ -2225,7 +2225,7 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         applied_snapshot_id > initial_snapshot_id,
         "snapshot_id should increase after schema change"
     );
-    let clickhouse_table_name = applied_metadata.destination_table_id().to_owned();
+    let clickhouse_table_name = applied_metadata.table_id().to_owned();
 
     // --- WHEN: a fresh destination on the same store replays the old relation ---
     let restarted_destination =

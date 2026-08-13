@@ -841,6 +841,34 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn updating_a_running_pipeline_resets_vpa_when_table_copy_will_repeat() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "data_sync", r#"{"type": "data_sync"}"#)],
+    )
+    .await;
+    let pipeline = app.read_pipeline(&tenant_id, pipeline_id).await;
+    let pipeline: ReadPipelineResponse =
+        pipeline.json().await.expect("failed to deserialize response");
+    let update_request = UpdatePipelineRequest {
+        source_id: pipeline.source_id,
+        destination_id: pipeline.destination_id,
+        config: UpdateApiPipelineConfig::default(),
+    };
+
+    let response = app.update_pipeline(&tenant_id, pipeline_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
     init_test_tracing();
     let k8s_state = MockK8sState::default();
@@ -1437,7 +1465,69 @@ async fn a_running_pipeline_can_be_restarted() {
 
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     assert!(k8s_state.create_calls() > create_calls_before);
-    assert_eq!(k8s_state.vpa_delete_calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_when_table_copy_will_repeat() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "data_sync", r#"{"type": "data_sync"}"#)],
+    )
+    .await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_preserves_vpa_when_no_table_copy_will_repeat() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[
+            ("test_users", "ready", r#"{"type": "ready"}"#),
+            ("test_events", "sync_done", r#"{"type": "sync_done", "lsn": "0/10"}"#),
+            (
+                "test_orders",
+                "errored",
+                r#"{"type": "errored", "reason": "manual intervention required", "retry_policy": {"type": "manual_retry"}}"#,
+            ),
+        ],
+    )
+    .await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_preserves_vpa_when_source_inspection_fails() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, _source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    let create_calls_before = app.k8s_state.create_calls();
+    drop_pg_database(&source_db_config).await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(app.k8s_state.create_calls() > create_calls_before);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

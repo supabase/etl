@@ -381,6 +381,11 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.channels.read().await.contains_key(&table_id)
     }
 
+    /// Checks whether a table exists in the configured Snowflake namespace.
+    pub(super) async fn table_exists(&self, table_name: &str) -> Result<bool> {
+        self.sql_client.table_exists(table_name).await
+    }
+
     /// Creates a table when needed and prepares it for initial-copy writes.
     pub(super) async fn initialize_table(
         &self,

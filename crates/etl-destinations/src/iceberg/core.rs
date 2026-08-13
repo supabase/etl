@@ -217,7 +217,7 @@ where
             return Ok(());
         };
         ensure_iceberg_relation_is_unchanged(&metadata, replicated_table_schema)?;
-        let iceberg_table_name = metadata.destination_table_id().to_owned();
+        let iceberg_table_name = metadata.table_id().to_owned();
 
         let namespace = schema_to_namespace(&replicated_table_schema.name().schema);
         let namespace = inner.namespace.get_or(&namespace);
@@ -252,7 +252,7 @@ where
         };
         let iceberg_table_name =
             if let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? {
-                metadata.destination_table_id().to_owned()
+                metadata.table_id().to_owned()
             } else {
                 default_table_name
             };
@@ -473,7 +473,7 @@ where
         let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
         let iceberg_table_name = existing_metadata
             .as_ref()
-            .map_or(iceberg_table_name, |metadata| metadata.destination_table_id().to_owned());
+            .map_or(iceberg_table_name, |metadata| metadata.table_id().to_owned());
 
         // We prepare the namespace.
         let namespace = schema_to_namespace(&table_name.schema);
@@ -509,7 +509,7 @@ where
                 None
             }
             Some(metadata) => {
-                match metadata.schema() {
+                match metadata.table_schema() {
                     DestinationTableSchema::Applying { .. } => {
                         return Err(etl_error!(
                             ErrorKind::InvalidState,
@@ -704,14 +704,14 @@ fn ensure_iceberg_relation_is_unchanged(
     let table_id = new_schema.id();
     let new_snapshot_id = new_schema.inner().snapshot_id;
     let new_replication_mask = new_schema.replication_mask();
-    let DestinationTableSchema::Applied { snapshot_id, replication_mask } = metadata.schema()
+    let DestinationTableSchema::Applied { snapshot_id, replication_mask } = metadata.table_schema()
     else {
         return Err(etl_error!(
             ErrorKind::InvalidState,
             "Iceberg destination table schema is not applied",
             format!(
                 "Table {table_id} has schema state '{:?}'; resynchronize the table to recover",
-                metadata.schema()
+                metadata.table_schema()
             )
         ));
     };
