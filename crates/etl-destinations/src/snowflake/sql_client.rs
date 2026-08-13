@@ -460,9 +460,9 @@ fn parse_show_columns(response: &StatementResponse) -> Result<Vec<&str>> {
     parse_named_show_column(response, "SHOW COLUMNS", "column_name")
 }
 
-/// Parse exact table identifiers from `SHOW TABLES`.
+/// Parse exact table identifiers from `SHOW TERSE TABLES`.
 fn parse_show_table_names(response: &StatementResponse) -> Result<Vec<&str>> {
-    parse_named_show_column(response, "SHOW TABLES", "name")
+    parse_named_show_column(response, "SHOW TERSE TABLES", "name")
 }
 
 /// Validates exact column names without relying on column order.
@@ -569,7 +569,8 @@ mod tests {
             vec![vec![serde_json::Value::String("EVENTS".to_owned()), serde_json::Value::Null]],
         );
 
-        let table_names = parse_show_table_names(&response).expect("SHOW TABLES should parse");
+        let table_names =
+            parse_show_table_names(&response).expect("SHOW TERSE TABLES should parse");
 
         assert_eq!(table_names, vec!["EVENTS"]);
     }
@@ -586,7 +587,7 @@ mod tests {
                 statement_handle: Some(handle),
                 message,
             } if handle == "test-statement"
-                && message == "SHOW TABLES result metadata omitted column 'name'"
+                && message == "SHOW TERSE TABLES result metadata omitted column 'name'"
         ));
     }
 
