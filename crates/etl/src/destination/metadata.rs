@@ -1,4 +1,7 @@
-use crate::schema::{ReplicationMask, SnapshotId};
+use crate::{
+    error::{ErrorKind, EtlResult},
+    schema::{ReplicationMask, SnapshotId},
+};
 
 /// Schema metadata for a table at a destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,12 +150,18 @@ impl DestinationTableMetadata {
         mut self,
         snapshot_id: SnapshotId,
         replication_mask: ReplicationMask,
-    ) -> Self {
+    ) -> EtlResult<Self> {
         let (previous_snapshot_id, previous_replication_mask) = match self.table_schema {
-            DestinationTableSchema::Creating { snapshot_id, replication_mask }
-            | DestinationTableSchema::Applying { snapshot_id, replication_mask, .. }
-            | DestinationTableSchema::Applied { snapshot_id, replication_mask } => {
+            DestinationTableSchema::Applied { snapshot_id, replication_mask } => {
                 (snapshot_id, replication_mask)
+            }
+            DestinationTableSchema::Creating { .. } | DestinationTableSchema::Applying { .. } => {
+                return Err(crate::etl_error!(
+                    ErrorKind::InvalidState,
+                    "Destination schema change requires applied metadata",
+                    "Complete or recover the pending destination operation before starting \
+                     another schema change."
+                ));
             }
         };
 
@@ -163,7 +172,7 @@ impl DestinationTableMetadata {
             previous_replication_mask,
         };
 
-        self
+        Ok(self)
     }
 }
 
@@ -200,7 +209,8 @@ mod tests {
             previous_snapshot_id,
             previous_replication_mask.clone(),
         )
-        .with_schema_change(snapshot_id, replication_mask.clone());
+        .with_schema_change(snapshot_id, replication_mask.clone())
+        .unwrap();
 
         assert_eq!(
             metadata.table_schema(),
@@ -223,11 +233,39 @@ mod tests {
             ReplicationMask::from_bytes(vec![1, 0]),
         )
         .with_schema_change(snapshot_id, replication_mask.clone())
+        .unwrap()
         .to_applied();
 
         assert_eq!(
             metadata.table_schema(),
             &DestinationTableSchema::Applied { snapshot_id, replication_mask }
         );
+    }
+
+    #[test]
+    fn pending_metadata_cannot_start_another_schema_change() {
+        let snapshot_id = SnapshotId::new(PgLsn::from(20), PgLsn::from(21));
+        let replication_mask = ReplicationMask::from_bytes(vec![1]);
+        let creating_metadata = DestinationTableMetadata::new_creating(
+            "users".to_owned(),
+            SnapshotId::initial(),
+            replication_mask.clone(),
+        );
+        let error = creating_metadata
+            .with_schema_change(snapshot_id, replication_mask.clone())
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+
+        let applying_metadata = DestinationTableMetadata::new_applied(
+            "users".to_owned(),
+            SnapshotId::initial(),
+            replication_mask.clone(),
+        )
+        .with_schema_change(snapshot_id, replication_mask.clone())
+        .unwrap();
+        let error = applying_metadata
+            .with_schema_change(SnapshotId::new(PgLsn::from(30), PgLsn::from(31)), replication_mask)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
     }
 }

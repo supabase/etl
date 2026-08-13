@@ -442,7 +442,7 @@ impl StateStore for PostgresStore {
                     previous_snapshot_id,
                     ReplicationMask::from_bytes(previous_replication_mask),
                 )
-                .with_schema_change(row.snapshot_id, target_mask),
+                .with_schema_change(row.snapshot_id, target_mask)?,
                 (
                     pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applied,
                     None,

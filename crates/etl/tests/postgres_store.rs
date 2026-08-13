@@ -1288,7 +1288,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     assert!(matches!(legacy_metadata.table_schema(), DestinationTableSchema::Applied { .. }));
     let target_mask = ReplicationMask::from_bytes(vec![1, 1, 1, 1, 0]);
     let applying_metadata =
-        legacy_metadata.with_schema_change(test_snapshot_id(10, 11), target_mask.clone());
+        legacy_metadata.with_schema_change(test_snapshot_id(10, 11), target_mask.clone()).unwrap();
     store.store_destination_table_metadata(table_id, applying_metadata).await.unwrap();
 
     let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
@@ -1489,7 +1489,8 @@ async fn destination_metadata_roundtrip_preserves_previous_logical_endpoint() {
         previous_snapshot_id,
         previous_mask.clone(),
     )
-    .with_schema_change(target_snapshot_id, target_mask.clone());
+    .with_schema_change(target_snapshot_id, target_mask.clone())
+    .unwrap();
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     store.store_destination_table_metadata(table_id, metadata).await.unwrap();

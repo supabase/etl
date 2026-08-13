@@ -982,7 +982,8 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
         test_snapshot_id(100_u64, 100_u64),
         replication_mask.clone(),
     )
-    .with_schema_change(test_snapshot_id(200_u64, 200_u64), replication_mask);
+    .with_schema_change(test_snapshot_id(200_u64, 200_u64), replication_mask)
+    .unwrap();
     store.store_destination_table_metadata(table_id, metadata).await.unwrap();
 
     let destination = clickhouse_db
@@ -1026,7 +1027,8 @@ async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
         test_snapshot_id(100_u64, 100_u64),
         target_mask.clone(),
     )
-    .with_schema_change(test_snapshot_id(200_u64, 200_u64), target_mask);
+    .with_schema_change(test_snapshot_id(200_u64, 200_u64), target_mask)
+    .unwrap();
     store.store_destination_table_metadata(table_id, metadata).await.unwrap();
 
     let destination =
@@ -1121,7 +1123,8 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         test_snapshot_id(100_u64, 100_u64),
         old_mask,
     )
-    .with_schema_change(test_snapshot_id(200_u64, 200_u64), new_mask);
+    .with_schema_change(test_snapshot_id(200_u64, 200_u64), new_mask)
+    .unwrap();
     store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
 
     // A restarted destination (empty table cache, so metadata is consulted)
@@ -1216,7 +1219,8 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
         test_snapshot_id(100_u64, 100_u64),
         old_mask,
     )
-    .with_schema_change(target_table_schema.snapshot_id, target_mask.clone());
+    .with_schema_change(target_table_schema.snapshot_id, target_mask.clone())
+    .unwrap();
     store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
 
     let restarted_destination = clickhouse_db

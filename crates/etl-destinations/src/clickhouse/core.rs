@@ -1145,7 +1145,7 @@ where
             current_snapshot_id,
             current_replication_mask,
         )
-        .with_schema_change(new_snapshot_id, new_replication_mask);
+        .with_schema_change(new_snapshot_id, new_replication_mask)?;
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
         if let Err(err) =

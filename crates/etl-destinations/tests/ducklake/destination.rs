@@ -1228,7 +1228,8 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
     .with_schema_change(
         new_schema.snapshot_id,
         new_replicated_table_schema.replication_mask().clone(),
-    );
+    )
+    .unwrap();
     store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
 
     let lsn = PgLsn::from(42_u64);
@@ -1328,7 +1329,8 @@ async fn write_events_rejects_mismatched_relation_before_applying_recovery() {
     .with_schema_change(
         target_schema.snapshot_id,
         target_replicated_table_schema.replication_mask().clone(),
-    );
+    )
+    .unwrap();
     store.store_destination_table_metadata(old_schema.id, applying_metadata.clone()).await.unwrap();
 
     let error = destination
@@ -2147,7 +2149,8 @@ async fn startup_after_restart_recovers_applying_schema_change() {
     .with_schema_change(
         new_schema.snapshot_id,
         new_replicated_table_schema.replication_mask().clone(),
-    );
+    )
+    .unwrap();
     store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
 
     destination.shutdown().await.unwrap();
@@ -2217,7 +2220,8 @@ async fn startup_after_restart_recovers_publication_mask_expansion() {
         previous_schema.snapshot_id,
         previous_mask,
     )
-    .with_schema_change(target_schema.snapshot_id, target_mask.clone());
+    .with_schema_change(target_schema.snapshot_id, target_mask.clone())
+    .unwrap();
     store.store_destination_table_metadata(previous_schema.id, applying_metadata).await.unwrap();
 
     destination.shutdown().await.unwrap();
@@ -2342,7 +2346,8 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
     .with_schema_change(
         new_schema.snapshot_id,
         new_replicated_table_schema.replication_mask().clone(),
-    );
+    )
+    .unwrap();
     store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
 
     destination.shutdown().await.unwrap();
@@ -2418,7 +2423,8 @@ async fn startup_after_restart_rejects_applying_schema_change_with_pruned_previo
     .with_schema_change(
         new_schema.snapshot_id,
         new_replicated_table_schema.replication_mask().clone(),
-    );
+    )
+    .unwrap();
     store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
 
     destination.shutdown().await.unwrap();

@@ -1811,7 +1811,8 @@ where
             // An applying schema change may still need both endpoints for recovery, so
             // retain from the earlier destination snapshot.
             let destination_snapshot_id = destination_table_metadata.snapshot_id();
-            let destination_retention_snapshot_id = match destination_table_metadata.table_schema() {
+            let destination_retention_snapshot_id = match destination_table_metadata.table_schema()
+            {
                 DestinationTableSchema::Applying { previous_snapshot_id, .. } => {
                     (*previous_snapshot_id).min(destination_snapshot_id)
                 }

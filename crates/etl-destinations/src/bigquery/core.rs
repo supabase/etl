@@ -171,8 +171,7 @@ fn metadata_sequenced_table_id_for_base(
     metadata: &DestinationTableMetadata,
     base_bigquery_table_id: &BigQueryTableId,
 ) -> EtlResult<SequencedBigQueryTableId> {
-    let sequenced_bigquery_table_id =
-        metadata.table_id().parse::<SequencedBigQueryTableId>()?;
+    let sequenced_bigquery_table_id = metadata.table_id().parse::<SequencedBigQueryTableId>()?;
 
     if !sequenced_bigquery_table_id.belongs_to_base(base_bigquery_table_id) {
         bail!(
@@ -804,7 +803,7 @@ where
             current_snapshot_id,
             current_replication_mask.clone(),
         )
-        .with_schema_change(new_snapshot_id, new_replication_mask.clone());
+        .with_schema_change(new_snapshot_id, new_replication_mask.clone())?;
         self.state_store
             .store_destination_table_metadata(table_id, updated_metadata.clone())
             .await?;
