@@ -89,7 +89,7 @@ use crate::{
         },
         sql::{qualified_lake_table_name, quote_identifier},
     },
-    recovery::ensure_relation_schema_transition,
+    recovery::{ensure_relation_schema_transition, warn_unsupported_column_type_change},
 };
 
 /// Shared Postgres metadata pool size for DuckLake background samplers.
@@ -1113,19 +1113,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
             SchemaOperation::AlterColumn { alteration }
                 if alteration.kind() == ColumnAlterationKind::Type =>
             {
-                let before = alteration.before_column_schema();
-                let after = alteration.after_column_schema();
-                warn!(
-                    table_name = %table_name,
-                    column_name = %before.name,
-                    before_data_type = before.typ.name(),
-                    before_type_modifier = before.modifier,
-                    after_data_type = after.typ.name(),
-                    after_type_modifier = after.modifier,
-                    "ducklake column type changes are currently unsupported; subsequent schema \
-                     changes and row writes may fail or behave unpredictably until type-change \
-                     support is implemented"
-                );
+                warn_unsupported_column_type_change("ducklake", table_name, alteration);
             }
             SchemaOperation::AlterColumn { alteration }
                 if alteration.kind() == ColumnAlterationKind::Nullability =>

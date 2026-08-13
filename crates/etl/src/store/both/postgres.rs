@@ -445,19 +445,6 @@ impl StateStore for PostgresStore {
                 schema_status: row.schema_status.into(),
             };
             destination_metadata.validate_recovery_endpoint()?;
-            if destination_metadata.is_applying()
-                && destination_metadata.previous_snapshot_id.is_none()
-            {
-                return Err(etl_error!(
-                    ErrorKind::InvalidState,
-                    "Applying destination table metadata has no previous schema endpoint",
-                    format!(
-                        "Table '{}' cannot be recovered after restart without a previous snapshot \
-                         and replication mask",
-                        destination_metadata.destination_table_id
-                    )
-                ));
-            }
             metadata.insert(table_id, destination_metadata);
         }
 

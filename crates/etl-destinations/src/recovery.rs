@@ -1,10 +1,35 @@
 //! Shared helpers for destination schema-transition safety and recovery.
 
+use std::fmt::Display;
+
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    schema::{ReplicationMask, SnapshotId, TableId},
+    schema::{ColumnAlteration, ReplicationMask, SnapshotId, TableId},
 };
+use tracing::warn;
+
+/// Warns that a destination is intentionally skipping a column type change.
+pub(crate) fn warn_unsupported_column_type_change(
+    destination_name: &str,
+    destination_table_id: impl Display,
+    alteration: &ColumnAlteration,
+) {
+    let before = alteration.before_column_schema();
+    let after = alteration.after_column_schema();
+    warn!(
+        destination_name,
+        destination_table_id = %destination_table_id,
+        column_name = %before.name,
+        before_data_type = before.typ.name(),
+        before_type_modifier = before.modifier,
+        after_data_type = after.typ.name(),
+        after_type_modifier = after.modifier,
+        "{destination_name} column type changes are currently unsupported; subsequent schema \
+         changes and row writes may fail or behave unpredictably until type-change support is \
+         implemented"
+    );
+}
 
 /// Validates that a relation can advance an applied destination schema.
 ///

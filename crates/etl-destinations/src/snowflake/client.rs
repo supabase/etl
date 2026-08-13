@@ -15,21 +15,25 @@ use tokio::{
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::snowflake::{
-    Config, Error, Result, SnowpipeError,
-    auth::{AuthManager, HttpExchanger, TokenProvider},
-    config::{HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT},
-    metrics::{
-        ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_FAILURES_TOTAL,
-        ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_SECONDS, ETL_SNOWFLAKE_STREAMING_PENDING_BYTES,
-        ETL_SNOWFLAKE_STREAMING_PENDING_CHANNELS, ETL_SNOWFLAKE_STREAMING_PENDING_ROW_BATCHES,
-    },
-    schema,
-    sql::{quote_identifier, quote_string_literal},
-    sql_client::SqlClient,
-    streaming::{
-        AcceptedRowBatch, ChannelHandle, DEFAULT_COMMIT_POLL_INTERVAL, DEFAULT_COMMIT_WAIT_TIMEOUT,
-        OffsetToken, PendingDurabilityTarget, RestStreamClient, RowBatch, StreamClient,
+use crate::{
+    recovery::warn_unsupported_column_type_change,
+    snowflake::{
+        Config, Error, Result, SnowpipeError,
+        auth::{AuthManager, HttpExchanger, TokenProvider},
+        config::{HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT},
+        metrics::{
+            ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_FAILURES_TOTAL,
+            ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_SECONDS, ETL_SNOWFLAKE_STREAMING_PENDING_BYTES,
+            ETL_SNOWFLAKE_STREAMING_PENDING_CHANNELS, ETL_SNOWFLAKE_STREAMING_PENDING_ROW_BATCHES,
+        },
+        schema,
+        sql::{quote_identifier, quote_string_literal},
+        sql_client::SqlClient,
+        streaming::{
+            AcceptedRowBatch, ChannelHandle, DEFAULT_COMMIT_POLL_INTERVAL,
+            DEFAULT_COMMIT_WAIT_TIMEOUT, OffsetToken, PendingDurabilityTarget, RestStreamClient,
+            RowBatch, StreamClient,
+        },
     },
 };
 
@@ -515,16 +519,10 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                                 .await?;
                         }
                         ColumnAlterationKind::Type => {
-                            warn!(
+                            warn_unsupported_column_type_change(
+                                "snowflake",
                                 table_name,
-                                column_name = %before.name,
-                                before_data_type = before.typ.name(),
-                                before_type_modifier = before.modifier,
-                                after_data_type = after.typ.name(),
-                                after_type_modifier = after.modifier,
-                                "snowflake column type changes are currently unsupported; \
-                                 subsequent schema changes and row writes may fail or behave \
-                                 unpredictably until type-change support is implemented"
+                                alteration,
                             );
                         }
                         ColumnAlterationKind::Nullability => {

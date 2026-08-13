@@ -321,7 +321,9 @@ where
             )?;
         let replicated_schema =
             ReplicatedTableSchema::from_mask(table_schema, metadata.replication_mask.clone());
-        let columns: Vec<_> = replicated_schema.column_schemas().cloned().collect();
+        replicated_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
+        let columns: Vec<_> =
+            replicated_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
         self.client
             .prepare_existing_table(table_id, &metadata.destination_table_id, &columns)
             .await
@@ -600,9 +602,8 @@ where
             current_table_schema,
             current_replication_mask.clone(),
         );
-        let current_columns: Vec<_> = current_schema
-            .destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING)
-            .collect();
+        let current_columns: Vec<_> =
+            current_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
         let table_name = metadata.destination_table_id.clone();
         self.client
             .prepare_existing_table(table_id, &table_name, &current_columns)

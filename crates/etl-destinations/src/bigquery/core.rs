@@ -37,7 +37,7 @@ use crate::{
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
         schema::{column_default_sql, column_schemas_to_table_descriptor},
     },
-    recovery::ensure_relation_schema_transition,
+    recovery::{ensure_relation_schema_transition, warn_unsupported_column_type_change},
     table_name::try_stringify_table_name,
 };
 
@@ -914,17 +914,10 @@ where
                                 .await?;
                         }
                         ColumnAlterationKind::Type => {
-                            warn!(
-                                table_id = %table_id,
-                                destination_table_id = %sequenced_bigquery_table_id,
-                                column_name = %before.name,
-                                before_data_type = before.typ.name(),
-                                before_type_modifier = before.modifier,
-                                after_data_type = after.typ.name(),
-                                after_type_modifier = after.modifier,
-                                "bigquery column type changes are currently unsupported; \
-                                 subsequent schema changes and row writes may fail or behave \
-                                 unpredictably until type-change support is implemented"
+                            warn_unsupported_column_type_change(
+                                "bigquery",
+                                sequenced_bigquery_table_id,
+                                alteration,
                             );
                         }
                         ColumnAlterationKind::Nullability => {

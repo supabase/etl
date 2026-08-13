@@ -34,7 +34,7 @@ use crate::{
             supports_column_default, trailing_cdc_column_names,
         },
     },
-    recovery::ensure_relation_schema_transition,
+    recovery::{ensure_relation_schema_transition, warn_unsupported_column_type_change},
     table_name::try_stringify_table_name,
 };
 
@@ -1320,16 +1320,10 @@ where
                             }
                         }
                         ColumnAlterationKind::Type => {
-                            warn!(
-                                table_name = %clickhouse_table_name,
-                                column_name = %before.name,
-                                before_data_type = before.typ.name(),
-                                before_type_modifier = before.modifier,
-                                after_data_type = after.typ.name(),
-                                after_type_modifier = after.modifier,
-                                "clickhouse column type changes are currently unsupported; \
-                                 subsequent schema changes and RowBinary writes may fail or behave \
-                                 unpredictably until type-change support is implemented"
+                            warn_unsupported_column_type_change(
+                                "clickhouse",
+                                clickhouse_table_name,
+                                alteration,
                             );
                         }
                         ColumnAlterationKind::Nullability => {

@@ -111,6 +111,8 @@ impl DestinationTableMetadata {
     pub(crate) fn validate_recovery_endpoint(&self) -> EtlResult<()> {
         let has_previous_snapshot = self.previous_snapshot_id.is_some();
         let has_previous_mask = self.previous_replication_mask.is_some();
+        let has_previous_metadata = has_previous_snapshot || has_previous_mask;
+
         if has_previous_snapshot != has_previous_mask {
             return Err(crate::etl_error!(
                 ErrorKind::InvalidState,
@@ -121,7 +123,8 @@ impl DestinationTableMetadata {
                 )
             ));
         }
-        if self.is_applied() && has_previous_snapshot {
+
+        if self.is_applied() && has_previous_metadata {
             return Err(crate::etl_error!(
                 ErrorKind::InvalidState,
                 "Applied destination table metadata contains stale recovery state",

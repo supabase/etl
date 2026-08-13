@@ -1308,13 +1308,14 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn destination_metadata_load_rejects_unrecoverable_applying_endpoint() {
+async fn destination_metadata_load_accepts_initial_applying_and_rejects_incomplete_endpoint() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
     let pipeline_id = 1;
     let table_id = TableId::new(12346);
-    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    // We initialize the store to run the migrations.
+    let _store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
 
     sqlx::query(
@@ -1332,9 +1333,12 @@ async fn destination_metadata_load_rejects_unrecoverable_applying_endpoint() {
     .await
     .unwrap();
 
-    let error = store.load_destination_tables_metadata().await.unwrap_err();
-
-    assert_eq!(error.kind(), ErrorKind::InvalidState);
+    let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    reloaded_store.load_destination_tables_metadata().await.unwrap();
+    let metadata = reloaded_store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(metadata.is_applying());
+    assert_eq!(metadata.previous_snapshot_id, None);
+    assert_eq!(metadata.previous_replication_mask, None);
 
     sqlx::query(
         r#"
@@ -1349,7 +1353,8 @@ async fn destination_metadata_load_rejects_unrecoverable_applying_endpoint() {
     .await
     .unwrap();
 
-    let error = store.load_destination_tables_metadata().await.unwrap_err();
+    let incomplete_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let error = incomplete_store.load_destination_tables_metadata().await.unwrap_err();
 
     assert_eq!(error.kind(), ErrorKind::InvalidState);
 }
