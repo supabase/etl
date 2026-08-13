@@ -24,15 +24,6 @@ use crate::{
     },
 };
 
-/// Criteria for resolving a runtime when the destination id is not known.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ResolveRuntimeConfigRequest {
-    /// Product kind of the destination to resolve.
-    pub destination_kind: DestinationKind,
-    /// Exact destination name to resolve.
-    pub destination_name: String,
-}
-
 /// Runtime configuration, including credentials, resolved for one destination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolveRuntimeConfigResponse {
@@ -146,20 +137,23 @@ pub(crate) async fn resolve_runtime_config(
     .await
 }
 
-/// Resolves a tenant runtime using destination criteria supplied by the caller.
+/// Resolves a tenant runtime using destination criteria supplied in the request
+/// path.
 pub(crate) async fn resolve_tenant_runtime_config(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
-    Json(request): Json<ResolveRuntimeConfigRequest>,
+    destination_selector: Path<(DestinationKind, String)>,
 ) -> Result<Response, RuntimeConfigError> {
     let tenant_id = extract_tenant_id(&headers)?;
+    let (destination_kind, destination_name) = destination_selector.into_inner();
+    let destination_config_key = stored_destination_config_key(destination_kind);
     let runtimes = read_pipeline_ids_for_destination_selector(
         &pool,
         tenant_id,
-        &request.destination_name,
-        request.destination_kind.as_str(),
+        &destination_name,
+        destination_config_key,
     )
     .await?;
     let (destination_id, pipeline_id) = match runtimes.as_slice() {
@@ -177,6 +171,18 @@ pub(crate) async fn resolve_tenant_runtime_config(
         &source_tls_config,
     )
     .await
+}
+
+/// Returns the JSON key used by the encrypted destination configuration stored
+/// in the API database.
+const fn stored_destination_config_key(destination_kind: DestinationKind) -> &'static str {
+    match destination_kind {
+        DestinationKind::BigQuery => "big_query",
+        DestinationKind::ClickHouse => "click_house",
+        DestinationKind::Ducklake => "ducklake",
+        DestinationKind::Iceberg => "iceberg",
+        DestinationKind::Snowflake => "snowflake",
+    }
 }
 
 async fn resolve_runtime_config_inner(

@@ -294,8 +294,8 @@ impl TestApp {
         tenant_id: &str,
         destination_id: i64,
     ) -> reqwest::Response {
-        self.post_authenticated(format!(
-            "{}/v1/internal/destinations/{destination_id}/runtime-config/resolve",
+        self.get_authenticated(format!(
+            "{}/v1/internal/destinations/{destination_id}/config",
             &self.internal_address
         ))
         .header("tenant_id", tenant_id)
@@ -310,18 +310,24 @@ impl TestApp {
         destination_kind: &str,
         destination_name: &str,
     ) -> reqwest::Response {
-        self.post_authenticated(format!(
-            "{}/v1/internal/runtime-config/resolve",
-            &self.internal_address
-        ))
-        .header("tenant_id", tenant_id)
-        .json(&serde_json::json!({
-            "destination_kind": destination_kind,
-            "destination_name": destination_name,
-        }))
-        .send()
-        .await
-        .expect("failed to execute request")
+        let mut url = reqwest::Url::parse(&self.internal_address)
+            .expect("internal test application address should be a valid URL");
+        url.path_segments_mut()
+            .expect("internal test application address should be a base URL")
+            .extend([
+                "v1",
+                "internal",
+                "destinations",
+                destination_kind,
+                destination_name,
+                "config",
+            ]);
+
+        self.get_authenticated(url)
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
     }
 
     pub(crate) async fn create_pipeline(

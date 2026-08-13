@@ -215,7 +215,7 @@ async fn runtime_config_is_not_exposed_on_the_public_listener() {
 
     let response = app
         .api_client
-        .post(format!("{}/v1/internal/destinations/1/runtime-config/resolve", app.address))
+        .get(format!("{}/v1/internal/destinations/1/config", app.address))
         .bearer_auth(&app.api_key)
         .header("tenant_id", "abcdefghijklmnopqrst")
         .send()
@@ -232,7 +232,7 @@ async fn runtime_config_requires_existing_api_authentication() {
 
     let response = app
         .api_client
-        .post(format!("{}/v1/internal/destinations/1/runtime-config/resolve", app.internal_address))
+        .get(format!("{}/v1/internal/destinations/1/config", app.internal_address))
         .header("tenant_id", "abcdefghijklmnopqrst")
         .send()
         .await
@@ -273,6 +273,74 @@ async fn tenant_runtime_config_resolves_a_destination_matching_the_requested_sel
         response.json().await.expect("failed to deserialize runtime config response");
     assert_eq!(response["destination_id"], destination_id);
     assert_eq!(response["pipeline_id"], pipeline_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_runtime_config_resolves_multiword_destination_kind_tags() {
+    init_test_tracing();
+    let destinations = [
+        ("bigquery", new_bigquery_destination_config()),
+        (
+            "clickhouse",
+            ApiDestinationConfig::ClickHouse {
+                url: "https://clickhouse.example.com:8443".parse().unwrap(),
+                user: "etl_user".to_owned(),
+                password: Some(SerializableSecretString::from(
+                    "fake-clickhouse-password".to_owned(),
+                )),
+                database: "analytics".to_owned(),
+                engine: ClickHouseEngine::default(),
+            },
+        ),
+    ];
+
+    for (destination_kind, destination_config) in destinations {
+        let app = spawn_test_app().await;
+        let tenant_id = create_tenant(&app).await;
+        let destination_name = format!("requested_{destination_kind}_destination");
+        let (destination_id, pipeline_id) = create_pipeline_with_destination_name(
+            &app,
+            &tenant_id,
+            &destination_name,
+            destination_config,
+        )
+        .await;
+
+        let response = app
+            .resolve_tenant_runtime_config(&tenant_id, destination_kind, &destination_name)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let response: serde_json::Value =
+            response.json().await.expect("failed to deserialize runtime config response");
+        assert_eq!(response["destination_id"], destination_id);
+        assert_eq!(response["pipeline_id"], pipeline_id);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_runtime_config_decodes_the_destination_name_path_segment() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = create_tenant(&app).await;
+    let destination_name = "requested destination/with?#%ü";
+    let (destination_id, pipeline_id) = create_pipeline_with_destination_name(
+        &app,
+        &tenant_id,
+        destination_name,
+        new_ducklake_destination_config(),
+    )
+    .await;
+
+    let response =
+        app.resolve_tenant_runtime_config(&tenant_id, "ducklake", destination_name).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: serde_json::Value =
+        response.json().await.expect("failed to deserialize runtime config response");
+    assert_eq!(response["destination_id"], destination_id);
+    assert_eq!(response["pipeline_id"], pipeline_id);
+    assert_eq!(response["destination_name"], destination_name);
 }
 
 #[tokio::test(flavor = "multi_thread")]

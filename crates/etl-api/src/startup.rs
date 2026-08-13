@@ -1,7 +1,10 @@
 use std::{
+    future::Future,
     io,
     net::{SocketAddr, TcpListener},
+    pin::Pin,
     sync::Arc,
+    task::{Context as TaskContext, Poll},
     time::Duration,
 };
 
@@ -20,8 +23,11 @@ use etl_config::{
 use etl_telemetry::metrics::init_metrics_handle;
 use kube::config::KubeConfigOptions;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
-use tokio_rustls::{TlsAcceptor, server::TlsStream};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::{TcpListener as TokioTcpListener, TcpStream},
+};
+use tokio_rustls::{Accept, TlsAcceptor, server::TlsStream as ServerTlsStream};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
@@ -105,13 +111,17 @@ pub struct ApplicationListeners {
     pub internal: TcpListener,
 }
 
+/// Listener that accepts internal TCP connections without waiting for their TLS
+/// handshakes to complete.
 struct TlsListener {
+    /// TCP listener serving the internal API.
     listener: TokioTcpListener,
+    /// TLS acceptor used to start each connection handshake.
     acceptor: TlsAcceptor,
 }
 
 impl Listener for TlsListener {
-    type Io = TlsStream<TcpStream>;
+    type Io = LazyTlsStream;
     type Addr = SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
@@ -125,12 +135,8 @@ impl Listener for TlsListener {
                 }
             };
 
-            match self.acceptor.accept(stream).await {
-                Ok(stream) => return (stream, address),
-                Err(error) => {
-                    tracing::debug!(%error, %address, "rejected internal API TLS connection");
-                }
-            }
+            let stream = LazyTlsStream::new(self.acceptor.accept(stream), address);
+            return (stream, address);
         }
     }
 
@@ -139,6 +145,105 @@ impl Listener for TlsListener {
     }
 }
 
+/// TLS connection that defers its handshake until Axum polls its I/O.
+struct LazyTlsStream {
+    /// Current handshake or streaming state.
+    state: LazyTlsStreamState,
+    /// Remote peer address used for handshake diagnostics.
+    address: SocketAddr,
+}
+
+/// State of a lazily negotiated internal TLS connection.
+enum LazyTlsStreamState {
+    /// TLS handshake waiting to be polled by the connection task.
+    Handshaking(Pin<Box<Accept<TcpStream>>>),
+    /// Established TLS stream.
+    Streaming(Box<ServerTlsStream<TcpStream>>),
+    /// Terminal state after a failed handshake.
+    Failed,
+}
+
+impl LazyTlsStream {
+    /// Creates a stream that will negotiate TLS on its first I/O poll.
+    fn new(handshake: Accept<TcpStream>, address: SocketAddr) -> Self {
+        Self { state: LazyTlsStreamState::Handshaking(Box::pin(handshake)), address }
+    }
+
+    /// Polls the handshake and returns the established TLS stream when ready.
+    fn poll_stream(
+        &mut self,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<io::Result<&mut ServerTlsStream<TcpStream>>> {
+        if let LazyTlsStreamState::Handshaking(handshake) = &mut self.state {
+            match handshake.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(stream)) => {
+                    self.state = LazyTlsStreamState::Streaming(Box::new(stream));
+                }
+                Poll::Ready(Err(error)) => {
+                    tracing::debug!(error = %error, address = %self.address, "rejected internal API TLS connection");
+                    self.state = LazyTlsStreamState::Failed;
+                    return Poll::Ready(Err(error));
+                }
+            }
+        }
+
+        match &mut self.state {
+            LazyTlsStreamState::Streaming(stream) => Poll::Ready(Ok(stream.as_mut())),
+            LazyTlsStreamState::Failed => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "TLS handshake failed",
+            ))),
+            LazyTlsStreamState::Handshaking(_) => unreachable!("pending handshake returned early"),
+        }
+    }
+}
+
+impl AsyncRead for LazyTlsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut().poll_stream(cx) {
+            Poll::Ready(Ok(stream)) => Pin::new(stream).poll_read(cx, buffer),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl AsyncWrite for LazyTlsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut().poll_stream(cx) {
+            Poll::Ready(Ok(stream)) => Pin::new(stream).poll_write(cx, buffer),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut().poll_stream(cx) {
+            Poll::Ready(Ok(stream)) => Pin::new(stream).poll_flush(cx),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut().poll_stream(cx) {
+            Poll::Ready(Ok(stream)) => Pin::new(stream).poll_shutdown(cx),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Builds the TLS acceptor used by the internal API listener.
 fn internal_tls_acceptor(settings: &InternalTlsSettings) -> anyhow::Result<TlsAcceptor> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 
@@ -161,6 +266,7 @@ fn internal_tls_acceptor(settings: &InternalTlsSettings) -> anyhow::Result<TlsAc
     Ok(TlsAcceptor::from(Arc::new(server_config)))
 }
 
+/// Returns whether sensitive internal runtime routes may be exposed.
 fn internal_runtime_routes_enabled(environment: Environment, tls_enabled: bool) -> bool {
     matches!(environment, Environment::Dev) || tls_enabled
 }
@@ -551,11 +657,11 @@ pub fn run(
         .layer(middleware::from_fn_with_state(Arc::clone(&config), auth_validator));
 
     let internal_routes = Router::new()
-        .route("/runtime-config/resolve", post(resolve_tenant_runtime_config))
         .route(
-            "/destinations/{destination_id}/runtime-config/resolve",
-            post(resolve_runtime_config),
+            "/destinations/{destination_kind}/{destination_name}/config",
+            get(resolve_tenant_runtime_config),
         )
+        .route("/destinations/{destination_id}/config", get(resolve_runtime_config))
         .layer(middleware::from_fn(mark_sensitive_sentry_scope))
         .layer(middleware::from_fn_with_state(Arc::clone(&config), auth_validator));
 
@@ -638,9 +744,39 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use etl_config::Environment;
+    use std::{sync::Arc, time::Duration};
 
-    use super::internal_runtime_routes_enabled;
+    use axum::serve::Listener;
+    use etl_config::Environment;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_rustls::TlsAcceptor;
+
+    use super::{TlsListener, internal_runtime_routes_enabled};
+
+    #[tokio::test]
+    async fn tls_listener_accepts_connections_without_waiting_for_handshakes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(rustls::server::ResolvesServerCertUsingSni::new()));
+        let mut listener =
+            TlsListener { listener, acceptor: TlsAcceptor::from(Arc::new(server_config)) };
+
+        let _first_stalled_client = TcpStream::connect(address).await.unwrap();
+        let _first_connection = tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .expect("TCP acceptance should not wait for the TLS handshake");
+        let _second_stalled_client = TcpStream::connect(address).await.unwrap();
+        let _second_connection =
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .expect("a stalled TLS handshake should not block later TCP connections");
+    }
 
     #[test]
     fn internal_runtime_routes_require_tls_outside_development() {

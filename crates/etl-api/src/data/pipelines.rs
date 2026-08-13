@@ -460,7 +460,7 @@ pub async fn read_pipeline_ids_for_destination_selector<'c, E>(
     executor: E,
     tenant_id: &str,
     destination_name: &str,
-    destination_kind: &str,
+    destination_config_key: &str,
 ) -> Result<Vec<(i64, i64)>, PipelinesDbError>
 where
     E: PgExecutor<'c>,
@@ -478,7 +478,7 @@ where
     )
     .bind(tenant_id)
     .bind(destination_name)
-    .bind(destination_kind)
+    .bind(destination_config_key)
     .fetch_all(executor)
     .await?;
 
