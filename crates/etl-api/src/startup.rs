@@ -638,8 +638,9 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::internal_runtime_routes_enabled;
     use etl_config::Environment;
+
+    use super::internal_runtime_routes_enabled;
 
     #[test]
     fn internal_runtime_routes_require_tls_outside_development() {

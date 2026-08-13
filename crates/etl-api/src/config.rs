@@ -280,7 +280,8 @@ pub struct ApplicationSettings {
     pub port: u16,
     /// Port number the cluster-internal API listens on.
     pub internal_port: u16,
-    /// Optional TLS certificate and private key for the cluster-internal listener.
+    /// Optional TLS certificate and private key for the cluster-internal
+    /// listener.
     #[serde(default)]
     pub internal_tls: Option<InternalTlsSettings>,
 }
