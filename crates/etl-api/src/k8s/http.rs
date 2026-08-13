@@ -118,13 +118,13 @@ const DUCKLAKE_MAINTENANCE_APP_LABEL: &str = "etl-ducklake-maintenance-app";
 const APP_NAME_LABEL: &str = "etl.supabase.com/app-name";
 /// Label that distinguishes replicator and maintenance workloads.
 const APP_TYPE_LABEL: &str = "etl.supabase.com/app-type";
+/// Tenant identity label used for observability and future ownership migration.
+const TENANT_ID_LABEL: &str = "etl.supabase.com/tenant-id";
 /// Pipeline identity label used for observability and future ownership
 /// migration.
 const PIPELINE_ID_LABEL: &str = "etl.supabase.com/pipeline-id";
 /// Replicator runtime identity label.
 const REPLICATOR_ID_LABEL: &str = "etl.supabase.com/replicator-id";
-/// Tenant identity label used for observability and future ownership migration.
-const TENANT_ID_LABEL: &str = "etl.supabase.com/tenant-id";
 /// DuckLake maintenance CRD group.
 const DUCKLAKE_MAINTENANCE_GROUP: &str = "etl.supabase.com";
 /// DuckLake maintenance CRD version.
