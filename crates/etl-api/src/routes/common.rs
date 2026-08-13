@@ -31,7 +31,7 @@ use crate::{
 /// up those changes.
 ///
 /// Before reconciliation, this best-effort checks durable source state. If the
-/// restart will perform an initial table sync, it resets the VPA so
+/// restart performed an initial table sync, it resets the VPA so
 /// reconciliation recreates it without a steady-state recommendation. Source
 /// inspection failures preserve the existing VPA and do not block restart.
 /// Kubernetes-initiated Pod restarts do not call this helper and preserve VPA
@@ -56,7 +56,7 @@ pub(crate) async fn restart_pipeline_replicator_if_running(
         return Ok(false);
     }
 
-    if restart_will_perform_table_sync(pipeline_id, source.id, &source.config, source_tls_config)
+    if restart_would_perform_table_sync(pipeline_id, source.id, &source.config, source_tls_config)
         .await
     {
         let resource_prefix = create_k8s_object_prefix(tenant_id, replicator.id);
@@ -79,7 +79,7 @@ pub(crate) async fn restart_pipeline_replicator_if_running(
     Ok(true)
 }
 
-async fn restart_will_perform_table_sync(
+async fn restart_would_perform_table_sync(
     pipeline_id: i64,
     source_id: i64,
     source_config: &StoredSourceConfig,
