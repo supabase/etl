@@ -36,9 +36,9 @@ use crate::{
         pipeline::{DuckLakeMaintenanceConfig, ReplicatorResourcesConfig},
     },
     k8s::{
-        DestinationType, DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodPhase,
-        PodStatus, ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
-        ReplicatorVerticalPodAutoscalerConfig,
+        DestinationType, DuckLakeMaintenanceResourceConfig, K8sClient, K8sError,
+        PipelineRuntimeIdentity, PodPhase, PodStatus, ReplicatorConfigMapFile,
+        ReplicatorStatefulSetConfig,
     },
 };
 
@@ -114,6 +114,17 @@ const LOGS_VOLUME_NAME: &str = "logs";
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 /// Label used to identify DuckLake maintenance resources.
 const DUCKLAKE_MAINTENANCE_APP_LABEL: &str = "etl-ducklake-maintenance-app";
+/// Label that groups resources belonging to the same pipeline workload.
+const APP_NAME_LABEL: &str = "etl.supabase.com/app-name";
+/// Label that distinguishes replicator and maintenance workloads.
+const APP_TYPE_LABEL: &str = "etl.supabase.com/app-type";
+/// Pipeline identity label used for observability and future ownership
+/// migration.
+const PIPELINE_ID_LABEL: &str = "etl.supabase.com/pipeline-id";
+/// Replicator runtime identity label.
+const REPLICATOR_ID_LABEL: &str = "etl.supabase.com/replicator-id";
+/// Tenant identity label used for observability and future ownership migration.
+const TENANT_ID_LABEL: &str = "etl.supabase.com/tenant-id";
 /// DuckLake maintenance CRD group.
 const DUCKLAKE_MAINTENANCE_GROUP: &str = "etl.supabase.com";
 /// DuckLake maintenance CRD version.
@@ -505,18 +516,20 @@ pub enum K8sPreflightError {
 impl K8sClient for HttpK8sClient {
     async fn create_or_update_postgres_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         postgres_password: &str,
     ) -> Result<(), K8sError> {
         debug!("patching postgres secret");
 
         let encoded_postgres_password = BASE64_STANDARD.encode(postgres_password);
-        let postgres_secret_name = create_postgres_secret_name(prefix);
-        let replicator_app_name = create_replicator_app_name(prefix);
+        let postgres_secret_name = create_postgres_secret_name(resource_prefix);
+        let replicator_app_name = create_replicator_app_name(resource_prefix);
         let postgres_secret_json = create_postgres_secret_json(
             &self.k8s_config,
             &postgres_secret_name,
             &replicator_app_name,
+            identity,
             &encoded_postgres_password,
         );
         let secret: Secret = serde_json::from_value(postgres_secret_json)?;
@@ -533,18 +546,20 @@ impl K8sClient for HttpK8sClient {
 
     async fn create_or_update_bigquery_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         bq_service_account_key: &str,
     ) -> Result<(), K8sError> {
         debug!("patching bq secret");
 
         let encoded_bq_service_account_key = BASE64_STANDARD.encode(bq_service_account_key);
-        let bq_secret_name = create_bq_secret_name(prefix);
-        let replicator_app_name = create_replicator_app_name(prefix);
+        let bq_secret_name = create_bq_secret_name(resource_prefix);
+        let replicator_app_name = create_replicator_app_name(resource_prefix);
         let bq_secret_json = create_bq_service_account_key_secret_json(
             &self.k8s_config,
             &bq_secret_name,
             &replicator_app_name,
+            identity,
             &encoded_bq_service_account_key,
         );
         let secret: Secret = serde_json::from_value(bq_secret_json)?;
@@ -561,18 +576,20 @@ impl K8sClient for HttpK8sClient {
 
     async fn create_or_update_clickhouse_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         password: Option<&str>,
     ) -> Result<(), K8sError> {
         debug!("patching clickhouse secret");
 
         if let Some(password) = password {
-            let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
-            let replicator_app_name = create_replicator_app_name(prefix);
+            let clickhouse_secret_name = create_clickhouse_secret_name(resource_prefix);
+            let replicator_app_name = create_replicator_app_name(resource_prefix);
             let secret = create_clickhouse_password_secret(
                 &self.k8s_config,
                 &clickhouse_secret_name,
                 &replicator_app_name,
+                identity,
                 password,
             );
 
@@ -589,7 +606,8 @@ impl K8sClient for HttpK8sClient {
 
     async fn create_or_update_iceberg_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         catalog_token: &str,
         s3_access_key_id: &str,
         s3_secret_access_key: &str,
@@ -600,12 +618,13 @@ impl K8sClient for HttpK8sClient {
         let encoded_s3_access_key_id = BASE64_STANDARD.encode(s3_access_key_id);
         let encoded_s3_secret_access_key = BASE64_STANDARD.encode(s3_secret_access_key);
 
-        let iceberg_secret_name = create_iceberg_secret_name(prefix);
-        let replicator_app_name = create_replicator_app_name(prefix);
+        let iceberg_secret_name = create_iceberg_secret_name(resource_prefix);
+        let replicator_app_name = create_replicator_app_name(resource_prefix);
         let iceberg_secret_json = create_iceberg_secret_json(
             &self.k8s_config,
             &iceberg_secret_name,
             &replicator_app_name,
+            identity,
             &encoded_catalog_token,
             &encoded_s3_access_key_id,
             &encoded_s3_secret_access_key,
@@ -624,7 +643,8 @@ impl K8sClient for HttpK8sClient {
 
     async fn create_or_update_ducklake_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         catalog_url: &str,
         s3_access_key_id: &str,
         s3_secret_access_key: &str,
@@ -635,12 +655,13 @@ impl K8sClient for HttpK8sClient {
         let encoded_s3_access_key_id = BASE64_STANDARD.encode(s3_access_key_id);
         let encoded_s3_secret_access_key = BASE64_STANDARD.encode(s3_secret_access_key);
 
-        let ducklake_secret_name = create_ducklake_secret_name(prefix);
-        let replicator_app_name = create_replicator_app_name(prefix);
+        let ducklake_secret_name = create_ducklake_secret_name(resource_prefix);
+        let replicator_app_name = create_replicator_app_name(resource_prefix);
         let ducklake_secret_json = create_ducklake_secret_json(
             &self.k8s_config,
             &ducklake_secret_name,
             &replicator_app_name,
+            identity,
             &encoded_catalog_url,
             &encoded_s3_access_key_id,
             &encoded_s3_secret_access_key,
@@ -653,10 +674,10 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_postgres_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
         debug!("deleting postgres secret");
 
-        let postgres_secret_name = create_postgres_secret_name(prefix);
+        let postgres_secret_name = create_postgres_secret_name(resource_prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.secrets_api.delete(&postgres_secret_name, &dp).await,
@@ -665,10 +686,10 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_clickhouse_secret(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_clickhouse_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
         debug!("deleting clickhouse secret");
 
-        let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
+        let clickhouse_secret_name = create_clickhouse_secret_name(resource_prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.secrets_api.delete(&clickhouse_secret_name, &dp).await,
@@ -677,20 +698,20 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_bigquery_secret(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_bigquery_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
         debug!("deleting bq secret");
 
-        let bq_secret_name = create_bq_secret_name(prefix);
+        let bq_secret_name = create_bq_secret_name(resource_prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(self.secrets_api.delete(&bq_secret_name, &dp).await)?;
 
         Ok(())
     }
 
-    async fn delete_iceberg_secret(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_iceberg_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
         debug!("deleting iceberg secret");
 
-        let iceberg_secret_name = create_iceberg_secret_name(prefix);
+        let iceberg_secret_name = create_iceberg_secret_name(resource_prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.secrets_api.delete(&iceberg_secret_name, &dp).await,
@@ -699,10 +720,10 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_ducklake_secret(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_ducklake_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
         debug!("deleting ducklake secret");
 
-        let ducklake_secret_name = create_ducklake_secret_name(prefix);
+        let ducklake_secret_name = create_ducklake_secret_name(resource_prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.secrets_api.delete(&ducklake_secret_name, &dp).await,
@@ -713,7 +734,8 @@ impl K8sClient for HttpK8sClient {
 
     async fn create_or_update_snowflake_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         private_key: &str,
         private_key_passphrase: Option<&str>,
     ) -> Result<(), K8sError> {
@@ -722,12 +744,13 @@ impl K8sClient for HttpK8sClient {
         let encoded_private_key = BASE64_STANDARD.encode(private_key);
         let encoded_passphrase = private_key_passphrase.map(|p| BASE64_STANDARD.encode(p));
 
-        let snowflake_secret_name = create_snowflake_secret_name(prefix);
-        let replicator_app_name = create_replicator_app_name(prefix);
+        let snowflake_secret_name = create_snowflake_secret_name(resource_prefix);
+        let replicator_app_name = create_replicator_app_name(resource_prefix);
         let snowflake_secret_json = create_snowflake_secret_json(
             &self.k8s_config,
             &snowflake_secret_name,
             &replicator_app_name,
+            identity,
             &encoded_private_key,
             encoded_passphrase.as_deref(),
         );
@@ -739,10 +762,10 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_snowflake_secret(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_snowflake_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
         debug!("deleting snowflake secret");
 
-        let snowflake_secret_name = create_snowflake_secret_name(prefix);
+        let snowflake_secret_name = create_snowflake_secret_name(resource_prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.secrets_api.delete(&snowflake_secret_name, &dp).await,
@@ -753,18 +776,20 @@ impl K8sClient for HttpK8sClient {
 
     async fn create_or_update_replicator_config_map(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         files: Vec<ReplicatorConfigMapFile>,
     ) -> Result<(), K8sError> {
         debug!("patching config map");
 
-        let replicator_config_map_name = create_replicator_config_map_name(prefix);
-        let replicator_app_name = create_replicator_app_name(prefix);
+        let replicator_config_map_name = create_replicator_config_map_name(resource_prefix);
+        let replicator_app_name = create_replicator_app_name(resource_prefix);
 
         let config_map_json = create_replicator_config_map_json(
             &self.k8s_config,
             &replicator_config_map_name,
             &replicator_app_name,
+            identity,
             files,
         );
         let config_map: ConfigMap = serde_json::from_value(config_map_json)?;
@@ -781,10 +806,10 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_replicator_config_map(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_replicator_config_map(&self, resource_prefix: &str) -> Result<(), K8sError> {
         debug!("deleting config map");
 
-        let replicator_config_map_name = create_replicator_config_map_name(prefix);
+        let replicator_config_map_name = create_replicator_config_map_name(resource_prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.config_maps_api.delete(&replicator_config_map_name, &dp).await,
@@ -795,11 +820,12 @@ impl K8sClient for HttpK8sClient {
 
     async fn create_or_update_replicator_stateful_set(
         &self,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         request: ReplicatorStatefulSetConfig,
     ) -> Result<(), K8sError> {
         debug!("patching stateful set");
 
-        let prefix = request.prefix.as_str();
         let replicator_image = request.replicator_image.as_str();
         let default_replicator_resources =
             self.k8s_config.replicator_resources_for(request.destination_type.kind());
@@ -810,8 +836,8 @@ impl K8sClient for HttpK8sClient {
             request.replicator_resources.as_ref(),
         )?;
 
-        let stateful_set_name = create_stateful_set_name(prefix);
-        let legacy_stateful_set_name = create_legacy_stateful_set_name(prefix);
+        let stateful_set_name = create_stateful_set_name(resource_prefix);
+        let legacy_stateful_set_name = create_legacy_stateful_set_name(resource_prefix);
         if legacy_stateful_set_name != stateful_set_name {
             let dp = DeleteParams::default();
             Self::handle_delete_with_404_ignore(
@@ -822,7 +848,7 @@ impl K8sClient for HttpK8sClient {
         let environment = Environment::load().map_err(K8sError::Config)?;
         let container_environment = create_container_environment_json(
             &self.k8s_config,
-            prefix,
+            resource_prefix,
             &environment,
             replicator_image,
             request.destination_type,
@@ -834,18 +860,17 @@ impl K8sClient for HttpK8sClient {
         let tolerations = tolerations_json(&self.k8s_config.replicator_tolerations);
         let init_containers = create_init_containers_json(
             &self.k8s_config,
-            prefix,
+            resource_prefix,
             &environment,
             &stateful_set_resources,
         );
-        let volumes = create_volumes_json(prefix, &environment);
+        let volumes = create_volumes_json(resource_prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &self.k8s_config,
-            prefix,
-            &request.tenant_id,
-            request.pipeline_id,
+            resource_prefix,
+            identity,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -870,16 +895,16 @@ impl K8sClient for HttpK8sClient {
 
     async fn create_or_update_replicator_vertical_pod_autoscaler(
         &self,
-        request: ReplicatorVerticalPodAutoscalerConfig,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
     ) -> Result<(), K8sError> {
         debug!("patching vertical pod autoscaler");
 
-        let name = create_stateful_set_name(&request.prefix);
+        let name = create_stateful_set_name(resource_prefix);
         let vertical_pod_autoscaler = create_replicator_vertical_pod_autoscaler_json(
             &self.k8s_config,
-            &request.prefix,
-            &request.tenant_id,
-            request.pipeline_id,
+            resource_prefix,
+            identity,
             &name,
         )?;
         let pp = PatchParams::apply(FIELD_MANAGER).force();
@@ -890,11 +915,11 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_replicator_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_replicator_stateful_set(&self, resource_prefix: &str) -> Result<(), K8sError> {
         debug!("deleting stateful set");
 
         let dp = DeleteParams::default();
-        for stateful_set_name in stateful_set_names_for_lookup(prefix) {
+        for stateful_set_name in stateful_set_names_for_lookup(resource_prefix) {
             Self::handle_delete_with_404_ignore(
                 self.stateful_sets_api.delete(&stateful_set_name, &dp).await,
             )?;
@@ -905,11 +930,11 @@ impl K8sClient for HttpK8sClient {
 
     async fn delete_replicator_vertical_pod_autoscaler(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
     ) -> Result<(), K8sError> {
         debug!("deleting vertical pod autoscaler");
 
-        let name = create_stateful_set_name(prefix);
+        let name = create_stateful_set_name(resource_prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.vertical_pod_autoscalers_api.delete(&name, &dp).await,
@@ -918,10 +943,13 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn replicator_stateful_set_exists(&self, prefix: &str) -> Result<bool, K8sError> {
+    async fn replicator_stateful_set_exists(
+        &self,
+        resource_prefix: &str,
+    ) -> Result<bool, K8sError> {
         debug!("checking stateful set existence");
 
-        for stateful_set_name in stateful_set_names_for_lookup(prefix) {
+        for stateful_set_name in stateful_set_names_for_lookup(resource_prefix) {
             match self.stateful_sets_api.get(&stateful_set_name).await {
                 Ok(_) => return Ok(true),
                 Err(kube::Error::Api(err)) if err.code == 404 => {}
@@ -934,14 +962,20 @@ impl K8sClient for HttpK8sClient {
 
     async fn create_or_update_ducklake_maintenance(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         config: DuckLakeMaintenanceResourceConfig,
     ) -> Result<(), K8sError> {
         debug!("patching ducklake maintenance");
 
-        let name = create_ducklake_maintenance_name(prefix);
-        let ducklake_maintenance_json =
-            create_ducklake_maintenance_json(&self.k8s_config, prefix, &name, config);
+        let name = create_ducklake_maintenance_name(resource_prefix);
+        let ducklake_maintenance_json = create_ducklake_maintenance_json(
+            &self.k8s_config,
+            resource_prefix,
+            &name,
+            identity,
+            config,
+        );
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.ducklake_maintenance_api
             .patch(&name, &pp, &Patch::Apply(ducklake_maintenance_json))
@@ -950,10 +984,10 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_ducklake_maintenance(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_ducklake_maintenance(&self, resource_prefix: &str) -> Result<(), K8sError> {
         debug!("deleting ducklake maintenance");
 
-        let name = create_ducklake_maintenance_name(prefix);
+        let name = create_ducklake_maintenance_name(resource_prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.ducklake_maintenance_api.delete(&name, &dp).await,
@@ -962,11 +996,14 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn get_replicator_pod_status(&self, prefix: &str) -> Result<PodStatus, K8sError> {
+    async fn get_replicator_pod_status(
+        &self,
+        resource_prefix: &str,
+    ) -> Result<PodStatus, K8sError> {
         debug!("getting pod status");
 
         let mut pod = None;
-        for pod_name in pod_names_for_status(prefix) {
+        for pod_name in pod_names_for_status(resource_prefix) {
             match self.pods_api.get(&pod_name).await {
                 Ok(found_pod) => {
                     pod = Some(found_pod);
@@ -980,7 +1017,7 @@ impl K8sClient for HttpK8sClient {
             return Ok(PodStatus::Stopped);
         };
 
-        let replicator_container_name = create_replicator_container_name(prefix);
+        let replicator_container_name = create_replicator_container_name(resource_prefix);
 
         if Self::has_replicator_container_error(&pod, &replicator_container_name) {
             return Ok(PodStatus::Failed);
@@ -1099,10 +1136,37 @@ fn create_vector_container_name(prefix: &str) -> String {
     format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}")
 }
 
+fn create_app_selector_labels(app_name: &str, app_type: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (APP_NAME_LABEL.to_owned(), app_name.to_owned()),
+        (APP_TYPE_LABEL.to_owned(), app_type.to_owned()),
+    ])
+}
+
+fn create_app_identity_labels(
+    app_name: &str,
+    app_type: &str,
+    identity: &PipelineRuntimeIdentity,
+) -> BTreeMap<String, String> {
+    let mut labels = create_app_selector_labels(app_name, app_type);
+    labels.insert(TENANT_ID_LABEL.to_owned(), identity.tenant_id.clone());
+    labels.insert(PIPELINE_ID_LABEL.to_owned(), identity.pipeline_id.to_string());
+    labels.insert(REPLICATOR_ID_LABEL.to_owned(), identity.replicator_id.to_string());
+    labels
+}
+
+fn create_replicator_identity_labels(
+    replicator_app_name: &str,
+    identity: &PipelineRuntimeIdentity,
+) -> BTreeMap<String, String> {
+    create_app_identity_labels(replicator_app_name, REPLICATOR_APP_LABEL, identity)
+}
+
 fn create_postgres_secret_json(
     k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
+    identity: &PipelineRuntimeIdentity,
     encoded_postgres_password: &str,
 ) -> serde_json::Value {
     json!({
@@ -1111,10 +1175,7 @@ fn create_postgres_secret_json(
       "metadata": {
         "name": secret_name,
         "namespace": &k8s_config.replicator_namespace,
-        "labels": {
-          "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
-        }
+        "labels": create_replicator_identity_labels(replicator_app_name, identity)
       },
       "type": "Opaque",
       "data": {
@@ -1127,16 +1188,14 @@ fn create_clickhouse_password_secret(
     k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
+    identity: &PipelineRuntimeIdentity,
     clickhouse_password: &str,
 ) -> Secret {
     Secret {
         metadata: ObjectMeta {
             name: Some(secret_name.to_owned()),
             namespace: Some(k8s_config.replicator_namespace.clone()),
-            labels: Some(BTreeMap::from([
-                ("etl.supabase.com/app-name".to_owned(), replicator_app_name.to_owned()),
-                ("etl.supabase.com/app-type".to_owned(), REPLICATOR_APP_LABEL.to_owned()),
-            ])),
+            labels: Some(create_replicator_identity_labels(replicator_app_name, identity)),
             ..ObjectMeta::default()
         },
         type_: Some("Opaque".to_owned()),
@@ -1152,6 +1211,7 @@ fn create_snowflake_secret_json(
     k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
+    identity: &PipelineRuntimeIdentity,
     encoded_private_key: &str,
     encoded_private_key_passphrase: Option<&str>,
 ) -> serde_json::Value {
@@ -1172,10 +1232,7 @@ fn create_snowflake_secret_json(
       "metadata": {
         "name": secret_name,
         "namespace": &k8s_config.replicator_namespace,
-        "labels": {
-          "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
-        }
+        "labels": create_replicator_identity_labels(replicator_app_name, identity)
       },
       "type": "Opaque",
       "data": data
@@ -1186,6 +1243,7 @@ fn create_bq_service_account_key_secret_json(
     k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
+    identity: &PipelineRuntimeIdentity,
     encoded_bq_service_account_key: &str,
 ) -> serde_json::Value {
     json!({
@@ -1194,10 +1252,7 @@ fn create_bq_service_account_key_secret_json(
       "metadata": {
         "name": secret_name,
         "namespace": &k8s_config.replicator_namespace,
-        "labels": {
-          "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
-        }
+        "labels": create_replicator_identity_labels(replicator_app_name, identity)
       },
       "type": "Opaque",
       "data": {
@@ -1210,6 +1265,7 @@ fn create_iceberg_secret_json(
     k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
+    identity: &PipelineRuntimeIdentity,
     encoded_catalog_token: &str,
     encoded_s3_access_key_id: &str,
     encoded_s3_secret_access_key: &str,
@@ -1220,10 +1276,7 @@ fn create_iceberg_secret_json(
       "metadata": {
         "name": secret_name,
         "namespace": &k8s_config.replicator_namespace,
-        "labels": {
-          "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
-        }
+        "labels": create_replicator_identity_labels(replicator_app_name, identity)
       },
       "type": "Opaque",
       "data": {
@@ -1238,6 +1291,7 @@ fn create_ducklake_secret_json(
     k8s_config: &K8sConfig,
     secret_name: &str,
     replicator_app_name: &str,
+    identity: &PipelineRuntimeIdentity,
     encoded_catalog_url: &str,
     encoded_s3_access_key_id: &str,
     encoded_s3_secret_access_key: &str,
@@ -1248,10 +1302,7 @@ fn create_ducklake_secret_json(
       "metadata": {
         "name": secret_name,
         "namespace": &k8s_config.replicator_namespace,
-        "labels": {
-          "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
-        }
+        "labels": create_replicator_identity_labels(replicator_app_name, identity)
       },
       "type": "Opaque",
       "data": {
@@ -1266,6 +1317,7 @@ fn create_replicator_config_map_json(
     k8s_config: &K8sConfig,
     config_map_name: &str,
     replicator_app_name: &str,
+    identity: &PipelineRuntimeIdentity,
     files: Vec<ReplicatorConfigMapFile>,
 ) -> serde_json::Value {
     let mut data = serde_json::Map::new();
@@ -1279,10 +1331,7 @@ fn create_replicator_config_map_json(
       "metadata": {
         "name": config_map_name,
         "namespace": &k8s_config.replicator_namespace,
-        "labels": {
-          "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
-        }
+        "labels": create_replicator_identity_labels(replicator_app_name, identity)
       },
       "data": data
     })
@@ -1292,6 +1341,7 @@ fn create_ducklake_maintenance_json(
     k8s_config: &K8sConfig,
     prefix: &str,
     name: &str,
+    identity: &PipelineRuntimeIdentity,
     config: DuckLakeMaintenanceResourceConfig,
 ) -> serde_json::Value {
     let replicator_app_name = create_replicator_app_name(prefix);
@@ -1304,16 +1354,17 @@ fn create_ducklake_maintenance_json(
       "metadata": {
         "name": name,
         "namespace": &k8s_config.replicator_namespace,
-        "labels": {
-          "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": DUCKLAKE_MAINTENANCE_APP_LABEL,
-        }
+        "labels": create_app_identity_labels(
+          &replicator_app_name,
+          DUCKLAKE_MAINTENANCE_APP_LABEL,
+          identity
+        )
       },
       "spec": {
         "pipelineRef": {
-          "tenantId": config.tenant_id,
-          "pipelineId": config.pipeline_id,
-          "replicatorId": config.replicator_id,
+          "tenantId": identity.tenant_id,
+          "pipelineId": identity.pipeline_id,
+          "replicatorId": identity.replicator_id,
         },
         "schedule": {
           "minIntervalSeconds": config.policy.min_interval_seconds,
@@ -1821,8 +1872,7 @@ fn create_snowflake_passphrase_env_var_json(snowflake_secret_name: &str) -> serd
 fn create_replicator_stateful_set_json(
     k8s_config: &K8sConfig,
     prefix: &str,
-    tenant_id: &str,
-    pipeline_id: i64,
+    identity: &PipelineRuntimeIdentity,
     stateful_set_name: &str,
     replicator_image: &str,
     container_environment: Vec<serde_json::Value>,
@@ -1836,6 +1886,8 @@ fn create_replicator_stateful_set_json(
     let replicator_app_name = create_replicator_app_name(prefix);
     let restarted_at_annotation = get_restarted_at_annotation_value();
     let replicator_container_name = create_replicator_container_name(prefix);
+    let selector_labels = create_app_selector_labels(&replicator_app_name, REPLICATOR_APP_LABEL);
+    let identity_labels = create_replicator_identity_labels(&replicator_app_name, identity);
 
     json!({
       "apiVersion": "apps/v1",
@@ -1843,32 +1895,21 @@ fn create_replicator_stateful_set_json(
       "metadata": {
         "name": stateful_set_name,
         "namespace": &k8s_config.replicator_namespace,
-        "labels": {
-          "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
-          "etl.supabase.com/pipeline-id": pipeline_id.to_string(),
-          "etl.supabase.com/tenant-id": tenant_id
-        },
+        "labels": identity_labels,
       },
       "spec": {
         "replicas": 1,
-        // The VPA controller's blocked-resize fallback updates this Pod template and relies on the
-        // StatefulSet controller to terminate and recreate the Pod gracefully.
+        // Keep native rolling updates for API-driven template changes. VPA updates Pods in place
+        // when possible; otherwise the updater evicts and admission mutates the replacement Pod.
         "updateStrategy": {
           "type": "RollingUpdate"
         },
         "selector": {
-          "matchLabels": {
-            "etl.supabase.com/app-name": replicator_app_name,
-            "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
-          }
+          "matchLabels": selector_labels
         },
         "template": {
           "metadata": {
-            "labels": {
-              "etl.supabase.com/app-name": replicator_app_name,
-              "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
-            },
+            "labels": identity_labels,
             "annotations": {
               // Attach template annotations (e.g., restart checksum) to trigger a rolling restart.
               "etl.supabase.com/restarted-at": restarted_at_annotation,
@@ -1938,12 +1979,12 @@ fn create_replicator_stateful_set_json(
 fn create_replicator_vertical_pod_autoscaler_json(
     k8s_config: &K8sConfig,
     prefix: &str,
-    tenant_id: &str,
-    pipeline_id: i64,
+    identity: &PipelineRuntimeIdentity,
     stateful_set_name: &str,
 ) -> Result<DynamicObject, serde_json::Error> {
     let replicator_app_name = create_replicator_app_name(prefix);
     let replicator_container_name = create_replicator_container_name(prefix);
+    let identity_labels = create_replicator_identity_labels(&replicator_app_name, identity);
 
     serde_json::from_value(json!({
       "apiVersion": format!("{VERTICAL_POD_AUTOSCALER_GROUP}/{VERTICAL_POD_AUTOSCALER_VERSION}"),
@@ -1951,12 +1992,7 @@ fn create_replicator_vertical_pod_autoscaler_json(
       "metadata": {
         "name": stateful_set_name,
         "namespace": &k8s_config.replicator_namespace,
-        "labels": {
-          "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
-          "etl.supabase.com/pipeline-id": pipeline_id.to_string(),
-          "etl.supabase.com/tenant-id": tenant_id
-        }
+        "labels": identity_labels
       },
       "spec": {
         "targetRef": {
@@ -2019,10 +2055,27 @@ mod tests {
 
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
     const PIPELINE_ID: i64 = 24;
+    const REPLICATOR_ID: i64 = 42;
     const MAX_TENANT_ID: &str = "abcdefghijklmnopqrst";
     const MAX_BIGINT_ID: i64 = 9_223_372_036_854_775_807;
     const MAX_K8S_LABEL_VALUE_LEN: usize = 63;
     const CONTROLLER_REVISION_HASH_LEN: usize = 10;
+
+    fn replicator_identity_with(
+        tenant_id: &str,
+        pipeline_id: i64,
+        replicator_id: i64,
+    ) -> PipelineRuntimeIdentity {
+        PipelineRuntimeIdentity { tenant_id: tenant_id.to_owned(), pipeline_id, replicator_id }
+    }
+
+    fn pipeline_runtime_identity() -> PipelineRuntimeIdentity {
+        replicator_identity_with(TENANT_ID, PIPELINE_ID, REPLICATOR_ID)
+    }
+
+    fn max_pipeline_runtime_identity() -> PipelineRuntimeIdentity {
+        replicator_identity_with(MAX_TENANT_ID, MAX_BIGINT_ID, MAX_BIGINT_ID)
+    }
 
     fn default_k8s_config() -> K8sConfig {
         test_k8s_config(&Environment::Staging)
@@ -2053,12 +2106,14 @@ mod tests {
         stateful_set_json: &serde_json::Value,
         tenant_id: &str,
         pipeline_id: i64,
+        replicator_id: i64,
     ) {
         let labels = stateful_set_json
             .pointer("/metadata/labels")
             .and_then(serde_json::Value::as_object)
             .expect("stateful set should have metadata labels");
         let pipeline_id = pipeline_id.to_string();
+        let replicator_id = replicator_id.to_string();
 
         assert_eq!(
             labels.get("etl.supabase.com/tenant-id").and_then(serde_json::Value::as_str),
@@ -2082,16 +2137,55 @@ mod tests {
         );
         assert!(
             stateful_set_json
-                .pointer("/spec/template/metadata/labels/etl.supabase.com~1tenant-id")
+                .pointer("/spec/selector/matchLabels/etl.supabase.com~1replicator-id")
                 .is_none(),
-            "tenant-id should not be part of the pod template labels"
+            "replicator-id should not be part of the immutable selector"
         );
-        assert!(
+        assert_eq!(
+            stateful_set_json.pointer("/spec/template/metadata/labels/etl.supabase.com~1tenant-id"),
+            Some(&json!(tenant_id))
+        );
+        assert_eq!(
             stateful_set_json
-                .pointer("/spec/template/metadata/labels/etl.supabase.com~1pipeline-id")
-                .is_none(),
-            "pipeline-id should not be part of the pod template labels"
+                .pointer("/spec/template/metadata/labels/etl.supabase.com~1pipeline-id"),
+            Some(&json!(pipeline_id))
         );
+        assert_eq!(
+            stateful_set_json
+                .pointer("/spec/template/metadata/labels/etl.supabase.com~1replicator-id"),
+            Some(&json!(replicator_id))
+        );
+    }
+
+    fn assert_resource_identity_labels(
+        resource_name: &str,
+        resource: &serde_json::Value,
+        expected_app_name: &str,
+        expected_app_type: &str,
+        tenant_id: &str,
+        pipeline_id: i64,
+        replicator_id: i64,
+    ) {
+        let expected_pipeline_id = pipeline_id.to_string();
+        let expected_replicator_id = replicator_id.to_string();
+        let labels = resource
+            .pointer("/metadata/labels")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("{resource_name} should have metadata labels"));
+
+        for (key, expected) in [
+            (APP_NAME_LABEL, expected_app_name),
+            (APP_TYPE_LABEL, expected_app_type),
+            (TENANT_ID_LABEL, tenant_id),
+            (PIPELINE_ID_LABEL, expected_pipeline_id.as_str()),
+            (REPLICATOR_ID_LABEL, expected_replicator_id.as_str()),
+        ] {
+            assert_eq!(
+                labels.get(key).and_then(serde_json::Value::as_str),
+                Some(expected),
+                "{resource_name} has an unexpected {key} label"
+            );
+        }
     }
 
     fn container_environment_has_var(
@@ -2384,6 +2478,7 @@ mod tests {
         );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
+        let identity = max_pipeline_runtime_identity();
 
         let resources = vec![
             (
@@ -2392,6 +2487,7 @@ mod tests {
                     &default_k8s_config(),
                     &postgres_secret_name,
                     &replicator_app_name,
+                    &identity,
                     "secret",
                 ),
             ),
@@ -2401,6 +2497,7 @@ mod tests {
                     &default_k8s_config(),
                     &clickhouse_secret_name,
                     &replicator_app_name,
+                    &identity,
                     "secret",
                 ))
                 .unwrap(),
@@ -2411,6 +2508,7 @@ mod tests {
                     &default_k8s_config(),
                     &bq_secret_name,
                     &replicator_app_name,
+                    &identity,
                     "secret",
                 ),
             ),
@@ -2420,6 +2518,7 @@ mod tests {
                     &default_k8s_config(),
                     &iceberg_secret_name,
                     &replicator_app_name,
+                    &identity,
                     "secret",
                     "secret",
                     "secret",
@@ -2431,6 +2530,7 @@ mod tests {
                     &default_k8s_config(),
                     &ducklake_secret_name,
                     &replicator_app_name,
+                    &identity,
                     "secret",
                     "secret",
                     "secret",
@@ -2442,6 +2542,7 @@ mod tests {
                     &default_k8s_config(),
                     &snowflake_secret_name,
                     &replicator_app_name,
+                    &identity,
                     &BASE64_STANDARD.encode("secret"),
                     Some(&BASE64_STANDARD.encode("secret")),
                 ),
@@ -2452,6 +2553,7 @@ mod tests {
                     &default_k8s_config(),
                     &config_map_name,
                     &replicator_app_name,
+                    &identity,
                     vec![ReplicatorConfigMapFile {
                         filename: "prod.json".to_owned(),
                         content: "{}".to_owned(),
@@ -2464,22 +2566,32 @@ mod tests {
                     &default_k8s_config(),
                     &prefix,
                     &ducklake_maintenance_name,
+                    &identity,
                     DuckLakeMaintenanceResourceConfig {
-                        tenant_id: MAX_TENANT_ID.to_owned(),
-                        pipeline_id: MAX_BIGINT_ID,
-                        replicator_id: MAX_BIGINT_ID,
                         image: replicator_image.to_owned(),
                         policy: DuckLakeMaintenancePolicy::default(),
                     },
                 ),
             ),
             (
+                "replicator vertical pod autoscaler",
+                serde_json::to_value(
+                    create_replicator_vertical_pod_autoscaler_json(
+                        &default_k8s_config(),
+                        &prefix,
+                        &identity,
+                        &stateful_set_name,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            ),
+            (
                 "replicator stateful set",
                 create_replicator_stateful_set_json(
                     &default_k8s_config(),
                     &prefix,
-                    MAX_TENANT_ID,
-                    MAX_BIGINT_ID,
+                    &identity,
                     &stateful_set_name,
                     replicator_image,
                     container_environment,
@@ -2495,6 +2607,20 @@ mod tests {
 
         for (resource_name, resource) in resources {
             assert_kubernetes_label_values_are_safe(resource_name, &resource);
+            let expected_app_type = if resource_name == "ducklake maintenance" {
+                DUCKLAKE_MAINTENANCE_APP_LABEL
+            } else {
+                REPLICATOR_APP_LABEL
+            };
+            assert_resource_identity_labels(
+                resource_name,
+                &resource,
+                &replicator_app_name,
+                expected_app_type,
+                MAX_TENANT_ID,
+                MAX_BIGINT_ID,
+                MAX_BIGINT_ID,
+            );
         }
     }
 
@@ -2505,14 +2631,22 @@ mod tests {
         k8s_config.replicator_service_account_name = "custom-replicator".to_owned();
         k8s_config.vector_image = "example.com/vector:custom".to_owned();
 
-        let prefix = create_k8s_object_prefix(TENANT_ID, PIPELINE_ID);
+        let prefix = create_k8s_object_prefix(TENANT_ID, REPLICATOR_ID);
         let app_name = create_replicator_app_name(&prefix);
+        let identity = pipeline_runtime_identity();
         let namespaced_resources = vec![
-            create_postgres_secret_json(&k8s_config, "postgres-secret", &app_name, "secret"),
+            create_postgres_secret_json(
+                &k8s_config,
+                "postgres-secret",
+                &app_name,
+                &identity,
+                "secret",
+            ),
             serde_json::to_value(create_clickhouse_password_secret(
                 &k8s_config,
                 "clickhouse-secret",
                 &app_name,
+                &identity,
                 "secret",
             ))
             .unwrap(),
@@ -2520,6 +2654,7 @@ mod tests {
                 &k8s_config,
                 "snowflake-secret",
                 &app_name,
+                &identity,
                 "secret",
                 None,
             ),
@@ -2527,12 +2662,14 @@ mod tests {
                 &k8s_config,
                 "bigquery-secret",
                 &app_name,
+                &identity,
                 "secret",
             ),
             create_iceberg_secret_json(
                 &k8s_config,
                 "iceberg-secret",
                 &app_name,
+                &identity,
                 "secret",
                 "secret",
                 "secret",
@@ -2541,19 +2678,24 @@ mod tests {
                 &k8s_config,
                 "ducklake-secret",
                 &app_name,
+                &identity,
                 "secret",
                 "secret",
                 "secret",
             ),
-            create_replicator_config_map_json(&k8s_config, "replicator-config", &app_name, vec![]),
+            create_replicator_config_map_json(
+                &k8s_config,
+                "replicator-config",
+                &app_name,
+                &identity,
+                vec![],
+            ),
             create_ducklake_maintenance_json(
                 &k8s_config,
                 &prefix,
                 "ducklake-maintenance",
+                &identity,
                 DuckLakeMaintenanceResourceConfig {
-                    tenant_id: TENANT_ID.to_owned(),
-                    pipeline_id: PIPELINE_ID,
-                    replicator_id: PIPELINE_ID,
                     image: "example.com/replicator:custom".to_owned(),
                     policy: DuckLakeMaintenancePolicy::default(),
                 },
@@ -2598,8 +2740,7 @@ mod tests {
         let stateful_set = create_replicator_stateful_set_json(
             &k8s_config,
             &prefix,
-            TENANT_ID,
-            PIPELINE_ID,
+            &identity,
             &create_stateful_set_name(&prefix),
             "example.com/replicator:custom",
             container_environment,
@@ -2685,11 +2826,13 @@ mod tests {
         let secret_name = &create_postgres_secret_name(&prefix);
         let replicator_app_name = create_replicator_app_name(&prefix);
         let encoded_postgres_password = "dGVzdC1wYXNzd29yZA==";
+        let identity = replicator_identity_with(TENANT_ID, 42, 42);
 
         let secret_json = create_postgres_secret_json(
             &default_k8s_config(),
             secret_name,
             &replicator_app_name,
+            &identity,
             encoded_postgres_password,
         );
 
@@ -2704,11 +2847,13 @@ mod tests {
         let secret_name = &create_bq_secret_name(&prefix);
         let replicator_app_name = create_replicator_app_name(&prefix);
         let encoded_bq_service_account_key = "ewogICJrZXkiOiAidmFsdWUiCn0=";
+        let identity = replicator_identity_with(TENANT_ID, 42, 42);
 
         let secret_json = create_bq_service_account_key_secret_json(
             &default_k8s_config(),
             secret_name,
             &replicator_app_name,
+            &identity,
             encoded_bq_service_account_key,
         );
 
@@ -2725,11 +2870,13 @@ mod tests {
         let encoded_catalog_token = "ZXlKMGVYQWlPaUpLVjFRaUxDSmhiR2NpT2lKRlV6STFOaUlzSW10cFpDSTZJakZrTnpGak1HRXlObUl4TURGak9EUTVaVGt4Wm1RMU5qZGpZakE1TlRKbUluMC5leUpsZUhBaU9qSXdOekEzTVRjeE5qQXNJbWxoZENJNk1UYzFOakUwTlRFMU1Dd2lhWE56SWpvaWMzVndZV0poYzJVaUxDSnlaV1lpT2lKaFltTmtaV1puYUdscWJHdHRibTl3Y1hKemRDSXNJbkp2YkdVaU9pSnpaWEoyYVdObFgzSnZiR1VpZlEuWWRUV2trSXZ3alNrWG90M05DMDd4eWpQakdXUU1OekxxNUVQenVtenJkTHp1SHJqLXp1ekktbmx5UXRRNVY3Z1phdXlzbS13R3dtcHp0UlhmUGMzQVE=";
         let encoded_s3_access_key_id = "Y2FlNGY0NjliNTY5MjJhMTNmMzNiNjM3YTNjMWU2ZjI=";
         let encoded_s3_secret_access_key = "NDUyOWE3ZmMwNzY2NDBjODRiZTgzZGJiNGMyNDI3MTNhOTk0MzE5OTBjYzJmMzIzMGM4MzVjOGJmZjAzYWE2ZQ==";
+        let identity = replicator_identity_with(TENANT_ID, 42, 42);
 
         let secret_json = create_iceberg_secret_json(
             &default_k8s_config(),
             secret_name,
             &replicator_app_name,
+            &identity,
             encoded_catalog_token,
             encoded_s3_access_key_id,
             encoded_s3_secret_access_key,
@@ -2794,6 +2941,7 @@ mod tests {
         let replicator_config_without_secrets: ReplicatorConfigWithoutSecrets =
             replicator_config.into();
         let env_config = serde_json::to_string(&replicator_config_without_secrets).unwrap();
+        let identity = replicator_identity_with(TENANT_ID, 42, 42);
 
         let files = vec![
             ReplicatorConfigMapFile {
@@ -2810,6 +2958,7 @@ mod tests {
             &default_k8s_config(),
             &replicator_config_map_name,
             &replicator_app_name,
+            &identity,
             files,
         );
 
@@ -2827,10 +2976,8 @@ mod tests {
             &default_k8s_config(),
             &prefix,
             &name,
+            &replicator_identity_with(TENANT_ID, 24, 42),
             DuckLakeMaintenanceResourceConfig {
-                tenant_id: TENANT_ID.to_owned(),
-                pipeline_id: 24,
-                replicator_id: 42,
                 image: "supabase/replicator:1.2.3".to_owned(),
                 policy: DuckLakeMaintenancePolicy {
                     min_interval_seconds: 3600,
@@ -3140,10 +3287,12 @@ mod tests {
     fn snowflake_secret_contains_private_key() {
         let private_key = "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----";
         let encoded_private_key = BASE64_STANDARD.encode(private_key);
+        let identity = replicator_identity_with("tenant", 42, 42);
         let snowflake_secret_json = create_snowflake_secret_json(
             &default_k8s_config(),
             "tenant-42-snowflake",
             "tenant-42-replicator-app",
+            &identity,
             &encoded_private_key,
             None,
         );
@@ -3172,10 +3321,12 @@ mod tests {
         let passphrase = "my-passphrase";
         let encoded_private_key = BASE64_STANDARD.encode(private_key);
         let encoded_passphrase = BASE64_STANDARD.encode(passphrase);
+        let identity = replicator_identity_with("tenant", 42, 42);
         let snowflake_secret_json = create_snowflake_secret_json(
             &default_k8s_config(),
             "tenant-42-snowflake",
             "tenant-42-replicator-app",
+            &identity,
             &encoded_private_key,
             Some(&encoded_passphrase),
         );
@@ -3204,12 +3355,12 @@ mod tests {
     fn replicator_stateful_set_applies_optional_scheduling_constraints() {
         let resources =
             ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Dev).unwrap();
+        let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
         let create_stateful_set = |node_selector, tolerations| {
             create_replicator_stateful_set_json(
                 &default_k8s_config(),
                 "tenant-1-42",
-                "tenant-1",
-                42,
+                &identity,
                 "tenant-1-42-replicator",
                 "example.com/replicator:latest",
                 Vec::new(),
@@ -3273,11 +3424,11 @@ mod tests {
     fn replicator_stateful_set_allows_in_place_cpu_and_memory_resize() {
         let resources =
             ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Dev).unwrap();
+        let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
         let stateful_set = create_replicator_stateful_set_json(
             &default_k8s_config(),
             "tenant-1-42",
-            "tenant-1",
-            42,
+            &identity,
             "tenant-1-42-replicator",
             "example.com/replicator:latest",
             Vec::new(),
@@ -3304,11 +3455,11 @@ mod tests {
 
     #[test]
     fn replicator_vertical_pod_autoscaler_applies_requests_and_limits_in_place() {
+        let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
         let autoscaler = create_replicator_vertical_pod_autoscaler_json(
             &default_k8s_config(),
             "tenant-1-42",
-            "tenant-1",
-            42,
+            &identity,
             "tenant-1-42-replicator",
         )
         .unwrap();
@@ -3422,6 +3573,7 @@ mod tests {
     #[test]
     fn test_create_bq_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let identity = pipeline_runtime_identity();
         let stateful_set_name = create_stateful_set_name(&prefix);
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
@@ -3454,8 +3606,7 @@ mod tests {
         let stateful_set_json = create_replicator_stateful_set_json(
             &default_k8s_config(),
             &prefix,
-            TENANT_ID,
-            PIPELINE_ID,
+            &identity,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -3472,6 +3623,7 @@ mod tests {
             &stateful_set_json,
             TENANT_ID,
             PIPELINE_ID,
+            REPLICATOR_ID,
         );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
@@ -3504,8 +3656,7 @@ mod tests {
         let stateful_set_json = create_replicator_stateful_set_json(
             &default_k8s_config(),
             &prefix,
-            TENANT_ID,
-            PIPELINE_ID,
+            &identity,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -3522,6 +3673,7 @@ mod tests {
             &stateful_set_json,
             TENANT_ID,
             PIPELINE_ID,
+            REPLICATOR_ID,
         );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
@@ -3554,8 +3706,7 @@ mod tests {
         let stateful_set_json = create_replicator_stateful_set_json(
             &default_k8s_config(),
             &prefix,
-            TENANT_ID,
-            PIPELINE_ID,
+            &identity,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -3572,6 +3723,7 @@ mod tests {
             &stateful_set_json,
             TENANT_ID,
             PIPELINE_ID,
+            REPLICATOR_ID,
         );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
@@ -3579,6 +3731,7 @@ mod tests {
     #[test]
     fn test_create_iceberg_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let identity = pipeline_runtime_identity();
         let stateful_set_name = create_stateful_set_name(&prefix);
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
@@ -3611,8 +3764,7 @@ mod tests {
         let stateful_set_json = create_replicator_stateful_set_json(
             &default_k8s_config(),
             &prefix,
-            TENANT_ID,
-            PIPELINE_ID,
+            &identity,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -3629,6 +3781,7 @@ mod tests {
             &stateful_set_json,
             TENANT_ID,
             PIPELINE_ID,
+            REPLICATOR_ID,
         );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
@@ -3661,8 +3814,7 @@ mod tests {
         let stateful_set_json = create_replicator_stateful_set_json(
             &default_k8s_config(),
             &prefix,
-            TENANT_ID,
-            PIPELINE_ID,
+            &identity,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -3679,6 +3831,7 @@ mod tests {
             &stateful_set_json,
             TENANT_ID,
             PIPELINE_ID,
+            REPLICATOR_ID,
         );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
@@ -3711,8 +3864,7 @@ mod tests {
         let stateful_set_json = create_replicator_stateful_set_json(
             &default_k8s_config(),
             &prefix,
-            TENANT_ID,
-            PIPELINE_ID,
+            &identity,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -3729,6 +3881,7 @@ mod tests {
             &stateful_set_json,
             TENANT_ID,
             PIPELINE_ID,
+            REPLICATOR_ID,
         );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
@@ -3736,6 +3889,7 @@ mod tests {
     #[test]
     fn test_create_ducklake_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let identity = pipeline_runtime_identity();
         let stateful_set_name = create_stateful_set_name(&prefix);
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
@@ -3768,8 +3922,7 @@ mod tests {
         let stateful_set_json = create_replicator_stateful_set_json(
             &default_k8s_config(),
             &prefix,
-            TENANT_ID,
-            PIPELINE_ID,
+            &identity,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -3786,6 +3939,7 @@ mod tests {
             &stateful_set_json,
             TENANT_ID,
             PIPELINE_ID,
+            REPLICATOR_ID,
         );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
@@ -3818,8 +3972,7 @@ mod tests {
         let stateful_set_json = create_replicator_stateful_set_json(
             &default_k8s_config(),
             &prefix,
-            TENANT_ID,
-            PIPELINE_ID,
+            &identity,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -3836,6 +3989,7 @@ mod tests {
             &stateful_set_json,
             TENANT_ID,
             PIPELINE_ID,
+            REPLICATOR_ID,
         );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
@@ -3868,8 +4022,7 @@ mod tests {
         let stateful_set_json = create_replicator_stateful_set_json(
             &default_k8s_config(),
             &prefix,
-            TENANT_ID,
-            PIPELINE_ID,
+            &identity,
             &stateful_set_name,
             replicator_image,
             container_environment,
@@ -3886,6 +4039,7 @@ mod tests {
             &stateful_set_json,
             TENANT_ID,
             PIPELINE_ID,
+            REPLICATOR_ID,
         );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
