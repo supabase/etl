@@ -12,6 +12,8 @@ use crate::schema::{SnapshotId, TableId};
 #[derive(Debug, Clone, Copy, Type, PartialEq, Eq)]
 #[sqlx(type_name = "etl.destination_table_schema_status", rename_all = "snake_case")]
 pub enum StoredDestinationTableSchemaStatus {
+    /// The destination table is being created for the first time.
+    Creating,
     /// A schema change is currently being applied.
     Applying,
     /// The schema has been successfully applied.

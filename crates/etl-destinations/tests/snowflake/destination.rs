@@ -328,8 +328,8 @@ async fn write_table_rows_basic() {
         let metadata =
             harness.store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
         assert!(metadata.is_applied());
-        assert_eq!(metadata.snapshot_id, schema.inner().snapshot_id);
-        assert_eq!(&metadata.replication_mask, schema.replication_mask());
+        assert_eq!(metadata.snapshot_id(), schema.inner().snapshot_id);
+        assert_eq!(metadata.replication_mask(), schema.replication_mask());
 
         // The empty write is the table-wide durability barrier.
         let status = invoke_write_table_rows(&harness.destination, &schema, vec![]).await.unwrap();
@@ -666,11 +666,12 @@ async fn cold_open_rejects_unexpected_column() {
 
         let metadata = harness
             .store
-            .get_applied_destination_table_metadata(table_id)
+            .get_destination_table_metadata(table_id)
             .await
             .unwrap()
             .expect("destination metadata should remain applied");
-        assert_eq!(metadata.snapshot_id, SnapshotId::initial());
+        assert!(metadata.is_applied());
+        assert_eq!(metadata.snapshot_id(), SnapshotId::initial());
     })
     .await;
 }
@@ -841,9 +842,10 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
         assert_eq!(rows[1][1], serde_json::Value::String("bob@example.com".into()));
 
         let final_metadata =
-            harness.store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
-        assert_eq!(final_metadata.snapshot_id, new_snapshot_id);
-        assert_eq!(final_metadata.replication_mask, *evolved_replicated.replication_mask());
+            harness.store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+        assert!(final_metadata.is_applied());
+        assert_eq!(final_metadata.snapshot_id(), new_snapshot_id);
+        assert_eq!(final_metadata.replication_mask(), evolved_replicated.replication_mask());
     })
     .await;
 }

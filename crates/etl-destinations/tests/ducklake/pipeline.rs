@@ -965,9 +965,9 @@ async fn schema_change_add_column() {
     pipeline.start().await.unwrap();
     table_sync_complete_notify.notified().await;
 
-    let initial_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
-    let initial_snapshot_id = initial_metadata.snapshot_id;
+    let initial_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(initial_metadata.is_applied());
+    let initial_snapshot_id = initial_metadata.snapshot_id();
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -1002,9 +1002,9 @@ async fn schema_change_add_column() {
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 
-    let final_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
-    assert!(final_metadata.snapshot_id > initial_snapshot_id);
+    let final_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(final_metadata.is_applied());
+    assert!(final_metadata.snapshot_id() > initial_snapshot_id);
 
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(

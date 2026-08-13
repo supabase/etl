@@ -2006,9 +2006,10 @@ async fn schema_change_add_column_defaults() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     let destination_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
+        store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(destination_metadata.is_applied());
     let defaults = bigquery_database
-        .query_column_defaults_by_id(&destination_metadata.destination_table_id)
+        .query_column_defaults_by_id(destination_metadata.destination_table_id())
         .await;
     assert_eq!(
         defaults
@@ -2143,9 +2144,10 @@ async fn publication_mask_adds_nullable_columns_with_future_only_defaults() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     let destination_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
+        store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(destination_metadata.is_applied());
     let defaults = bigquery_database
-        .query_column_defaults_by_id(&destination_metadata.destination_table_id)
+        .query_column_defaults_by_id(destination_metadata.destination_table_id())
         .await;
     assert_eq!(
         defaults
@@ -2338,9 +2340,10 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     let destination_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
+        store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(destination_metadata.is_applied());
     let defaults = bigquery_database
-        .query_column_defaults_by_id(&destination_metadata.destination_table_id)
+        .query_column_defaults_by_id(destination_metadata.destination_table_id())
         .await;
     assert_eq!(
         defaults
@@ -2423,9 +2426,9 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
 
     table_sync_complete_notify.notified().await;
 
-    let initial_state =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
-    let initial_snapshot_id = initial_state.snapshot_id;
+    let initial_state = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(initial_state.is_applied());
+    let initial_snapshot_id = initial_state.snapshot_id();
 
     // Insert the initial row.
     let events_notify = destination
@@ -2506,10 +2509,10 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let final_state =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
+    let final_state = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(final_state.is_applied());
     // Applying the relation must advance the durable destination schema.
-    assert!(final_state.snapshot_id > initial_snapshot_id);
+    assert!(final_state.snapshot_id() > initial_snapshot_id);
 
     let table_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
     // A successful plan must consume every planner-generated temporary column.

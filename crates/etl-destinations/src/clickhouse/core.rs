@@ -3,9 +3,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
-        DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
+        DropTableForCopyResult, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -562,7 +561,7 @@ pub struct ClickHouseDestination<S> {
     /// `write_table_rows` / `write_events` call.
     inserter_config: ClickHouseInserterConfig,
     /// Schema/state store used to persist destination table metadata
-    /// (Applying / Applied) and to look up replicated schemas.
+    /// (Creating / Applying / Applied) and to look up replicated schemas.
     store: Arc<S>,
     /// ClickHouse table name -> per-column nullable flags (in column order,
     /// including the two trailing CDC columns which are always `false`).
@@ -626,14 +625,14 @@ where
     /// operation is crash-recoverable.
     ///
     /// Sequence:
-    /// 1. Persist `Applying` metadata (so a crash between this write and step 3
+    /// 1. Persist `Creating` metadata (so a crash between this write and step 3
     ///    leaves a marker that lets restart logic detect the interrupted
     ///    operation).
     /// 2. Execute `CREATE TABLE IF NOT EXISTS` against ClickHouse.
     /// 3. Persist `Applied` metadata.
     ///
     /// Recovery is handled by `ensure_table_exists`: on restart, an
-    /// `Applying` row signals that the previous run died mid-creation, so
+    /// `Creating` row signals that the previous run died mid-creation, so
     /// it re-runs the idempotent DDL and transitions the metadata to
     /// `Applied` itself.
     async fn create_table_with_metadata(
@@ -644,7 +643,7 @@ where
         snapshot_id: etl::schema::SnapshotId,
         replication_mask: etl::schema::ReplicationMask,
     ) -> EtlResult<()> {
-        let metadata = DestinationTableMetadata::new_applying(
+        let metadata = DestinationTableMetadata::new_creating(
             clickhouse_table_name.to_owned(),
             snapshot_id,
             replication_mask,
@@ -784,8 +783,8 @@ where
                 .await?;
             }
             Some(metadata) => {
-                if metadata.is_applying() {
-                    self.recover_applying_metadata(
+                if metadata.is_pending() {
+                    self.recover_pending_metadata(
                         table_id,
                         &clickhouse_table_name,
                         schema,
@@ -832,21 +831,26 @@ where
     ///
     /// ClickHouse DDL is nontransactional, so intermediate operation prefixes
     /// require manual recovery rather than replaying the plan from the start.
-    async fn recover_applying_metadata(
+    async fn recover_pending_metadata(
         &self,
         table_id: TableId,
         clickhouse_table_name: &str,
         schema: &ReplicatedTableSchema,
         metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
-        warn!("table {} has applying metadata, recovering interrupted operation", table_id);
+        warn!("table {} has pending metadata, recovering interrupted operation", table_id);
 
         ensure_clickhouse_recovery_schema_matches(table_id, schema, &metadata)?;
 
-        match metadata.previous_snapshot_id {
-            Some(prev_snapshot_id) => {
+        match metadata.schema().clone() {
+            DestinationTableSchema::Applying {
+                previous_snapshot_id,
+                previous_replication_mask,
+                ..
+            } => {
                 // Recovery replays the interrupted diff from the previous
                 // snapshot to the target snapshot recorded in the metadata.
+                let prev_snapshot_id = previous_snapshot_id;
                 let old_table_schema =
                     self.store.get_table_schema(&table_id, prev_snapshot_id).await?.ok_or_else(
                         || {
@@ -862,18 +866,6 @@ where
                         },
                     )?;
                 let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
-                let previous_replication_mask =
-                    metadata.previous_replication_mask.clone().ok_or_else(|| {
-                        etl_error!(
-                            ErrorKind::InvalidState,
-                            "ClickHouse cannot recover pre-migration Applying metadata",
-                            format!(
-                                "Table {table_id} began a schema change before ETL persisted the \
-                                 previous replication mask. Resynchronize the table because the \
-                                 previous logical projection cannot be reconstructed safely."
-                            )
-                        )
-                    })?;
                 let old_schema = ReplicatedTableSchema::from_mask(
                     Arc::clone(&old_table_schema),
                     previous_replication_mask,
@@ -939,8 +931,15 @@ where
                     }
                 }
             }
-            None => {
+            DestinationTableSchema::Creating { .. } => {
                 self.issue_create_table_stmt(clickhouse_table_name, schema).await?;
+            }
+            DestinationTableSchema::Applied { .. } => {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "ClickHouse recovery received applied destination metadata",
+                    format!("Table {table_id} does not have an interrupted destination operation")
+                ));
             }
         }
 
@@ -1069,15 +1068,15 @@ where
         // A relation event identifies the exact target schema through its
         // snapshot ID and replication mask. It can therefore resume an
         // interrupted change without inventing a DML event sequence key.
-        if metadata.is_applying() {
-            let clickhouse_table_name = metadata.destination_table_id.clone();
-            self.recover_applying_metadata(table_id, &clickhouse_table_name, new_schema, metadata)
+        if metadata.is_pending() {
+            let clickhouse_table_name = metadata.destination_table_id().to_owned();
+            self.recover_pending_metadata(table_id, &clickhouse_table_name, new_schema, metadata)
                 .await?;
             return Ok(());
         }
 
-        let current_snapshot_id = metadata.snapshot_id;
-        let current_replication_mask = metadata.replication_mask.clone();
+        let current_snapshot_id = metadata.snapshot_id();
+        let current_replication_mask = metadata.replication_mask().clone();
 
         // At-least-once delivery can replay an older relation or an
         // equal-snapshot mask from a deployment that missed its logical schema
@@ -1128,7 +1127,7 @@ where
             current_replication_mask.clone(),
         );
 
-        let clickhouse_table_name = &metadata.destination_table_id;
+        let clickhouse_table_name = metadata.destination_table_id();
         let plan = current_schema.plan_schema_change(new_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
         ensure_clickhouse_renames_are_supported(clickhouse_table_name, &plan)?;
         ensure_clickhouse_additions_are_supported(clickhouse_table_name, &plan)?;
@@ -1142,15 +1141,11 @@ where
         }
         // Mark as Applying before DDL changes.
         let updated_metadata = DestinationTableMetadata::new_applied(
-            clickhouse_table_name.clone(),
+            clickhouse_table_name.to_owned(),
             current_snapshot_id,
             current_replication_mask,
         )
-        .with_schema_change(
-            new_snapshot_id,
-            new_replication_mask,
-            DestinationTableSchemaStatus::Applying,
-        );
+        .with_schema_change(new_snapshot_id, new_replication_mask);
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
         if let Err(err) =
@@ -1972,8 +1967,8 @@ fn ensure_clickhouse_recovery_schema_matches(
 ) -> EtlResult<()> {
     let arriving_snapshot_id = schema.inner().snapshot_id;
     let arriving_replication_mask = schema.replication_mask();
-    if arriving_snapshot_id == metadata.snapshot_id
-        && arriving_replication_mask == &metadata.replication_mask
+    if arriving_snapshot_id == metadata.snapshot_id()
+        && arriving_replication_mask == metadata.replication_mask()
     {
         return Ok(());
     }
@@ -1986,8 +1981,8 @@ fn ensure_clickhouse_recovery_schema_matches(
              replication mask {}, but received snapshot {} and replication mask {}. Resynchronize \
              the table to recover.",
             table_id,
-            metadata.snapshot_id,
-            metadata.replication_mask,
+            metadata.snapshot_id(),
+            metadata.replication_mask(),
             arriving_snapshot_id,
             arriving_replication_mask
         )
@@ -2111,7 +2106,7 @@ mod tests {
     #[test]
     fn initial_creation_recovery_rejects_a_different_schema_target() {
         let arriving_schema = replicated_schema(IdentityType::PrimaryKey);
-        let metadata = DestinationTableMetadata::new_applying(
+        let metadata = DestinationTableMetadata::new_creating(
             "public_users".to_owned(),
             test_snapshot_id(1_u64, 1_u64),
             arriving_schema.replication_mask().clone(),

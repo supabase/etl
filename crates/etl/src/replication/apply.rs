@@ -41,8 +41,9 @@ use crate::{
     bail,
     data::SizeHint,
     destination::{
-        ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DestinationWriteStatus,
-        PendingWriteEventsResult, PipelineDestination, WriteEventsDurability, WriteEventsResult,
+        ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DestinationTableSchema,
+        DestinationWriteStatus, PendingWriteEventsResult, PipelineDestination,
+        WriteEventsDurability, WriteEventsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -1809,10 +1810,14 @@ where
 
             // An applying schema change may still need both endpoints for recovery, so
             // retain from the earlier destination snapshot.
-            let destination_retention_snapshot_id = destination_table_metadata
-                .previous_snapshot_id
-                .unwrap_or(destination_table_metadata.snapshot_id)
-                .min(destination_table_metadata.snapshot_id);
+            let destination_snapshot_id = destination_table_metadata.snapshot_id();
+            let destination_retention_snapshot_id = match destination_table_metadata.schema() {
+                DestinationTableSchema::Applying { previous_snapshot_id, .. } => {
+                    (*previous_snapshot_id).min(destination_snapshot_id)
+                }
+                DestinationTableSchema::Creating { .. }
+                | DestinationTableSchema::Applied { .. } => destination_snapshot_id,
+            };
 
             let retention_snapshot_id = schema_cleanup_retention_snapshot_id(
                 persisted_checkpoint_lsn,

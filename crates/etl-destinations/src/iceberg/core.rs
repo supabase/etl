@@ -7,9 +7,9 @@ use std::{
 use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
-        AppliedDestinationTableMetadata, Destination, DestinationTableMetadata,
-        DestinationWriteStatus, DropTableForCopyResult, TaskSet, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
+        DropTableForCopyResult, TaskSet, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -209,8 +209,7 @@ where
         // If no metadata exists, it means the table was never created in Iceberg (e.g.,
         // due to errors during copy). In this case, we skip the truncate since
         // there's nothing to truncate.
-        let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await?
-        else {
+        let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
             warn!(
                 %table_id,
                 "skipping truncate because no metadata exists (table was likely never created)",
@@ -218,7 +217,7 @@ where
             return Ok(());
         };
         ensure_iceberg_relation_is_unchanged(&metadata, replicated_table_schema)?;
-        let iceberg_table_name = metadata.destination_table_id;
+        let iceberg_table_name = metadata.destination_table_id().to_owned();
 
         let namespace = schema_to_namespace(&replicated_table_schema.name().schema);
         let namespace = inner.namespace.get_or(&namespace);
@@ -253,7 +252,7 @@ where
         };
         let iceberg_table_name =
             if let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? {
-                metadata.destination_table_id
+                metadata.destination_table_id().to_owned()
             } else {
                 default_table_name
             };
@@ -370,7 +369,7 @@ where
                     Event::Relation(relation) => {
                         let table_id = relation.replicated_table_schema.id();
                         let Some(metadata) =
-                            self.store.get_applied_destination_table_metadata(table_id).await?
+                            self.store.get_destination_table_metadata(table_id).await?
                         else {
                             return Err(etl_error!(
                                 ErrorKind::CorruptedTableSchema,
@@ -453,8 +452,8 @@ where
     /// avoid redundant table creation checks and holds a lock during the entire
     /// preparation to prevent race conditions.
     ///
-    /// Follows the applying -> applied pattern for crash recovery:
-    /// 1. Store metadata with `Applying` status before creating the table
+    /// Follows the creating -> applied pattern for crash recovery:
+    /// 1. Store metadata with `Creating` status before creating the table
     /// 2. Create the table
     /// 3. Update metadata to `Applied` after successful creation
     async fn prepare_table_for_streaming(
@@ -474,7 +473,7 @@ where
         let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
         let iceberg_table_name = existing_metadata
             .as_ref()
-            .map_or(iceberg_table_name, |metadata| metadata.destination_table_id.clone());
+            .map_or(iceberg_table_name, |metadata| metadata.destination_table_id().to_owned());
 
         // We prepare the namespace.
         let namespace = schema_to_namespace(&table_name.schema);
@@ -494,8 +493,7 @@ where
             if !metadata.is_applied() {
                 inner.created_tables.remove(&table_id);
             } else {
-                let applied_metadata = metadata.into_applied()?;
-                ensure_iceberg_relation_is_unchanged(&applied_metadata, replicated_table_schema)?;
+                ensure_iceberg_relation_is_unchanged(&metadata, replicated_table_schema)?;
                 debug!(
                     "iceberg table {iceberg_table_name} found in creation cache, skipping \
                      existence check"
@@ -505,26 +503,31 @@ where
             }
         }
 
-        let applying_metadata = match existing_metadata {
+        let creating_metadata = match existing_metadata {
             Some(metadata) if metadata.is_applied() => {
-                let applied_metadata = metadata.into_applied()?;
-                ensure_iceberg_relation_is_unchanged(&applied_metadata, replicated_table_schema)?;
+                ensure_iceberg_relation_is_unchanged(&metadata, replicated_table_schema)?;
                 None
             }
             Some(metadata) => {
-                if metadata.previous_snapshot_id.is_some() {
-                    return Err(etl_error!(
-                        ErrorKind::InvalidState,
-                        "Iceberg cannot recover an interrupted schema change",
-                        format!(
-                            "Table {table_id} has schema-change Applying metadata, but the \
-                             deprecated Iceberg destination does not support schema evolution. \
-                             Resynchronize the table to recover."
-                        )
-                    ));
+                match metadata.schema() {
+                    DestinationTableSchema::Applying { .. } => {
+                        return Err(etl_error!(
+                            ErrorKind::InvalidState,
+                            "Iceberg cannot recover an interrupted schema change",
+                            format!(
+                                "Table {table_id} has schema-change Applying metadata, but the \
+                                 deprecated Iceberg destination does not support schema \
+                                 evolution. Resynchronize the table to recover."
+                            )
+                        ));
+                    }
+                    DestinationTableSchema::Creating { .. } => {}
+                    DestinationTableSchema::Applied { .. } => unreachable!(
+                        "applied Iceberg metadata should be handled by the preceding match arm"
+                    ),
                 }
-                if metadata.snapshot_id != snapshot_id
-                    || metadata.replication_mask != replication_mask
+                if metadata.snapshot_id() != snapshot_id
+                    || metadata.replication_mask() != &replication_mask
                 {
                     return Err(etl_error!(
                         ErrorKind::DestinationSchemaRewind,
@@ -533,8 +536,8 @@ where
                             "Table {table_id} is being created for snapshot {} and replication \
                              mask {}, but received snapshot {snapshot_id} and replication mask \
                              {}. Resynchronize the table to recover.",
-                            metadata.snapshot_id,
-                            metadata.replication_mask,
+                            metadata.snapshot_id(),
+                            metadata.replication_mask(),
                             replicated_table_schema.replication_mask(),
                         )
                     ));
@@ -542,7 +545,7 @@ where
                 Some(metadata)
             }
             None => {
-                let metadata = DestinationTableMetadata::new_applying(
+                let metadata = DestinationTableMetadata::new_creating(
                     iceberg_table_name.clone(),
                     snapshot_id,
                     replication_mask,
@@ -559,7 +562,7 @@ where
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
-        if let Some(metadata) = applying_metadata {
+        if let Some(metadata) = creating_metadata {
             self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
         }
 
@@ -695,30 +698,41 @@ where
 
 /// Accepts an idempotent Iceberg relation and rejects every schema transition.
 fn ensure_iceberg_relation_is_unchanged(
-    metadata: &AppliedDestinationTableMetadata,
+    metadata: &DestinationTableMetadata,
     new_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
     let table_id = new_schema.id();
     let new_snapshot_id = new_schema.inner().snapshot_id;
     let new_replication_mask = new_schema.replication_mask();
+    let DestinationTableSchema::Applied { snapshot_id, replication_mask } = metadata.schema()
+    else {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "Iceberg destination table schema is not applied",
+            format!(
+                "Table {table_id} has schema state '{:?}'; resynchronize the table to recover",
+                metadata.schema()
+            )
+        ));
+    };
 
     ensure_relation_schema_transition(
         "Iceberg",
         table_id,
-        metadata.snapshot_id,
-        &metadata.replication_mask,
+        *snapshot_id,
+        replication_mask,
         new_snapshot_id,
         new_replication_mask,
     )?;
 
-    if metadata.snapshot_id != new_snapshot_id {
+    if *snapshot_id != new_snapshot_id {
         return Err(etl_error!(
             ErrorKind::CorruptedTableSchema,
             "Schema changes not supported",
             format!(
                 "Iceberg destination does not support schema changes. Table {} schema changed \
                  from snapshot {} to {}.",
-                table_id, metadata.snapshot_id, new_snapshot_id
+                table_id, snapshot_id, new_snapshot_id
             )
         ));
     }
@@ -840,7 +854,7 @@ mod tests {
 
     use etl::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
-        destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+        destination::DestinationTableMetadata,
         error::ErrorKind,
         event::EventSequenceKey,
         schema::{
@@ -901,13 +915,20 @@ mod tests {
     #[test]
     fn iceberg_relation_accepts_only_identical_applied_schema() {
         let schema = replicated_schema();
+        let creating_metadata = DestinationTableMetadata::new_creating(
+            "public_users_changelog".to_owned(),
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        let creating_error =
+            ensure_iceberg_relation_is_unchanged(&creating_metadata, &schema).unwrap_err();
+        assert_eq!(creating_error.kind(), ErrorKind::InvalidState);
+
         let metadata = DestinationTableMetadata::new_applied(
             "public_users_changelog".to_owned(),
             schema.inner().snapshot_id,
             schema.replication_mask().clone(),
-        )
-        .into_applied()
-        .unwrap();
+        );
 
         ensure_iceberg_relation_is_unchanged(&metadata, &schema).unwrap();
 
@@ -922,14 +943,11 @@ mod tests {
             ensure_iceberg_relation_is_unchanged(&metadata, &newer_schema).unwrap_err();
         assert_eq!(newer_error.kind(), ErrorKind::CorruptedTableSchema);
 
-        let newer_metadata: AppliedDestinationTableMetadata =
-            DestinationTableMetadata::new_applied(
-                "public_users_changelog".to_owned(),
-                test_snapshot_id(2_u64, 2_u64),
-                schema.replication_mask().clone(),
-            )
-            .into_applied()
-            .unwrap();
+        let newer_metadata = DestinationTableMetadata::new_applied(
+            "public_users_changelog".to_owned(),
+            test_snapshot_id(2_u64, 2_u64),
+            schema.replication_mask().clone(),
+        );
         let stale_error =
             ensure_iceberg_relation_is_unchanged(&newer_metadata, &schema).unwrap_err();
         assert_eq!(stale_error.kind(), ErrorKind::DestinationSchemaRewind);

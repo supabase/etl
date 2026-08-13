@@ -103,7 +103,6 @@ pub trait StateStore {
 
     // Destination table metadata
     fn get_destination_table_metadata(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<DestinationTableMetadata>>> + Send;
-    fn get_applied_destination_table_metadata(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<AppliedDestinationTableMetadata>>> + Send;
     fn load_destination_tables_metadata(&self) -> impl Future<Output = EtlResult<usize>> + Send;
     fn store_destination_table_metadata(&self, table_id: TableId, metadata: DestinationTableMetadata) -> impl Future<Output = EtlResult<()>> + Send;
 }
@@ -135,12 +134,11 @@ lets the worker resume safely after a restart.
 
 ### Destination Metadata Methods
 
-Destination table metadata connects source table IDs to destination state, including the **destination table identifier**, the **schema snapshot under management**, the **schema status** (`Applying` or `Applied`), and the **replication mask**. Only `AppliedDestinationTableMetadata` guarantees the destination schema is ready for normal reads and writes.
+Destination table metadata connects source table IDs to destination state. Its schema is explicitly `Creating`, `Applying`, or `Applied`; each variant contains the snapshots and replication masks required for that state. Destinations match the schema variant and decide whether to recover or reject an incomplete operation.
 
 | Method | Purpose |
 |--------|---------|
 | `get_destination_table_metadata()` | Returns destination table metadata for a source table from cache |
-| `get_applied_destination_table_metadata()` | Returns destination table metadata only when the destination schema is fully applied. If metadata exists but is still `Applying`, this returns an error |
 | `load_destination_tables_metadata()` | Loads destination table metadata from persistent storage into cache. Call once during startup |
 | `store_destination_table_metadata()` | Saves destination table metadata to both cache and persistent storage |
 

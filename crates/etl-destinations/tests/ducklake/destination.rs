@@ -28,7 +28,7 @@ use chrono::NaiveDate;
 use duckdb::Connection;
 use etl::{
     data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
-    destination::{Destination, DestinationTableMetadata, DestinationTableSchemaStatus},
+    destination::{Destination, DestinationTableMetadata, DestinationTableSchema},
     error::ErrorKind,
     event::{DeleteEvent, Event},
     schema::{
@@ -1228,7 +1228,6 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
     .with_schema_change(
         new_schema.snapshot_id,
         new_replicated_table_schema.replication_mask().clone(),
-        DestinationTableSchemaStatus::Applying,
     );
     store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
 
@@ -1254,7 +1253,7 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
 
     let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+    assert_eq!(metadata.snapshot_id(), new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut statement = conn
@@ -1329,7 +1328,6 @@ async fn write_events_rejects_mismatched_relation_before_applying_recovery() {
     .with_schema_change(
         target_schema.snapshot_id,
         target_replicated_table_schema.replication_mask().clone(),
-        DestinationTableSchemaStatus::Applying,
     );
     store.store_destination_table_metadata(old_schema.id, applying_metadata.clone()).await.unwrap();
 
@@ -1417,7 +1415,7 @@ async fn write_events_rejects_stale_relation_before_reverse_ddl() {
 
     let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+    assert_eq!(metadata.snapshot_id(), new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut statement = conn
@@ -1760,7 +1758,7 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
 
     let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+    assert_eq!(metadata.snapshot_id(), new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut statement = conn
@@ -2149,7 +2147,6 @@ async fn startup_after_restart_recovers_applying_schema_change() {
     .with_schema_change(
         new_schema.snapshot_id,
         new_replicated_table_schema.replication_mask().clone(),
-        DestinationTableSchemaStatus::Applying,
     );
     store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
 
@@ -2161,7 +2158,7 @@ async fn startup_after_restart_recovers_applying_schema_change() {
 
     let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+    assert_eq!(metadata.snapshot_id(), new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
@@ -2220,11 +2217,7 @@ async fn startup_after_restart_recovers_publication_mask_expansion() {
         previous_schema.snapshot_id,
         previous_mask,
     )
-    .with_schema_change(
-        target_schema.snapshot_id,
-        target_mask.clone(),
-        DestinationTableSchemaStatus::Applying,
-    );
+    .with_schema_change(target_schema.snapshot_id, target_mask.clone());
     store.store_destination_table_metadata(previous_schema.id, applying_metadata).await.unwrap();
 
     destination.shutdown().await.unwrap();
@@ -2249,10 +2242,9 @@ async fn startup_after_restart_recovers_publication_mask_expansion() {
 
     let metadata = store.get_destination_table_metadata(previous_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, target_schema.snapshot_id);
-    assert_eq!(metadata.replication_mask, target_mask);
-    assert_eq!(metadata.previous_snapshot_id, None);
-    assert_eq!(metadata.previous_replication_mask, None);
+    assert_eq!(metadata.snapshot_id(), target_schema.snapshot_id);
+    assert_eq!(metadata.replication_mask(), &target_mask);
+    assert!(matches!(metadata.schema(), DestinationTableSchema::Applied { .. }));
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let rows = conn
@@ -2350,7 +2342,6 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
     .with_schema_change(
         new_schema.snapshot_id,
         new_replicated_table_schema.replication_mask().clone(),
-        DestinationTableSchemaStatus::Applying,
     );
     store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
 
@@ -2369,7 +2360,7 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
 
     let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+    assert_eq!(metadata.snapshot_id(), new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "ddl_col_4_0"]);
@@ -2427,7 +2418,6 @@ async fn startup_after_restart_rejects_applying_schema_change_with_pruned_previo
     .with_schema_change(
         new_schema.snapshot_id,
         new_replicated_table_schema.replication_mask().clone(),
-        DestinationTableSchemaStatus::Applying,
     );
     store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
 
@@ -2441,9 +2431,13 @@ async fn startup_after_restart_rejects_applying_schema_change_with_pruned_previo
 
     let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applying());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
-    assert_eq!(metadata.previous_snapshot_id, Some(missing_previous_snapshot_id));
-    assert_eq!(metadata.replication_mask, new_replicated_table_schema.replication_mask().clone());
+    assert_eq!(metadata.snapshot_id(), new_schema.snapshot_id);
+    assert!(matches!(
+        metadata.schema(),
+        DestinationTableSchema::Applying { previous_snapshot_id, .. }
+            if *previous_snapshot_id == missing_previous_snapshot_id
+    ));
+    assert_eq!(metadata.replication_mask(), new_replicated_table_schema.replication_mask());
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name"]);
@@ -2451,31 +2445,31 @@ async fn startup_after_restart_rejects_applying_schema_change_with_pruned_previo
 
 /// Startup should recover an interrupted initial table creation.
 #[tokio::test(flavor = "multi_thread")]
-async fn startup_after_restart_recovers_initial_applying_metadata() {
-    let lake = create_test_lake("startup_after_restart_recovers_initial_applying_metadata").await;
+async fn startup_after_restart_recovers_creating_metadata() {
+    let lake = create_test_lake("startup_after_restart_recovers_creating_metadata").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
-    let base_schema = make_schema(45, "public", "restart_initial_applying");
+    let base_schema = make_schema(45, "public", "restart_creating");
     let schema = make_schema_with_email(&base_schema, 46);
     let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema.clone()).await.unwrap();
-    let applying_metadata = DestinationTableMetadata::new_applying(
+    let creating_metadata = DestinationTableMetadata::new_creating(
         table_name.to_metadata_id().unwrap(),
         schema.snapshot_id,
         replicated_table_schema.replication_mask().clone(),
     );
-    store.store_destination_table_metadata(schema.id, applying_metadata).await.unwrap();
+    store.store_destination_table_metadata(schema.id, creating_metadata).await.unwrap();
 
     let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     restarted_destination.startup().await.unwrap();
 
     let metadata = store.get_destination_table_metadata(schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, schema.snapshot_id);
+    assert_eq!(metadata.snapshot_id(), schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);

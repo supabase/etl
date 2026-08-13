@@ -108,7 +108,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use etl::{
-    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    destination::DestinationTableMetadata,
     error::{ErrorKind, EtlResult},
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
@@ -298,16 +298,6 @@ impl StateStore for CustomStore {
         Ok(tables
             .get(&table_id)
             .and_then(|e| e.destination_metadata.clone()))
-    }
-
-    async fn get_applied_destination_table_metadata(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
-        self.get_destination_table_metadata(table_id)
-            .await?
-            .map(|metadata| metadata.into_applied())
-            .transpose()
     }
 
     async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {

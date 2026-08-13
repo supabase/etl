@@ -9,9 +9,9 @@ use std::{
 use etl::{
     data::{OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
-        DestinationWriteStatus, DropTableForCopyResult, TaskSet, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
+        DropTableForCopyResult, TaskSet, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -1902,9 +1902,9 @@ where
                     )
                 )
             })?;
-        let table_name = DuckLakeTableName::from_metadata_id(&metadata.destination_table_id)?;
-        let metadata = if metadata.is_applying() {
-            self.recover_applying_metadata(
+        let table_name = DuckLakeTableName::from_metadata_id(metadata.destination_table_id())?;
+        let metadata = if metadata.is_pending() {
+            self.recover_pending_metadata(
                 table_id,
                 &table_name,
                 metadata,
@@ -1915,8 +1915,8 @@ where
             metadata
         };
 
-        let current_snapshot_id = metadata.snapshot_id;
-        let current_replication_mask = metadata.replication_mask.clone();
+        let current_snapshot_id = metadata.snapshot_id();
+        let current_replication_mask = metadata.replication_mask().clone();
 
         // A relation carries no durable DML sequence key. Reject both schema
         // rewind and an equal-snapshot mask conflict before either can drive
@@ -1974,11 +1974,7 @@ where
             current_snapshot_id,
             current_replication_mask,
         )
-        .with_schema_change(
-            new_snapshot_id,
-            new_replication_mask,
-            DestinationTableSchemaStatus::Applying,
-        );
+        .with_schema_change(new_snapshot_id, new_replication_mask);
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
         if let Err(error) = self.apply_schema_plan(&table_name, &plan).await {
@@ -2301,21 +2297,23 @@ where
                 continue;
             };
 
-            let table_name = DuckLakeTableName::from_metadata_id(&metadata.destination_table_id)?;
-            if metadata.is_applying() {
-                self.recover_applying_metadata(table_id, &table_name, metadata, None).await?;
+            let table_name = DuckLakeTableName::from_metadata_id(metadata.destination_table_id())?;
+            if metadata.is_pending() {
+                self.recover_pending_metadata(table_id, &table_name, metadata, None).await?;
                 continue;
             }
 
             let target_table_schema = self
                 .load_exact_table_schema(
                     table_id,
-                    metadata.snapshot_id,
+                    metadata.snapshot_id(),
                     "DuckLake startup schema not found",
                 )
                 .await?;
-            let target_schema =
-                ReplicatedTableSchema::from_mask(target_table_schema, metadata.replication_mask);
+            let target_schema = ReplicatedTableSchema::from_mask(
+                target_table_schema,
+                metadata.replication_mask().clone(),
+            );
 
             self.issue_create_table_stmt(&table_name, &target_schema).await?;
             self.reconcile_missing_replicated_columns(&table_name, &target_schema).await?;
@@ -2638,7 +2636,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         validate_ducklake_table_shape(replicated_table_schema)?;
-        let metadata = DestinationTableMetadata::new_applying(
+        let metadata = DestinationTableMetadata::new_creating(
             table_name.to_metadata_id()?,
             replicated_table_schema.inner().snapshot_id,
             replicated_table_schema.replication_mask().clone(),
@@ -2751,8 +2749,8 @@ where
         if let Some(schema) = provided_target_schema {
             let arriving_snapshot_id = schema.inner().snapshot_id;
             let arriving_replication_mask = schema.replication_mask();
-            if arriving_snapshot_id == metadata.snapshot_id
-                && arriving_replication_mask == &metadata.replication_mask
+            if arriving_snapshot_id == metadata.snapshot_id()
+                && arriving_replication_mask == metadata.replication_mask()
             {
                 return Ok(schema.clone());
             }
@@ -2765,8 +2763,8 @@ where
                      replication mask {}, but received snapshot {} and replication mask {}. \
                      Resynchronize the table to recover.",
                     table_id,
-                    metadata.snapshot_id,
-                    metadata.replication_mask,
+                    metadata.snapshot_id(),
+                    metadata.replication_mask(),
                     arriving_snapshot_id,
                     arriving_replication_mask
                 )
@@ -2776,17 +2774,20 @@ where
         let target_table_schema = self
             .load_exact_table_schema(
                 table_id,
-                metadata.snapshot_id,
+                metadata.snapshot_id(),
                 "DuckLake schema recovery target schema not found",
             )
             .await?;
 
-        Ok(ReplicatedTableSchema::from_mask(target_table_schema, metadata.replication_mask.clone()))
+        Ok(ReplicatedTableSchema::from_mask(
+            target_table_schema,
+            metadata.replication_mask().clone(),
+        ))
     }
 
     /// Replays interrupted DuckLake DDL and transitions metadata back to
     /// `Applied`.
-    async fn recover_applying_metadata(
+    async fn recover_pending_metadata(
         &self,
         table_id: TableId,
         table_name: &DuckLakeTableName,
@@ -2796,29 +2797,21 @@ where
         warn!(
             table_id = %table_id,
             table = %table_name,
-            "ducklake table has Applying metadata, recovering interrupted operation"
+            "ducklake table has pending metadata, recovering interrupted operation"
         );
 
         let target_schema =
             self.target_schema_for_recovery(table_id, &metadata, target_schema).await?;
 
-        match metadata.previous_snapshot_id {
-            Some(previous_snapshot_id) => {
+        match metadata.schema().clone() {
+            DestinationTableSchema::Applying {
+                previous_snapshot_id,
+                previous_replication_mask,
+                ..
+            } => {
                 let previous_table_schema = self
                     .load_previous_recovery_table_schema(table_id, previous_snapshot_id)
                     .await?;
-                let previous_replication_mask =
-                    metadata.previous_replication_mask.clone().ok_or_else(|| {
-                        etl_error!(
-                            ErrorKind::InvalidState,
-                            "DuckLake cannot recover pre-migration Applying metadata",
-                            format!(
-                                "Table {table_id} began a schema change before ETL persisted the \
-                                 previous replication mask. Resynchronize the table because the \
-                                 previous logical projection cannot be reconstructed safely."
-                            )
-                        )
-                    })?;
                 let old_schema = ReplicatedTableSchema::from_mask(
                     previous_table_schema,
                     previous_replication_mask,
@@ -2828,8 +2821,15 @@ where
                 ensure_ducklake_schema_plan_recoverable(table_name, &plan)?;
                 self.apply_schema_plan(table_name, &plan).await?;
             }
-            None => {
+            DestinationTableSchema::Creating { .. } => {
                 self.issue_create_table_stmt(table_name, &target_schema).await?;
+            }
+            DestinationTableSchema::Applied { .. } => {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake recovery received applied destination metadata",
+                    format!("Table {table_id} does not have an interrupted destination operation")
+                ));
             }
         }
         self.reconcile_missing_replicated_columns(table_name, &target_schema).await?;
@@ -2853,10 +2853,10 @@ where
         let metadata = self.store.get_destination_table_metadata(table_id).await?;
         let table_name = metadata.as_ref().map_or_else(
             || table_name_to_ducklake_table_name(replicated_table_schema.name()),
-            |metadata| DuckLakeTableName::from_metadata_id(&metadata.destination_table_id),
+            |metadata| DuckLakeTableName::from_metadata_id(metadata.destination_table_id()),
         )?;
 
-        if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_applying)
+        if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_pending)
             && self.created_tables.lock().contains(&table_name)
         {
             return Ok(table_name);
@@ -2876,10 +2876,10 @@ where
         let metadata = self.store.get_destination_table_metadata(table_id).await?;
         let table_name = metadata.as_ref().map_or_else(
             || table_name_to_ducklake_table_name(replicated_table_schema.name()),
-            |metadata| DuckLakeTableName::from_metadata_id(&metadata.destination_table_id),
+            |metadata| DuckLakeTableName::from_metadata_id(metadata.destination_table_id()),
         )?;
 
-        if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_applying)
+        if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_pending)
             && self.created_tables.lock().contains(&table_name)
         {
             return Ok(table_name);
@@ -2890,8 +2890,8 @@ where
                 self.create_table_with_metadata(table_id, &table_name, replicated_table_schema)
                     .await?;
             }
-            Some(metadata) if metadata.is_applying() => {
-                self.recover_applying_metadata(
+            Some(metadata) if metadata.is_pending() => {
+                self.recover_pending_metadata(
                     table_id,
                     &table_name,
                     metadata,
@@ -2919,9 +2919,9 @@ where
         let table_id = replicated_table_schema.id();
         if let Some(metadata) = self.store.get_destination_table_metadata(table_id).await?
             && metadata.is_applied()
-            && (metadata.snapshot_id < replicated_table_schema.inner().snapshot_id
-                || (metadata.snapshot_id == replicated_table_schema.inner().snapshot_id
-                    && &metadata.replication_mask != replicated_table_schema.replication_mask()))
+            && (metadata.snapshot_id() < replicated_table_schema.inner().snapshot_id
+                || (metadata.snapshot_id() == replicated_table_schema.inner().snapshot_id
+                    && metadata.replication_mask() != replicated_table_schema.replication_mask()))
         {
             self.handle_relation_event(replicated_table_schema).await?;
         }
@@ -2961,7 +2961,7 @@ where
         let table_id = replicated_table_schema.id();
 
         if let Some(existing) = self.store.get_destination_table_metadata(table_id).await? {
-            return DuckLakeTableName::from_metadata_id(&existing.destination_table_id);
+            return DuckLakeTableName::from_metadata_id(existing.destination_table_id());
         }
 
         table_name_to_ducklake_table_name(replicated_table_schema.name())

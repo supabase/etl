@@ -1709,9 +1709,9 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(initial_columns, vec!["id", "name", "age"]);
 
-    let initial_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
-    let initial_snapshot_id = initial_metadata.snapshot_id;
+    let initial_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(initial_metadata.is_applied());
+    let initial_snapshot_id = initial_metadata.snapshot_id();
 
     // --- WHEN: add column and insert with new schema ---
     let events_notify = destination
@@ -1768,9 +1768,9 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(final_columns, vec!["id", "name", "age", "email", "score"]);
 
-    let final_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
-    assert!(final_metadata.snapshot_id > initial_snapshot_id);
+    let final_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(final_metadata.is_applied());
+    assert!(final_metadata.snapshot_id() > initial_snapshot_id);
 
     let final_column_types = clickhouse_db.column_types(clickhouse_table_name).await;
     assert_eq!(
@@ -1988,9 +1988,9 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(initial_columns, vec!["id", "name", "age", "status"]);
 
-    let initial_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
-    let initial_snapshot_id = initial_metadata.snapshot_id;
+    let initial_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(initial_metadata.is_applied());
+    let initial_snapshot_id = initial_metadata.snapshot_id();
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -2066,10 +2066,10 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
     let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(final_columns, vec!["id", "status", "name", "age"]);
 
-    let final_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
+    let final_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(final_metadata.is_applied());
     // Applying the relation must advance the durable destination schema.
-    assert!(final_metadata.snapshot_id > initial_snapshot_id);
+    assert!(final_metadata.snapshot_id() > initial_snapshot_id);
 
     assert_eq!(
         rows,
@@ -2183,14 +2183,14 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
     pipeline.start().await.unwrap();
     table_sync_complete.notified().await;
 
-    let initial_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
-    let initial_snapshot_id = initial_metadata.snapshot_id;
+    let initial_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(initial_metadata.is_applied());
+    let initial_snapshot_id = initial_metadata.snapshot_id();
     let stale_table_schema =
         store.get_table_schema(&table_id, initial_snapshot_id).await.unwrap().unwrap();
     let stale_schema = ReplicatedTableSchema::from_mask(
         stale_table_schema,
-        initial_metadata.replication_mask.clone(),
+        initial_metadata.replication_mask().clone(),
     );
 
     // Add a column and stream one row that carries data in it.
@@ -2218,14 +2218,14 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let applied_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
-    let applied_snapshot_id = applied_metadata.snapshot_id;
+    let applied_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(applied_metadata.is_applied());
+    let applied_snapshot_id = applied_metadata.snapshot_id();
     assert!(
         applied_snapshot_id > initial_snapshot_id,
         "snapshot_id should increase after schema change"
     );
-    let clickhouse_table_name = applied_metadata.destination_table_id.clone();
+    let clickhouse_table_name = applied_metadata.destination_table_id().to_owned();
 
     // --- WHEN: a fresh destination on the same store replays the old relation ---
     let restarted_destination =
@@ -2257,10 +2257,11 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         "newer column data must survive the stale replay"
     );
 
-    let final_metadata =
-        store.get_applied_destination_table_metadata(table_id).await.unwrap().unwrap();
+    let final_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(final_metadata.is_applied());
     assert_eq!(
-        final_metadata.snapshot_id, applied_snapshot_id,
+        final_metadata.snapshot_id(),
+        applied_snapshot_id,
         "metadata must stay at the newer snapshot"
     );
 }
