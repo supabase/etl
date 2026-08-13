@@ -127,8 +127,21 @@ impl TableInitializer {
         // completed setup after the fast-path read.
         let snapshot_id = table_schema.inner().snapshot_id;
         let replication_mask = table_schema.replication_mask().clone();
+        schema::validate_no_cdc_collisions(&columns).map_err(EtlError::from)?;
         let applying_metadata = match store.get_destination_table_metadata(table_id).await? {
             None => {
+                if client.table_exists(&table_name).await.map_err(EtlError::from)? {
+                    bail!(
+                        ErrorKind::DestinationTableAlreadyExists,
+                        "Snowflake destination table already exists",
+                        format!(
+                            "Table {table_name} exists, but this pipeline has no destination \
+                             metadata proving ownership. Remove the table or use another \
+                             destination schema before retrying."
+                        )
+                    );
+                }
+
                 // Record ownership before creating remote state so a restart can
                 // find and remove a partial setup.
                 let metadata = DestinationTableMetadata::new_applying(
@@ -922,7 +935,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initial_setup_failure_leaves_metadata_applying() {
+    async fn interrupted_initial_setup_failure_preserves_metadata_applying() {
         let (destination, store) = test_destination();
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(2),
@@ -930,6 +943,12 @@ mod tests {
             vec![ColumnSchema::new("_cdc_operation".to_owned(), Type::TEXT, -1, 1, true)],
         ));
         let schema = ReplicatedTableSchema::all(table_schema);
+        let metadata = DestinationTableMetadata::new_applying(
+            try_stringify_table_name(schema.name()).unwrap().to_uppercase(),
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(schema.id(), metadata).await.unwrap();
 
         let error = destination.writer.initialize_table(&schema).await.unwrap_err();
 
@@ -947,6 +966,22 @@ mod tests {
             metadata.destination_table_id,
             try_stringify_table_name(schema.name()).unwrap().to_uppercase()
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_invalid_schema_is_rejected_before_remote_probe() {
+        let (destination, store) = test_destination();
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(4),
+            TableName::new("public".to_owned(), "reserved_column".to_owned()),
+            vec![ColumnSchema::new("_cdc_operation".to_owned(), Type::TEXT, -1, 1, true)],
+        ));
+        let schema = ReplicatedTableSchema::all(table_schema);
+
+        let error = destination.writer.initialize_table(&schema).await.unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
+        assert!(store.get_destination_table_metadata(schema.id()).await.unwrap().is_none());
     }
 
     /// A stale relation event must fail before driving reverse Snowflake DDL.
