@@ -31,6 +31,7 @@ fn create_ducklake_config(
 ) -> ApiDestinationConfig {
     ApiDestinationConfig::Ducklake {
         catalog_url: SerializableSecretString::from(catalog_url.to_string()),
+        catalog_pooler_url: None,
         data_path: "s3://bucket/path".to_owned(),
         pool_size: Some(1),
         s3_access_key_id: Some(SerializableSecretString::from("access-key".to_owned())),

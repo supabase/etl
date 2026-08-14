@@ -116,6 +116,7 @@ async fn set_ducklake_maintenance_mode(
     let updated_config = match dest_config {
         StoredDestinationConfig::Ducklake {
             catalog_url,
+            catalog_pooler_url,
             data_path,
             pool_size,
             s3_access_key_id,
@@ -131,6 +132,7 @@ async fn set_ducklake_maintenance_mode(
             table_sorting,
         } => StoredDestinationConfig::Ducklake {
             catalog_url,
+            catalog_pooler_url,
             data_path,
             pool_size,
             s3_access_key_id,
