@@ -108,15 +108,17 @@ pub struct ReplicatorAutoscalingConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplicatorAutoscalingUpdateMode {
-    /// Collect recommendations without applying them to Pods.
+    /// Publish recommendations without changing Pod resources.
     #[default]
     Off,
-    /// Apply recommendations only while Pods are being admitted.
+    /// Apply recommendations only when Pods are created.
     Initial,
-    /// Apply recommendations by recreating Pods.
+    /// Apply recommendations to new Pods and recreate running Pods when needed.
     Recreate,
-    /// Prefer in-place updates and recreate Pods when required.
+    /// Prefer in-place updates and fall back to recreating Pods when required.
     InPlaceOrRecreate,
+    /// Update running Pods only in place and never evict them.
+    InPlace,
 }
 
 impl ReplicatorAutoscalingUpdateMode {
@@ -127,6 +129,7 @@ impl ReplicatorAutoscalingUpdateMode {
             Self::Initial => "Initial",
             Self::Recreate => "Recreate",
             Self::InPlaceOrRecreate => "InPlaceOrRecreate",
+            Self::InPlace => "InPlace",
         }
     }
 }
@@ -609,17 +612,31 @@ mod tests {
 
     #[test]
     fn replicator_autoscaling_initial_update_mode_is_configurable() {
-        let config: ReplicatorAutoscalingConfig = serde_json::from_value(json!({
-            "initial_update_mode": "in_place_or_recreate",
-            "min_memory_mib": 768,
-            "max_memory_mib": 8192,
-            "min_cpu_millicores": 250,
-            "max_cpu_millicores": 2000
-        }))
-        .unwrap();
+        let modes = [
+            ("off", ReplicatorAutoscalingUpdateMode::Off, "Off"),
+            ("initial", ReplicatorAutoscalingUpdateMode::Initial, "Initial"),
+            ("recreate", ReplicatorAutoscalingUpdateMode::Recreate, "Recreate"),
+            (
+                "in_place_or_recreate",
+                ReplicatorAutoscalingUpdateMode::InPlaceOrRecreate,
+                "InPlaceOrRecreate",
+            ),
+            ("in_place", ReplicatorAutoscalingUpdateMode::InPlace, "InPlace"),
+        ];
 
-        assert_eq!(config.initial_update_mode, ReplicatorAutoscalingUpdateMode::InPlaceOrRecreate);
-        assert_eq!(config.initial_update_mode.as_k8s_value(), "InPlaceOrRecreate");
+        for (configured_mode, expected_mode, k8s_mode) in modes {
+            let config: ReplicatorAutoscalingConfig = serde_json::from_value(json!({
+                "initial_update_mode": configured_mode,
+                "min_memory_mib": 768,
+                "max_memory_mib": 8192,
+                "min_cpu_millicores": 250,
+                "max_cpu_millicores": 2000
+            }))
+            .unwrap();
+
+            assert_eq!(config.initial_update_mode, expected_mode);
+            assert_eq!(config.initial_update_mode.as_k8s_value(), k8s_mode);
+        }
     }
 
     #[test]

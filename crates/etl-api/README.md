@@ -158,11 +158,18 @@ allocation is clamped to `replicator_autoscaling` bounds. The same bounds are
 written to the VPA resource policy. CPU/memory requests always equal limits so
 every generated replicator Pod has Kubernetes Guaranteed QoS. VPA controls both
 requests and limits, preserving their initial 1:1 ratio when recommendations
-are enabled. `initial_update_mode` accepts `off`, `initial`, `recreate`, or
-`in_place_or_recreate` and applies only when a VPA is first created. Subsequent
-API reconciliation preserves the live update mode, allowing an operator or
-separate Kubernetes controller to manage transitions without the API resetting
-them. The default `off` mode publishes recommendations without applying them.
+are enabled. `initial_update_mode` accepts the supported Kubernetes VPA update
+modes below and applies only when a VPA is first created:
+
+- `off` publishes recommendations without changing Pods.
+- `initial` applies recommendations only when Pods are created.
+- `recreate` also updates running Pods by recreating them.
+- `in_place_or_recreate` tries an in-place update before recreating the Pod.
+- `in_place` only updates in place and requires the upstream VPA feature gate.
+
+Subsequent API reconciliation preserves the live update mode, allowing an
+operator or separate Kubernetes controller to manage transitions without the
+API resetting them. The default is `off`.
 `minReplicas: 1` permits disruption-aware recreation for enabled modes that may
 fall back to it. The global defaults should normally match the autoscaling
 maximum, so a new replicator begins with the full copy allocation. Explicit
