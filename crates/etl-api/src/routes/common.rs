@@ -9,8 +9,8 @@ use crate::{
     k8s::{
         K8sClient, SourceTlsConfig,
         core::{
-            create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
-            should_reconcile_replicator_resources,
+            create_k8s_object_prefix, create_or_update_pipeline_runtime_in_k8s,
+            should_reconcile_pipeline_runtime,
         },
     },
     routes::pipelines::PipelineError,
@@ -40,7 +40,7 @@ use crate::{
 /// If Kubernetes support is unavailable, or the pipeline has no active
 /// Kubernetes resources, the call returns `false` without reconciling.
 /// Otherwise, it returns `true` after the Kubernetes resources are reconciled.
-pub(crate) async fn restart_pipeline_replicator_if_running(
+pub(crate) async fn restart_replicator_if_running(
     connection: &mut sqlx::PgConnection,
     tenant_id: &str,
     pipeline_id: i64,
@@ -52,7 +52,7 @@ pub(crate) async fn restart_pipeline_replicator_if_running(
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(connection, tenant_id, pipeline_id, encryption_key).await?;
 
-    if !should_reconcile_replicator_resources(k8s_client, tenant_id, replicator.id).await? {
+    if !should_reconcile_pipeline_runtime(k8s_client, tenant_id, replicator.id).await? {
         return Ok(false);
     }
 
@@ -63,7 +63,7 @@ pub(crate) async fn restart_pipeline_replicator_if_running(
         k8s_client.delete_replicator_vertical_pod_autoscaler(&resource_prefix).await?;
     }
 
-    create_or_update_pipeline_resources_in_k8s(
+    create_or_update_pipeline_runtime_in_k8s(
         k8s_client,
         tenant_id,
         pipeline,
