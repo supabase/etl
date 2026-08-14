@@ -240,6 +240,7 @@ mod ducklake {
             expire_snapshots_older_than,
             maintenance_mode,
             table_sorting,
+            ..
         } = config
         else {
             unreachable!("Destination config should match DuckLake.");

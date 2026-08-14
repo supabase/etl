@@ -1095,6 +1095,7 @@ mod tests {
         };
         let destination_config = StoredDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from("postgres://catalog".to_owned()),
+            catalog_pooler_url: None,
             data_path: "s3://bucket/path".to_owned(),
             pool_size: 4,
             s3_access_key_id: Some(SerializableSecretString::from("key-id".to_owned())),
@@ -1143,6 +1144,7 @@ mod tests {
         };
         let destination_config = StoredDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from("postgres://catalog".to_owned()),
+            catalog_pooler_url: None,
             data_path: "s3://bucket/path".to_owned(),
             pool_size: 4,
             s3_access_key_id: None,

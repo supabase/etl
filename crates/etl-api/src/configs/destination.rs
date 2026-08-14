@@ -80,6 +80,14 @@ pub enum ApiDestinationConfig {
         #[schema(value_type = String, example = "postgres://localhost:5432/ducklake_catalog")]
         #[serde(deserialize_with = "crate::utils::trim_secret_string")]
         catalog_url: SerializableSecretString,
+        /// Optional transaction-pooler URL used by read/query runtimes.
+        #[schema(value_type = Option<String>)]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_secret_string"
+        )]
+        catalog_pooler_url: Option<SerializableSecretString>,
         #[schema(example = "s3://bucket/path")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         data_path: String,
@@ -449,6 +457,14 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_secret_string"
         )]
         catalog_url: UpdateField<SerializableSecretString>,
+        /// Optional transaction-pooler URL used by read/query runtimes.
+        #[schema(value_type = Option<String>)]
+        #[serde(
+            default,
+            skip_serializing_if = "UpdateField::is_preserve",
+            deserialize_with = "deserialize_update_secret_string"
+        )]
+        catalog_pooler_url: UpdateField<SerializableSecretString>,
         #[schema(example = "s3://bucket/path")]
         #[serde(
             default,
@@ -608,6 +624,7 @@ impl UpdateApiDestinationConfig {
             }
             ApiDestinationConfig::Ducklake {
                 catalog_url,
+                catalog_pooler_url,
                 data_path,
                 pool_size,
                 s3_access_key_id,
@@ -623,6 +640,7 @@ impl UpdateApiDestinationConfig {
                 table_sorting,
             } => Self::Ducklake {
                 catalog_url: UpdateField::Set(catalog_url),
+                catalog_pooler_url: UpdateField::from_option(catalog_pooler_url),
                 data_path: UpdateField::Set(data_path),
                 pool_size: UpdateField::from_option(pool_size),
                 s3_access_key_id: UpdateField::from_option(s3_access_key_id),
@@ -727,6 +745,7 @@ impl UpdateApiDestinationConfig {
             (
                 Self::Ducklake {
                     catalog_url,
+                    catalog_pooler_url,
                     data_path,
                     pool_size,
                     s3_access_key_id,
@@ -743,6 +762,7 @@ impl UpdateApiDestinationConfig {
                 },
                 StoredDestinationConfig::Ducklake {
                     catalog_url: stored_catalog_url,
+                    catalog_pooler_url: stored_catalog_pooler_url,
                     data_path: stored_data_path,
                     pool_size: stored_pool_size,
                     s3_access_key_id: stored_s3_access_key_id,
@@ -762,6 +782,7 @@ impl UpdateApiDestinationConfig {
                     stored_catalog_url,
                     required_field_cleared("DuckLake", "catalog_url"),
                 )?,
+                catalog_pooler_url: catalog_pooler_url.apply_to_option(stored_catalog_pooler_url),
                 data_path: data_path.apply_to_required(
                     stored_data_path,
                     required_field_cleared("DuckLake", "data_path"),
@@ -883,6 +904,7 @@ impl UpdateApiDestinationConfig {
                 .map(|config| StoredDestinationConfig::Iceberg { config }),
             Self::Ducklake {
                 catalog_url,
+                catalog_pooler_url,
                 data_path,
                 pool_size,
                 s3_access_key_id,
@@ -901,6 +923,7 @@ impl UpdateApiDestinationConfig {
                     missing_required_secret("DuckLake", "catalog_url"),
                     required_field_cleared("DuckLake", "catalog_url"),
                 )?,
+                catalog_pooler_url: catalog_pooler_url.apply_to_option(None),
                 data_path: data_path.into_required(
                     missing_required_field("DuckLake", "data_path"),
                     required_field_cleared("DuckLake", "data_path"),
@@ -1044,6 +1067,7 @@ impl From<StoredDestinationConfig> for ApiDestinationConfig {
             },
             StoredDestinationConfig::Ducklake {
                 catalog_url,
+                catalog_pooler_url,
                 data_path,
                 pool_size,
                 s3_access_key_id,
@@ -1059,6 +1083,7 @@ impl From<StoredDestinationConfig> for ApiDestinationConfig {
                 table_sorting,
             } => Self::Ducklake {
                 catalog_url,
+                catalog_pooler_url,
                 data_path,
                 pool_size: Some(pool_size),
                 s3_access_key_id,
@@ -1115,6 +1140,7 @@ impl From<StoredDestinationConfig> for StrippedApiDestinationConfig {
             StoredDestinationConfig::Iceberg { config } => Self::Iceberg { config: config.into() },
             StoredDestinationConfig::Ducklake {
                 catalog_url: _,
+                catalog_pooler_url: _,
                 data_path,
                 pool_size,
                 s3_access_key_id: _,
@@ -1175,6 +1201,7 @@ pub enum StoredDestinationConfig {
     },
     Ducklake {
         catalog_url: SerializableSecretString,
+        catalog_pooler_url: Option<SerializableSecretString>,
         data_path: String,
         pool_size: u32,
         s3_access_key_id: Option<SerializableSecretString>,
@@ -1265,6 +1292,7 @@ impl StoredDestinationConfig {
             },
             Self::Ducklake {
                 catalog_url,
+                catalog_pooler_url: _,
                 data_path,
                 pool_size,
                 s3_access_key_id,
@@ -1375,6 +1403,7 @@ impl From<ApiDestinationConfig> for StoredDestinationConfig {
             },
             ApiDestinationConfig::Ducklake {
                 catalog_url,
+                catalog_pooler_url,
                 data_path,
                 pool_size,
                 s3_access_key_id,
@@ -1390,6 +1419,7 @@ impl From<ApiDestinationConfig> for StoredDestinationConfig {
                 table_sorting,
             } => Self::Ducklake {
                 catalog_url,
+                catalog_pooler_url,
                 data_path,
                 pool_size: pool_size.unwrap_or(DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE),
                 s3_access_key_id,
@@ -1520,6 +1550,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
             },
             Self::Ducklake {
                 catalog_url,
+                catalog_pooler_url,
                 data_path,
                 pool_size,
                 s3_access_key_id,
@@ -1536,6 +1567,9 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
             } => {
                 let encrypted_catalog_url =
                     encrypt_text(catalog_url.expose_secret().to_owned(), encryption_key)?;
+                let encrypted_catalog_pooler_url = catalog_pooler_url
+                    .map(|value| encrypt_text(value.expose_secret().to_owned(), encryption_key))
+                    .transpose()?;
                 let s3_access_key_id = s3_access_key_id
                     .map(|value| encrypt_text(value.expose_secret().to_owned(), encryption_key))
                     .transpose()?;
@@ -1545,6 +1579,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
 
                 Ok(EncryptedStoredDestinationConfig::Ducklake {
                     catalog_url: encrypted_catalog_url,
+                    catalog_pooler_url: encrypted_catalog_pooler_url,
                     data_path,
                     pool_size,
                     s3_access_key_id,
@@ -1616,6 +1651,8 @@ pub enum EncryptedStoredDestinationConfig {
     },
     Ducklake {
         catalog_url: EncryptedValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        catalog_pooler_url: Option<EncryptedValue>,
         data_path: String,
         #[serde(default = "default_ducklake_pool_size")]
         pool_size: u32,
@@ -1766,6 +1803,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
             }
             Self::Ducklake {
                 catalog_url,
+                catalog_pooler_url,
                 data_path,
                 pool_size,
                 s3_access_key_id,
@@ -1784,6 +1822,11 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     catalog_url,
                     encryption_key,
                 )?),
+                catalog_pooler_url: catalog_pooler_url
+                    .map(|value| {
+                        decrypt_text(value, encryption_key).map(SerializableSecretString::from)
+                    })
+                    .transpose()?,
                 data_path,
                 pool_size,
                 s3_access_key_id: s3_access_key_id
@@ -2339,6 +2382,7 @@ mod tests {
             catalog_url: SerializableSecretString::from(
                 "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
             ),
+            catalog_pooler_url: None,
             data_path: "s3://bucket/path".to_owned(),
             pool_size: Some(4),
             s3_access_key_id: None,
@@ -2411,6 +2455,10 @@ mod tests {
                     "postgres://embedded-user:embedded-password@catalog.example.com/postgres"
                         .to_owned(),
                 ),
+                catalog_pooler_url: Some(SerializableSecretString::from(
+                    "postgres://embedded-user:embedded-password@pooler.example.com:6543/postgres"
+                        .to_owned(),
+                )),
                 data_path: "s3://example-bucket/path".to_owned(),
                 pool_size: 4,
                 s3_access_key_id: Some(SerializableSecretString::from(
@@ -2469,11 +2517,13 @@ mod tests {
             } => vec![s3_access_key_id.expose_secret(), s3_secret_access_key.expose_secret()],
             StoredDestinationConfig::Ducklake {
                 catalog_url,
+                catalog_pooler_url,
                 s3_access_key_id,
                 s3_secret_access_key,
                 ..
             } => {
                 let mut credentials = vec![catalog_url.expose_secret()];
+                credentials.extend(catalog_pooler_url.iter().map(|value| value.expose_secret()));
                 credentials.extend(s3_access_key_id.iter().map(|value| value.expose_secret()));
                 credentials.extend(s3_secret_access_key.iter().map(|value| value.expose_secret()));
                 credentials
@@ -2500,6 +2550,7 @@ mod tests {
                 "s3_access_key_id",
                 "s3_secret_access_key",
                 "catalog_url",
+                "catalog_pooler_url",
                 "private_key",
                 "private_key_passphrase",
             ] {
@@ -3419,6 +3470,9 @@ mod tests {
             catalog_url: SerializableSecretString::from(
                 "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
             ),
+            catalog_pooler_url: Some(SerializableSecretString::from(
+                "postgres://user:pass@pooler.example.test:6543/ducklake_catalog".to_owned(),
+            )),
             data_path: "s3://bucket/path".to_owned(),
             pool_size: 8,
             s3_access_key_id: Some(SerializableSecretString::from("access".to_owned())),
@@ -3446,6 +3500,7 @@ mod tests {
             (
                 StoredDestinationConfig::Ducklake {
                     catalog_url: c1,
+                    catalog_pooler_url: pooler1,
                     data_path: d1,
                     pool_size: p1,
                     s3_access_key_id: a1,
@@ -3462,6 +3517,7 @@ mod tests {
                 },
                 StoredDestinationConfig::Ducklake {
                     catalog_url: c2,
+                    catalog_pooler_url: pooler2,
                     data_path: d2,
                     pool_size: p2,
                     s3_access_key_id: a2,
@@ -3478,6 +3534,10 @@ mod tests {
                 },
             ) => {
                 assert_eq!(c1.expose_secret(), c2.expose_secret());
+                assert_eq!(
+                    pooler1.as_ref().map(|value| value.expose_secret()),
+                    pooler2.as_ref().map(|value| value.expose_secret())
+                );
                 assert_eq!(d1, d2);
                 assert_eq!(p1, p2);
                 assert_eq!(
@@ -3565,11 +3625,33 @@ mod tests {
     }
 
     #[test]
+    fn api_destination_config_preserves_optional_catalog_pooler_url() {
+        let config: ApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "ducklake": {
+                "catalog_url": "postgres://user:password@database.example.test:5432/postgres",
+                "catalog_pooler_url": "postgres://user.project-ref:password@pooler.example.test:6543/postgres",
+                "data_path": "s3://bucket/path"
+            }
+        }))
+        .unwrap();
+
+        let serialized = serde_json::to_value(config).unwrap();
+
+        assert_eq!(
+            serialized["ducklake"]["catalog_pooler_url"],
+            "postgres://user.project-ref:password@pooler.example.test:6543/postgres"
+        );
+    }
+
+    #[test]
     fn api_destination_config_conversion_ducklake() {
         let api_config = ApiDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from(
                 "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
             ),
+            catalog_pooler_url: Some(SerializableSecretString::from(
+                "postgres://user:pass@pooler.example.test:6543/ducklake_catalog".to_owned(),
+            )),
             data_path: "s3://bucket/path".to_owned(),
             pool_size: None,
             s3_access_key_id: None,
@@ -3627,6 +3709,9 @@ mod tests {
             catalog_url: SerializableSecretString::from(
                 "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
             ),
+            catalog_pooler_url: Some(SerializableSecretString::from(
+                "postgres://user:pass@pooler.example.test:6543/ducklake_catalog".to_owned(),
+            )),
             data_path: "s3://bucket/path".to_owned(),
             pool_size: Some(4),
             s3_access_key_id: Some(SerializableSecretString::from("access".to_owned())),
@@ -3650,6 +3735,7 @@ mod tests {
             (
                 ApiDestinationConfig::Ducklake {
                     catalog_url: c1,
+                    catalog_pooler_url: pooler1,
                     data_path: d1,
                     pool_size: p1,
                     s3_access_key_id: a1,
@@ -3666,6 +3752,7 @@ mod tests {
                 },
                 ApiDestinationConfig::Ducklake {
                     catalog_url: c2,
+                    catalog_pooler_url: pooler2,
                     data_path: d2,
                     pool_size: p2,
                     s3_access_key_id: a2,
@@ -3682,6 +3769,10 @@ mod tests {
                 },
             ) => {
                 assert_eq!(c1.expose_secret(), c2.expose_secret());
+                assert_eq!(
+                    pooler1.as_ref().map(|value| value.expose_secret()),
+                    pooler2.as_ref().map(|value| value.expose_secret())
+                );
                 assert_eq!(d1, &d2);
                 assert_eq!(p1, &p2);
                 assert_eq!(

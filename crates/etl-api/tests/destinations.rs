@@ -502,6 +502,7 @@ async fn ducklake_destination_update_preserves_and_clears_encrypted_fields() {
         name: "DuckLake Destination (Partial)".to_owned(),
         config: UpdateApiDestinationConfig::Ducklake {
             catalog_url: UpdateField::Preserve,
+            catalog_pooler_url: UpdateField::Preserve,
             data_path: UpdateField::Set("s3://ducklake/patched/".to_owned()),
             pool_size: UpdateField::Preserve,
             s3_access_key_id: UpdateField::Clear,
