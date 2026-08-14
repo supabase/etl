@@ -901,21 +901,21 @@ impl K8sClient for HttpK8sClient {
         let name = create_stateful_set_name(resource_prefix);
         let initial_update_mode =
             self.k8s_config.replicator_autoscaling.initial_update_mode.as_k8s_value();
-        debug!(vpa = %name, initial_update_mode, "creating or updating vertical pod autoscaler");
-
         let existing_vertical_pod_autoscaler =
             self.vertical_pod_autoscalers_api.get_opt(&name).await?;
+        let update_mode = existing_vertical_pod_autoscaler
+            .as_ref()
+            .and_then(vpa_update_mode)
+            .unwrap_or(initial_update_mode);
+
+        debug!(vpa = %name, update_mode, "creating or updating vertical pod autoscaler");
+
         let vertical_pod_autoscaler = create_replicator_vertical_pod_autoscaler_json(
             &self.k8s_config,
             resource_prefix,
             identity,
             &name,
-            Some(
-                existing_vertical_pod_autoscaler
-                    .as_ref()
-                    .and_then(vpa_update_mode)
-                    .unwrap_or(initial_update_mode),
-            ),
+            update_mode,
         )?;
 
         // We are forcing the update since we are the field manager that should own the
@@ -1995,16 +1995,11 @@ fn create_replicator_vertical_pod_autoscaler_json(
     prefix: &str,
     identity: &PipelineRuntimeIdentity,
     stateful_set_name: &str,
-    update_mode: Option<&str>,
+    update_mode: &str,
 ) -> Result<DynamicObject, serde_json::Error> {
     let replicator_app_name = create_replicator_app_name(prefix);
     let replicator_container_name = create_replicator_container_name(prefix);
     let identity_labels = create_replicator_identity_labels(&replicator_app_name, identity);
-
-    let mut update_policy = json!({"minReplicas": 1});
-    if let Some(update_mode) = update_mode {
-        update_policy["updateMode"] = json!(update_mode);
-    }
 
     serde_json::from_value(json!({
       "apiVersion": format!("{VERTICAL_POD_AUTOSCALER_GROUP}/{VERTICAL_POD_AUTOSCALER_VERSION}"),
@@ -2020,7 +2015,10 @@ fn create_replicator_vertical_pod_autoscaler_json(
           "kind": "StatefulSet",
           "name": stateful_set_name
         },
-        "updatePolicy": update_policy,
+        "updatePolicy": {
+          "updateMode": update_mode,
+          "minReplicas": 1
+        },
         "resourcePolicy": {
           "containerPolicies": [
             {
@@ -2603,7 +2601,7 @@ mod tests {
                         &prefix,
                         &identity,
                         &stateful_set_name,
-                        Some(ReplicatorAutoscalingUpdateMode::Off.as_k8s_value()),
+                        ReplicatorAutoscalingUpdateMode::Off.as_k8s_value(),
                     )
                     .unwrap(),
                 )
@@ -3484,7 +3482,7 @@ mod tests {
             "tenant-1-42",
             &identity,
             "tenant-1-42-replicator",
-            Some(ReplicatorAutoscalingUpdateMode::Off.as_k8s_value()),
+            ReplicatorAutoscalingUpdateMode::Off.as_k8s_value(),
         )
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();
@@ -3536,7 +3534,7 @@ mod tests {
             "tenant-1-42",
             &identity,
             "tenant-1-42-replicator",
-            vpa_update_mode(&live),
+            vpa_update_mode(&live).unwrap(),
         )
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();

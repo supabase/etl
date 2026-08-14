@@ -239,7 +239,8 @@ pub async fn is_replicator_pod_stopped(
     Ok(matches!(pod_status, PodStatus::Stopped))
 }
 
-/// Returns `true` if the existing Kubernetes pipeline runtime should be reconciled.
+/// Returns `true` if the existing Kubernetes pipeline runtime should be
+/// reconciled.
 ///
 /// A stopped pod normally means the pipeline is intentionally inactive. A
 /// StatefulSet without a pod means Kubernetes still has desired runtime state,
