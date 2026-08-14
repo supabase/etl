@@ -91,6 +91,9 @@ pub struct K8sConfig {
 /// converges them toward their steady-state usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct ReplicatorAutoscalingConfig {
+    /// Update mode assigned when a per-pipeline VPA is first created.
+    #[serde(default)]
+    pub initial_update_mode: ReplicatorAutoscalingUpdateMode,
     /// Minimum replicator memory allocation, in Mi.
     pub min_memory_mib: i32,
     /// Maximum replicator memory allocation, in Mi.
@@ -101,9 +104,37 @@ pub struct ReplicatorAutoscalingConfig {
     pub max_cpu_millicores: i32,
 }
 
+/// Kubernetes VPA update mode used for a newly created autoscaler.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicatorAutoscalingUpdateMode {
+    /// Collect recommendations without applying them to Pods.
+    #[default]
+    Off,
+    /// Apply recommendations only while Pods are being admitted.
+    Initial,
+    /// Apply recommendations by recreating Pods.
+    Recreate,
+    /// Prefer in-place updates and recreate Pods when required.
+    InPlaceOrRecreate,
+}
+
+impl ReplicatorAutoscalingUpdateMode {
+    /// Returns the value expected by the Kubernetes VPA API.
+    pub const fn as_k8s_value(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Initial => "Initial",
+            Self::Recreate => "Recreate",
+            Self::InPlaceOrRecreate => "InPlaceOrRecreate",
+        }
+    }
+}
+
 impl Default for ReplicatorAutoscalingConfig {
     fn default() -> Self {
         Self {
+            initial_update_mode: ReplicatorAutoscalingUpdateMode::Off,
             min_memory_mib: 768,
             max_memory_mib: 8 * 1024,
             min_cpu_millicores: 250,
@@ -563,6 +594,7 @@ mod tests {
     #[test]
     fn replicator_autoscaling_bounds_must_be_positive_and_ordered() {
         let invalid = ReplicatorAutoscalingConfig {
+            initial_update_mode: ReplicatorAutoscalingUpdateMode::Off,
             min_memory_mib: 1024,
             max_memory_mib: 512,
             min_cpu_millicores: 300,
@@ -573,6 +605,21 @@ mod tests {
 
         let invalid = ReplicatorAutoscalingConfig { min_memory_mib: 0, ..Default::default() };
         assert!(invalid.validate().unwrap_err().contains("must be greater than 0"));
+    }
+
+    #[test]
+    fn replicator_autoscaling_initial_update_mode_is_configurable() {
+        let config: ReplicatorAutoscalingConfig = serde_json::from_value(json!({
+            "initial_update_mode": "in_place_or_recreate",
+            "min_memory_mib": 768,
+            "max_memory_mib": 8192,
+            "min_cpu_millicores": 250,
+            "max_cpu_millicores": 2000
+        }))
+        .unwrap();
+
+        assert_eq!(config.initial_update_mode, ReplicatorAutoscalingUpdateMode::InPlaceOrRecreate);
+        assert_eq!(config.initial_update_mode.as_k8s_value(), "InPlaceOrRecreate");
     }
 
     #[test]

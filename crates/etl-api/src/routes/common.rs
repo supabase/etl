@@ -90,6 +90,7 @@ async fn restart_would_perform_table_sync(
             source_config.clone().into_connection_config(source_tls_config.get_tls_config());
         let source_pool = source_database::connect(&connection_config).await?;
         let state_rows = table_state::get_table_state_rows(&source_pool, pipeline_id).await?;
+        let mut would_perform_table_sync = false;
 
         for state_row in state_rows {
             let Some(metadata) = state_row.metadata else {
@@ -98,12 +99,10 @@ async fn restart_would_perform_table_sync(
             let state: TableState =
                 serde_json::from_value(metadata).map_err(PipelineError::InvalidTableState)?;
 
-            if state.as_type().would_perform_table_sync() {
-                return Ok(true);
-            }
+            would_perform_table_sync |= state.as_type().would_perform_table_sync();
         }
 
-        Ok(false)
+        Ok(would_perform_table_sync)
     }
     .await;
 
