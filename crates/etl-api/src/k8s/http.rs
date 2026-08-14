@@ -25,7 +25,7 @@ use thiserror::Error;
 use tracing::debug;
 
 #[cfg(test)]
-use crate::config::DefaultReplicatorResourcesConfig;
+use crate::config::{DefaultReplicatorResourcesConfig, ReplicatorAutoscalingUpdateMode};
 use crate::{
     config::{
         DefaultVectorResourcesConfig, K8sConfig, ReplicatorAutoscalingConfig,
@@ -898,15 +898,29 @@ impl K8sClient for HttpK8sClient {
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
     ) -> Result<(), K8sError> {
-        debug!("patching vertical pod autoscaler");
-
         let name = create_stateful_set_name(resource_prefix);
+        let initial_update_mode =
+            self.k8s_config.replicator_autoscaling.initial_update_mode.as_k8s_value();
+        let existing_vertical_pod_autoscaler =
+            self.vertical_pod_autoscalers_api.get_opt(&name).await?;
+        let update_mode = existing_vertical_pod_autoscaler
+            .as_ref()
+            .and_then(vpa_update_mode)
+            .unwrap_or(initial_update_mode);
+
+        debug!(vpa = %name, update_mode, "creating or updating vertical pod autoscaler");
+
         let vertical_pod_autoscaler = create_replicator_vertical_pod_autoscaler_json(
             &self.k8s_config,
             resource_prefix,
             identity,
             &name,
+            update_mode,
         )?;
+
+        // We are forcing the update since we are the field manager that should own the
+        // fields. If there is an override (likely during an incident or SREs
+        // intervention), we want to override their changes.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.vertical_pod_autoscalers_api
             .patch(&name, &pp, &Patch::Apply(vertical_pod_autoscaler))
@@ -1981,6 +1995,7 @@ fn create_replicator_vertical_pod_autoscaler_json(
     prefix: &str,
     identity: &PipelineRuntimeIdentity,
     stateful_set_name: &str,
+    update_mode: &str,
 ) -> Result<DynamicObject, serde_json::Error> {
     let replicator_app_name = create_replicator_app_name(prefix);
     let replicator_container_name = create_replicator_container_name(prefix);
@@ -2001,7 +2016,7 @@ fn create_replicator_vertical_pod_autoscaler_json(
           "name": stateful_set_name
         },
         "updatePolicy": {
-          "updateMode": "InPlaceOrRecreate",
+          "updateMode": update_mode,
           "minReplicas": 1
         },
         "resourcePolicy": {
@@ -2028,6 +2043,11 @@ fn create_replicator_vertical_pod_autoscaler_json(
         }
       }
     }))
+}
+
+/// Reads the update mode that API reconciliation must preserve.
+fn vpa_update_mode(vpa: &DynamicObject) -> Option<&str> {
+    vpa.data.pointer("/spec/updatePolicy/updateMode")?.as_str()
 }
 
 fn get_restarted_at_annotation_value() -> String {
@@ -2581,6 +2601,7 @@ mod tests {
                         &prefix,
                         &identity,
                         &stateful_set_name,
+                        ReplicatorAutoscalingUpdateMode::Off.as_k8s_value(),
                     )
                     .unwrap(),
                 )
@@ -3454,21 +3475,19 @@ mod tests {
     }
 
     #[test]
-    fn replicator_vertical_pod_autoscaler_applies_requests_and_limits_in_place() {
+    fn replicator_vertical_pod_autoscaler_starts_in_recommendation_only_mode() {
         let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
         let autoscaler = create_replicator_vertical_pod_autoscaler_json(
             &default_k8s_config(),
             "tenant-1-42",
             &identity,
             "tenant-1-42-replicator",
+            ReplicatorAutoscalingUpdateMode::Off.as_k8s_value(),
         )
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();
 
-        assert_eq!(
-            autoscaler.pointer("/spec/updatePolicy/updateMode"),
-            Some(&json!("InPlaceOrRecreate"))
-        );
+        assert_eq!(autoscaler.pointer("/spec/updatePolicy/updateMode"), Some(&json!("Off")));
         assert_eq!(autoscaler.pointer("/spec/updatePolicy/minReplicas"), Some(&json!(1)));
         assert_eq!(
             autoscaler.pointer("/spec/targetRef"),
@@ -3498,6 +3517,33 @@ mod tests {
             autoscaler.pointer("/spec/resourcePolicy/containerPolicies/1/mode"),
             Some(&json!("Off"))
         );
+    }
+
+    #[test]
+    fn replicator_vertical_pod_autoscaler_updates_preserve_live_mode() {
+        let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
+        let live: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "autoscaling.k8s.io/v1",
+            "kind": "VerticalPodAutoscaler",
+            "metadata": {"name": "tenant-1-42-replicator"},
+            "spec": {"updatePolicy": {"updateMode": "InPlaceOrRecreate"}}
+        }))
+        .unwrap();
+        let autoscaler = create_replicator_vertical_pod_autoscaler_json(
+            &default_k8s_config(),
+            "tenant-1-42",
+            &identity,
+            "tenant-1-42-replicator",
+            vpa_update_mode(&live).unwrap(),
+        )
+        .unwrap();
+        let autoscaler = serde_json::to_value(autoscaler).unwrap();
+
+        assert_eq!(
+            autoscaler.pointer("/spec/updatePolicy/updateMode"),
+            Some(&json!("InPlaceOrRecreate"))
+        );
+        assert_eq!(autoscaler.pointer("/spec/updatePolicy/minReplicas"), Some(&json!(1)));
     }
 
     #[test]

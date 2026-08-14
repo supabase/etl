@@ -45,12 +45,12 @@ use crate::{
     k8s::{
         DestinationType, K8sClient, K8sError, PodStatus, SourceTlsConfig,
         core::{
-            create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
-            delete_pipeline_resources_in_k8s, is_replicator_active,
+            create_k8s_object_prefix, create_or_update_pipeline_runtime_in_k8s,
+            delete_pipeline_runtime_in_k8s, is_replicator_active,
         },
     },
     routes::{
-        ErrorMessage, IntoInner, TenantIdError, common::restart_pipeline_replicator_if_running,
+        ErrorMessage, IntoInner, TenantIdError, common::restart_replicator_if_running,
         error_response_with_internal_error, extract_tenant_id, utils as route_utils,
     },
     utils::parse_docker_image_tag,
@@ -833,7 +833,7 @@ pub(crate) async fn update_pipeline(
     .await?
     .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
-    restart_pipeline_replicator_if_running(
+    restart_replicator_if_running(
         &mut txn,
         tenant_id,
         pipeline_id,
@@ -1012,7 +1012,7 @@ pub(crate) async fn start_pipeline(
 
     let tls_config = source_tls_config.get_tls_config();
 
-    create_or_update_pipeline_resources_in_k8s(
+    create_or_update_pipeline_runtime_in_k8s(
         k8s_client.as_ref(),
         tenant_id,
         pipeline,
@@ -1060,7 +1060,7 @@ pub(crate) async fn restart_pipeline(
     let pipeline_id = pipeline_id.into_inner();
 
     let mut connection = pool.acquire().await?;
-    let restarted = restart_pipeline_replicator_if_running(
+    let restarted = restart_replicator_if_running(
         &mut connection,
         tenant_id,
         pipeline_id,
@@ -1113,7 +1113,7 @@ pub(crate) async fn stop_pipeline(
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
-    delete_pipeline_resources_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
+    delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     txn.commit().await?;
 
     Ok(StatusCode::OK)
@@ -1144,7 +1144,7 @@ pub(crate) async fn stop_all_pipelines(
     let mut txn = pool.begin().await?;
     let replicators = data::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
     for replicator in replicators {
-        delete_pipeline_resources_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
+        delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     }
     txn.commit().await?;
 
@@ -1587,7 +1587,7 @@ pub(crate) async fn update_pipeline_version(
         return Ok(StatusCode::OK);
     }
 
-    restart_pipeline_replicator_if_running(
+    restart_replicator_if_running(
         &mut txn,
         tenant_id,
         pipeline_id,

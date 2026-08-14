@@ -1531,6 +1531,35 @@ async fn restarting_pipeline_preserves_vpa_when_source_inspection_fails() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_preserves_vpa_without_usable_table_state() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[
+            ("test_events", "data_sync", r#"{"type": "data_sync"}"#),
+            ("test_users", "ready", r#"{}"#),
+        ],
+    )
+    .await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_stopped_pipeline_cannot_be_restarted() {
     init_test_tracing();
     let k8s_state = MockK8sState::default();

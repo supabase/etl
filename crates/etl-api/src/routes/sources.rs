@@ -377,7 +377,7 @@ pub(crate) async fn update_source(
 
     let pipeline_ids = read_pipeline_ids_for_source(txn.deref_mut(), tenant_id, source_id).await?;
     for pipeline_id in pipeline_ids {
-        common::restart_pipeline_replicator_if_running(
+        common::restart_replicator_if_running(
             txn.deref_mut(),
             tenant_id,
             pipeline_id,

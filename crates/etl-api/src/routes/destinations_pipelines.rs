@@ -12,7 +12,7 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use super::{
-    ErrorMessage, IntoInner, TenantIdError, common::restart_pipeline_replicator_if_running,
+    ErrorMessage, IntoInner, TenantIdError, common::restart_replicator_if_running,
     error_response_with_internal_error, extract_tenant_id, utils,
 };
 use crate::{
@@ -420,7 +420,7 @@ pub(crate) async fn update_destination_and_pipeline(
         e => e.into(),
     })?;
 
-    restart_pipeline_replicator_if_running(
+    restart_replicator_if_running(
         &mut txn,
         tenant_id,
         pipeline_id,
