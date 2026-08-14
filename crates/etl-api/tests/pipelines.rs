@@ -39,7 +39,10 @@ use crate::support::{
         sources::create_source,
         tenants::{create_tenant, create_tenant_with_id_and_name},
     },
-    test_app::{TestApp, spawn_test_app, spawn_test_app_with_k8s_state},
+    test_app::{
+        TestApp, spawn_test_app, spawn_test_app_with_k8s_state,
+        spawn_test_app_with_simulator_tenants,
+    },
 };
 
 /// Finds a named property in a possibly composed OpenAPI schema.
@@ -1403,7 +1406,7 @@ async fn update_version_fails_for_non_existing_pipeline() {
 async fn update_version_fails_when_version_is_not_default() {
     init_test_tracing();
     // Arrange
-    let app = spawn_test_app().await;
+    let app = spawn_test_app_with_simulator_tenants(vec!["etl-sf-test-sim".to_owned()]).await;
     create_default_image(&app).await;
     let tenant_id = &create_tenant(&app).await;
     let source_id = create_source(&app, tenant_id).await;
@@ -1418,16 +1421,53 @@ async fn update_version_fails_when_version_is_not_default() {
     )
     .await;
 
-    // Create a non-default image
+    // Create a non-default image.
     let non_default_image_id =
         create_image_with_name(&app, "another/image".to_owned(), false).await;
 
-    // Act - attempt update with a non-default image id
+    // Act as a tenant that is not allowlisted.
     let update_request = UpdatePipelineVersionRequest { version_id: non_default_image_id };
     let response = app.update_pipeline_version(tenant_id, pipeline_id, &update_request).await;
 
-    // Assert - mismatching image id should be rejected
+    // Assert that another tenant's allowlisting does not expand access.
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn simulator_tenant_can_update_pipeline_to_registered_non_default_version() {
+    init_test_tracing();
+    // Arrange
+    let tenant_id = "etl-sf-test-sim".to_owned();
+    let app = spawn_test_app_with_simulator_tenants(vec![tenant_id.clone()]).await;
+    let default_image_id = create_default_image(&app).await;
+    create_tenant_with_id_and_name(&app, tenant_id.clone(), "Snowflake Simulator".to_owned()).await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+    let pipeline_id = create_pipeline_with_config(
+        &app,
+        &tenant_id,
+        source_id,
+        destination_id,
+        new_pipeline_config(),
+    )
+    .await;
+    let non_default_image_name = "public.ecr.aws/supabase/etl-replicator:experimental".to_owned();
+    let non_default_image_id =
+        create_image_with_name(&app, non_default_image_name.clone(), false).await;
+
+    // Act
+    let update_request = UpdatePipelineVersionRequest { version_id: non_default_image_id };
+    let response = app.update_pipeline_version(&tenant_id, pipeline_id, &update_request).await;
+
+    // Assert
+    assert!(response.status().is_success());
+    assert_eq!(app.k8s_state.last_replicator_image().await, Some(non_default_image_name));
+
+    let response = app.get_pipeline_version(&tenant_id, pipeline_id).await;
+    let version: GetPipelineVersionResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(version.version.id, non_default_image_id);
+    assert_eq!(version.new_version.map(|image| image.id), Some(default_image_id));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -34,6 +34,16 @@ pub struct ApiConfig {
     ///
     /// All keys in this list are considered valid for authentication.
     pub api_keys: Vec<String>,
+    /// Tenant IDs used by staging destination simulators.
+    ///
+    /// Pipelines belonging to these tenants may select registered non-default
+    /// replicator images so each simulator can test an experimental build
+    /// without changing the default image for other tenants.
+    ///
+    /// Production tenant IDs must never be included. An empty list preserves
+    /// the default-only image policy for every tenant.
+    #[serde(default)]
+    pub simulator_tenant_ids: Vec<String>,
     /// Optional Sentry configuration for error tracking.
     pub sentry: Option<SentryConfig>,
     /// Optional Supabase API URL for error notifications.
@@ -240,6 +250,11 @@ impl ApiConfig {
 
         Ok(())
     }
+
+    /// Returns whether `tenant_id` identifies an allowlisted staging simulator.
+    pub(crate) fn is_simulator_tenant(&self, tenant_id: &str) -> bool {
+        self.simulator_tenant_ids.iter().any(|id| id == tenant_id)
+    }
 }
 
 impl ReplicatorAutoscalingConfig {
@@ -356,7 +371,7 @@ pub struct SourceConfig {
 }
 
 impl Config for ApiConfig {
-    const LIST_PARSE_KEYS: &'static [&'static str] = &["api_keys"];
+    const LIST_PARSE_KEYS: &'static [&'static str] = &["api_keys", "simulator_tenant_ids"];
 }
 
 /// HTTP server configuration settings.
