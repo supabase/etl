@@ -74,6 +74,7 @@ pub(crate) mod destinations {
             catalog_url: SerializableSecretString::from(
                 "postgres://postgres:postgres@localhost:5432/postgres".to_owned(),
             ),
+            catalog_pooler_url: None,
             data_path: "s3://ducklake/".to_owned(),
             pool_size: Some(1),
             s3_access_key_id: Some(SerializableSecretString::from("access-key-id".to_owned())),
