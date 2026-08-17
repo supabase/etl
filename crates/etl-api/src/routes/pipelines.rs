@@ -45,12 +45,12 @@ use crate::{
     k8s::{
         DestinationType, K8sClient, K8sError, PodStatus, SourceTlsConfig,
         core::{
-            create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
-            delete_pipeline_resources_in_k8s, is_replicator_active,
+            create_k8s_object_prefix, create_or_update_pipeline_runtime_in_k8s,
+            delete_pipeline_runtime_in_k8s, is_replicator_active,
         },
     },
     routes::{
-        ErrorMessage, IntoInner, TenantIdError, common::restart_pipeline_replicator_if_running,
+        ErrorMessage, IntoInner, TenantIdError, common::restart_replicator_if_running,
         error_response_with_internal_error, extract_tenant_id, utils as route_utils,
     },
     utils::parse_docker_image_tag,
@@ -122,6 +122,9 @@ pub enum PipelineError {
 
     #[error("A pipeline already exists for this source and destination")]
     DuplicatePipeline,
+
+    #[error("The selected pipeline version is not available")]
+    ImageIdNotFound(i64),
 
     #[error("The selected pipeline version is not available")]
     ImageIdNotDefault(i64),
@@ -263,6 +266,7 @@ impl IntoResponse for PipelineError {
             | PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             PipelineError::PipelineNotFound(_)
             | PipelineError::EtlStateNotInitialized
+            | PipelineError::ImageIdNotFound(_)
             | PipelineError::ImageIdNotDefault(_)
             | PipelineError::DestinationNotFound(_)
             | PipelineError::SourceNotFound(_) => StatusCode::NOT_FOUND,
@@ -833,7 +837,7 @@ pub(crate) async fn update_pipeline(
     .await?
     .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
-    restart_pipeline_replicator_if_running(
+    restart_replicator_if_running(
         &mut txn,
         tenant_id,
         pipeline_id,
@@ -1012,7 +1016,7 @@ pub(crate) async fn start_pipeline(
 
     let tls_config = source_tls_config.get_tls_config();
 
-    create_or_update_pipeline_resources_in_k8s(
+    create_or_update_pipeline_runtime_in_k8s(
         k8s_client.as_ref(),
         tenant_id,
         pipeline,
@@ -1060,7 +1064,7 @@ pub(crate) async fn restart_pipeline(
     let pipeline_id = pipeline_id.into_inner();
 
     let mut connection = pool.acquire().await?;
-    let restarted = restart_pipeline_replicator_if_running(
+    let restarted = restart_replicator_if_running(
         &mut connection,
         tenant_id,
         pipeline_id,
@@ -1113,7 +1117,7 @@ pub(crate) async fn stop_pipeline(
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
-    delete_pipeline_resources_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
+    delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     txn.commit().await?;
 
     Ok(StatusCode::OK)
@@ -1144,7 +1148,7 @@ pub(crate) async fn stop_all_pipelines(
     let mut txn = pool.begin().await?;
     let replicators = data::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
     for replicator in replicators {
-        delete_pipeline_resources_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
+        delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     }
     txn.commit().await?;
 
@@ -1549,18 +1553,17 @@ pub(crate) async fn update_pipeline_version(
     let (_, replicator, current_image, _, destination) =
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
-    // Only allow updating to the current default image. The client must provide the
-    // version id and it must match the default version id. If it does not, we
-    // consider this a race condition and we fail the update.
-    let default_image = data::images::read_default_image(txn.deref_mut())
+    // For regular tenants, the requested image must be the current default;
+    // rejecting any other id preserves the existing stale-client race guard.
+    // Simulator tenants may additionally select a registered non-default image
+    // without changing the global default.
+    let target_image = data::images::read_image(txn.deref_mut(), update_request.version_id)
         .await?
-        .ok_or(PipelineError::NoDefaultImageFound)?;
+        .ok_or(PipelineError::ImageIdNotFound(update_request.version_id))?;
 
-    if update_request.version_id != default_image.id {
+    if !target_image.is_default && !api_config.is_simulator_tenant(tenant_id) {
         return Err(PipelineError::ImageIdNotDefault(update_request.version_id));
     }
-
-    let target_image = default_image;
 
     // If the image ids are different, we change the database entry.
     if target_image.id != current_image.id {
@@ -1587,7 +1590,7 @@ pub(crate) async fn update_pipeline_version(
         return Ok(StatusCode::OK);
     }
 
-    restart_pipeline_replicator_if_running(
+    restart_replicator_if_running(
         &mut txn,
         tenant_id,
         pipeline_id,

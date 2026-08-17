@@ -32,7 +32,7 @@ use crate::{
     },
 };
 
-/// Errors raised while preparing or applying Kubernetes pipeline resources.
+/// Errors raised while preparing or applying a Kubernetes pipeline runtime.
 #[derive(Debug, Error)]
 pub enum K8sCoreError {
     #[error("A K8s error occurred: {0}")]
@@ -106,16 +106,14 @@ pub enum Secrets {
     },
 }
 
-/// Creates or updates all Kubernetes resources required for a pipeline.
+/// Creates or updates the Kubernetes runtime for a pipeline.
 ///
-/// This function orchestrates the creation or update of secrets, config maps,
-/// and stateful sets needed to run a pipeline in Kubernetes. It extracts
-/// credentials from the source and destination configurations, builds the
-/// replicator configuration, and applies all resources to the cluster. Updating
-/// the StatefulSet intentionally forces pod recreation so the replicator
-/// process picks up the latest mounted config and secret-backed environment.
+/// The runtime currently consists of secrets, configuration, maintenance,
+/// autoscaling, and the StatefulSet running the replicator. Updating the
+/// StatefulSet intentionally forces pod recreation so the replicator observes
+/// the latest runtime configuration.
 #[allow(clippy::too_many_arguments)]
-pub async fn create_or_update_pipeline_resources_in_k8s(
+pub async fn create_or_update_pipeline_runtime_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
     pipeline: Pipeline,
@@ -193,7 +191,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         ducklake_maintenance_for_kubernetes.clone(),
     )
     .await?;
-    create_or_update_replicator_stateful_set(
+    create_or_update_replicator_workload(
         k8s_client,
         &resource_prefix,
         &identity,
@@ -206,19 +204,14 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         },
     )
     .await?;
-    k8s_client
-        .create_or_update_replicator_vertical_pod_autoscaler(&resource_prefix, &identity)
-        .await?;
 
     Ok(())
 }
 
-/// Deletes all Kubernetes resources associated with a pipeline.
+/// Deletes the Kubernetes runtime associated with a pipeline.
 ///
-/// This function removes all secrets, config maps, and stateful sets created
-/// for a replicator. It uses the tenant ID and replicator ID to identify and
-/// delete the correct resources.
-pub async fn delete_pipeline_resources_in_k8s(
+/// This removes all resources that currently comprise the pipeline runtime.
+pub async fn delete_pipeline_runtime_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
     replicator: Replicator,
@@ -246,12 +239,13 @@ pub async fn is_replicator_pod_stopped(
     Ok(matches!(pod_status, PodStatus::Stopped))
 }
 
-/// Returns `true` if existing Kubernetes resources should be reconciled.
+/// Returns `true` if the existing Kubernetes pipeline runtime should be
+/// reconciled.
 ///
 /// A stopped pod normally means the pipeline is intentionally inactive. A
 /// StatefulSet without a pod means Kubernetes still has desired runtime state,
 /// so reconciliation should repair or migrate it.
-pub async fn should_reconcile_replicator_resources(
+pub async fn should_reconcile_pipeline_runtime(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
     replicator_id: i64,
@@ -548,6 +542,19 @@ async fn create_or_update_replicator_stateful_set(
     Ok(())
 }
 
+async fn create_or_update_replicator_workload(
+    k8s_client: &dyn K8sClient,
+    resource_prefix: &str,
+    identity: &PipelineRuntimeIdentity,
+    config: ReplicatorStatefulSetConfig,
+) -> Result<(), K8sCoreError> {
+    // Apply the VPA first so newly admitted Pods observe its intended update mode.
+    k8s_client
+        .create_or_update_replicator_vertical_pod_autoscaler(resource_prefix, identity)
+        .await?;
+    create_or_update_replicator_stateful_set(k8s_client, resource_prefix, identity, config).await
+}
+
 /// Creates, updates, or deletes the DuckLake maintenance CR.
 async fn create_or_update_ducklake_maintenance(
     materializer: &dyn MaintenanceMaterializer,
@@ -828,18 +835,20 @@ mod tests {
 
         async fn create_or_update_replicator_stateful_set(
             &self,
-            _resource_prefix: &str,
+            resource_prefix: &str,
             _identity: &PipelineRuntimeIdentity,
             _config: ReplicatorStatefulSetConfig,
         ) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("stateful-set:{resource_prefix}"));
             Ok(())
         }
 
         async fn create_or_update_replicator_vertical_pod_autoscaler(
             &self,
-            _resource_prefix: &str,
+            resource_prefix: &str,
             _identity: &PipelineRuntimeIdentity,
         ) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("vpa:{resource_prefix}"));
             Ok(())
         }
 
@@ -937,6 +946,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vpa_is_applied_before_stateful_set() {
+        let client = RecordingK8sClient::default();
+
+        create_or_update_replicator_workload(
+            &client,
+            "tenant-42",
+            &pipeline_runtime_identity(),
+            ReplicatorStatefulSetConfig {
+                replicator_image: "etl-replicator:test".to_owned(),
+                replicator_resources: None,
+                destination_type: DestinationType::ClickHouse { password_secret_required: false },
+                ducklake_maintenance: None,
+                log_level: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.calls(), vec!["vpa:tenant-42", "stateful-set:tenant-42"]);
+    }
+
+    #[tokio::test]
     async fn failed_pod_is_considered_active_for_deletion_guards() {
         let client = RecordingK8sClient { pod_status: PodStatus::Failed, ..Default::default() };
         let pipeline =
@@ -958,7 +989,7 @@ mod tests {
         };
 
         let should_reconcile =
-            should_reconcile_replicator_resources(&client, "tenant-42", 4).await.unwrap();
+            should_reconcile_pipeline_runtime(&client, "tenant-42", 4).await.unwrap();
 
         assert!(should_reconcile);
     }
@@ -972,7 +1003,7 @@ mod tests {
         };
 
         let should_reconcile =
-            should_reconcile_replicator_resources(&client, "tenant-42", 4).await.unwrap();
+            should_reconcile_pipeline_runtime(&client, "tenant-42", 4).await.unwrap();
 
         assert!(!should_reconcile);
     }
@@ -1064,6 +1095,7 @@ mod tests {
         };
         let destination_config = StoredDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from("postgres://catalog".to_owned()),
+            catalog_pooler_url: None,
             data_path: "s3://bucket/path".to_owned(),
             pool_size: 4,
             s3_access_key_id: Some(SerializableSecretString::from("key-id".to_owned())),
@@ -1112,6 +1144,7 @@ mod tests {
         };
         let destination_config = StoredDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from("postgres://catalog".to_owned()),
+            catalog_pooler_url: None,
             data_path: "s3://bucket/path".to_owned(),
             pool_size: 4,
             s3_access_key_id: None,

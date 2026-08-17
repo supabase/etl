@@ -109,6 +109,7 @@ k8s:
     cpu_request_millicores: 2000
     memory_request_mib: 8192
   replicator_autoscaling:
+    initial_update_mode: off
     min_cpu_millicores: 250
     max_cpu_millicores: 2000
     min_memory_mib: 768
@@ -156,36 +157,48 @@ and limit becomes the allocation emitted as both request and limit. The
 allocation is clamped to `replicator_autoscaling` bounds. The same bounds are
 written to the VPA resource policy. CPU/memory requests always equal limits so
 every generated replicator Pod has Kubernetes Guaranteed QoS. VPA controls both
-requests and limits, preserving their initial 1:1 ratio while applying
-recommendations with `InPlaceOrRecreate`; blocked in-place updates may therefore
-fall back to a disruption-aware Pod recreation. `minReplicas: 1` permits that
-fallback for the single-replica StatefulSet. The global defaults should normally
-match the autoscaling maximum, so a new replicator begins with the full copy
-allocation. Explicit destination and pipeline overrides remain authoritative.
+requests and limits, preserving their initial 1:1 ratio when recommendations
+are enabled. `initial_update_mode` accepts the supported Kubernetes VPA update
+modes below and applies only when a VPA is first created:
+
+- `off` publishes recommendations without changing Pods.
+- `initial` applies recommendations only when Pods are created.
+- `recreate` also updates running Pods by recreating them.
+- `in_place_or_recreate` tries an in-place update before recreating the Pod.
+- `in_place` only updates in place and requires the upstream VPA feature gate.
+
+Subsequent API reconciliation preserves the live update mode, allowing an
+operator or separate Kubernetes controller to manage transitions without the
+API resetting them. The default is `off`.
+`minReplicas: 1` permits disruption-aware recreation for enabled modes that may
+fall back to it. The global defaults should normally match the autoscaling
+maximum, so a new replicator begins with the full copy allocation. Explicit
+destination and pipeline overrides remain authoritative.
 
 This max-first behavior is intentional for the current design. A fresh pipeline
 starts oversized to absorb the initial burst of data without an early OOM and
 to give table copy as much throughput as the configured operating envelope
-allows. After a short observation period, VPA converges CPU and memory toward
-the measured workload so long-running streaming remains efficient. This is the
-interim phase model until the replicator can explicitly signal copy and
-streaming transitions to autoscaling.
+allows. Deployments that start with VPA `Off` may enable updates after their
+chosen observation policy has collected representative usage. Deployments that
+want immediate actuation may configure `in_place_or_recreate` instead.
 
 Before restarting a running replicator, the API uses durable table state to
 predict whether the restart will repeat an initial table copy. If any table is
 before `SyncDone` and is not stopped in an error state, the API deletes the VPA
-before reconciling the pipeline. Reconciliation then recreates the VPA with no
-steady-state recommendation history, so the restarted Pod begins with the
-initial copy allocation. `SyncDone` and `Ready` tables keep their destination
-data across restart and therefore preserve the existing VPA. This applies to
+before reconciling the pipeline. Reconciliation then recreates the VPA in the
+configured initial update mode, allowing the restarted Pod to begin with the
+initial copy allocation. Deleting the VPA resource does not guarantee that a
+running upstream recommender forgets its in-memory usage aggregates. `SyncDone`
+and `Ready` tables keep their destination data across restart and therefore
+preserve the existing VPA and its live update mode. This applies to
 explicit restarts and configuration updates that restart a running replicator.
 Source connection, query, or state-decoding failures preserve the VPA rather
 than making the restart less reliable.
 
 Kubernetes- or controller-initiated Pod restarts do not pass through the API
 restart path and therefore keep the learned VPA recommendation. Stopping and
-starting a pipeline still resets autoscaling unconditionally: stop deletes the
-StatefulSet and VPA, and start recreates both with fresh recommendation history.
+starting a pipeline still deletes the autoscaler resource: stop deletes the
+StatefulSet and VPA, and start recreates both in the configured initial mode.
 
 ### Encryption Keys
 

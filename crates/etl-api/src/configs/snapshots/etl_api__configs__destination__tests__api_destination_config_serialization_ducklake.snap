@@ -1,11 +1,12 @@
 ---
 source: crates/etl-api/src/configs/destination.rs
-assertion_line: 3254
+assertion_line: 3733
 expression: api_config
 ---
 {
   "ducklake": {
     "catalog_url": "postgres://user:pass@localhost:5432/ducklake_catalog",
+    "catalog_pooler_url": "postgres://user:pass@pooler.example.test:6543/ducklake_catalog",
     "data_path": "s3://bucket/path",
     "pool_size": 4,
     "s3_access_key_id": "access",

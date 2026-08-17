@@ -35,7 +35,7 @@ use crate::{
         core::{K8sCoreError, first_active_pipeline_id},
     },
     routes::{
-        ErrorMessage, IntoInner, TenantIdError, common::restart_pipeline_replicator_if_running,
+        ErrorMessage, IntoInner, TenantIdError, common::restart_replicator_if_running,
         error_response_with_internal_error, extract_tenant_id, pipelines::PipelineError, utils,
     },
     validation,
@@ -337,7 +337,7 @@ pub(crate) async fn update_destination(
     let pipeline_ids =
         read_pipeline_ids_for_destination(txn.deref_mut(), tenant_id, destination_id).await?;
     for pipeline_id in pipeline_ids {
-        restart_pipeline_replicator_if_running(
+        restart_replicator_if_running(
             txn.deref_mut(),
             tenant_id,
             pipeline_id,
