@@ -1372,13 +1372,31 @@ fn ensure_engine_supported(engine: ClickHouseEngine, server_version: (u32, u32))
 /// Rejects source schemas the ClickHouse destination cannot represent for the
 /// configured engine.
 ///
-/// ReplacingMergeTree-only: the source table must have a primary key.
-/// ReplacingMergeTree uses the PK as `ORDER BY`, which is also the dedup key;
-/// without a PK there is nothing to merge on.
+/// Source columns must not use the configured engine's trailing metadata names.
+/// ReplacingMergeTree also requires a primary key because it uses the PK as
+/// both the `ORDER BY` and deduplication key.
 fn validate_clickhouse_table_shape(
     replicated_table_schema: &ReplicatedTableSchema,
     engine: ClickHouseEngine,
 ) -> EtlResult<()> {
+    if let Some(column) = replicated_table_schema.column_schemas().find(|column| {
+        trailing_cdc_column_names(engine)
+            .iter()
+            .any(|reserved_name| column.name.as_str() == *reserved_name)
+    }) {
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "Source column conflicts with ClickHouse metadata",
+            format!(
+                "Table '{}' contains source column '{}', which is reserved by the configured \
+                 ClickHouse {} engine. Rename the source column or select a different engine.",
+                replicated_table_schema.name(),
+                column.name,
+                engine.as_clickhouse_str()
+            )
+        ));
+    }
+
     if !replicated_table_schema.all_primary_key_columns_replicated() {
         let omitted_columns = replicated_table_schema
             .unreplicated_primary_key_column_schemas()
@@ -1861,7 +1879,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::clickhouse::schema::{CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME};
+    use crate::clickhouse::schema::{
+        CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME,
+        ETL_VERSION_COLUMN_NAME,
+    };
 
     /// Creates a synthetic composite snapshot ID for tests.
     fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
@@ -1919,6 +1940,22 @@ mod tests {
             IdentityType::AlternativeKey => IdentityMask::from_bytes(vec![0, 1]),
             IdentityType::Missing => IdentityMask::from_bytes(vec![0, 0]),
         };
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    /// Builds a primary-key schema with a caller-selected data column name.
+    fn replicated_schema_with_data_column_name(column_name: &str) -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new(column_name.to_owned(), Type::TEXT, -1, 2, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1, 0]);
+
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
@@ -2210,6 +2247,49 @@ mod tests {
 
         assert_eq!(err.kind(), ErrorKind::InvalidState);
         assert!(err.to_string().contains("Expected 1 key values"));
+    }
+
+    #[test]
+    fn validate_clickhouse_table_shape_rejects_configured_engine_metadata_columns() {
+        let cases = [
+            (ClickHouseEngine::MergeTree, CDC_OPERATION_COLUMN_NAME),
+            (ClickHouseEngine::MergeTree, CDC_LSN_COLUMN_NAME),
+            (ClickHouseEngine::MergeTree, CDC_TX_ORDINAL_COLUMN_NAME),
+            (ClickHouseEngine::ReplacingMergeTree, ETL_VERSION_COLUMN_NAME),
+            (ClickHouseEngine::ReplacingMergeTree, ETL_DELETED_COLUMN_NAME),
+        ];
+
+        for (engine, column_name) in cases {
+            let err = validate_clickhouse_table_shape(
+                &replicated_schema_with_data_column_name(column_name),
+                engine,
+            )
+            .unwrap_err();
+
+            assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+            assert!(err.to_string().contains(column_name));
+        }
+    }
+
+    #[test]
+    fn validate_clickhouse_table_shape_allows_other_engine_metadata_columns() {
+        for column_name in
+            [CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME]
+        {
+            validate_clickhouse_table_shape(
+                &replicated_schema_with_data_column_name(column_name),
+                ClickHouseEngine::ReplacingMergeTree,
+            )
+            .unwrap();
+        }
+
+        for column_name in [ETL_VERSION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME] {
+            validate_clickhouse_table_shape(
+                &replicated_schema_with_data_column_name(column_name),
+                ClickHouseEngine::MergeTree,
+            )
+            .unwrap();
+        }
     }
 
     #[test]
