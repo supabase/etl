@@ -1379,11 +1379,10 @@ fn validate_clickhouse_table_shape(
     replicated_table_schema: &ReplicatedTableSchema,
     engine: ClickHouseEngine,
 ) -> EtlResult<()> {
-    if let Some(column) = replicated_table_schema.column_schemas().find(|column| {
-        trailing_cdc_column_names(engine)
-            .iter()
-            .any(|reserved_name| column.name.as_str() == *reserved_name)
-    }) {
+    if let Some(column) = replicated_table_schema
+        .column_schemas()
+        .find(|column| trailing_cdc_column_names(engine).contains(&column.name.as_str()))
+    {
         return Err(etl_error!(
             ErrorKind::SourceSchemaError,
             "Source column conflicts with ClickHouse metadata",
@@ -1622,6 +1621,9 @@ fn postgres_key_cell_equal(old_value: &Cell, new_value: &Cell) -> bool {
 /// Returns [`ErrorKind::InvalidState`] for positional row-width mismatches and
 /// [`ErrorKind::SourceReplicaIdentityError`] when a key image is not the source
 /// primary key.
+///
+/// Key-image identity is checked before width because an alternative identity
+/// can legitimately contain a different number of columns.
 fn clickhouse_primary_key_was_changed(
     replicated_table_schema: &ReplicatedTableSchema,
     old_table_row: &OldTableRow,
@@ -1640,8 +1642,8 @@ fn clickhouse_primary_key_was_changed(
                 }))
         }
         OldTableRow::Key(row) => {
-            validate_clickhouse_key_row_width(replicated_table_schema, row)?;
             validate_clickhouse_key_image_identity(replicated_table_schema)?;
+            validate_clickhouse_key_row_width(replicated_table_schema, row)?;
 
             Ok(row
                 .values()
@@ -1710,9 +1712,12 @@ fn validate_clickhouse_key_image_identity(
 ///
 /// Caller only reaches this path for key-only deletes, so this function
 /// validates that the key row can be interpreted as source primary-key values.
+///
+/// Key-image identity is checked before width because an alternative identity
+/// can legitimately contain a different number of columns.
 fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> EtlResult<TableRow> {
-    validate_clickhouse_key_row_width(schema, &key_row)?;
     validate_clickhouse_key_image_identity(schema)?;
+    validate_clickhouse_key_row_width(schema, &key_row)?;
 
     let key_cells = key_row.into_values();
     let mut key_iter = key_cells.into_iter();
@@ -2002,6 +2007,24 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    /// Builds a schema with one PK column and a two-column alternative
+    /// identity.
+    fn replicated_schema_with_composite_alternative_identity() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 2, false),
+                ColumnSchema::new("external_id".to_owned(), Type::TEXT, -1, 3, false),
+            ],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![0, 1, 1]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
     fn replicated_schema_with_partial_primary_key() -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
@@ -2175,6 +2198,25 @@ mod tests {
     }
 
     #[test]
+    fn clickhouse_rows_for_update_rejects_composite_alternative_identity_key_image() {
+        let error = clickhouse_rows_for_update(
+            &replicated_schema_with_composite_alternative_identity(),
+            UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I32(2),
+                Cell::I32(10),
+                Cell::String("after".to_owned()),
+            ])),
+            Some(OldTableRow::Key(TableRow::new(vec![
+                Cell::I32(10),
+                Cell::String("before".to_owned()),
+            ]))),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
     fn clickhouse_rows_for_update_rejects_alternative_identity_without_old_row() {
         let error = clickhouse_rows_for_update(
             &replicated_schema(IdentityType::AlternativeKey),
@@ -2240,13 +2282,24 @@ mod tests {
     }
 
     #[test]
-    fn expand_key_row_rejects_short_key_payload_before_identity_checks() {
+    fn expand_key_row_rejects_short_primary_key_payload() {
         let err =
-            expand_key_row(TableRow::new(vec![]), &replicated_schema(IdentityType::AlternativeKey))
+            expand_key_row(TableRow::new(vec![]), &replicated_schema(IdentityType::PrimaryKey))
                 .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidState);
         assert!(err.to_string().contains("Expected 1 key values"));
+    }
+
+    #[test]
+    fn expand_key_row_rejects_composite_alternative_identity() {
+        let err = expand_key_row(
+            TableRow::new(vec![Cell::I32(10), Cell::String("before".to_owned())]),
+            &replicated_schema_with_composite_alternative_identity(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
