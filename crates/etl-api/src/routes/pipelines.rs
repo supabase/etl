@@ -124,6 +124,9 @@ pub enum PipelineError {
     DuplicatePipeline,
 
     #[error("The selected pipeline version is not available")]
+    ImageIdNotFound(i64),
+
+    #[error("The selected pipeline version is not available")]
     ImageIdNotDefault(i64),
 
     #[error("This project has reached its maximum of {limit} pipelines")]
@@ -263,6 +266,7 @@ impl IntoResponse for PipelineError {
             | PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             PipelineError::PipelineNotFound(_)
             | PipelineError::EtlStateNotInitialized
+            | PipelineError::ImageIdNotFound(_)
             | PipelineError::ImageIdNotDefault(_)
             | PipelineError::DestinationNotFound(_)
             | PipelineError::SourceNotFound(_) => StatusCode::NOT_FOUND,
@@ -1549,18 +1553,17 @@ pub(crate) async fn update_pipeline_version(
     let (_, replicator, current_image, _, destination) =
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
-    // Only allow updating to the current default image. The client must provide the
-    // version id and it must match the default version id. If it does not, we
-    // consider this a race condition and we fail the update.
-    let default_image = data::images::read_default_image(txn.deref_mut())
+    // For regular tenants, the requested image must be the current default;
+    // rejecting any other id preserves the existing stale-client race guard.
+    // Simulator tenants may additionally select a registered non-default image
+    // without changing the global default.
+    let target_image = data::images::read_image(txn.deref_mut(), update_request.version_id)
         .await?
-        .ok_or(PipelineError::NoDefaultImageFound)?;
+        .ok_or(PipelineError::ImageIdNotFound(update_request.version_id))?;
 
-    if update_request.version_id != default_image.id {
+    if !target_image.is_default && !api_config.is_simulator_tenant(tenant_id) {
         return Err(PipelineError::ImageIdNotDefault(update_request.version_id));
     }
-
-    let target_image = default_image;
 
     // If the image ids are different, we change the database entry.
     if target_image.id != current_image.id {

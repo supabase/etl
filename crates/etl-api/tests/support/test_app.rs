@@ -637,13 +637,22 @@ pub(crate) async fn spawn_test_app_with_k8s_state(
 ) -> TestApp {
     let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient::new(k8s_state.clone()));
 
-    spawn_test_app_with_services(trusted_source_username, k8s_client, k8s_state).await
+    spawn_test_app_with_services(trusted_source_username, k8s_client, k8s_state, Vec::new()).await
+}
+
+/// Spawns an app that classifies the supplied tenant IDs as staging simulators.
+pub(crate) async fn spawn_test_app_with_simulator_tenants(tenant_ids: Vec<String>) -> TestApp {
+    let k8s_state = MockK8sState::default();
+    let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient::new(k8s_state.clone()));
+
+    spawn_test_app_with_services(None, k8s_client, k8s_state, tenant_ids).await
 }
 
 async fn spawn_test_app_with_services(
     trusted_source_username: Option<String>,
     k8s_client: Arc<dyn K8sClient>,
     k8s_state: MockK8sState,
+    simulator_tenant_ids: Vec<String>,
 ) -> TestApp {
     Environment::Dev.set();
 
@@ -700,6 +709,7 @@ async fn spawn_test_app_with_services(
             key: BASE64_STANDARD.encode(key_bytes),
         }],
         api_keys: vec![api_key.clone()],
+        simulator_tenant_ids,
         sentry: None,
         supabase_api_url: None,
         configcat_sdk_key: None,

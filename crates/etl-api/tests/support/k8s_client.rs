@@ -21,6 +21,7 @@ pub(crate) struct MockK8sState {
     create_calls: Arc<AtomicUsize>,
     vpa_delete_calls: Arc<AtomicUsize>,
     ducklake_maintenance_create_calls: Arc<AtomicUsize>,
+    last_replicator_image: Arc<RwLock<Option<String>>>,
     last_replicator_resources: Arc<RwLock<Option<ReplicatorResourcesConfig>>>,
 }
 
@@ -31,6 +32,7 @@ impl Default for MockK8sState {
             create_calls: Arc::new(AtomicUsize::new(0)),
             vpa_delete_calls: Arc::new(AtomicUsize::new(0)),
             ducklake_maintenance_create_calls: Arc::new(AtomicUsize::new(0)),
+            last_replicator_image: Arc::new(RwLock::new(None)),
             last_replicator_resources: Arc::new(RwLock::new(None)),
         }
     }
@@ -51,6 +53,10 @@ impl MockK8sState {
 
     pub(crate) fn ducklake_maintenance_create_calls(&self) -> usize {
         self.ducklake_maintenance_create_calls.load(Ordering::Relaxed)
+    }
+
+    pub(crate) async fn last_replicator_image(&self) -> Option<String> {
+        self.last_replicator_image.read().await.clone()
     }
 
     pub(crate) async fn last_replicator_resources(&self) -> Option<ReplicatorResourcesConfig> {
@@ -188,6 +194,7 @@ impl K8sClient for MockK8sClient {
         _identity: &PipelineRuntimeIdentity,
         config: ReplicatorStatefulSetConfig,
     ) -> Result<(), K8sError> {
+        *self.state.last_replicator_image.write().await = Some(config.replicator_image);
         self.set_last_replicator_resources(config.replicator_resources.as_ref()).await;
         self.record_create_call();
         Ok(())
