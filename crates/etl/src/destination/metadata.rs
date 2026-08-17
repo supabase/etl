@@ -25,6 +25,11 @@ pub enum DestinationTableSchema {
         previous_replication_mask: ReplicationMask,
     },
     /// The current schema has been successfully applied.
+    ///
+    /// Destinations treat this state as authoritative. Restart and cache misses
+    /// may rebuild process-local or derived non-data-bearing state, but must
+    /// not recreate or structurally repair the data-bearing destination
+    /// table.
     Applied {
         /// The applied source schema snapshot.
         snapshot_id: SnapshotId,

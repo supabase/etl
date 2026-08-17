@@ -1127,8 +1127,8 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     .unwrap();
     store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
 
-    // A restarted destination (empty table cache, so metadata is consulted)
-    // receiving the target snapshot must replay the interrupted diff.
+    // A restarted destination has an empty process-local cache and must replay
+    // the interrupted diff from durable metadata.
     let restarted_destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;

@@ -3,9 +3,10 @@
 use std::fmt::Display;
 
 use etl::{
+    destination::DestinationTableMetadata,
     error::{ErrorKind, EtlResult},
     etl_error,
-    schema::{ColumnAlteration, ReplicationMask, SnapshotId, TableId},
+    schema::{ColumnAlteration, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId},
 };
 use tracing::warn;
 
@@ -77,14 +78,56 @@ pub(crate) fn ensure_relation_schema_transition(
     Ok(())
 }
 
+/// Requires an arriving schema to match the exact endpoint in destination
+/// metadata.
+///
+/// Caches may avoid remote work after this check, but they cannot replace it:
+/// the durable snapshot ID and replication mask define the only row shape the
+/// current destination table may accept.
+pub(crate) fn ensure_destination_schema_matches_metadata(
+    destination_name: &str,
+    table_id: TableId,
+    metadata: &DestinationTableMetadata,
+    received_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    let received_snapshot_id = received_schema.inner().snapshot_id;
+    let received_replication_mask = received_schema.replication_mask();
+    if metadata.snapshot_id() == received_snapshot_id
+        && metadata.replication_mask() == received_replication_mask
+    {
+        return Ok(());
+    }
+
+    Err(etl_error!(
+        ErrorKind::DestinationSchemaRewind,
+        "Destination metadata does not match the received schema",
+        format!(
+            "{destination_name} table {table_id} has destination metadata for snapshot {} and \
+             replication mask {}, but received snapshot {received_snapshot_id} and replication \
+             mask {received_replication_mask}. Recover the recorded destination operation or \
+             resynchronize the table before retrying.",
+            metadata.snapshot_id(),
+            metadata.replication_mask(),
+        )
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use etl::{
+        destination::DestinationTableMetadata,
         error::ErrorKind,
-        schema::{PgLsn, ReplicationMask, SnapshotId, TableId},
+        schema::{
+            ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
+            TableName, TableSchema, Type,
+        },
     };
 
-    use crate::recovery::ensure_relation_schema_transition;
+    use crate::recovery::{
+        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
+    };
 
     /// Creates a synthetic composite snapshot ID for tests.
     fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
@@ -149,5 +192,49 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(ambiguous_error.kind(), ErrorKind::DestinationSchemaRewind);
+    }
+
+    #[test]
+    fn destination_schema_match_requires_snapshot_and_replication_mask() {
+        let table_id = TableId::new(7);
+        let snapshot_id = test_snapshot_id(200_u64, 200_u64);
+        let table_schema = Arc::new(TableSchema::with_snapshot_id(
+            table_id,
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)],
+            snapshot_id,
+        ));
+        let schema = ReplicatedTableSchema::all(table_schema);
+        let metadata = DestinationTableMetadata::new_applied(
+            "users".to_owned(),
+            snapshot_id,
+            schema.replication_mask().clone(),
+        );
+
+        ensure_destination_schema_matches_metadata("Test", table_id, &metadata, &schema).unwrap();
+
+        let different_snapshot = DestinationTableMetadata::new_applied(
+            "users".to_owned(),
+            test_snapshot_id(300_u64, 300_u64),
+            schema.replication_mask().clone(),
+        );
+        let snapshot_error = ensure_destination_schema_matches_metadata(
+            "Test",
+            table_id,
+            &different_snapshot,
+            &schema,
+        )
+        .unwrap_err();
+        assert_eq!(snapshot_error.kind(), ErrorKind::DestinationSchemaRewind);
+
+        let different_mask = DestinationTableMetadata::new_applied(
+            "users".to_owned(),
+            snapshot_id,
+            ReplicationMask::from_bytes(vec![0]),
+        );
+        let mask_error =
+            ensure_destination_schema_matches_metadata("Test", table_id, &different_mask, &schema)
+                .unwrap_err();
+        assert_eq!(mask_error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 }

@@ -37,6 +37,13 @@ const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
 /// status code.
 const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &["backendError", "jobBackendError"];
+/// Environment variable name for the BigQuery project ID.
+pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
+/// Environment variable name for the BigQuery service account key path.
+pub const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
+/// When set, tests panic instead of skipping when BigQuery credentials are
+/// missing.
+pub const REQUIRE_BIGQUERY_CREDENTIALS_ENV: &str = "REQUIRE_BIGQUERY_CREDENTIALS";
 
 /// Retry policy for raw BigQuery operations in tests.
 const BIGQUERY_TEST_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -89,15 +96,12 @@ where
     .map_err(|failure| failure.last_error)
 }
 
-/// Environment variable name for the BigQuery project ID.
-pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
-
-/// Environment variable name for the BigQuery service account key path.
-pub const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
-
-/// When set, tests panic instead of skipping when BigQuery credentials are
-/// missing.
-pub const REQUIRE_BIGQUERY_CREDENTIALS_ENV: &str = "REQUIRE_BIGQUERY_CREDENTIALS";
+/// Builds a query request whose result must reflect current destination state.
+fn uncached_query_request(query: String) -> QueryRequest {
+    let mut request = QueryRequest::new(query);
+    request.use_query_cache = Some(false);
+    request
+}
 
 /// Returns whether BigQuery integration tests should be skipped.
 ///
@@ -271,7 +275,7 @@ impl BigQueryDatabase {
 
         loop {
             let (rows, not_found) = match retry_bigquery_test_operation("table query", || {
-                let request = QueryRequest::new(query.clone());
+                let request = uncached_query_request(query.clone());
                 async { self.client.job().query(&self.project_id, request).await }
             })
             .await
@@ -318,7 +322,7 @@ impl BigQueryDatabase {
             // could hide a table that still has rows, so it is retried like
             // a non-empty result.
             let observed_empty = match retry_bigquery_test_operation("table no-rows check", || {
-                let request = QueryRequest::new(query.clone());
+                let request = uncached_query_request(query.clone());
                 async { self.client.job().query(&self.project_id, request).await }
             })
             .await
@@ -364,7 +368,7 @@ impl BigQueryDatabase {
 
         loop {
             let rows = match retry_bigquery_test_operation("table schema query", || {
-                let request = QueryRequest::new(query.clone());
+                let request = uncached_query_request(query.clone());
                 async { self.client.job().query(project_id, request).await }
             })
             .await

@@ -308,8 +308,18 @@ fn copy_rows_to_arrow_record_batch(
     table_rows: Vec<TableRow>,
 ) -> EtlResult<RecordBatch> {
     let row_count = table_rows.len();
-    let column_schemas: Vec<_> =
-        replicated_table_schema.destination_column_schemas(DUCKLAKE_COLUMN_NAME_MAPPING).collect();
+    let column_schemas = replicated_table_schema.column_schemas().collect::<Vec<_>>();
+    let fields = column_schemas
+        .iter()
+        .zip(column_kinds.iter())
+        .map(|(column_schema, kind)| {
+            Field::new(
+                DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column_schema.name),
+                kind.data_type(),
+                column_schema.nullable,
+            )
+        })
+        .collect::<Vec<_>>();
     let mut column_values = column_kinds
         .iter()
         .copied()
@@ -317,20 +327,13 @@ fn copy_rows_to_arrow_record_batch(
         .collect::<Vec<_>>();
 
     for row in table_rows {
-        for ((column_value, column_schema), cell) in
-            column_values.iter_mut().zip(column_schemas.iter()).zip(row.into_values())
+        for ((column_value, field), cell) in
+            column_values.iter_mut().zip(fields.iter()).zip(row.into_values())
         {
-            column_value.push_cell(&column_schema.name, cell)?;
+            column_value.push_cell(field.name(), cell)?;
         }
     }
 
-    let fields = column_schemas
-        .iter()
-        .zip(column_kinds.iter())
-        .map(|(column_schema, kind)| {
-            Field::new(column_schema.name.clone(), kind.data_type(), column_schema.nullable)
-        })
-        .collect::<Vec<_>>();
     let arrays = column_values.into_iter().map(ArrowColumnValues::into_array).collect::<Vec<_>>();
 
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(|error| {

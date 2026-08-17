@@ -39,6 +39,22 @@ because they cannot represent the unknown historical value as `NULL`.
 See [Publication column changes](/explanation/schema-changes/#publication-column-changes)
 for the complete policy.
 
+## Destination ownership
+
+ETL assumes exclusive ownership of every data-bearing table it creates.
+Destination metadata is the authority for whether initial setup or a schema
+change completed; process-local caches do not replace that state. Once metadata
+is `Applied`, ETL does not recreate a missing table or repair external schema
+changes during ordinary writes or restart. Such changes are unsupported and
+typically cause the destination operation to fail. Use the table
+resynchronization lifecycle when a destination table must be rebuilt.
+
+ETL may rebuild ephemeral client state and derived non-data-bearing objects,
+such as Snowflake streaming channels or BigQuery views. Direct destination
+truncation is also outside ETL's lifecycle: later behavior depends on the
+destination's offset and write semantics, and previously replicated rows are
+not restored automatically.
+
 ## BigQuery
 
 <DestinationStatus status="stable" />

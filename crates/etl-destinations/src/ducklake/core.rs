@@ -89,7 +89,10 @@ use crate::{
         },
         sql::{qualified_lake_table_name, quote_identifier},
     },
-    recovery::{ensure_relation_schema_transition, warn_unsupported_column_type_change},
+    recovery::{
+        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
+        warn_unsupported_column_type_change,
+    },
 };
 
 /// Shared Postgres metadata pool size for DuckLake background samplers.
@@ -426,8 +429,11 @@ pub struct DuckLakeDestination<S> {
     table_creation_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     store: S,
-    /// Cache of table names whose DDL has already been executed.
-    created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    /// Applied ETL-owned tables used by the background metrics sampler.
+    ///
+    /// This cache is rebuilt from durable destination metadata after restart.
+    /// It never proves physical table existence and never drives table repair.
+    applied_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     /// Cache tracking whether the ETL batch marker table already exists. If
     /// it's set then the table has already been created
     applied_batches_table_created: Arc<AtomicBool>,
@@ -557,7 +563,7 @@ where
     }
 
     async fn startup(&self) -> EtlResult<()> {
-        self.reconcile_existing_tables_after_restart().await
+        self.prepare_tables_after_restart().await
     }
 
     async fn drop_table_for_copy(
@@ -1619,7 +1625,7 @@ where
         .await?;
 
         let copy_pool = Arc::new(build_warm_ducklake_pool(copy_manager, pool_size, "copy").await?);
-        let created_tables = Arc::default();
+        let applied_tables = Arc::default();
         let checkpoint_gate = Arc::new(RwLock::new(()));
         let mut destination = Self {
             manager: Arc::clone(&manager),
@@ -1638,7 +1644,7 @@ where
             table_creation_slots,
             table_write_slots: Arc::default(),
             store,
-            created_tables: Arc::clone(&created_tables),
+            applied_tables: Arc::clone(&applied_tables),
             applied_batches_table_created,
             streaming_progress_table_created,
         };
@@ -1654,7 +1660,7 @@ where
             spawn_ducklake_metrics_sampler(
                 metadata_schema.to_string(),
                 metadata_pg_pool.clone(),
-                Arc::clone(&created_tables),
+                Arc::clone(&applied_tables),
             )?
             .into(),
         );
@@ -1714,7 +1720,8 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        let table_name = self.ensure_table_exists(replicated_table_schema).await?;
+        let table_name =
+            self.ensure_table_ready_for_streaming_schema(replicated_table_schema).await?;
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
@@ -1834,7 +1841,7 @@ where
             "ducklake table replay epoch rotated after drop-for-copy"
         );
 
-        self.created_tables.lock().remove(&table_name);
+        self.applied_tables.lock().remove(&table_name);
 
         Ok(())
     }
@@ -1856,7 +1863,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let table_name = self.ensure_table_exists(replicated_table_schema).await?;
+        let table_name = self.prepare_table_for_writes(replicated_table_schema).await?;
 
         // Copy batches for the same table must still serialize so concurrent
         // callers do not race each other inside DuckDB.
@@ -1931,11 +1938,6 @@ where
         )?;
 
         if current_snapshot_id == new_snapshot_id {
-            self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema)
-                .await?;
-            self.reconcile_table_sorting(&table_name, new_replicated_table_schema).await?;
-            self.cleanup_tombstone_columns_after_applied(&table_name, new_replicated_table_schema)
-                .await;
             info!(
                 table_id = %table_id,
                 snapshot_id = %new_snapshot_id,
@@ -1975,6 +1977,7 @@ where
             current_replication_mask,
         )
         .with_schema_change(new_snapshot_id, new_replication_mask)?;
+        self.applied_tables.lock().remove(&table_name);
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
         if let Err(error) = self.apply_schema_plan(&table_name, &plan).await {
@@ -1993,7 +1996,7 @@ where
         self.store.store_destination_table_metadata(table_id, applied_metadata).await?;
         self.cleanup_tombstone_columns_after_applied(&table_name, new_replicated_table_schema)
             .await;
-        self.created_tables.lock().insert(table_name.clone());
+        self.applied_tables.lock().insert(table_name.clone());
 
         info!(
             table_id = %table_id,
@@ -2175,6 +2178,16 @@ where
             move |conn| read_ducklake_table_column_names_blocking(conn, &table_name_for_read),
         )
         .await?;
+        if ducklake_columns.is_empty() {
+            return Err(etl_error!(
+                ErrorKind::DestinationTableMissing,
+                "DuckLake destination table is missing",
+                format!(
+                    "Pending destination metadata identifies table '{table_name}', but the \
+                     physical table does not exist and recovery could not recreate it."
+                )
+            ));
+        }
         let missing_columns = missing_replicated_columns_ducklake(&ducklake_columns, target_schema);
 
         if missing_columns.is_empty() {
@@ -2278,8 +2291,12 @@ where
         }
     }
 
-    /// Reconciles persisted destination metadata with physical DuckLake tables.
-    async fn reconcile_existing_tables_after_restart(&self) -> EtlResult<()> {
+    /// Recovers pending operations and rebuilds applied-table process state.
+    ///
+    /// [`DestinationTableSchema::Applied`] is authoritative: startup trusts the
+    /// recorded destination table and does not inspect or repair its physical
+    /// schema. Missing or externally modified tables fail on ordinary use.
+    async fn prepare_tables_after_restart(&self) -> EtlResult<()> {
         let table_schemas = self.store.get_table_schemas().await?;
         let table_ids: HashSet<_> = table_schemas.iter().map(|schema| schema.id).collect();
 
@@ -2289,7 +2306,7 @@ where
 
         info!(
             table_count = table_ids.len(),
-            "ducklake reconciling destination table schemas after restart"
+            "ducklake recovering pending tables and rebuilding applied table state"
         );
 
         for table_id in table_ids {
@@ -2303,23 +2320,7 @@ where
                 continue;
             }
 
-            let target_table_schema = self
-                .load_exact_table_schema(
-                    table_id,
-                    metadata.snapshot_id(),
-                    "DuckLake startup schema not found",
-                )
-                .await?;
-            let target_schema = ReplicatedTableSchema::from_mask(
-                target_table_schema,
-                metadata.replication_mask().clone(),
-            );
-
-            self.issue_create_table_stmt(&table_name, &target_schema).await?;
-            self.reconcile_missing_replicated_columns(&table_name, &target_schema).await?;
-            self.reconcile_table_sorting(&table_name, &target_schema).await?;
-            self.cleanup_tombstone_columns_after_applied(&table_name, &target_schema).await;
-            self.created_tables.lock().insert(table_name);
+            self.applied_tables.lock().insert(table_name);
         }
 
         Ok(())
@@ -2580,7 +2581,8 @@ where
                 let mut join_set = JoinSet::new();
 
                 for (_, (replicated_table_schema, truncates)) in truncate_table_ids {
-                    let table_name = self.ensure_table_exists(&replicated_table_schema).await?;
+                    let table_name =
+                        self.prepare_table_for_writes(&replicated_table_schema).await?;
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
                     let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
                     let checkpoint_gate = Arc::clone(&self.checkpoint_gate);
@@ -2647,7 +2649,10 @@ where
         self.reconcile_missing_replicated_columns(table_name, replicated_table_schema).await?;
         self.reconcile_table_sorting(table_name, replicated_table_schema).await?;
 
-        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await
+        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        self.applied_tables.lock().insert(table_name.clone());
+
+        Ok(())
     }
 
     /// Issues DuckLake's idempotent `create table if not exists` statement.
@@ -2660,7 +2665,6 @@ where
             .destination_column_schemas(DUCKLAKE_COLUMN_NAME_MAPPING)
             .collect();
         let ddl = build_create_table_sql_ducklake(table_name, &column_schemas);
-        let created_tables = Arc::clone(&self.created_tables);
         let table_name = table_name.clone();
         let _checkpoint_guard = self.acquire_mutation_guard().await;
 
@@ -2670,12 +2674,8 @@ where
             move |conn| -> EtlResult<()> {
                 debug!(table = %table_name, "ducklake create table begin");
                 match conn.execute_batch(&ddl) {
-                    Ok(()) => {
-                        created_tables.lock().insert(table_name.clone());
-                    }
-                    Err(error) if is_create_table_conflict(&error, table_name.table()) => {
-                        created_tables.lock().insert(table_name.clone());
-                    }
+                    Ok(()) => {}
+                    Err(error) if is_create_table_conflict(&error, table_name.table()) => {}
                     Err(error) => {
                         return Err(etl_error!(
                             ErrorKind::DestinationQueryFailed,
@@ -2747,28 +2747,8 @@ where
         provided_target_schema: Option<&ReplicatedTableSchema>,
     ) -> EtlResult<ReplicatedTableSchema> {
         if let Some(schema) = provided_target_schema {
-            let arriving_snapshot_id = schema.inner().snapshot_id;
-            let arriving_replication_mask = schema.replication_mask();
-            if arriving_snapshot_id == metadata.snapshot_id()
-                && arriving_replication_mask == metadata.replication_mask()
-            {
-                return Ok(schema.clone());
-            }
-
-            return Err(etl_error!(
-                ErrorKind::DestinationSchemaRewind,
-                "DuckLake schema recovery received mismatched schema state",
-                format!(
-                    "Table {} has an interrupted destination operation targeting snapshot {} and \
-                     replication mask {}, but received snapshot {} and replication mask {}. \
-                     Resynchronize the table to recover.",
-                    table_id,
-                    metadata.snapshot_id(),
-                    metadata.replication_mask(),
-                    arriving_snapshot_id,
-                    arriving_replication_mask
-                )
-            ));
+            ensure_destination_schema_matches_metadata("DuckLake", table_id, metadata, schema)?;
+            return Ok(schema.clone());
         }
 
         let target_table_schema = self
@@ -2802,6 +2782,7 @@ where
 
         let target_schema =
             self.target_schema_for_recovery(table_id, &metadata, target_schema).await?;
+        validate_ducklake_table_shape(&target_schema)?;
 
         match metadata.table_schema().clone() {
             DestinationTableSchema::Applying {
@@ -2838,17 +2819,19 @@ where
         let metadata = metadata.to_applied();
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
         self.cleanup_tombstone_columns_after_applied(table_name, &target_schema).await;
-        self.created_tables.lock().insert(table_name.clone());
+        self.applied_tables.lock().insert(table_name.clone());
 
         Ok(metadata)
     }
 
-    /// Ensures the destination table exists, creating it (DDL) if necessary.
-    async fn ensure_table_exists(
+    /// Resolves the ETL-owned destination table and completes pending setup.
+    ///
+    /// Applied metadata is authoritative and only repopulates process state;
+    /// it never causes physical table inspection or repair.
+    async fn prepare_table_for_writes(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
-        validate_ducklake_table_shape(replicated_table_schema)?;
         let table_id = replicated_table_schema.id();
         let metadata = self.store.get_destination_table_metadata(table_id).await?;
         let table_name = metadata.as_ref().map_or_else(
@@ -2856,16 +2839,27 @@ where
             |metadata| DuckLakeTableName::from_metadata_id(metadata.table_id()),
         )?;
 
-        if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_pending)
-            && self.created_tables.lock().contains(&table_name)
-        {
-            return Ok(table_name);
+        if let Some(metadata) = &metadata {
+            ensure_destination_schema_matches_metadata(
+                "DuckLake",
+                table_id,
+                metadata,
+                replicated_table_schema,
+            )?;
+            if metadata.is_applied() {
+                self.applied_tables.lock().insert(table_name.clone());
+                return Ok(table_name);
+            }
         }
+
+        // Only initial setup and pending-operation recovery may validate or
+        // mutate the physical destination schema.
+        validate_ducklake_table_shape(replicated_table_schema)?;
 
         info!(
             table_id = %table_id,
             table = %table_name,
-            "ducklake destination table cache miss, ensuring table exists"
+            "ducklake destination table requires setup or recovery"
         );
 
         let _table_creation_permit =
@@ -2879,10 +2873,17 @@ where
             |metadata| DuckLakeTableName::from_metadata_id(metadata.table_id()),
         )?;
 
-        if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_pending)
-            && self.created_tables.lock().contains(&table_name)
-        {
-            return Ok(table_name);
+        if let Some(metadata) = &metadata {
+            ensure_destination_schema_matches_metadata(
+                "DuckLake",
+                table_id,
+                metadata,
+                replicated_table_schema,
+            )?;
+            if metadata.is_applied() {
+                self.applied_tables.lock().insert(table_name.clone());
+                return Ok(table_name);
+            }
         }
 
         match metadata {
@@ -2899,12 +2900,7 @@ where
                 )
                 .await?;
             }
-            Some(_) => {
-                self.issue_create_table_stmt(&table_name, replicated_table_schema).await?;
-                self.reconcile_missing_replicated_columns(&table_name, replicated_table_schema)
-                    .await?;
-                self.reconcile_table_sorting(&table_name, replicated_table_schema).await?;
-            }
+            Some(_) => unreachable!("applied DuckLake metadata should return before setup"),
         }
 
         Ok(table_name)
@@ -2919,14 +2915,21 @@ where
         let table_id = replicated_table_schema.id();
         if let Some(metadata) = self.store.get_destination_table_metadata(table_id).await?
             && metadata.is_applied()
-            && (metadata.snapshot_id() < replicated_table_schema.inner().snapshot_id
-                || (metadata.snapshot_id() == replicated_table_schema.inner().snapshot_id
-                    && metadata.replication_mask() != replicated_table_schema.replication_mask()))
+            && (metadata.snapshot_id() != replicated_table_schema.inner().snapshot_id
+                || metadata.replication_mask() != replicated_table_schema.replication_mask())
         {
+            ensure_relation_schema_transition(
+                "DuckLake",
+                table_id,
+                metadata.snapshot_id(),
+                metadata.replication_mask(),
+                replicated_table_schema.inner().snapshot_id,
+                replicated_table_schema.replication_mask(),
+            )?;
             self.handle_relation_event(replicated_table_schema).await?;
         }
 
-        self.ensure_table_exists(replicated_table_schema).await
+        self.prepare_table_for_writes(replicated_table_schema).await
     }
 
     /// Ensures the ETL-managed replay marker table exists.

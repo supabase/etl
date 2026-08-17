@@ -1680,14 +1680,14 @@ async fn write_events_reveals_publication_column_nullable_without_default() {
     assert_eq!(column_default.as_deref(), Some("NULL"));
 }
 
-/// `write_events` repairs physical DuckLake columns when metadata was already
-/// marked applied for a schema that was not fully applied.
+/// Applied metadata does not repair an externally modified DuckLake table.
 #[tokio::test(flavor = "multi_thread")]
-async fn write_events_reconciles_missing_columns_after_applied_metadata() {
+async fn write_events_does_not_reconcile_missing_columns_after_applied_metadata() {
     use etl::event::{InsertEvent, RelationEvent};
 
     let lake =
-        create_test_lake("write_events_reconciles_missing_columns_after_applied_metadata").await;
+        create_test_lake("write_events_does_not_reconcile_missing_columns_after_applied_metadata")
+            .await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
@@ -1739,7 +1739,7 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
     store.store_destination_table_metadata(old_schema.id, applied_metadata).await.unwrap();
 
     let lsn = PgLsn::from(43_u64);
-    destination
+    let error = destination
         .write_events(vec![
             Event::Relation(RelationEvent {
                 replicated_table_schema: new_replicated_table_schema.clone(),
@@ -1756,34 +1756,24 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
             }),
         ])
         .await
-        .unwrap();
+        .unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
 
     let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applied());
     assert_eq!(metadata.snapshot_id(), new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    let mut statement = conn
-        .prepare(&format!(
-            "select id, name, email from {} order by id",
-            qualified_lake_table_name(&table_name)
-        ))
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name"]);
+    let row_count: i64 = conn
+        .query_row(
+            &format!("select count(*) from {}", qualified_lake_table_name(&table_name)),
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
-        })
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-
-    assert_eq!(
-        rows,
-        vec![
-            (1, "Alice".to_owned(), None),
-            (2, "Bob".to_owned(), Some("bob@example.com".to_owned())),
-        ]
-    );
+    assert_eq!(row_count, 1);
 }
 
 /// Drop-plus-add with the same column name should behave like a type-changing
@@ -2037,12 +2027,13 @@ async fn write_table_rows_preserves_active_column_with_tombstone_prefix() {
     assert_eq!(value, "kept");
 }
 
-/// Startup should repair persisted `Applied` metadata whose physical table is
-/// still missing replicated columns.
+/// Restart trusts `Applied` metadata and leaves external schema changes alone.
 #[tokio::test(flavor = "multi_thread")]
-async fn startup_after_restart_reconciles_applied_metadata_missing_columns() {
-    let lake =
-        create_test_lake("startup_after_restart_reconciles_applied_metadata_missing_columns").await;
+async fn startup_after_restart_does_not_reconcile_applied_metadata_missing_columns() {
+    let lake = create_test_lake(
+        "startup_after_restart_does_not_reconcile_applied_metadata_missing_columns",
+    )
+    .await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
@@ -2077,7 +2068,7 @@ async fn startup_after_restart_reconciles_applied_metadata_missing_columns() {
 
     let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     restarted_destination.startup().await.unwrap();
-    restarted_destination
+    let error = restarted_destination
         .write_table_rows(
             &new_replicated_table_schema,
             vec![TableRow::new(vec![
@@ -2087,32 +2078,12 @@ async fn startup_after_restart_reconciles_applied_metadata_missing_columns() {
             ])],
         )
         .await
-        .unwrap();
+        .unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
-
-    let mut statement = conn
-        .prepare(&format!(
-            "select id, name, email from {} order by id",
-            qualified_lake_table_name(&table_name)
-        ))
-        .unwrap();
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
-        })
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-
-    assert_eq!(
-        rows,
-        vec![
-            (1, "Alice".to_owned(), None),
-            (2, "Bob".to_owned(), Some("bob@example.com".to_owned())),
-        ]
-    );
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name"]);
 }
 
 /// Startup should recover an interrupted schema change left in `Applying`.
@@ -2479,6 +2450,44 @@ async fn startup_after_restart_recovers_creating_metadata() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
+}
+
+/// Restart trusts `Applied` metadata, and ordinary writes surface a missing
+/// table.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_after_restart_does_not_recreate_missing_applied_table() {
+    let lake = create_test_lake("startup_after_restart_rejects_missing_applied_table").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schema = make_schema(46, "public", "restart_missing_applied");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema.clone()).await.unwrap();
+    store
+        .store_destination_table_metadata(
+            schema.id,
+            DestinationTableMetadata::new_applied(
+                table_name.to_metadata_id().unwrap(),
+                schema.snapshot_id,
+                replicated_table_schema.replication_mask().clone(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let destination = new_test_destination(&catalog_url, &data_url, store).await;
+    destination.startup().await.unwrap();
+    let error = destination
+        .write_table_rows(
+            &replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
 }
 
 /// Small CDC batches should remain inlined after the caller returns.

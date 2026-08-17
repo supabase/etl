@@ -826,9 +826,23 @@ impl ReplicatedTableSchema {
         &self,
         column_name_mapping: ColumnNameMapping,
     ) -> Result<(), SchemaPlanError> {
-        let column_names: Vec<_> =
-            self.column_schemas().map(|column| column.name.clone()).collect();
-        collect_unique_column_names(&column_names, column_name_mapping, SchemaEndpoint::After)?;
+        let column_schemas = self.column_schemas();
+        let mut source_name_by_destination_name = HashMap::with_capacity(column_schemas.len());
+
+        for column_schema in column_schemas {
+            let destination_name = column_name_mapping.map_name(&column_schema.name);
+            if let Some(first_column_name) = source_name_by_destination_name
+                .insert(destination_name, column_schema.name.as_str())
+            {
+                return Err(SchemaPlanError::DestinationColumnNameCollision {
+                    endpoint: SchemaEndpoint::After,
+                    column_name_mapping,
+                    first_column_name: first_column_name.to_owned(),
+                    second_column_name: column_schema.name.clone(),
+                });
+            }
+        }
+
         Ok(())
     }
 

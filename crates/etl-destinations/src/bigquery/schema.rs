@@ -248,9 +248,7 @@ pub(crate) fn column_schemas_to_table_descriptor(
     let mut field_descriptors = vec![];
     let mut number = 1;
 
-    for column_schema in
-        replicated_table_schema.destination_column_schemas(BIGQUERY_COLUMN_NAME_MAPPING)
-    {
+    for column_schema in replicated_table_schema.column_schemas() {
         let typ = match column_schema.typ {
             Type::BOOL => ColumnType::Bool,
             Type::INT2 => ColumnType::Int32,
@@ -286,7 +284,12 @@ pub(crate) fn column_schemas_to_table_descriptor(
             ColumnMode::Required
         };
 
-        field_descriptors.push(FieldDescriptor { number, name: column_schema.name, typ, mode });
+        field_descriptors.push(FieldDescriptor {
+            number,
+            name: BIGQUERY_COLUMN_NAME_MAPPING.map_name(&column_schema.name),
+            typ,
+            mode,
+        });
         number += 1;
     }
 

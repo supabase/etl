@@ -25,7 +25,7 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    recovery::ensure_relation_schema_transition,
+    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
     snowflake::{
         Client, SNOWFLAKE_COLUMN_NAME_MAPPING,
         auth::{AuthManager, HttpExchanger, TokenProvider},
@@ -126,6 +126,12 @@ impl TableInitializer {
         if let Some(metadata) = store.get_destination_table_metadata(table_id).await?
             && metadata.is_applied()
         {
+            ensure_destination_schema_matches_metadata(
+                "Snowflake",
+                table_id,
+                &metadata,
+                table_schema,
+            )?;
             client
                 .prepare_existing_table(table_id, metadata.table_id(), &columns)
                 .await
@@ -182,6 +188,12 @@ impl TableInitializer {
             }
             Some(metadata) if metadata.is_applied() => {
                 // Another copy partition completed setup while this caller waited.
+                ensure_destination_schema_matches_metadata(
+                    "Snowflake",
+                    table_id,
+                    &metadata,
+                    table_schema,
+                )?;
                 client
                     .prepare_existing_table(table_id, metadata.table_id(), &columns)
                     .await
@@ -191,17 +203,20 @@ impl TableInitializer {
             Some(metadata) if metadata.is_creating() => {
                 // Resume a matching initial setup left by an earlier failure or
                 // cancellation.
-                if metadata.table_id() != table_name
-                    || metadata.snapshot_id() != snapshot_id
-                    || metadata.replication_mask() != &replication_mask
-                {
+                ensure_destination_schema_matches_metadata(
+                    "Snowflake",
+                    table_id,
+                    &metadata,
+                    table_schema,
+                )?;
+                if metadata.table_id() != table_name {
                     bail!(
                         ErrorKind::CorruptedTableSchema,
-                        "Interrupted Snowflake table setup metadata does not match current schema",
+                        "Interrupted Snowflake table setup metadata does not match current table",
                         format!(
-                            "Table {table_id} has interrupted initial setup metadata for snapshot \
-                             {}, but the current setup uses snapshot {snapshot_id}.",
-                            metadata.snapshot_id()
+                            "Table {table_id} has interrupted initial setup metadata for '{}', \
+                             but the current setup resolves to '{table_name}'.",
+                            metadata.table_id()
                         )
                     );
                 }
@@ -317,7 +332,11 @@ where
 
     /// Loads the durable applied schema and prepares its existing table for
     /// events.
-    async fn prepare_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn prepare_table_for_writes(
+        &self,
+        table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_id = table_schema.id();
         // Check durable state before the warm-channel fast path so an interrupted
         // schema change continues to block DML.
         let metadata =
@@ -332,30 +351,15 @@ where
                 )
             })?;
         ensure_snowflake_metadata_applied(table_id, &metadata)?;
+        ensure_destination_schema_matches_metadata("Snowflake", table_id, &metadata, table_schema)?;
 
         if self.client.has_channel(table_id).await {
             return Ok(());
         }
 
-        let table_schema =
-            self.store.get_table_schema(&table_id, metadata.snapshot_id()).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::MissingTableSchema,
-                        "Stored schema snapshot missing for Snowflake streaming table",
-                        format!(
-                            "Table {table_id} needs stored schema snapshot {} to prepare the \
-                             destination channel.",
-                            metadata.snapshot_id()
-                        )
-                    )
-                },
-            )?;
-        let replicated_schema =
-            ReplicatedTableSchema::from_mask(table_schema, metadata.replication_mask().clone());
-        replicated_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
+        table_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
         let columns: Vec<_> =
-            replicated_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
+            table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
         self.client
             .prepare_existing_table(table_id, metadata.table_id(), &columns)
             .await
@@ -446,7 +450,7 @@ where
         let had_truncates = !operations.is_empty();
 
         for (schema, offset) in operations {
-            self.prepare_table(schema.id()).await?;
+            self.prepare_table_for_writes(&schema).await?;
             self.client.truncate_table(schema.id(), &offset).await.map_err(EtlError::from)?;
         }
 
@@ -559,8 +563,7 @@ where
     ) -> EtlResult<()> {
         #[allow(clippy::map_entry)]
         if !column_cache.contains_key(&table_id) {
-            self.prepare_table(table_id).await?;
-            table_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
+            self.prepare_table_for_writes(table_schema).await?;
             let cols: Vec<_> =
                 table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
             column_cache.insert(table_id, cols);
@@ -1018,6 +1021,22 @@ mod tests {
 
         let applied_metadata = creating_metadata.to_applied();
         ensure_snowflake_metadata_applied(table_id, &applied_metadata).unwrap();
+    }
+
+    #[tokio::test]
+    async fn applied_initialization_rejects_a_different_schema_endpoint_before_remote_work() {
+        let (destination, store) = test_destination();
+        let schema = replicated_schema();
+        let metadata = DestinationTableMetadata::new_applied(
+            "PUBLIC_USERS".to_owned(),
+            test_snapshot_id(100_u64, 100_u64),
+            schema.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(schema.id(), metadata).await.unwrap();
+
+        let error = destination.writer.initialize_table(&schema).await.unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 
     #[tokio::test]

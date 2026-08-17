@@ -1,9 +1,14 @@
+use std::sync::Arc;
+
 use etl::{
     data::{Cell, TableRow},
     event::EventType,
     pipeline::PipelineId,
+    schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
+    store::{MemoryStore, StateStore},
     test_utils::{
         database::spawn_source_database,
+        destination::write_table_rows as invoke_write_table_rows,
         event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
@@ -23,6 +28,67 @@ use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
 use crate::support::iceberg::read_all_rows;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn applied_metadata_does_not_recreate_a_missing_table_after_restart() {
+    init_test_tracing();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
+    let namespace = "test_namespace";
+    client.create_namespace_if_missing(namespace).await.unwrap();
+
+    let table_schema = Arc::new(TableSchema::new(
+        TableId::new(1),
+        TableName::new("public".to_owned(), "missing_applied".to_owned()),
+        vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+    ));
+    let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
+    let table_id = replicated_table_schema.id();
+    let iceberg_table_name =
+        table_name_to_iceberg_table_name(replicated_table_schema.name(), true).unwrap();
+    let store = MemoryStore::new();
+    let destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_owned()),
+        store.clone(),
+    );
+
+    invoke_write_table_rows(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
+
+    let applied_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(applied_metadata.is_applied());
+    client.drop_table_if_exists(namespace, iceberg_table_name.clone()).await.unwrap();
+
+    let restarted_destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_owned()),
+        store.clone(),
+    );
+    invoke_write_table_rows(
+        &restarted_destination,
+        &replicated_table_schema,
+        vec![TableRow::new(vec![Cell::I32(1)])],
+    )
+    .await
+    .unwrap_err();
+
+    assert!(!client.table_exists(namespace, iceberg_table_name).await.unwrap());
+    assert_eq!(
+        store.get_destination_table_metadata(table_id).await.unwrap(),
+        Some(applied_metadata)
+    );
+
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy() {
@@ -590,7 +656,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     .unwrap();
 
     let actual_users = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
-    let actual_orders = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
+    let actual_orders = read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
 
     assert!(actual_users.is_empty());
     assert!(actual_orders.is_empty());

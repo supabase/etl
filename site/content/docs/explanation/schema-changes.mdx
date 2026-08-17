@@ -153,6 +153,25 @@ Destination metadata records the target snapshot and replication mask. While a
 change is `Applying`, it also records the previous snapshot and previous
 replication mask as one logical recovery endpoint.
 
+Initial table setup uses a separate `Creating` state. If setup is interrupted,
+ETL retries the destination's idempotent write-path setup for that exact target
+schema and records `Applied` only after the destination is ready for writes.
+Ancillary objects that are not required for writes, such as BigQuery's
+customer-facing view, have their own idempotent reconciliation. This keeps
+creation recovery separate from partially applied schema changes, which may
+require operator recovery.
+
+`Applied` metadata is authoritative. It records that ETL completed setup for
+the destination table and logical schema, so a process restart or empty local
+cache does not trigger creation DDL or structural repair. Destinations may make
+read-only metadata calls needed to rebuild indispensable process-local state,
+reopen ephemeral write channels, reconcile fully derived non-data-bearing
+objects such as views, or clean up ETL-owned temporary artifacts left by a
+completed operation. Those operations do not authorize table repair.
+If the data-bearing table was deleted or modified outside ETL, ordinary
+destination operations fail; resynchronize the table to establish a new,
+linear lifecycle.
+
 ETL does not infer missing recovery state:
 
 - Previous snapshot and mask values must be stored together.

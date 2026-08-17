@@ -33,7 +33,10 @@ use crate::{
             supports_column_default, trailing_cdc_column_names,
         },
     },
-    recovery::{ensure_relation_schema_transition, warn_unsupported_column_type_change},
+    recovery::{
+        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
+        warn_unsupported_column_type_change,
+    },
     table_name::try_stringify_table_name,
 };
 
@@ -563,27 +566,38 @@ pub struct ClickHouseDestination<S> {
     /// Schema/state store used to persist destination table metadata
     /// (Creating / Applying / Applied) and to look up replicated schemas.
     store: Arc<S>,
-    /// ClickHouse table name -> per-column nullable flags (in column order,
-    /// including the two trailing CDC columns which are always `false`).
+    /// Source table ID -> validated applied ClickHouse table state.
     ///
     /// Populated lazily on first encounter of a table and consulted on the
     /// hot insert path. `std::sync::RwLock` is sufficient: every critical
     /// section is a brief in-memory map op with no `.await` inside, so the
     /// async `tokio::sync::RwLock` would be needless overhead.
-    table_cache: Arc<RwLock<HashMap<String, Arc<[bool]>>>>,
+    table_cache: Arc<RwLock<HashMap<TableId, Arc<ClickHouseTableCacheEntry>>>>,
     /// Per-`table_id` locks serialising first-time table creation.
     ///
     /// The two ctid copy workers spawned when `max_copy_connections > 1` share
     /// this destination (it is `Clone` over `Arc` state), so without a guard
-    /// both fall through the cache miss in [`Self::ensure_table_exists`] and
-    /// issue racing `CREATE TABLE` / `CREATE VIEW` statements. On ClickHouse
-    /// Cloud the replicated `... IF NOT EXISTS` is not atomic across replicas,
-    /// so the loser fails with "DDL failed". A `tokio::sync::Mutex` (held
-    /// across the DDL `.await`) per table makes the second worker wait,
-    /// then fall through the post-lock cache re-check. The outer map is
-    /// guarded by a brief, await-free `parking_lot::Mutex` and grows at
-    /// most one entry per replicated table.
+    /// both fall through the cache miss in [`Self::prepare_table_for_writes`]
+    /// and issue racing `CREATE TABLE` / `CREATE VIEW` statements. On
+    /// ClickHouse Cloud the replicated `... IF NOT EXISTS` is not atomic
+    /// across replicas, so the loser fails with "DDL failed". A
+    /// `tokio::sync::Mutex` (held across the DDL `.await`) per table makes
+    /// the second worker wait, then fall through the post-lock cache
+    /// re-check. The outer map is guarded by a brief, await-free
+    /// `parking_lot::Mutex` and grows at most one entry per replicated
+    /// table.
     create_locks: Arc<Mutex<HashMap<TableId, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+/// Applied ClickHouse table state cached for the insert hot path.
+#[derive(Clone)]
+struct ClickHouseTableCacheEntry {
+    /// Destination table name selected by durable metadata.
+    table_name: String,
+    /// Exact applied schema endpoint validated before this entry was inserted.
+    metadata: DestinationTableMetadata,
+    /// Per-column nullable flags, including the trailing CDC columns.
+    nullable_flags: Arc<[bool]>,
 }
 
 impl<S> ClickHouseDestination<S>
@@ -631,7 +645,7 @@ where
     /// 2. Execute `CREATE TABLE IF NOT EXISTS` against ClickHouse.
     /// 3. Persist `Applied` metadata.
     ///
-    /// Recovery is handled by `ensure_table_exists`: on restart, an
+    /// Recovery is handled by `prepare_table_for_writes`: on restart, a
     /// `Creating` row signals that the previous run died mid-creation, so
     /// it re-runs the idempotent DDL and transitions the metadata to
     /// `Applied` itself.
@@ -727,24 +741,33 @@ where
         self.client.execute_ddl(DdlKind::CreateView, &create_view).await
     }
 
-    /// Ensures the ClickHouse table for the given schema exists, returning
+    /// Returns the lock serializing table preparation and schema transitions.
+    fn table_preparation_lock(&self, table_id: TableId) -> Arc<tokio::sync::Mutex<()>> {
+        let mut guard = self.create_locks.lock();
+        Arc::clone(guard.entry(table_id).or_default())
+    }
+
+    /// Prepares the ETL-owned ClickHouse table for writes, returning
     /// `(clickhouse_table_name, nullable_flags)`.
     ///
-    /// On first encounter, executes `CREATE TABLE IF NOT EXISTS` and stores
-    /// destination metadata with `Applied` status. Subsequent calls return
-    /// the cached result.
-    async fn ensure_table_exists(
+    /// Applied metadata never triggers repair DDL. A cold cache performs the
+    /// one read-only schema load required to reconstruct RowBinary null-marker
+    /// flags; missing or externally modified tables fail that load.
+    async fn prepare_table_for_writes(
         &self,
         schema: &ReplicatedTableSchema,
     ) -> EtlResult<(String, Arc<[bool]>)> {
-        validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
-        let clickhouse_table_name = try_stringify_table_name(schema.name())?;
-
-        if let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned() {
-            return Ok((clickhouse_table_name, flags));
-        }
-
         let table_id = schema.id();
+
+        if let Some(entry) = self.table_cache.read().get(&table_id).cloned() {
+            ensure_destination_schema_matches_metadata(
+                "ClickHouse",
+                table_id,
+                &entry.metadata,
+                schema,
+            )?;
+            return Ok((entry.table_name.clone(), Arc::clone(&entry.nullable_flags)));
+        }
 
         // Serialise the first-time create/recover path per `table_id`. When
         // `max_copy_connections > 1` the two ctid copy workers share this
@@ -753,26 +776,37 @@ where
         // ClickHouse Cloud the replicated `... IF NOT EXISTS` is not atomic
         // across replicas, so the loser fails with "DDL failed". See the
         // `create_locks` field doc.
-        let table_lock = {
-            let mut guard = self.create_locks.lock();
-            Arc::clone(guard.entry(table_id).or_default())
-        };
+        let table_lock = self.table_preparation_lock(table_id);
         let _create_guard = table_lock.lock().await;
 
-        // Re-check the cache under the lock: a worker that went ahead of us may
-        // have completed creation and populated it while we were blocked.
-        if let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned() {
-            return Ok((clickhouse_table_name, flags));
+        // Another caller may have populated the cache while this caller waited.
+        if let Some(entry) = self.table_cache.read().get(&table_id).cloned() {
+            ensure_destination_schema_matches_metadata(
+                "ClickHouse",
+                table_id,
+                &entry.metadata,
+                schema,
+            )?;
+            return Ok((entry.table_name.clone(), Arc::clone(&entry.nullable_flags)));
         }
 
-        // Engine-mismatch detection runs before any DDL or metadata mutation:
-        // a pre-existing table created under a different engine must hard-fail
-        // here, not silently get an idempotent CREATE TABLE IF NOT EXISTS that
-        // would then mis-align RowBinary on insert.
-        self.ensure_engine_matches(&clickhouse_table_name).await?;
+        // Load durable metadata once under the lock so table identity and state
+        // cannot race a schema transition.
+        let metadata = self.store.get_destination_table_metadata(table_id).await?;
+        let clickhouse_table_name = metadata.as_ref().map_or_else(
+            || try_stringify_table_name(schema.name()),
+            |metadata| Ok(metadata.table_id().to_owned()),
+        )?;
+        if let Some(metadata) = &metadata {
+            ensure_destination_schema_matches_metadata("ClickHouse", table_id, metadata, schema)?;
+        }
 
-        match self.store.get_destination_table_metadata(table_id).await? {
+        match metadata {
             None => {
+                validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
+                // Detect an unmanaged pre-existing table with an incompatible
+                // engine before recording ownership or issuing creation DDL.
+                self.ensure_engine_matches(&clickhouse_table_name).await?;
                 self.create_table_with_metadata(
                     table_id,
                     &clickhouse_table_name,
@@ -782,21 +816,13 @@ where
                 )
                 .await?;
             }
-            Some(metadata) => {
-                if metadata.is_pending() {
-                    self.recover_pending_metadata(
-                        table_id,
-                        &clickhouse_table_name,
-                        schema,
-                        metadata,
-                    )
+            Some(metadata) if metadata.is_pending() => {
+                validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
+                self.ensure_engine_matches(&clickhouse_table_name).await?;
+                self.recover_pending_metadata(table_id, &clickhouse_table_name, schema, metadata)
                     .await?;
-                }
-                // Otherwise the metadata is already `Applied`: this branch
-                // runs after `handle_relation_event` invalidated the cache,
-                // so no DDL is needed and we just fall through to recompute
-                // nullable flags below.
             }
+            Some(_) => {}
         }
 
         // Compute nullable flags from the actual ClickHouse schema. This matters after
@@ -812,18 +838,23 @@ where
             &actual_columns,
         )?;
 
-        // `or_insert_with` handles the race where a concurrent caller populated
-        // the entry between our read-miss and this write.
-        let flags = {
+        let applied_metadata = DestinationTableMetadata::new_applied(
+            clickhouse_table_name.clone(),
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        let entry = {
             let mut guard = self.table_cache.write();
-            Arc::clone(
-                guard
-                    .entry(clickhouse_table_name.clone())
-                    .or_insert_with(|| Arc::clone(&nullable_flags)),
-            )
+            Arc::clone(guard.entry(table_id).or_insert_with(|| {
+                Arc::new(ClickHouseTableCacheEntry {
+                    table_name: clickhouse_table_name.clone(),
+                    metadata: applied_metadata,
+                    nullable_flags,
+                })
+            }))
         };
 
-        Ok((clickhouse_table_name, flags))
+        Ok((entry.table_name.clone(), Arc::clone(&entry.nullable_flags)))
     }
 
     /// Recovers initial creation or an unambiguous schema-change endpoint and
@@ -840,7 +871,7 @@ where
     ) -> EtlResult<()> {
         warn!("table {} has pending metadata, recovering interrupted operation", table_id);
 
-        ensure_clickhouse_recovery_schema_matches(table_id, schema, &metadata)?;
+        ensure_destination_schema_matches_metadata("ClickHouse", table_id, &metadata, schema)?;
 
         match metadata.table_schema().clone() {
             DestinationTableSchema::Applying {
@@ -953,12 +984,12 @@ where
         )?;
 
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
-        self.table_cache.write().remove(clickhouse_table_name);
+        self.table_cache.write().remove(&table_id);
         Ok(())
     }
 
     async fn truncate_table_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
-        let (clickhouse_table_name, _) = self.ensure_table_exists(schema).await?;
+        let (clickhouse_table_name, _) = self.prepare_table_for_writes(schema).await?;
         self.client.truncate_table(&clickhouse_table_name).await
     }
 
@@ -971,7 +1002,7 @@ where
         }
 
         self.client.drop_table(&clickhouse_table_name).await?;
-        self.table_cache.write().remove(&clickhouse_table_name);
+        self.table_cache.write().remove(&schema.id());
 
         Ok(())
     }
@@ -1007,7 +1038,7 @@ where
         schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let (clickhouse_table_name, nullable_flags) = self.ensure_table_exists(schema).await?;
+        let (clickhouse_table_name, nullable_flags) = self.prepare_table_for_writes(schema).await?;
 
         let engine = self.inserter_config.engine;
         let rows: Vec<Vec<ClickHouseValue>> = table_rows
@@ -1051,6 +1082,12 @@ where
         let table_id = new_schema.id();
         let new_snapshot_id = new_schema.inner().snapshot_id;
         let new_replication_mask = new_schema.replication_mask().clone();
+
+        // Serialize cache reconstruction and schema transitions. This ensures
+        // a cold-cache writer cannot repopulate an old RowBinary layout after
+        // the relation handler invalidates it.
+        let table_lock = self.table_preparation_lock(table_id);
+        let _preparation_guard = table_lock.lock().await;
 
         let metadata =
             self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
@@ -1139,6 +1176,13 @@ where
                 new_schema,
             )?;
         }
+        // A cached RowBinary layout is valid only for Applied metadata. Remove
+        // it before persisting Applying so cancellation cannot leave pending
+        // durable metadata reachable through the old cache. If the metadata
+        // write fails, the cache miss is harmless and can be repopulated from
+        // the still-Applied metadata.
+        self.table_cache.write().remove(&table_id);
+
         // Mark as Applying before DDL changes.
         let updated_metadata = DestinationTableMetadata::new_applied(
             clickhouse_table_name.to_owned(),
@@ -1163,12 +1207,6 @@ where
         self.store
             .store_destination_table_metadata(table_id, updated_metadata.to_applied())
             .await?;
-
-        // Invalidate cached nullable flags so the next write recomputes them.
-        {
-            let mut guard = self.table_cache.write();
-            guard.remove(clickhouse_table_name);
-        }
 
         info!(
             table_id = %table_id,
@@ -1496,9 +1534,9 @@ where
     /// Encodes the accumulated `PendingRow` batches and inserts them into
     /// ClickHouse, one `JoinSet` task per table. No-op if `pending` is empty.
     ///
-    /// All `ensure_table_exists` calls run sequentially before any insert is
-    /// spawned, so a schema-resolution failure aborts the whole pass without
-    /// any partial-write side effects.
+    /// All `prepare_table_for_writes` calls run sequentially before any insert
+    /// is spawned, so a schema-resolution failure aborts the whole pass
+    /// without any partial-write side effects.
     async fn flush_pending_rows(
         &self,
         pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)>,
@@ -1510,7 +1548,8 @@ where
         let mut prepared: Vec<(String, Arc<[bool]>, Vec<PendingRow>)> =
             Vec::with_capacity(pending.len());
         for (_, (schema, rows)) in pending {
-            let (clickhouse_table_name, nullable_flags) = self.ensure_table_exists(&schema).await?;
+            let (clickhouse_table_name, nullable_flags) =
+                self.prepare_table_for_writes(&schema).await?;
             prepared.push((clickhouse_table_name, nullable_flags, rows));
         }
 
@@ -1959,36 +1998,6 @@ where
     }
 }
 
-/// Requires interrupted ClickHouse DDL to use its recorded target schema.
-fn ensure_clickhouse_recovery_schema_matches(
-    table_id: TableId,
-    schema: &ReplicatedTableSchema,
-    metadata: &DestinationTableMetadata,
-) -> EtlResult<()> {
-    let arriving_snapshot_id = schema.inner().snapshot_id;
-    let arriving_replication_mask = schema.replication_mask();
-    if arriving_snapshot_id == metadata.snapshot_id()
-        && arriving_replication_mask == metadata.replication_mask()
-    {
-        return Ok(());
-    }
-
-    Err(etl_error!(
-        ErrorKind::DestinationSchemaRewind,
-        "ClickHouse schema recovery received mismatched schema state",
-        format!(
-            "Table {} has an interrupted destination operation targeting snapshot {} and \
-             replication mask {}, but received snapshot {} and replication mask {}. Resynchronize \
-             the table to recover.",
-            table_id,
-            metadata.snapshot_id(),
-            metadata.replication_mask(),
-            arriving_snapshot_id,
-            arriving_replication_mask
-        )
-    ))
-}
-
 /// Strips ClickHouse Cloud's `Shared` storage-variant prefix so the shared and
 /// non-shared MergeTree-family engines compare equal (see
 /// `ensure_engine_matches`).
@@ -2112,10 +2121,11 @@ mod tests {
             arriving_schema.replication_mask().clone(),
         );
 
-        let error = ensure_clickhouse_recovery_schema_matches(
+        let error = ensure_destination_schema_matches_metadata(
+            "ClickHouse",
             arriving_schema.id(),
-            &arriving_schema,
             &metadata,
+            &arriving_schema,
         )
         .unwrap_err();
 
