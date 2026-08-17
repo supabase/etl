@@ -7,7 +7,7 @@ use etl_maintenance::{
 
 use crate::{
     configs::pipeline::DuckLakeMaintenanceConfig,
-    k8s::{DuckLakeMaintenanceResourceConfig, K8sClient},
+    k8s::{DuckLakeMaintenanceResourceConfig, K8sClient, PipelineRuntimeIdentity},
 };
 
 /// Converts API-authored DuckLake maintenance config to backend-neutral policy.
@@ -65,13 +65,16 @@ impl MaintenanceMaterializer for KubernetesMaintenanceMaterializer<'_> {
         &self,
         input: DuckLakeMaintenanceMaterialization,
     ) -> Result<(), MaintenanceMaterializationError> {
+        let identity = PipelineRuntimeIdentity {
+            tenant_id: input.identity.tenant_id,
+            pipeline_id: input.identity.pipeline_id,
+            replicator_id: input.identity.replicator_id,
+        };
         self.k8s_client
             .create_or_update_ducklake_maintenance(
                 &input.identity.resource_prefix,
+                &identity,
                 DuckLakeMaintenanceResourceConfig {
-                    tenant_id: input.identity.tenant_id,
-                    pipeline_id: input.identity.pipeline_id,
-                    replicator_id: input.identity.replicator_id,
                     image: input.runtime_refs.replicator_image,
                     policy: input.policy,
                 },

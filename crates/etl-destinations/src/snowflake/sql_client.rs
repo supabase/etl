@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,28 @@ pub(crate) struct StatementResponse {
     pub(crate) message: Option<String>,
     #[serde(default)]
     pub(crate) data: Option<Vec<Vec<serde_json::Value>>>,
+    /// Names and positions for values in each result row.
+    #[serde(default)]
+    result_set_meta_data: Option<ResultSetMetadata>,
+}
+
+/// Column metadata returned with a Snowflake SQL result set.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResultSetMetadata {
+    /// Total rows across every result partition.
+    #[serde(default)]
+    num_rows: Option<u64>,
+    /// Result columns in row order.
+    #[serde(default)]
+    row_type: Vec<ResultColumnMetadata>,
+}
+
+/// One named Snowflake SQL result column.
+#[derive(Debug, Deserialize)]
+struct ResultColumnMetadata {
+    /// Column name supplied by Snowflake.
+    name: String,
 }
 
 impl<T: TokenProvider> SqlClient<T> {
@@ -80,7 +102,8 @@ impl<T: TokenProvider> SqlClient<T> {
         Ok(())
     }
 
-    /// Create a table with the given columns, enabling schema evolution.
+    /// Create a table with the given columns and provider-driven evolution
+    /// disabled.
     pub async fn create_table_if_not_exists(
         &self,
         table_name: &str,
@@ -88,9 +111,23 @@ impl<T: TokenProvider> SqlClient<T> {
     ) -> Result<()> {
         let fqn = self.fully_qualified_name(table_name);
         let sql = format!(
-            "CREATE TABLE IF NOT EXISTS {fqn} ({column_defs}) ENABLE_SCHEMA_EVOLUTION = TRUE"
+            "CREATE TABLE IF NOT EXISTS {fqn} ({column_defs}) ENABLE_SCHEMA_EVOLUTION = FALSE"
         );
         self.execute_ddl(&sql).await
+    }
+
+    /// Validates a table's write schema.
+    pub(crate) async fn validate_table_schema(
+        &self,
+        table_name: &str,
+        expected_column_names: &[&str],
+    ) -> Result<()> {
+        let fqn = self.fully_qualified_name(table_name);
+        let columns_response =
+            self.execute_statement(&format!("SHOW COLUMNS IN TABLE {fqn}")).await?;
+        let columns = parse_show_columns(&columns_response)?;
+
+        validate_column_names(table_name, expected_column_names, &columns)
     }
 
     /// Remove all rows from a table without dropping it.
@@ -117,10 +154,8 @@ impl<T: TokenProvider> SqlClient<T> {
         let name_prefix = quote_string_literal(table_name);
         let sql = format!("SHOW TERSE TABLES IN SCHEMA {db}.{schema} STARTS WITH {name_prefix}");
         let resp = self.execute_statement(&sql).await?;
-        Ok(resp.data.is_some_and(|rows| {
-            rows.iter()
-                .any(|row| row.get(1).and_then(serde_json::Value::as_str) == Some(table_name))
-        }))
+        let table_names = parse_show_table_names(&resp)?;
+        Ok(table_names.contains(&table_name))
     }
 
     /// Add a nullable column to an existing table.
@@ -359,6 +394,103 @@ impl<T: TokenProvider> SqlClient<T> {
     }
 }
 
+/// Parse one named string column from a `SHOW` response.
+fn parse_named_show_column<'a>(
+    response: &'a StatementResponse,
+    command: &str,
+    result_column: &str,
+) -> Result<Vec<&'a str>> {
+    fn malformed_show_response(response: &StatementResponse, message: String) -> Error {
+        Error::Sql { statement_handle: response.statement_handle.clone(), message }
+    }
+
+    let metadata = response.result_set_meta_data.as_ref().ok_or_else(|| {
+        malformed_show_response(response, format!("{command} omitted result metadata"))
+    })?;
+    let result_column_index = metadata
+        .row_type
+        .iter()
+        .position(|column| column.name.eq_ignore_ascii_case(result_column))
+        .ok_or_else(|| {
+            malformed_show_response(
+                response,
+                format!("{command} result metadata omitted column '{result_column}'"),
+            )
+        })?;
+    let num_rows = metadata.num_rows.ok_or_else(|| {
+        malformed_show_response(response, format!("{command} result metadata omitted numRows"))
+    })?;
+    let rows = response.data.as_deref().ok_or_else(|| {
+        malformed_show_response(response, format!("{command} omitted result data"))
+    })?;
+    let actual_rows = u64::try_from(rows.len()).map_err(|_| {
+        malformed_show_response(response, format!("{command} result row count overflowed"))
+    })?;
+
+    // Exact validation must not treat the first result partition as the whole
+    // table.
+    if actual_rows != num_rows {
+        return Err(malformed_show_response(
+            response,
+            format!(
+                "{command} returned {actual_rows} rows, but metadata declared {num_rows} total \
+                 rows"
+            ),
+        ));
+    }
+
+    let mut columns = Vec::with_capacity(rows.len());
+
+    for (row_index, row) in rows.iter().enumerate() {
+        let value =
+            row.get(result_column_index).and_then(serde_json::Value::as_str).ok_or_else(|| {
+                malformed_show_response(
+                    response,
+                    format!("{command} row {row_index} has no string {result_column}"),
+                )
+            })?;
+        columns.push(value);
+    }
+
+    Ok(columns)
+}
+
+/// Parse exact column identifiers from `SHOW COLUMNS`.
+fn parse_show_columns(response: &StatementResponse) -> Result<Vec<&str>> {
+    parse_named_show_column(response, "SHOW COLUMNS", "column_name")
+}
+
+/// Parse exact table identifiers from `SHOW TERSE TABLES`.
+fn parse_show_table_names(response: &StatementResponse) -> Result<Vec<&str>> {
+    parse_named_show_column(response, "SHOW TERSE TABLES", "name")
+}
+
+/// Validates exact column names without relying on column order.
+fn validate_column_names(
+    table_name: &str,
+    expected_column_names: &[&str],
+    actual_column_names: &[&str],
+) -> Result<()> {
+    let expected_column_names = expected_column_names.iter().copied().collect::<BTreeSet<_>>();
+    let actual_column_names = actual_column_names.iter().copied().collect::<BTreeSet<_>>();
+
+    if let Some(column_name) = expected_column_names.difference(&actual_column_names).next() {
+        return Err(Error::MissingTableColumn {
+            table_name: table_name.to_owned(),
+            column_name: (*column_name).to_owned(),
+        });
+    }
+
+    if let Some(column_name) = actual_column_names.difference(&expected_column_names).next() {
+        return Err(Error::UnexpectedTableColumn {
+            table_name: table_name.to_owned(),
+            column_name: (*column_name).to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
 fn classify_for_retry(error: &Error) -> RetryDecision {
     match error {
         Error::HttpTransport(_) => RetryDecision::Retry,
@@ -396,6 +528,137 @@ mod tests {
         let config = Config::new("example-account", "test-user", "test-db", "test-schema")
             .expect("test configuration should be valid");
         SqlClient::new(config, Arc::new(TestTokenProvider), Client::new())
+    }
+
+    /// Build a resolved statement response with named result columns.
+    fn statement_response(
+        column_names: &[&str],
+        data: Vec<Vec<serde_json::Value>>,
+    ) -> StatementResponse {
+        let row_count = u64::try_from(data.len()).expect("test result row count should fit in u64");
+        StatementResponse {
+            statement_handle: Some("test-statement".to_owned()),
+            message: None,
+            data: Some(data),
+            result_set_meta_data: Some(ResultSetMetadata {
+                num_rows: Some(row_count),
+                row_type: column_names
+                    .iter()
+                    .map(|name| ResultColumnMetadata { name: (*name).to_owned() })
+                    .collect(),
+            }),
+        }
+    }
+
+    #[test]
+    fn parses_show_columns_by_result_metadata_name() {
+        let response = statement_response(
+            &["ignored", "column_name"],
+            vec![vec![serde_json::Value::Null, serde_json::Value::String("id".to_owned())]],
+        );
+
+        let columns = parse_show_columns(&response).expect("SHOW COLUMNS should parse");
+
+        assert_eq!(columns, vec!["id"]);
+    }
+
+    #[test]
+    fn parses_show_table_names_by_result_metadata_name() {
+        let response = statement_response(
+            &["name", "created_on"],
+            vec![vec![serde_json::Value::String("EVENTS".to_owned()), serde_json::Value::Null]],
+        );
+
+        let table_names =
+            parse_show_table_names(&response).expect("SHOW TERSE TABLES should parse");
+
+        assert_eq!(table_names, vec!["EVENTS"]);
+    }
+
+    #[test]
+    fn malformed_show_table_metadata_is_a_structural_sql_error() {
+        let response = statement_response(&["created_on"], vec![vec![serde_json::Value::Null]]);
+
+        let error = parse_show_table_names(&response).expect_err("name metadata is required");
+
+        assert!(matches!(
+            error,
+            Error::Sql {
+                statement_handle: Some(handle),
+                message,
+            } if handle == "test-statement"
+                && message == "SHOW TERSE TABLES result metadata omitted column 'name'"
+        ));
+    }
+
+    #[test]
+    fn table_column_validation_is_order_independent() {
+        let expected = ["id", "_cdc_operation", "_cdc_sequence_number"];
+        let actual = ["_cdc_sequence_number", "id", "_cdc_operation"];
+
+        validate_column_names("events", &expected, &actual)
+            .expect("physical column order should not affect compatibility");
+    }
+
+    #[test]
+    fn table_column_validation_rejects_contract_mismatches() {
+        let expected = ["id", "_cdc_operation", "_cdc_sequence_number"];
+
+        let missing = ["_cdc_operation", "_cdc_sequence_number"];
+        assert!(matches!(
+            validate_column_names("events", &expected, &missing),
+            Err(Error::MissingTableColumn { table_name, column_name })
+                if table_name == "events" && column_name == "id"
+        ));
+
+        let unexpected = ["id", "_cdc_operation", "_cdc_sequence_number", "extra"];
+        assert!(matches!(
+            validate_column_names("events", &expected, &unexpected),
+            Err(Error::UnexpectedTableColumn { table_name, column_name })
+                if table_name == "events" && column_name == "extra"
+        ));
+
+        let differently_cased = ["ID", "_cdc_operation", "_cdc_sequence_number"];
+        assert!(matches!(
+            validate_column_names("events", &expected, &differently_cased),
+            Err(Error::MissingTableColumn { table_name, column_name })
+                if table_name == "events" && column_name == "id"
+        ));
+    }
+
+    #[test]
+    fn malformed_show_metadata_is_a_structural_sql_error() {
+        let response = statement_response(&["ignored"], vec![vec![serde_json::Value::Null]]);
+
+        let error = parse_show_columns(&response).expect_err("column_name metadata is required");
+
+        assert!(matches!(
+            error,
+            Error::Sql {
+                statement_handle: Some(handle),
+                message,
+            } if handle == "test-statement"
+                && message == "SHOW COLUMNS result metadata omitted column 'column_name'"
+        ));
+    }
+
+    #[test]
+    fn incomplete_show_result_fails_closed() {
+        let mut response = statement_response(
+            &["column_name"],
+            vec![vec![serde_json::Value::String("id".to_owned())]],
+        );
+        let metadata =
+            response.result_set_meta_data.as_mut().expect("test response should contain metadata");
+        metadata.num_rows = Some(2);
+
+        let error = parse_show_columns(&response).expect_err("incomplete SHOW must fail closed");
+
+        assert!(matches!(
+            error,
+            Error::Sql { message, .. }
+                if message == "SHOW COLUMNS returned 1 rows, but metadata declared 2 total rows"
+        ));
     }
 
     #[test]

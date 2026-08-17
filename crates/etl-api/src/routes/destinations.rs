@@ -15,7 +15,9 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::{
-        destination::{ApiDestinationConfig, UpdateApiDestinationConfig},
+        destination::{
+            ApiDestinationConfig, StrippedApiDestinationConfig, UpdateApiDestinationConfig,
+        },
         encryption::EncryptionKeyring,
         pipeline::ApiPipelineConfig,
     },
@@ -33,7 +35,7 @@ use crate::{
         core::{K8sCoreError, first_active_pipeline_id},
     },
     routes::{
-        ErrorMessage, IntoInner, TenantIdError, common::restart_pipeline_replicator_if_running,
+        ErrorMessage, IntoInner, TenantIdError, common::restart_replicator_if_running,
         error_response_with_internal_error, extract_tenant_id, pipelines::PipelineError, utils,
     },
     validation,
@@ -149,6 +151,8 @@ pub struct UpdateDestinationRequest {
     #[schema(example = "My Updated BigQuery Destination", required = true)]
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
+    /// Patch-style destination configuration. Omitted fields, including all
+    /// credentials omitted by read responses, preserve their stored values.
     #[schema(required = true)]
     pub config: UpdateApiDestinationConfig,
 }
@@ -161,7 +165,7 @@ pub struct ReadDestinationResponse {
     pub tenant_id: String,
     #[schema(example = "My BigQuery Destination")]
     pub name: String,
-    pub config: ApiDestinationConfig,
+    pub config: StrippedApiDestinationConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -249,7 +253,7 @@ pub(crate) async fn create_destination(
     get,
     path = "/destinations/{destination_id}",
     summary = "Retrieve a destination",
-    description = "Returns a destination identified by its ID for the given tenant.",
+    description = "Returns a destination identified by its ID with credentials omitted from the configuration.",
     params(
         ("destination_id" = i64, Path, description = "Unique ID of the destination"),
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
@@ -289,7 +293,7 @@ pub(crate) async fn read_destination(
     post,
     path = "/destinations/{destination_id}",
     summary = "Update a destination",
-    description = "Updates the destination's name and configuration.",
+    description = "Updates the destination's name and configuration. Omitted configuration fields preserve their stored values, so credentials returned as omitted by read endpoints do not need to be submitted again.",
     request_body = UpdateDestinationRequest,
     params(
         ("destination_id" = i64, Path, description = "Unique ID of the destination"),
@@ -333,7 +337,7 @@ pub(crate) async fn update_destination(
     let pipeline_ids =
         read_pipeline_ids_for_destination(txn.deref_mut(), tenant_id, destination_id).await?;
     for pipeline_id in pipeline_ids {
-        restart_pipeline_replicator_if_running(
+        restart_replicator_if_running(
             txn.deref_mut(),
             tenant_id,
             pipeline_id,
@@ -409,7 +413,7 @@ pub(crate) async fn delete_destination(
     get,
     path = "/destinations",
     summary = "List destinations",
-    description = "Returns all destinations for the specified tenant.",
+    description = "Returns all destinations for the specified tenant with credentials omitted from every configuration.",
     responses(
         (status = 200, description = "Destinations listed successfully", body = ReadDestinationsResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),

@@ -12,7 +12,7 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use super::{
-    ErrorMessage, IntoInner, TenantIdError, common::restart_pipeline_replicator_if_running,
+    ErrorMessage, IntoInner, TenantIdError, common::restart_replicator_if_running,
     error_response_with_internal_error, extract_tenant_id, utils,
 };
 use crate::{
@@ -339,7 +339,7 @@ pub(crate) async fn create_destination_and_pipeline(
     post,
     path = "/destinations-pipelines/{destination_id}/{pipeline_id}",
     summary = "Update destination and pipeline",
-    description = "Updates the destination and pipeline ensuring they remain linked.",
+    description = "Updates the linked destination and pipeline. Omitted destination configuration fields preserve their stored values, so credentials returned as omitted by read endpoints do not need to be submitted again.",
     request_body = UpdateDestinationPipelineRequest,
     params(
         ("destination_id" = i64, Path, description = "Unique ID of the destination"),
@@ -420,7 +420,7 @@ pub(crate) async fn update_destination_and_pipeline(
         e => e.into(),
     })?;
 
-    restart_pipeline_replicator_if_running(
+    restart_replicator_if_running(
         &mut txn,
         tenant_id,
         pipeline_id,

@@ -380,7 +380,7 @@ async fn destination_pipeline_update_accepts_partial_config_updates() {
     let response: ReadDestinationResponse =
         response.json().await.expect("failed to deserialize response");
     match response.config {
-        etl_api::configs::destination::ApiDestinationConfig::BigQuery {
+        etl_api::configs::destination::StrippedApiDestinationConfig::BigQuery {
             project_id,
             dataset_id,
             ..

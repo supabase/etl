@@ -386,6 +386,12 @@ impl TableStateType {
         matches!(self, Self::SyncDone | Self::Ready)
     }
 
+    /// Returns `true` if a table with this state would perform the initial
+    /// table sync, `false` otherwise.
+    pub fn would_perform_table_sync(&self) -> bool {
+        !matches!(self, Self::SyncDone | Self::Ready | Self::Errored)
+    }
+
     /// Returns `true` if a table with this state is in error, `false`
     /// otherwise.
     pub fn is_errored(&self) -> bool {
@@ -696,6 +702,19 @@ mod tests {
 
         let completed_states = [TableStateType::SyncDone, TableStateType::Ready];
         assert!(completed_states.iter().all(TableStateType::has_completed_table_sync));
+
+        let states_that_repeat_copy = [
+            TableStateType::Init,
+            TableStateType::DataSync,
+            TableStateType::FinishedCopy,
+            TableStateType::SyncWait,
+            TableStateType::Catchup,
+        ];
+        assert!(states_that_repeat_copy.iter().all(TableStateType::would_perform_table_sync));
+
+        let states_that_preserve_copy =
+            [TableStateType::SyncDone, TableStateType::Ready, TableStateType::Errored];
+        assert!(states_that_preserve_copy.iter().all(|state| !state.would_perform_table_sync()));
     }
 
     #[test]

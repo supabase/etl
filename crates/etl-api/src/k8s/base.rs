@@ -40,15 +40,20 @@ pub struct ReplicatorConfigMapFile {
     pub content: String,
 }
 
+/// Product identity shared by all Kubernetes resources in a pipeline runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineRuntimeIdentity {
+    /// Tenant/project identifier.
+    pub tenant_id: String,
+    /// Pipeline identifier.
+    pub pipeline_id: i64,
+    /// Concrete replicator identifier for this pipeline runtime.
+    pub replicator_id: i64,
+}
+
 /// DuckLake maintenance CR materialization input.
 #[derive(Debug, Clone)]
 pub struct DuckLakeMaintenanceResourceConfig {
-    /// Tenant/project identifier.
-    pub tenant_id: String,
-    /// Pipeline id.
-    pub pipeline_id: i64,
-    /// Replicator id.
-    pub replicator_id: i64,
     /// Image containing the maintenance binary.
     pub image: String,
     /// User-authored maintenance policy.
@@ -58,12 +63,6 @@ pub struct DuckLakeMaintenanceResourceConfig {
 /// Replicator StatefulSet materialization input.
 #[derive(Debug, Clone)]
 pub struct ReplicatorStatefulSetConfig {
-    /// Existing Kubernetes resource prefix.
-    pub prefix: String,
-    /// Tenant id that owns the replicator.
-    pub tenant_id: String,
-    /// Pipeline id that owns the replicator.
-    pub pipeline_id: i64,
     /// Image for the replicator container.
     pub replicator_image: String,
     /// Optional resource overrides.
@@ -197,39 +196,43 @@ pub enum PodStatus {
 pub trait K8sClient: Send + Sync {
     /// Creates or updates the Postgres password secret for a replicator.
     ///
-    /// The secret name is derived from `prefix` and stored in the data-plane
-    /// namespace.
+    /// The secret name is derived from `resource_prefix` and stored in the
+    /// data-plane namespace.
     async fn create_or_update_postgres_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         postgres_password: &str,
     ) -> Result<(), K8sError>;
 
     /// Creates or updates the BigQuery service account secret for a replicator.
     ///
-    /// The secret name is derived from `prefix` and stored in the data-plane
-    /// namespace.
+    /// The secret name is derived from `resource_prefix` and stored in the
+    /// data-plane namespace.
     async fn create_or_update_bigquery_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         bq_service_account_key: &str,
     ) -> Result<(), K8sError>;
 
     /// Creates or updates the ClickHouse password secret for a replicator.
     async fn create_or_update_clickhouse_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         password: Option<&str>,
     ) -> Result<(), K8sError>;
 
     /// Creates or updates the Iceberg credentials secret for a replicator.
     ///
     /// The secret contains the catalog token, S3 access key ID, and S3 secret
-    /// access key. The secret name is derived from `prefix` and stored in
-    /// the data-plane namespace.
+    /// access key. The secret name is derived from `resource_prefix` and stored
+    /// in the data-plane namespace.
     async fn create_or_update_iceberg_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         catalog_token: &str,
         s3_access_key_id: &str,
         s3_secret_access_key: &str,
@@ -240,7 +243,8 @@ pub trait K8sClient: Send + Sync {
     /// The secret contains the catalog URL and S3 credentials.
     async fn create_or_update_ducklake_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         catalog_url: &str,
         s3_access_key_id: &str,
         s3_secret_access_key: &str,
@@ -249,27 +253,27 @@ pub trait K8sClient: Send + Sync {
     /// Deletes the Postgres password secret for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError>;
+    async fn delete_postgres_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
 
     /// Deletes the ClickHouse credentials for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_clickhouse_secret(&self, prefix: &str) -> Result<(), K8sError>;
+    async fn delete_clickhouse_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
 
     /// Deletes the BigQuery service account secret for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_bigquery_secret(&self, prefix: &str) -> Result<(), K8sError>;
+    async fn delete_bigquery_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
 
     /// Deletes the Iceberg credentials secret for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_iceberg_secret(&self, prefix: &str) -> Result<(), K8sError>;
+    async fn delete_iceberg_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
 
     /// Deletes the DuckLake credentials secret for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_ducklake_secret(&self, prefix: &str) -> Result<(), K8sError>;
+    async fn delete_ducklake_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
 
     /// Creates or updates the Snowflake credentials secret for a replicator.
     ///
@@ -277,7 +281,8 @@ pub trait K8sClient: Send + Sync {
     /// passphrase.
     async fn create_or_update_snowflake_secret(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         private_key: &str,
         private_key_passphrase: Option<&str>,
     ) -> Result<(), K8sError>;
@@ -285,23 +290,24 @@ pub trait K8sClient: Send + Sync {
     /// Deletes the Snowflake credentials secret for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_snowflake_secret(&self, prefix: &str) -> Result<(), K8sError>;
+    async fn delete_snowflake_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
 
     /// Creates or updates the replicator configuration [`ConfigMap`].
     ///
     /// Accepts a list of files to store in the config map. Each file's filename
     /// becomes a key in the config map's data section with the content as its
-    /// value. The config map name is derived from `prefix`.
+    /// value. The config map name is derived from `resource_prefix`.
     async fn create_or_update_replicator_config_map(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         files: Vec<ReplicatorConfigMapFile>,
     ) -> Result<(), K8sError>;
 
     /// Deletes the replicator configuration [`ConfigMap`].
     ///
     /// Does nothing if the config map does not exist.
-    async fn delete_replicator_config_map(&self, prefix: &str) -> Result<(), K8sError>;
+    async fn delete_replicator_config_map(&self, resource_prefix: &str) -> Result<(), K8sError>;
 
     /// Creates or updates the replicator `StatefulSet`.
     ///
@@ -312,30 +318,51 @@ pub trait K8sClient: Send + Sync {
     /// secret-backed environment values.
     async fn create_or_update_replicator_stateful_set(
         &self,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         config: ReplicatorStatefulSetConfig,
+    ) -> Result<(), K8sError>;
+
+    /// Creates or updates the Vertical Pod Autoscaler for the replicator
+    /// `StatefulSet`.
+    async fn create_or_update_replicator_vertical_pod_autoscaler(
+        &self,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
     ) -> Result<(), K8sError>;
 
     /// Deletes the replicator `StatefulSet`.
     ///
     /// Does nothing if the stateful set does not exist.
-    async fn delete_replicator_stateful_set(&self, prefix: &str) -> Result<(), K8sError>;
+    async fn delete_replicator_stateful_set(&self, resource_prefix: &str) -> Result<(), K8sError>;
+
+    /// Deletes the replicator Vertical Pod Autoscaler.
+    ///
+    /// Does nothing if the autoscaler does not exist.
+    async fn delete_replicator_vertical_pod_autoscaler(
+        &self,
+        resource_prefix: &str,
+    ) -> Result<(), K8sError>;
 
     /// Returns whether the replicator `StatefulSet` exists.
-    async fn replicator_stateful_set_exists(&self, prefix: &str) -> Result<bool, K8sError>;
+    async fn replicator_stateful_set_exists(&self, resource_prefix: &str)
+    -> Result<bool, K8sError>;
 
     /// Creates or updates the DuckLake maintenance CR.
     async fn create_or_update_ducklake_maintenance(
         &self,
-        prefix: &str,
+        resource_prefix: &str,
+        identity: &PipelineRuntimeIdentity,
         config: DuckLakeMaintenanceResourceConfig,
     ) -> Result<(), K8sError>;
 
     /// Deletes the DuckLake maintenance CR.
-    async fn delete_ducklake_maintenance(&self, prefix: &str) -> Result<(), K8sError>;
+    async fn delete_ducklake_maintenance(&self, resource_prefix: &str) -> Result<(), K8sError>;
 
     /// Retrieves the current status of a replicator pod.
     ///
     /// Returns a [`PodStatus`] derived from the pod's phase, deletion
     /// timestamp, and exit status.
-    async fn get_replicator_pod_status(&self, prefix: &str) -> Result<PodStatus, K8sError>;
+    async fn get_replicator_pod_status(&self, resource_prefix: &str)
+    -> Result<PodStatus, K8sError>;
 }

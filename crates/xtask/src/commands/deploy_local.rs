@@ -25,11 +25,11 @@ const DEFAULT_APP_ENVIRONMENT: &str = "dev";
 /// Default CPU request for the local replicator pod.
 const DEFAULT_CPU_REQUEST: &str = "125m";
 /// Default CPU limit for the local replicator pod.
-const DEFAULT_CPU_LIMIT: &str = "250m";
+const DEFAULT_CPU_LIMIT: &str = DEFAULT_CPU_REQUEST;
 /// Default memory request for the local replicator pod.
 const DEFAULT_MEMORY_REQUEST: &str = "250Mi";
 /// Default memory limit for the local replicator pod.
-const DEFAULT_MEMORY_LIMIT: &str = "300Mi";
+const DEFAULT_MEMORY_LIMIT: &str = DEFAULT_MEMORY_REQUEST;
 /// Default log filter used by the local replicator.
 const DEFAULT_RUST_LOG: &str = "info";
 /// Default tracing flag used by the local replicator.
@@ -92,14 +92,15 @@ pub(crate) struct DeployLocalArgs {
     /// CPU request (defaults to CPU_REQUEST, MAC_CPU_REQUEST, or 125m).
     #[arg(long, value_name = "VALUE")]
     cpu_request: Option<String>,
-    /// CPU limit (defaults to CPU_LIMIT, MAC_CPU_LIMIT, or 250m).
+    /// CPU limit (defaults to CPU_LIMIT, MAC_CPU_LIMIT, or the CPU request).
     #[arg(long, value_name = "VALUE")]
     cpu_limit: Option<String>,
     /// Memory request (defaults to MEMORY_REQUEST, MAC_MEMORY_REQUEST, or
     /// 250Mi).
     #[arg(long, value_name = "VALUE")]
     memory_request: Option<String>,
-    /// Memory limit (defaults to MEMORY_LIMIT, MAC_MEMORY_LIMIT, or 300Mi).
+    /// Memory limit (defaults to MEMORY_LIMIT, MAC_MEMORY_LIMIT, or the memory
+    /// request).
     #[arg(long, value_name = "VALUE")]
     memory_limit: Option<String>,
     /// Skip the local Docker image build.
@@ -662,6 +663,8 @@ metadata:
 spec:
   serviceName: {headless_service_name}
   replicas: 1
+  updateStrategy:
+    type: RollingUpdate
   selector:
     matchLabels:
       app.kubernetes.io/name: {name}
@@ -675,6 +678,11 @@ spec:
       - name: replicator
         image: {image}
         imagePullPolicy: IfNotPresent
+        resizePolicy:
+        - resourceName: cpu
+          restartPolicy: NotRequired
+        - resourceName: memory
+          restartPolicy: NotRequired
         envFrom:
         - configMapRef:
             name: {env_config_map_name}

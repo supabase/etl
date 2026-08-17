@@ -10,6 +10,7 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
       "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
       "etl.supabase.com/app-type": "etl-replicator-app",
       "etl.supabase.com/pipeline-id": "24",
+      "etl.supabase.com/replicator-id": "42",
       "etl.supabase.com/tenant-id": "abcdefghijklmnopqrst"
     },
     "name": "abcdefghijklmnopqrst-42-replicator",
@@ -30,7 +31,10 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
         },
         "labels": {
           "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
-          "etl.supabase.com/app-type": "etl-replicator-app"
+          "etl.supabase.com/app-type": "etl-replicator-app",
+          "etl.supabase.com/pipeline-id": "24",
+          "etl.supabase.com/replicator-id": "42",
+          "etl.supabase.com/tenant-id": "abcdefghijklmnopqrst"
         }
       },
       "spec": {
@@ -129,14 +133,24 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
                 "protocol": "TCP"
               }
             ],
+            "resizePolicy": [
+              {
+                "resourceName": "cpu",
+                "restartPolicy": "NotRequired"
+              },
+              {
+                "resourceName": "memory",
+                "restartPolicy": "NotRequired"
+              }
+            ],
             "resources": {
               "limits": {
-                "cpu": "125m",
-                "memory": "250Mi"
+                "cpu": "250m",
+                "memory": "768Mi"
               },
               "requests": {
-                "cpu": "125m",
-                "memory": "250Mi"
+                "cpu": "250m",
+                "memory": "768Mi"
               }
             },
             "securityContext": {
@@ -233,6 +247,9 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
           }
         ]
       }
+    },
+    "updateStrategy": {
+      "type": "RollingUpdate"
     }
   }
 }

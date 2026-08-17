@@ -9,15 +9,6 @@ Iceberg {
         namespace: Some(
             "my-namespace",
         ),
-        catalog_token: SerializableSecretString(
-            SecretBox<str>([REDACTED]),
-        ),
-        s3_access_key_id: SerializableSecretString(
-            SecretBox<str>([REDACTED]),
-        ),
-        s3_secret_access_key: SerializableSecretString(
-            SecretBox<str>([REDACTED]),
-        ),
         s3_region: "ap-southeast-1",
     },
 }

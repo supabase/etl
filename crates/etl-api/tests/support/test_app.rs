@@ -29,7 +29,7 @@ use etl_api::{
         tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest},
         tenants_sources::CreateTenantSourceRequest,
     },
-    startup::run,
+    startup::{ApplicationListeners, run},
 };
 use etl_config::{
     Environment,
@@ -49,6 +49,7 @@ use crate::support::{
 
 pub(crate) struct TestApp {
     pub address: String,
+    pub internal_address: String,
     pub api_client: reqwest::Client,
     pub api_key: String,
     config: ApiConfig,
@@ -282,6 +283,47 @@ impl TestApp {
 
     pub(crate) async fn read_all_destinations(&self, tenant_id: &str) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/destinations", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
+    }
+
+    pub(crate) async fn resolve_runtime_config(
+        &self,
+        tenant_id: &str,
+        destination_id: i64,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!(
+            "{}/v1/internal/destinations/{destination_id}/config",
+            &self.internal_address
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub(crate) async fn resolve_tenant_runtime_config(
+        &self,
+        tenant_id: &str,
+        destination_kind: &str,
+        destination_name: &str,
+    ) -> reqwest::Response {
+        let mut url = reqwest::Url::parse(&self.internal_address)
+            .expect("internal test application address should be a valid URL");
+        url.path_segments_mut()
+            .expect("internal test application address should be a base URL")
+            .extend([
+                "v1",
+                "internal",
+                "destinations",
+                destination_kind,
+                destination_name,
+                "config",
+            ]);
+
+        self.get_authenticated(url)
             .header("tenant_id", tenant_id)
             .send()
             .await
@@ -595,13 +637,22 @@ pub(crate) async fn spawn_test_app_with_k8s_state(
 ) -> TestApp {
     let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient::new(k8s_state.clone()));
 
-    spawn_test_app_with_services(trusted_source_username, k8s_client, k8s_state).await
+    spawn_test_app_with_services(trusted_source_username, k8s_client, k8s_state, Vec::new()).await
+}
+
+/// Spawns an app that classifies the supplied tenant IDs as staging simulators.
+pub(crate) async fn spawn_test_app_with_simulator_tenants(tenant_ids: Vec<String>) -> TestApp {
+    let k8s_state = MockK8sState::default();
+    let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient::new(k8s_state.clone()));
+
+    spawn_test_app_with_services(None, k8s_client, k8s_state, tenant_ids).await
 }
 
 async fn spawn_test_app_with_services(
     trusted_source_username: Option<String>,
     k8s_client: Arc<dyn K8sClient>,
     k8s_state: MockK8sState,
+    simulator_tenant_ids: Vec<String>,
 ) -> TestApp {
     Environment::Dev.set();
 
@@ -609,6 +660,9 @@ async fn spawn_test_app_with_services(
     let listener =
         TcpListener::bind(format!("{base_address}:0")).expect("failed to bind random port");
     let port = listener.local_addr().unwrap().port();
+    let internal_listener =
+        TcpListener::bind(format!("{base_address}:0")).expect("failed to bind random port");
+    let internal_port = internal_listener.local_addr().unwrap().port();
 
     let database_config = get_test_db_config();
     let api_db_pool = create_etl_api_database(&database_config).await;
@@ -627,7 +681,12 @@ async fn spawn_test_app_with_services(
 
     let config = ApiConfig {
         database: database_config,
-        application: ApplicationSettings { host: base_address.to_owned(), port },
+        application: ApplicationSettings {
+            host: base_address.to_owned(),
+            port,
+            internal_port,
+            internal_tls: None,
+        },
         k8s: K8sConfig {
             replicator_namespace: "etl-data-plane".to_owned(),
             replicator_service_account_name: "etl-replicator".to_owned(),
@@ -638,6 +697,7 @@ async fn spawn_test_app_with_services(
                 cpu_request_millicores: 125,
                 destinations: Default::default(),
             },
+            replicator_autoscaling: Default::default(),
             vector_image: "timberio/vector:0.55.0-distroless-libc".to_owned(),
             vector_resources: DefaultVectorResourcesConfig {
                 memory_request_mib: 192,
@@ -649,6 +709,7 @@ async fn spawn_test_app_with_services(
             key: BASE64_STANDARD.encode(key_bytes),
         }],
         api_keys: vec![api_key.clone()],
+        simulator_tenant_ids,
         sentry: None,
         supabase_api_url: None,
         configcat_sdk_key: None,
@@ -666,7 +727,7 @@ async fn spawn_test_app_with_services(
 
     let server = run(
         config.clone(),
-        listener,
+        ApplicationListeners { public: listener, internal: internal_listener },
         api_db_pool,
         encryption_keyring,
         k8s_client,
@@ -677,6 +738,7 @@ async fn spawn_test_app_with_services(
 
     TestApp {
         address: format!("http://{base_address}:{port}"),
+        internal_address: format!("http://{base_address}:{internal_port}"),
         api_client: reqwest::Client::new(),
         api_key,
         config,

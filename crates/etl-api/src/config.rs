@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, path::PathBuf};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::{
@@ -34,6 +34,16 @@ pub struct ApiConfig {
     ///
     /// All keys in this list are considered valid for authentication.
     pub api_keys: Vec<String>,
+    /// Tenant IDs used by staging destination simulators.
+    ///
+    /// Pipelines belonging to these tenants may select registered non-default
+    /// replicator images so each simulator can test an experimental build
+    /// without changing the default image for other tenants.
+    ///
+    /// Production tenant IDs must never be included. An empty list preserves
+    /// the default-only image policy for every tenant.
+    #[serde(default)]
+    pub simulator_tenant_ids: Vec<String>,
     /// Optional Sentry configuration for error tracking.
     pub sentry: Option<SentryConfig>,
     /// Optional Supabase API URL for error notifications.
@@ -71,11 +81,79 @@ pub struct K8sConfig {
     /// replicator pod unless a destination-kind default or pipeline-level
     /// override supplies one of those request values.
     pub replicator_resources: DefaultReplicatorResourcesConfig,
+    /// CPU and memory bounds shared by generated VPAs and StatefulSets.
+    #[serde(default)]
+    pub replicator_autoscaling: ReplicatorAutoscalingConfig,
     /// Vector image used by the logging sidecar.
     #[serde(default = "default_vector_image")]
     pub vector_image: String,
     /// Default request sizing for the Vector sidecar.
     pub vector_resources: DefaultVectorResourcesConfig,
+}
+
+/// Resource bounds enforced for autoscaled replicator containers.
+///
+/// The API applies these bounds both to the initial StatefulSet allocation and
+/// to the per-pipeline VPA policy, keeping the VPA object as the source of
+/// truth for the workload's operating envelope. Global replicator resources
+/// should normally match the maximum bounds: fresh pipelines intentionally
+/// start oversized for initial-copy throughput and burst safety, then VPA
+/// converges them toward their steady-state usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ReplicatorAutoscalingConfig {
+    /// Update mode assigned when a per-pipeline VPA is first created.
+    #[serde(default)]
+    pub initial_update_mode: ReplicatorAutoscalingUpdateMode,
+    /// Minimum replicator memory allocation, in Mi.
+    pub min_memory_mib: i32,
+    /// Maximum replicator memory allocation, in Mi.
+    pub max_memory_mib: i32,
+    /// Minimum replicator CPU allocation, in millicores.
+    pub min_cpu_millicores: i32,
+    /// Maximum replicator CPU allocation, in millicores.
+    pub max_cpu_millicores: i32,
+}
+
+/// Kubernetes VPA update mode used for a newly created autoscaler.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicatorAutoscalingUpdateMode {
+    /// Publish recommendations without changing Pod resources.
+    #[default]
+    Off,
+    /// Apply recommendations only when Pods are created.
+    Initial,
+    /// Apply recommendations to new Pods and recreate running Pods when needed.
+    Recreate,
+    /// Prefer in-place updates and fall back to recreating Pods when required.
+    InPlaceOrRecreate,
+    /// Update running Pods only in place and never evict them.
+    InPlace,
+}
+
+impl ReplicatorAutoscalingUpdateMode {
+    /// Returns the value expected by the Kubernetes VPA API.
+    pub const fn as_k8s_value(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Initial => "Initial",
+            Self::Recreate => "Recreate",
+            Self::InPlaceOrRecreate => "InPlaceOrRecreate",
+            Self::InPlace => "InPlace",
+        }
+    }
+}
+
+impl Default for ReplicatorAutoscalingConfig {
+    fn default() -> Self {
+        Self {
+            initial_update_mode: ReplicatorAutoscalingUpdateMode::Off,
+            min_memory_mib: 768,
+            max_memory_mib: 8 * 1024,
+            min_cpu_millicores: 250,
+            max_cpu_millicores: 2_000,
+        }
+    }
 }
 
 fn default_replicator_namespace() -> String {
@@ -167,7 +245,32 @@ impl ApiConfig {
     /// Validates API service configuration.
     pub fn validate(&self) -> Result<(), String> {
         self.k8s.replicator_resources.validate()?;
+        self.k8s.replicator_autoscaling.validate()?;
         self.k8s.vector_resources.validate()?;
+
+        Ok(())
+    }
+
+    /// Returns whether `tenant_id` identifies an allowlisted staging simulator.
+    pub(crate) fn is_simulator_tenant(&self, tenant_id: &str) -> bool {
+        self.simulator_tenant_ids.iter().any(|id| id == tenant_id)
+    }
+}
+
+impl ReplicatorAutoscalingConfig {
+    /// Validates that autoscaling bounds are positive and ordered.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_positive_request("K8s autoscaling minimum memory", self.min_memory_mib)?;
+        validate_positive_request("K8s autoscaling maximum memory", self.max_memory_mib)?;
+        validate_positive_request("K8s autoscaling minimum cpu", self.min_cpu_millicores)?;
+        validate_positive_request("K8s autoscaling maximum cpu", self.max_cpu_millicores)?;
+
+        if self.min_memory_mib > self.max_memory_mib {
+            return Err("K8s autoscaling minimum memory must not exceed maximum memory".to_owned());
+        }
+        if self.min_cpu_millicores > self.max_cpu_millicores {
+            return Err("K8s autoscaling minimum cpu must not exceed maximum cpu".to_owned());
+        }
 
         Ok(())
     }
@@ -268,7 +371,7 @@ pub struct SourceConfig {
 }
 
 impl Config for ApiConfig {
-    const LIST_PARSE_KEYS: &'static [&'static str] = &["api_keys"];
+    const LIST_PARSE_KEYS: &'static [&'static str] = &["api_keys", "simulator_tenant_ids"];
 }
 
 /// HTTP server configuration settings.
@@ -276,15 +379,32 @@ impl Config for ApiConfig {
 pub struct ApplicationSettings {
     /// Host address the API listens on.
     pub host: String,
-    /// Port number the API listens on.
+    /// Port number the public API listens on.
     pub port: u16,
+    /// Port number the cluster-internal API listens on.
+    pub internal_port: u16,
+    /// Optional TLS certificate and private key for the cluster-internal
+    /// listener.
+    #[serde(default)]
+    pub internal_tls: Option<InternalTlsSettings>,
+}
+
+/// TLS files used by the cluster-internal API listener.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InternalTlsSettings {
+    /// PEM-encoded server certificate chain.
+    pub cert_path: PathBuf,
+    /// PEM-encoded server private key.
+    pub key_path: PathBuf,
 }
 
 impl fmt::Display for ApplicationSettings {
     /// Formats application settings for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "    host: {}", self.host)?;
-        writeln!(f, "    port: {}", self.port)
+        writeln!(f, "    port: {}", self.port)?;
+        writeln!(f, "    internal_port: {}", self.internal_port)?;
+        writeln!(f, "    internal_tls: {}", self.internal_tls.is_some())
     }
 }
 
@@ -405,6 +525,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn internal_listener_tls_configuration_is_optional() {
+        let plaintext: ApplicationSettings = serde_json::from_value(json!({
+            "host": "127.0.0.1",
+            "port": 8080,
+            "internal_port": 8081
+        }))
+        .unwrap();
+        assert!(plaintext.internal_tls.is_none());
+
+        let tls: ApplicationSettings = serde_json::from_value(json!({
+            "host": "127.0.0.1",
+            "port": 8080,
+            "internal_port": 8081,
+            "internal_tls": {
+                "cert_path": "/etc/etl-api/internal-tls/tls.crt",
+                "key_path": "/etc/etl-api/internal-tls/tls.key"
+            }
+        }))
+        .unwrap();
+        let tls = tls.internal_tls.unwrap();
+        assert_eq!(tls.cert_path, PathBuf::from("/etc/etl-api/internal-tls/tls.crt"));
+        assert_eq!(tls.key_path, PathBuf::from("/etc/etl-api/internal-tls/tls.key"));
+    }
+
+    #[test]
     fn destination_replicator_resources_override_selected_global_fields() {
         let config: K8sConfig = serde_json::from_value(json!({
             "replicator_resources": {
@@ -461,6 +606,52 @@ mod tests {
                 cpu_request_millicores: 500,
             }
         );
+        assert_eq!(config.replicator_autoscaling, ReplicatorAutoscalingConfig::default());
+    }
+
+    #[test]
+    fn replicator_autoscaling_bounds_must_be_positive_and_ordered() {
+        let invalid = ReplicatorAutoscalingConfig {
+            initial_update_mode: ReplicatorAutoscalingUpdateMode::Off,
+            min_memory_mib: 1024,
+            max_memory_mib: 512,
+            min_cpu_millicores: 300,
+            max_cpu_millicores: 200,
+        };
+
+        assert!(invalid.validate().unwrap_err().contains("minimum memory"));
+
+        let invalid = ReplicatorAutoscalingConfig { min_memory_mib: 0, ..Default::default() };
+        assert!(invalid.validate().unwrap_err().contains("must be greater than 0"));
+    }
+
+    #[test]
+    fn replicator_autoscaling_initial_update_mode_is_configurable() {
+        let modes = [
+            ("off", ReplicatorAutoscalingUpdateMode::Off, "Off"),
+            ("initial", ReplicatorAutoscalingUpdateMode::Initial, "Initial"),
+            ("recreate", ReplicatorAutoscalingUpdateMode::Recreate, "Recreate"),
+            (
+                "in_place_or_recreate",
+                ReplicatorAutoscalingUpdateMode::InPlaceOrRecreate,
+                "InPlaceOrRecreate",
+            ),
+            ("in_place", ReplicatorAutoscalingUpdateMode::InPlace, "InPlace"),
+        ];
+
+        for (configured_mode, expected_mode, k8s_mode) in modes {
+            let config: ReplicatorAutoscalingConfig = serde_json::from_value(json!({
+                "initial_update_mode": configured_mode,
+                "min_memory_mib": 768,
+                "max_memory_mib": 8192,
+                "min_cpu_millicores": 250,
+                "max_cpu_millicores": 2000
+            }))
+            .unwrap();
+
+            assert_eq!(config.initial_update_mode, expected_mode);
+            assert_eq!(config.initial_update_mode.as_k8s_value(), k8s_mode);
+        }
     }
 
     #[test]

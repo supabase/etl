@@ -454,6 +454,37 @@ where
     Ok(records)
 }
 
+/// Reads the destination and pipeline ids for destinations with the requested
+/// name and kind.
+pub async fn read_pipeline_ids_for_destination_selector<'c, E>(
+    executor: E,
+    tenant_id: &str,
+    destination_name: &str,
+    destination_config_key: &str,
+) -> Result<Vec<(i64, i64)>, PipelinesDbError>
+where
+    E: PgExecutor<'c>,
+{
+    let records = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        select p.destination_id, p.id
+        from app.pipelines p
+        join app.destinations d on p.destination_id = d.id
+        where p.tenant_id = $1
+          and d.name = $2
+          and d.config ? $3
+        order by p.id
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(destination_name)
+    .bind(destination_config_key)
+    .fetch_all(executor)
+    .await?;
+
+    Ok(records)
+}
+
 pub async fn read_pipelines_for_source_for_deletion<'c, E>(
     executor: E,
     tenant_id: &str,

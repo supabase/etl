@@ -2014,6 +2014,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tower-http",
  "tracing",
