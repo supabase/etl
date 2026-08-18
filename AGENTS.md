@@ -63,6 +63,33 @@
   an unsupported value with an error, prefer delegating that check to the
   destination instead of duplicating expensive validation in the write path.
 
+## Migrations
+- Treat each committed migration as a durable deployment boundary. Prefer one
+  transactional migration for correlated schema changes, data backfills, and
+  cleanup that together form one semantic transition, so the whole transition
+  succeeds or fails together. Do not split migrations merely to make each file
+  or statement smaller.
+- Split correlated changes only when PostgreSQL or another real deployment
+  constraint prevents them from running safely in one transaction, such as a
+  database operation that must commit before its result can be used, an online
+  expand/backfill/contract rollout, compatibility with multiple application
+  versions, or a backfill whose locking or runtime must be managed separately.
+  Document the limitation and why the commit boundary exists.
+- Every intermediate state created by a split migration sequence must be valid,
+  restart-safe, and compatible with the deployment procedure. Make ordering and
+  dependencies explicit, and ensure a failure can be retried without leaving
+  ambiguous or partially classified data.
+- Include concise comments in migrations that provide enough context to review
+  and operate them later. As applicable, explain what changes, why it is needed,
+  how existing rows are handled, and any non-obvious impact on locking,
+  performance, compatibility, failure recovery, or rollback. No fixed comment
+  template is required, and comments should explain intent and consequences
+  rather than restating the SQL.
+- For reversible migrations, order down migrations so dependent data is made
+  compatible before removing the schema it depends on. Add focused migration
+  tests when classification, backfill, retry, or rollback behavior is not
+  obvious from the SQL alone.
+
 ## Public Repo Secret Safety
 - Treat this repository, every branch, every commit, every PR, and every review
   comment as public by default. Assume anything written to tracked files, commit
