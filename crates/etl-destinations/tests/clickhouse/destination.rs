@@ -675,6 +675,17 @@ async fn array_values_roundtrip_through_destination() {
     });
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn nullable_array_columns_fail_only_for_top_level_null_values() {
+    let table = PropertyTable::create("nullablearray", &[("values", Type::INT8_ARRAY, true)]).await;
+
+    table.write(vec![Cell::Array(ArrayCell::I64(vec![]))]).await.unwrap();
+    let error = table.write(vec![Cell::Null]).await.unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::ConversionError);
+    assert_eq!(error.description(), Some("NULL value for non-nullable ClickHouse column"));
+}
+
 /// Dates legal in Postgres but outside ClickHouse `Date32`'s
 /// `1900-01-01..=2299-12-31` range.
 fn out_of_range_date() -> impl Strategy<Value = NaiveDate> {
@@ -688,17 +699,6 @@ fn out_of_range_date() -> impl Strategy<Value = NaiveDate> {
 
     prop_oneof![low_min..=low_max, high_min..=high_max]
         .prop_map(move |days| epoch + chrono::Duration::days(days))
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn out_of_range_dates_are_rejected_loudly() {
-    let table = PropertyTable::create("propdatereject", &[("vd", Type::DATE, true)]).await;
-
-    run_property("clickhouse date rejection", &out_of_range_date(), |date| {
-        let result = block_on(table.write(vec![Cell::Date(*date)]));
-        prop_assert!(result.is_err(), "date {} is outside Date32 but the write succeeded", date);
-        Ok(())
-    });
 }
 
 #[derive(clickhouse::Row, serde::Deserialize)]

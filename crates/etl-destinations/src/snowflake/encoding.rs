@@ -133,9 +133,9 @@ impl Serialize for CellSerializer<'_> {
 
 fn reject_non_finite<E: serde::ser::Error>(f: f64) -> std::result::Result<(), E> {
     if f.is_nan() || f.is_infinite() {
-        return Err(E::custom(format!(
-            "Snowflake does not support NaN/Infinity float values: {f}"
-        )));
+        return Err(E::custom(
+            "Snowflake JSON ingestion cannot encode non-finite float values without changing them",
+        ));
     }
     Ok(())
 }
@@ -144,14 +144,9 @@ fn serialize_pg_numeric<S: Serializer>(
     n: &PgNumeric,
     ser: S,
 ) -> std::result::Result<S::Ok, S::Error> {
-    match n {
-        PgNumeric::NaN => Err(serde::ser::Error::custom("Snowflake NUMBER does not support NaN")),
-        PgNumeric::PositiveInfinity | PgNumeric::NegativeInfinity => {
-            Err(serde::ser::Error::custom("Snowflake NUMBER does not support Infinity"))
-        }
-        // PgNumeric `Display` writes directly via `collect_str`, no extra alloc.
-        PgNumeric::Value { .. } => ser.collect_str(n),
-    }
+    // PostgreSQL NUMERIC columns are stored as Snowflake VARCHAR, including
+    // special values, so formatting preserves the source value exactly.
+    ser.collect_str(n)
 }
 
 /// Zero-allocation hex formatter for byte slices.
@@ -356,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_finite() {
+    fn rejects_non_finite_floats() {
         let cases: Vec<Cell> = vec![
             Cell::F64(f64::NAN),
             Cell::F64(f64::INFINITY),
@@ -364,13 +359,18 @@ mod tests {
             Cell::F32(f32::NAN),
             Cell::F32(f32::INFINITY),
             Cell::F32(f32::NEG_INFINITY),
-            Cell::Numeric(PgNumeric::NaN),
-            Cell::Numeric(PgNumeric::PositiveInfinity),
-            Cell::Numeric(PgNumeric::NegativeInfinity),
         ];
         for cell in cases {
             let dbg = format!("{cell:?}");
             assert!(push_single_cell(cell).is_err(), "should reject: {dbg}");
+        }
+    }
+
+    #[test]
+    fn serializes_non_finite_numerics_as_strings() {
+        for numeric in [PgNumeric::NaN, PgNumeric::PositiveInfinity, PgNumeric::NegativeInfinity] {
+            let expected = json!(numeric.to_string());
+            assert_eq!(push_single_cell(Cell::Numeric(numeric)).unwrap(), expected);
         }
     }
 
@@ -406,16 +406,28 @@ mod tests {
     }
 
     #[test]
-    fn array_rejects_non_finite() {
+    fn array_rejects_non_finite_floats() {
         let cases: Vec<Cell> = vec![
             Cell::Array(ArrayCell::F64(vec![Some(f64::NAN)])),
             Cell::Array(ArrayCell::F32(vec![Some(f32::INFINITY)])),
-            Cell::Array(ArrayCell::Numeric(vec![Some(PgNumeric::NaN)])),
         ];
         for cell in cases {
             let dbg = format!("{cell:?}");
             assert!(push_single_cell(cell).is_err(), "should reject: {dbg}");
         }
+    }
+
+    #[test]
+    fn array_serializes_non_finite_numerics_as_strings() {
+        let numerics = vec![
+            Some(PgNumeric::NaN),
+            Some(PgNumeric::PositiveInfinity),
+            Some(PgNumeric::NegativeInfinity),
+            None,
+        ];
+        let expected = json!(["NaN", "Infinity", "-Infinity", null]);
+
+        assert_eq!(push_single_cell(Cell::Array(ArrayCell::Numeric(numerics))).unwrap(), expected);
     }
 
     #[test]

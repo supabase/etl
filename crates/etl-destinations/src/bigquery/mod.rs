@@ -6,7 +6,6 @@ mod schema;
 mod sql;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
-mod validation;
 
 use etl::schema::ColumnNameMapping;
 

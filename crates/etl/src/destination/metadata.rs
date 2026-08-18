@@ -6,7 +6,7 @@ use crate::{
 /// Schema metadata for a table at a destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DestinationTableSchema {
-    /// The destination table is being created for the first time.
+    /// The destination table is being created or recreated by ETL.
     Creating {
         /// The source schema snapshot being created.
         snapshot_id: SnapshotId,
@@ -71,7 +71,8 @@ pub struct DestinationTableMetadata {
 }
 
 impl DestinationTableMetadata {
-    /// Creates metadata for a table being created at the destination.
+    /// Creates metadata for a table being created or recreated at the
+    /// destination.
     pub fn new_creating(
         table_id: String,
         snapshot_id: SnapshotId,
@@ -115,7 +116,7 @@ impl DestinationTableMetadata {
         self.table_schema.replication_mask()
     }
 
-    /// Returns true if the destination table is being created.
+    /// Returns true if the destination table is being created or recreated.
     pub fn is_creating(&self) -> bool {
         matches!(self.table_schema, DestinationTableSchema::Creating { .. })
     }

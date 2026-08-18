@@ -9,6 +9,10 @@ column changes listed below when the destination can represent them safely.
 When it cannot, ETL either skips the destination DDL with a warning or rejects
 the change before applying it.
 
+This page describes structural DDL compatibility. Row values are not validated
+against destination-specific value domains; see [Row value
+handling](/reference/destinations/#row-value-handling).
+
 ## Supported changes
 
 | PostgreSQL change | Current behavior |
@@ -156,6 +160,9 @@ replication mask as one logical recovery endpoint.
 Initial table setup uses a separate `Creating` state. If setup is interrupted,
 ETL retries the destination's idempotent write-path setup for that exact target
 schema and records `Applied` only after the destination is ready for writes.
+Iceberg also uses `Creating` to bracket its ETL-owned drop-and-recreate
+implementation of source truncation, so an interrupted recreation can finish
+before replayed writes continue.
 Ancillary objects that are not required for writes, such as BigQuery's
 customer-facing view, have their own idempotent reconciliation. This keeps
 creation recovery separate from partially applied schema changes, which may

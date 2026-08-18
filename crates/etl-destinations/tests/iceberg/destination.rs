@@ -2,13 +2,16 @@ use std::sync::Arc;
 
 use etl::{
     data::{Cell, TableRow},
-    event::EventType,
+    destination::{DestinationTableMetadata, WriteEventsDurability},
+    event::{Event, EventType, InsertEvent, TruncateEvent},
     pipeline::PipelineId,
-    schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
+    schema::{ColumnSchema, PgLsn, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
     store::{MemoryStore, StateStore},
     test_utils::{
         database::spawn_source_database,
-        destination::write_table_rows as invoke_write_table_rows,
+        destination::{
+            write_events as invoke_write_events, write_table_rows as invoke_write_table_rows,
+        },
         event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
@@ -86,6 +89,121 @@ async fn applied_metadata_does_not_recreate_a_missing_table_after_restart() {
         Some(applied_metadata)
     );
 
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupted_truncate_recovery_handles_replay_ordering() {
+    init_test_tracing();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
+    let namespace = "test_namespace";
+    client.create_namespace_if_missing(namespace).await.unwrap();
+
+    let table_schema = Arc::new(TableSchema::new(
+        TableId::new(1),
+        TableName::new("public".to_owned(), "truncate_recovery".to_owned()),
+        vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+    ));
+    let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
+    let table_id = replicated_table_schema.id();
+    let iceberg_table_name =
+        table_name_to_iceberg_table_name(replicated_table_schema.name(), true).unwrap();
+    let store = MemoryStore::new();
+    let destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_owned()),
+        store.clone(),
+    );
+
+    invoke_write_table_rows(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
+
+    // Simulate a crash after truncate persisted its recreation marker and
+    // dropped the table, but before the replacement table was created.
+    let applied_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    let recreating_metadata = DestinationTableMetadata::new_creating(
+        applied_metadata.table_id().to_owned(),
+        applied_metadata.snapshot_id(),
+        applied_metadata.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(table_id, recreating_metadata).await.unwrap();
+    client.drop_table_if_exists(namespace, iceberg_table_name.clone()).await.unwrap();
+
+    let restarted_destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_owned()),
+        store.clone(),
+    );
+    let commit_lsn = PgLsn::from(20_u64);
+    invoke_write_events(
+        &restarted_destination,
+        WriteEventsDurability::RequireDurable,
+        vec![
+            Event::Insert(InsertEvent {
+                commit_lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(1)]),
+            }),
+            Event::Truncate(TruncateEvent {
+                commit_lsn,
+                tx_ordinal: 2,
+                options: 0,
+                truncated_tables: vec![replicated_table_schema.clone()],
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+
+    assert!(client.table_exists(namespace, iceberg_table_name.clone()).await.unwrap());
+    assert!(
+        read_all_rows(&client, namespace.to_owned(), iceberg_table_name.clone()).await.is_empty()
+    );
+    assert!(store.get_destination_table_metadata(table_id).await.unwrap().unwrap().is_applied());
+
+    // A truncate-only replay must recover the same marker itself because no
+    // preceding row write is available to run table preparation first.
+    let applied_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    let recreating_metadata = DestinationTableMetadata::new_creating(
+        applied_metadata.table_id().to_owned(),
+        applied_metadata.snapshot_id(),
+        applied_metadata.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(table_id, recreating_metadata).await.unwrap();
+    client.drop_table_if_exists(namespace, iceberg_table_name.clone()).await.unwrap();
+
+    let restarted_destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_owned()),
+        store.clone(),
+    );
+    invoke_write_events(
+        &restarted_destination,
+        WriteEventsDurability::RequireDurable,
+        vec![Event::Truncate(TruncateEvent {
+            commit_lsn,
+            tx_ordinal: 3,
+            options: 0,
+            truncated_tables: vec![replicated_table_schema],
+        })],
+    )
+    .await
+    .unwrap();
+
+    assert!(client.table_exists(namespace, iceberg_table_name.clone()).await.unwrap());
+    assert!(store.get_destination_table_metadata(table_id).await.unwrap().unwrap().is_applied());
+
+    client.drop_table_if_exists(namespace, iceberg_table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }

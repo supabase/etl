@@ -1044,11 +1044,8 @@ where
         let rows: Vec<Vec<ClickHouseValue>> = table_rows
             .into_iter()
             .map(|table_row| {
-                let mut values: Vec<ClickHouseValue> = table_row
-                    .into_values()
-                    .into_iter()
-                    .map(cell_to_clickhouse_value)
-                    .collect::<EtlResult<_>>()?;
+                let mut values: Vec<ClickHouseValue> =
+                    table_row.into_values().into_iter().map(cell_to_clickhouse_value).collect();
                 // Initial-copy rows are tagged as INSERT with LSN 0 / tx_ordinal 0
                 // (sentinel meaning "this row pre-dates the streaming cursor"). For
                 // ReplacingMergeTree, any streaming event then wins on FINAL because its packed
@@ -1563,10 +1560,8 @@ where
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
                     .map(|PendingRow { operation, sequence_key, cells }| {
-                        let mut values: Vec<ClickHouseValue> = cells
-                            .into_iter()
-                            .map(cell_to_clickhouse_value)
-                            .collect::<EtlResult<_>>()?;
+                        let mut values: Vec<ClickHouseValue> =
+                            cells.into_iter().map(cell_to_clickhouse_value).collect();
                         append_cdc_columns(&mut values, operation, sequence_key, engine);
                         Ok(values)
                     })
@@ -1720,22 +1715,6 @@ fn validate_clickhouse_schema_capabilities(
     replicated_table_schema: &ReplicatedTableSchema,
     engine: ClickHouseEngine,
 ) -> EtlResult<()> {
-    if let Some(column) = replicated_table_schema
-        .column_schemas()
-        .find(|column| column.nullable && is_array_type(&column.typ))
-    {
-        return Err(etl_error!(
-            ErrorKind::SourceSchemaError,
-            "ClickHouse cannot represent nullable source arrays",
-            format!(
-                "Table '{}' column '{}' is a nullable array. The ClickHouse destination uses a \
-                 non-nullable Array column and cannot preserve a top-level NULL array.",
-                replicated_table_schema.name(),
-                column.name
-            )
-        ));
-    }
-
     let trailing_column_names = trailing_cdc_column_names(engine);
     if let Some(column) = replicated_table_schema.column_schemas().find(|column| {
         trailing_column_names.iter().any(|trailing_name| {
@@ -2021,9 +2000,12 @@ mod tests {
     };
 
     use super::*;
-    use crate::clickhouse::schema::{
-        CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME,
-        ETL_VERSION_COLUMN_NAME, clickhouse_column_type,
+    use crate::clickhouse::{
+        encoding::encode_to_row_binary,
+        schema::{
+            CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME,
+            ETL_VERSION_COLUMN_NAME, clickhouse_column_type,
+        },
     };
 
     /// Creates a synthetic composite snapshot ID for tests.
@@ -2251,6 +2233,28 @@ mod tests {
     }
 
     #[test]
+    fn clickhouse_update_row_defers_null_array_failure_to_row_binary_encoding() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![ColumnSchema::new("tags".to_owned(), Type::TEXT_ARRAY, -1, 1, true)],
+        ));
+        let schema = ReplicatedTableSchema::all(table_schema);
+        let row = clickhouse_update_row(
+            &schema,
+            UpdatedTableRow::Full(TableRow::new(vec![Cell::Null])),
+            ClickHouseEngine::MergeTree,
+        )
+        .unwrap();
+        let values =
+            row.into_values().into_iter().map(cell_to_clickhouse_value).collect::<Vec<_>>();
+
+        let error = encode_to_row_binary(values, &[false], &mut Vec::new()).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConversionError);
+    }
+
+    #[test]
     fn clickhouse_delete_old_row_rejects_missing_old_rows() {
         let err = clickhouse_delete_old_row(&replicated_schema(IdentityType::PrimaryKey), None)
             .unwrap_err();
@@ -2289,7 +2293,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_clickhouse_table_shape_rejects_nullable_arrays() {
+    fn validate_clickhouse_table_shape_accepts_nullable_arrays() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
@@ -2297,12 +2301,8 @@ mod tests {
         ));
         let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
 
-        let error =
-            validate_clickhouse_table_shape(&replicated_table_schema, ClickHouseEngine::MergeTree)
-                .unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
-        assert_eq!(error.description(), Some("ClickHouse cannot represent nullable source arrays"));
+        validate_clickhouse_table_shape(&replicated_table_schema, ClickHouseEngine::MergeTree)
+            .unwrap();
     }
 
     #[test]

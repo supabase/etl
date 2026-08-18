@@ -57,11 +57,21 @@
   not run expensive checks reflexively for unrelated documentation, YAML-only, or
   similarly low-risk edits; in those cases, run the smallest relevant validation
   instead and report what actually ran.
-- Add local destination value validation only when it prevents silent data
-  corruption, such as rounding, truncation, clamping, coercion, or another
-  semantic change that the destination would accept. If the destination rejects
-  an unsupported value with an error, prefer delegating that check to the
-  destination instead of duplicating expensive validation in the write path.
+- Put predictive source-to-destination compatibility checks in the ETL API
+  preflight layer. Report value- or event-contingent incompatibilities as
+  non-blocking warnings using stable destination capabilities. Do not reject a
+  runtime schema merely because it permits a value or event shape that the
+  destination might not preserve; if that value or event never occurs,
+  replication should continue.
+- Do not add destination runtime value-domain validation merely to predict
+  whether the destination will reject, coerce, round, truncate, clamp, or
+  otherwise reinterpret a value. If ETL can faithfully construct the
+  destination request or wire representation, send the value and rely on the
+  destination's native behavior and errors.
+- Return a typed local error only when ETL cannot construct the destination
+  request or wire representation faithfully, or when a structural or state
+  invariant is violated. Keep wire-representation checks at the encoding point
+  and apply the same path to initial copy, inserts, and updates.
 
 ## Migrations
 - Treat each committed migration as a durable deployment boundary. Prefer one

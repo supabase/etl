@@ -27,6 +27,22 @@ recommended default.**
 - **Deprecated:** Retained for compatibility but no longer recommended for new
   deployments. Plan to move away from it.
 
+## Row value handling
+
+ETL validates structural prerequisites such as primary keys, replica identity,
+column mappings, and schema transitions. It does not pre-validate each row value
+against destination-specific domains. When ETL can represent a value in the
+destination request or wire format, it sends that value and relies on the
+destination's native coercion, rounding, canonicalization, and rejection
+behavior. These semantics apply consistently to initial copy, inserts, and
+updates.
+
+ETL returns a local error only when it cannot construct a faithful wire
+representation. The ETL API may also emit non-blocking preflight warnings for
+known destination differences, but those warnings do not add per-cell runtime
+validation. Test destination-specific value semantics that matter to your
+workload.
+
 ## Publication column additions
 
 An existing column newly exposed by a publication is added as nullable so old
@@ -68,6 +84,11 @@ as its default example.
 - Every replicated source table needs a primary key, and all primary-key
   columns must be included in the publication.
 - PostgreSQL arrays containing `NULL` elements are not supported.
+- BigQuery stores a top-level PostgreSQL `NULL` array as an empty array, so the
+  two source values are indistinguishable in the destination.
+- Numeric and JSON values follow BigQuery's native domain, rounding, and
+  canonicalization behavior. BigQuery may transform or reject values that do
+  not map exactly to its types.
 - Supported schema changes are applied automatically, but PostgreSQL default
   expressions and backfill behavior are only supported where they map safely
   to BigQuery. See [Schema Changes](/explanation/schema-changes/).
@@ -93,6 +114,11 @@ append-only event-log layout with `MergeTree`.
 - Source type changes are warned about, but physical type DDL is not currently
   applied or validated. Later RowBinary writes may fail or behave unpredictably;
   resynchronize the table after a source type change.
+- ClickHouse `Array` columns are non-nullable. A top-level PostgreSQL `NULL`
+  array cannot be encoded in RowBinary and fails the write; empty arrays and
+  `NULL` array elements remain supported.
+- Values that RowBinary can represent are sent without local ClickHouse domain
+  checks and follow ClickHouse's native conversion or rejection behavior.
 - Dotted nested subcolumns can be renamed only within the same parent, matching
   ClickHouse's documented `RENAME COLUMN` limitation.
 - Tombstone cleanup and `OPTIMIZE ... FINAL CLEANUP` are operator-managed.

@@ -7,7 +7,7 @@ use etl::{
     error::ErrorKind,
     event::{Event, EventType},
     pipeline::PipelineId,
-    store::{StateStore, TableState, TableStateType},
+    store::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -1018,7 +1018,7 @@ async fn table_nullable_scalar_columns() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_nullable_array_columns_are_rejected() {
+async fn table_nullable_array_columns_follow_bigquery_null_coercion() {
     if skip_if_missing_bigquery_env_vars() {
         return;
     }
@@ -1031,35 +1031,57 @@ async fn table_nullable_array_columns_are_rejected() {
     let table_name = test_table_name("nullable_cols_array");
     let table_id =
         database.create_table(table_name.clone(), true, &[("values", "integer[]")]).await.unwrap();
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "insert into {} (values) values (array[]::integer[])",
+                table_name.as_quoted_identifier()
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
 
     let publication_name = "test_pub_array";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
-    let table_errored_notify =
-        store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
-
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
         publication_name.to_owned(),
         store.clone(),
-        destination,
+        destination.clone(),
     );
 
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
     pipeline.start().await.unwrap();
-    table_errored_notify.notified().await;
+    table_sync_complete_notify.notified().await;
+
+    let events_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .await;
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(&format!("update {} set values = null", table_name.as_quoted_identifier()), &[])
+        .await
+        .unwrap();
+
+    events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
-    match table_state {
-        TableState::Errored { reason, .. } => {
-            assert!(reason.contains("nullable source arrays"));
-        }
-        other => panic!("expected Errored state, got {other:?}"),
-    }
+    let table_rows = bigquery_database.query_table(table_name).await.unwrap();
+    assert_eq!(table_rows.len(), 1);
+    let columns = table_rows[0].columns.as_ref().unwrap();
+    assert_eq!(columns[1].value.as_ref().unwrap().as_array().unwrap().len(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1713,213 +1735,6 @@ async fn table_array_with_null_values() {
     if let Some(columns) = &row.columns {
         assert_eq!(columns.len(), 2);
         assert_eq!(columns[1].value.clone().unwrap().as_array().unwrap().len(), 3);
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_validation_out_of_bounds_values() {
-    if skip_if_missing_bigquery_env_vars() {
-        return;
-    }
-
-    init_test_tracing();
-    install_crypto_provider();
-
-    let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_database().await;
-
-    // Create tables with different error types
-    let huge_numeric_table = test_table_name("huge_numeric");
-    let huge_numeric_table_id = database
-        .create_table(huge_numeric_table.clone(), true, &[("huge_numeric", "numeric")])
-        .await
-        .unwrap();
-
-    let infinite_numeric_table = test_table_name("infinite_numeric");
-    let infinite_numeric_table_id = database
-        .create_table(infinite_numeric_table.clone(), true, &[("infinite_numeric", "numeric")])
-        .await
-        .unwrap();
-
-    let old_date_table = test_table_name("old_date");
-    let old_date_table_id = database
-        .create_table(old_date_table.clone(), true, &[("test_date", "date")])
-        .await
-        .unwrap();
-
-    let nan_array_table = test_table_name("nan_array");
-    let nan_array_table_id = database
-        .create_table(nan_array_table.clone(), true, &[("numeric_array", "numeric[]")])
-        .await
-        .unwrap();
-
-    let wide_json_table = test_table_name("wide_json");
-    let wide_json_table_id =
-        database.create_table(wide_json_table.clone(), true, &[("payload", "json")]).await.unwrap();
-
-    let imprecise_json_integer_table = test_table_name("imprecise_json_integer");
-    let imprecise_json_integer_table_id = database
-        .create_table(imprecise_json_integer_table.clone(), true, &[("payload", "json")])
-        .await
-        .unwrap();
-
-    // Insert out-of-bounds data into each table
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (huge_numeric) values ({})",
-                huge_numeric_table.as_quoted_identifier(),
-                "'123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890'"
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (infinite_numeric) values ('Infinity'::numeric)",
-                infinite_numeric_table.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (test_date) values ('0001-01-01'::date - interval '1 day')",
-                old_date_table.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (numeric_array) values (array['NaN'::numeric, '123.45'::numeric])",
-                nan_array_table.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (payload) values ('{{\"value\":1e309}}'::json)",
-                wide_json_table.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (payload) values ('{{\"value\":18446744073709551616}}'::json)",
-                imprecise_json_integer_table.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
-
-    let publication_name = "test_pub_validation".to_owned();
-    database
-        .create_publication(
-            &publication_name,
-            &[
-                huge_numeric_table,
-                infinite_numeric_table,
-                old_date_table,
-                nan_array_table,
-                wide_json_table,
-                imprecise_json_integer_table,
-            ],
-        )
-        .await
-        .unwrap();
-
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        store.clone(),
-        destination.clone(),
-    );
-
-    // Register notifications for errored table state
-    let huge_numeric_error_notify =
-        store.notify_on_table_state_type(huge_numeric_table_id, TableStateType::Errored).await;
-
-    let infinite_numeric_error_notify =
-        store.notify_on_table_state_type(infinite_numeric_table_id, TableStateType::Errored).await;
-
-    let old_date_error_notify =
-        store.notify_on_table_state_type(old_date_table_id, TableStateType::Errored).await;
-
-    let nan_array_error_notify =
-        store.notify_on_table_state_type(nan_array_table_id, TableStateType::Errored).await;
-
-    let wide_json_error_notify =
-        store.notify_on_table_state_type(wide_json_table_id, TableStateType::Errored).await;
-
-    let imprecise_json_integer_error_notify = store
-        .notify_on_table_state_type(imprecise_json_integer_table_id, TableStateType::Errored)
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    // Wait for all tables to enter errored state
-    huge_numeric_error_notify.notified().await;
-    infinite_numeric_error_notify.notified().await;
-    old_date_error_notify.notified().await;
-    nan_array_error_notify.notified().await;
-    wide_json_error_notify.notified().await;
-    imprecise_json_integer_error_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    for table_id in [
-        huge_numeric_table_id,
-        infinite_numeric_table_id,
-        old_date_table_id,
-        nan_array_table_id,
-        wide_json_table_id,
-        imprecise_json_integer_table_id,
-    ] {
-        let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
-        assert!(matches!(table_state, TableState::Errored { .. }));
     }
 }
 

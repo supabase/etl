@@ -184,7 +184,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
         let table_id = replicated_table_schema.id();
 
         // Check if metadata exists for this table.
@@ -199,26 +199,68 @@ where
             );
             return Ok(());
         };
-        ensure_iceberg_relation_is_unchanged(&metadata, replicated_table_schema)?;
+        match metadata.table_schema() {
+            DestinationTableSchema::Applied { .. } => {
+                ensure_iceberg_relation_is_unchanged(&metadata, replicated_table_schema)?;
+            }
+            DestinationTableSchema::Creating { .. } => {
+                // A truncate-only replay reaches this path before any earlier DML
+                // can recover the marker. The drop/create pair below is itself the
+                // idempotent recovery operation for the recorded target.
+                ensure_destination_schema_matches_metadata(
+                    "Iceberg",
+                    table_id,
+                    &metadata,
+                    replicated_table_schema,
+                )?;
+            }
+            DestinationTableSchema::Applying { .. } => {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "Iceberg cannot recover an interrupted schema change",
+                    format!(
+                        "Table {table_id} has schema-change Applying metadata, but the deprecated \
+                         Iceberg destination does not support schema evolution. Resynchronize the \
+                         table to recover."
+                    )
+                ));
+            }
+        }
         let iceberg_table_name = metadata.table_id().to_owned();
 
+        replicated_table_schema.validate_destination_column_names(ICEBERG_COLUMN_NAME_MAPPING)?;
+        let column_schemas = Self::build_cdc_column_schemas(replicated_table_schema);
+        let recreating_metadata = DestinationTableMetadata::new_creating(
+            iceberg_table_name.clone(),
+            replicated_table_schema.inner().snapshot_id,
+            replicated_table_schema.replication_mask().clone(),
+        );
         let namespace = schema_to_namespace(&replicated_table_schema.name().schema);
         let namespace = inner.namespace.get_or(&namespace).to_owned();
+        let namespace = if metadata.is_creating() {
+            self.create_namespace_if_missing(&mut inner, namespace).await?
+        } else {
+            namespace
+        };
+
+        // Persist a recovery marker before creating the intentional missing-table
+        // window. If replay reaches earlier DML first, normal Creating recovery
+        // recreates the table so the batch can advance to this truncate again.
+        self.store.store_destination_table_metadata(table_id, recreating_metadata.clone()).await?;
 
         self.client
             .drop_table_if_exists(&namespace, iceberg_table_name.clone())
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
-        // A truncate deliberately recreates an Applied table. Ordinary table
-        // preparation never does this, so a missing Applied table outside this
-        // ordered truncate path fails closed instead of silently losing data.
-        replicated_table_schema.validate_destination_column_names(ICEBERG_COLUMN_NAME_MAPPING)?;
-        let column_schemas = Self::build_cdc_column_schemas(replicated_table_schema);
         self.client
             .create_table_if_missing(&namespace, iceberg_table_name, &column_schemas)
             .await
             .map_err(iceberg_error_to_etl_error)?;
+
+        self.store
+            .store_destination_table_metadata(table_id, recreating_metadata.to_applied())
+            .await?;
 
         Ok(())
     }
@@ -433,9 +475,10 @@ where
     /// Prepares a table for Iceberg writes with schema-aware table creation.
     ///
     /// Augments the provided schema with CDC columns and ensures the
-    /// corresponding Iceberg table exists during initial setup. Applied
-    /// metadata is authoritative and does not trigger catalog inspection or
-    /// physical table repair.
+    /// corresponding Iceberg table exists during initial setup or recovery from
+    /// an interrupted ETL-owned table recreation. Applied metadata is
+    /// authoritative and does not trigger catalog inspection or physical table
+    /// repair.
     ///
     /// Follows the creating -> applied pattern for crash recovery:
     /// 1. Store metadata with `Creating` status before creating the table
