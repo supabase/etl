@@ -9,7 +9,7 @@ use rustls::{
 use tokio::runtime::Handle;
 use tokio_postgres::{
     Client, GenericClient, NoTls, Transaction,
-    types::{FromSql, ToSql, Type},
+    types::{FromSql, PgLsn, ToSql, Type},
 };
 use tracing::info;
 
@@ -604,6 +604,46 @@ impl PgDatabase<Client> {
         let client = connect_to_pg_database(&config).await;
 
         Self { config, client: Some(client.0), server_version: client.1, destroy_on_drop: true }
+    }
+
+    /// Returns the database server's current flushed WAL position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if PostgreSQL cannot query the WAL position.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the database client has already been removed.
+    pub async fn current_wal_flush_lsn(&self) -> Result<PgLsn, tokio_postgres::Error> {
+        let row = self
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one("select pg_current_wal_flush_lsn()", &[])
+            .await?;
+
+        Ok(row.get(0))
+    }
+
+    /// Logs a running-transactions snapshot to WAL and returns its position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if PostgreSQL cannot log the standby snapshot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the database client has already been removed.
+    pub async fn log_standby_snapshot(&self) -> Result<PgLsn, tokio_postgres::Error> {
+        let row = self
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one("select pg_log_standby_snapshot()", &[])
+            .await?;
+
+        Ok(row.get(0))
     }
 
     /// Begins a new database transaction.

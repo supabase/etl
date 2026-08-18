@@ -167,21 +167,18 @@ impl Destination for DeferredEventsDestination {
     }
 }
 
-/// Waits until the apply worker has confirmed the source's current WAL flush
-/// position and returns that position.
-async fn wait_for_apply_worker_to_reach_current_wal(
+/// Waits until the apply worker confirms the provided WAL target and returns
+/// the confirmed position.
+async fn wait_for_apply_worker_to_reach(
     database: &PgDatabase<Client>,
     pipeline_id: PipelineId,
+    target_lsn: PgLsn,
 ) -> PgLsn {
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     let client = database.client.as_ref().unwrap();
-    let target_lsn =
-        client.query_one("select pg_current_wal_flush_lsn()", &[]).await.unwrap().get(0);
 
-    wait_for_replication_slot_flush_lsn(client, &apply_slot_name, target_lsn).await;
-
-    target_lsn
+    wait_for_replication_slot_flush_lsn(client, &apply_slot_name, target_lsn).await
 }
 
 enum ExpectedReplicatedEvent<'a> {
@@ -632,16 +629,10 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
 
     finished_copy_notify.notified().await;
 
-    let initial_commit_count = destination
-        .get_events()
-        .await
-        .iter()
-        .filter(|event| matches!(event, Event::Commit(_)))
-        .count() as u64;
     let apply_commits_notify = destination
         .wait_for_events(vec![EventCondition::AnyCount(
             EventType::Commit,
-            initial_commit_count + catchup_rows as u64,
+            u64::try_from(catchup_rows).unwrap(),
         )])
         .await;
 
@@ -865,9 +856,13 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     finished_copy_notify.notified().await;
 
     // Advance the physical schema while both logical connections are alive,
-    // but emit no DML that would make pgoutput send a new Relation. Keep the
-    // table-sync worker paused until the apply worker has passed this commit,
+    // but emit no DML that would make pgoutput send a new Relation. The DDL
+    // event trigger emits a transactional logical message, so its transaction
+    // has a commit event on every supported PostgreSQL version. Keep the
+    // table-sync worker paused until the apply worker has passed that commit,
     // so its later catchup target must include the DDL.
+    let apply_commit_notify =
+        destination.wait_for_events(vec![EventCondition::AnyCount(EventType::Commit, 1)]).await;
     let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
     database
         .run_sql(&format!(
@@ -876,7 +871,7 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
         ))
         .await
         .unwrap();
-    wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
+    apply_commit_notify.notified().await;
 
     let errored_notify = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
@@ -955,18 +950,18 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     // checkpoint cannot reach that future boundary.
     fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return(apply)").unwrap();
 
-    // Commit one published row at A while the table-sync worker is paused, then
-    // advance cluster WAL to T in another database. Logical decoding skips that
-    // transaction entirely, so no event batch exists at T.
+    // Commit one published row at A while the table-sync worker is paused.
     insert_users_data(&mut database, &users_schema.name, 1..=1).await;
+
     other_database
         .insert_values(other_database_table.clone(), &["value"], &[&1_i32])
         .await
         .unwrap();
 
-    // Ensure the apply worker observes T before choosing table sync's catchup
-    // target.
-    let target_lsn = wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
+    // The sender's next idle keepalive must advertise at least this post-commit
+    // cluster WAL frontier even though the transaction emitted no event batch.
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
 
     let table_sync_done_notify =
         store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
@@ -1023,7 +1018,8 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     // Since no destination flush occurred, quiescent coordination must not
     // persist that received LSN as an apply checkpoint.
     other_database.insert_values(other_database_table, &["value"], &[&2_i32]).await.unwrap();
-    wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
 
     let persisted_checkpoint_lsn =
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();

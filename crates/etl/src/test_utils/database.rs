@@ -142,8 +142,13 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
     database
 }
 
-/// Queries the replication slot's confirmed flush LSN and active walsender PID.
-async fn query_replication_slot_state(
+/// Tries to return the replication slot's confirmed flush LSN and active
+/// walsender PID.
+///
+/// # Errors
+///
+/// Returns an error if PostgreSQL cannot query the requested slot.
+pub async fn try_replication_slot_state(
     client: &Client,
     slot_name: &str,
 ) -> Result<(PgLsn, Option<i32>), tokio_postgres::Error> {
@@ -159,7 +164,7 @@ async fn query_replication_slot_state(
 
 /// Returns the replication slot's confirmed flush LSN and active walsender PID.
 pub async fn replication_slot_state(client: &Client, slot_name: &str) -> (PgLsn, Option<i32>) {
-    query_replication_slot_state(client, slot_name)
+    try_replication_slot_state(client, slot_name)
         .await
         .expect("Failed to query replication slot state")
 }
@@ -206,7 +211,7 @@ pub async fn terminate_active_walsender(
     client: &Client,
     slot_name: &str,
 ) -> Result<WalsenderTermination, tokio_postgres::Error> {
-    let (_, active_pid) = query_replication_slot_state(client, slot_name).await?;
+    let (_, active_pid) = try_replication_slot_state(client, slot_name).await?;
     let Some(pid) = active_pid else {
         return Ok(WalsenderTermination::Inactive);
     };
@@ -218,29 +223,30 @@ pub async fn terminate_active_walsender(
     }
 }
 
-/// Waits until a replication slot has confirmed at least `expected_lsn`.
+/// Waits until a replication slot confirms at least `target_lsn` and returns
+/// the confirmed position.
 ///
 /// # Panics
 ///
-/// Panics after [`DEFAULT_NOTIFY_TIMEOUT`] if the slot does not confirm the
-/// expected LSN.
+/// Panics after [`DEFAULT_NOTIFY_TIMEOUT`] if the slot does not reach the
+/// target.
 pub async fn wait_for_replication_slot_flush_lsn(
     client: &Client,
     slot_name: &str,
-    expected_lsn: PgLsn,
-) {
+    target_lsn: PgLsn,
+) -> PgLsn {
     tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, async {
         loop {
             let (confirmed_flush_lsn, _) = replication_slot_state(client, slot_name).await;
-            if confirmed_flush_lsn >= expected_lsn {
-                return;
+            if confirmed_flush_lsn >= target_lsn {
+                return confirmed_flush_lsn;
             }
 
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .expect("timed out waiting for the replication slot to confirm the expected LSN");
+    .expect("timed out waiting for the replication slot to reach the target LSN")
 }
 
 /// Waits until the replication slot is served by a walsender other than
@@ -260,7 +266,7 @@ pub async fn wait_for_new_walsender(
 ) -> Result<Option<i32>, tokio_postgres::Error> {
     let result = tokio::time::timeout(timeout, async {
         loop {
-            let (_, active_pid) = query_replication_slot_state(client, slot_name).await?;
+            let (_, active_pid) = try_replication_slot_state(client, slot_name).await?;
             if let Some(pid) = active_pid
                 && pid != old_pid
             {
