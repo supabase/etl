@@ -329,13 +329,13 @@ pub(crate) fn register_metrics() {
 pub(super) fn spawn_ducklake_metrics_sampler(
     metadata_schema: String,
     metadata_pg_pool: PgPool,
-    created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    applied_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
 ) -> EtlResult<DuckLakeMetricsSampler> {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let handle = tokio::spawn(run_ducklake_metrics_sampler(
         metadata_schema,
         metadata_pg_pool,
-        created_tables,
+        applied_tables,
         shutdown_rx,
     ));
 
@@ -346,7 +346,7 @@ pub(super) fn spawn_ducklake_metrics_sampler(
 async fn run_ducklake_metrics_sampler(
     metadata_schema: String,
     metadata_pg_pool: PgPool,
-    created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    applied_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     mut shutdown_rx: watch::Receiver<()>,
 ) {
     let mut interval =
@@ -370,7 +370,7 @@ async fn run_ducklake_metrics_sampler(
                 }
 
                 let table_names = {
-                    let cache = created_tables.lock();
+                    let cache = applied_tables.lock();
                     cache.iter().cloned().collect::<Vec<_>>()
                 };
 

@@ -6,6 +6,7 @@ use etl_config::shared::ClickHouseEngine;
 
 use super::{
     super::{ValidationContext, ValidationError, ValidationFailure, Validator},
+    nullable_array::{NullableArrayBehavior, NullableArrayValidator},
     primary_key::PrimaryKeyValidator,
     replica_identity::ReplicaIdentityValidator,
 };
@@ -99,6 +100,24 @@ impl DestinationValidator {
             _ => None,
         }
     }
+
+    /// Builds a nullable-array warning for destinations that cannot preserve
+    /// top-level NULL arrays.
+    fn nullable_array_validator(&self) -> Option<NullableArrayValidator> {
+        let publication_name = self.publication_name.clone()?;
+
+        match &self.config {
+            ApiDestinationConfig::BigQuery { .. } => Some(NullableArrayValidator::new(
+                publication_name,
+                NullableArrayBehavior::CoercesToEmpty,
+            )),
+            ApiDestinationConfig::ClickHouse { .. } => Some(NullableArrayValidator::new(
+                publication_name,
+                NullableArrayBehavior::CannotEncode,
+            )),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait]
@@ -122,6 +141,10 @@ impl Validator for DestinationValidator {
         }
 
         if let Some(validator) = self.primary_key_validator() {
+            failures.extend(validator.validate(ctx).await?);
+        }
+
+        if let Some(validator) = self.nullable_array_validator() {
             failures.extend(validator.validate(ctx).await?);
         }
 
@@ -161,6 +184,7 @@ macro_rules! disabled_destination {
 /// BigQuery validation adapter.
 #[cfg(feature = "bigquery")]
 mod bigquery {
+    use etl_config::shared::Validate;
     use secrecy::ExposeSecret;
 
     use super::{ApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
@@ -176,6 +200,13 @@ mod bigquery {
         else {
             unreachable!("Destination config should match BigQuery.");
         };
+
+        if let Err(error) = config.validate() {
+            return Ok(vec![ValidationFailure::critical(
+                "BigQuery Table Options Invalid",
+                error.to_string(),
+            )]);
+        }
 
         BigQueryValidator::new(
             project_id.clone(),

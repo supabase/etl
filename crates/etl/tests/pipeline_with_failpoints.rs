@@ -24,9 +24,12 @@ use etl::{
             wait_for_replication_slot_flush_lsn,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
+        faults::FaultyOp,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::{create_database_and_sync_done_pipeline_with_table, create_pipeline},
+        pipeline::{
+            PipelineBuilder, create_database_and_sync_done_pipeline_with_table, create_pipeline,
+        },
         schema::{
             assert_columns_names_types, assert_replicated_schema_column_names_types,
             assert_schema_snapshots_ordering, assert_table_schema_column_names_types,
@@ -164,21 +167,18 @@ impl Destination for DeferredEventsDestination {
     }
 }
 
-/// Waits until the apply worker has confirmed the source's current WAL flush
-/// position and returns that position.
-async fn wait_for_apply_worker_to_reach_current_wal(
+/// Waits until the apply worker confirms the provided WAL target and returns
+/// the confirmed position.
+async fn wait_for_apply_worker_to_reach(
     database: &PgDatabase<Client>,
     pipeline_id: PipelineId,
+    target_lsn: PgLsn,
 ) -> PgLsn {
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     let client = database.client.as_ref().unwrap();
-    let target_lsn =
-        client.query_one("select pg_current_wal_flush_lsn()", &[]).await.unwrap().get(0);
 
-    wait_for_replication_slot_flush_lsn(client, &apply_slot_name, target_lsn).await;
-
-    target_lsn
+    wait_for_replication_slot_flush_lsn(client, &apply_slot_name, target_lsn).await
 }
 
 enum ExpectedReplicatedEvent<'a> {
@@ -629,15 +629,25 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
 
     finished_copy_notify.notified().await;
 
+    let apply_commits_notify = destination
+        .wait_for_events(vec![EventCondition::AnyCount(
+            EventType::Commit,
+            u64::try_from(catchup_rows).unwrap(),
+        )])
+        .await;
+
     // Rows inserted while the worker is paused after copy must be replayed by
-    // table-sync streaming.
+    // table-sync streaming. The apply worker skips those row events while
+    // table sync owns the table, but still writes each transaction's commit.
+    // Acknowledging the commits proves that apply already consumed the
+    // preceding relation and row messages before handoff.
     insert_users_data(
         &mut database,
         &users_schema.name,
         copied_rows + 1..=copied_rows + catchup_rows,
     )
     .await;
-    wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
+    apply_commits_notify.notified().await;
 
     let all_rows_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(
@@ -694,6 +704,130 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn tx_ordinals_follow_wal_order_across_table_sync_and_apply_workers() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+    let users_schema = database_schema.users_schema();
+    let orders_schema = database_schema.orders_schema();
+    let users_table_id = users_schema.id;
+    let orders_table_id = orders_schema.id;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let assert_insert_ordinals = |events: &[Event], occurrence| {
+        let insert_for = |table_id| {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
+                        Some(insert)
+                    }
+                    _ => None,
+                })
+                .nth(occurrence)
+                .unwrap()
+        };
+        let users_insert = insert_for(users_table_id);
+        let orders_insert = insert_for(orders_table_id);
+
+        assert_eq!(users_insert.commit_lsn, orders_insert.commit_lsn);
+        assert_eq!(users_insert.tx_ordinal, 1);
+        assert_eq!(orders_insert.tx_ordinal, 2);
+    };
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_max_table_sync_workers(2)
+    .build();
+
+    // Holding row writes lets both copy workers establish their snapshots
+    // before the two-table transaction is committed.
+    let first_copy = destination.hold_next(FaultyOp::WriteTableRows).await;
+    let second_copy = destination.hold_next(FaultyOp::WriteTableRows).await;
+
+    let users_finished_copy_notify =
+        store.notify_on_table_state_type(users_table_id, TableStateType::FinishedCopy).await;
+    let orders_finished_copy_notify =
+        store.notify_on_table_state_type(orders_table_id, TableStateType::FinishedCopy).await;
+
+    pipeline.start().await.unwrap();
+
+    tokio::join!(first_copy.wait_reached(), second_copy.wait_reached());
+
+    let mut write_two_table_transaction = async |suffix: &str| {
+        let transaction = database.client.as_mut().unwrap().transaction().await.unwrap();
+        transaction
+            .execute(
+                &format!(
+                    "insert into {} (name, age) values ('user-{suffix}', 1)",
+                    users_schema.name.as_quoted_identifier()
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        transaction
+            .execute(
+                &format!(
+                    "insert into {} (description) values ('order-{suffix}')",
+                    orders_schema.name.as_quoted_identifier()
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+    };
+
+    // Each table-sync worker skips the other table but must still reserve its
+    // row ordinal before the ownership filter. Relation messages must not
+    // consume ordinals.
+    write_two_table_transaction("table-sync").await;
+
+    let table_sync_events_notify = destination
+        .wait_for_all_events(vec![
+            EventCondition::TableCount(EventType::Insert, users_table_id, 1),
+            EventCondition::TableCount(EventType::Insert, orders_table_id, 1),
+        ])
+        .await;
+
+    first_copy.release_ok();
+    second_copy.release_ok();
+
+    users_finished_copy_notify.notified().await;
+    orders_finished_copy_notify.notified().await;
+    table_sync_events_notify.notified().await;
+
+    assert_insert_ordinals(&destination.get_events().await, 0);
+
+    // The main apply worker must assign the same ordinals after taking
+    // ownership of both tables.
+    let apply_events_notify = destination
+        .wait_for_all_events(vec![
+            EventCondition::TableCount(EventType::Insert, users_table_id, 2),
+            EventCondition::TableCount(EventType::Insert, orders_table_id, 2),
+        ])
+        .await;
+
+    write_two_table_transaction("apply").await;
+
+    apply_events_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert_insert_ordinals(&destination.get_events().await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
@@ -722,9 +856,13 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     finished_copy_notify.notified().await;
 
     // Advance the physical schema while both logical connections are alive,
-    // but emit no DML that would make pgoutput send a new Relation. Keep the
-    // table-sync worker paused until the apply worker has passed this commit,
+    // but emit no DML that would make pgoutput send a new Relation. The DDL
+    // event trigger emits a transactional logical message, so its transaction
+    // has a commit event on every supported PostgreSQL version. Keep the
+    // table-sync worker paused until the apply worker has passed that commit,
     // so its later catchup target must include the DDL.
+    let apply_commit_notify =
+        destination.wait_for_events(vec![EventCondition::AnyCount(EventType::Commit, 1)]).await;
     let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
     database
         .run_sql(&format!(
@@ -733,7 +871,7 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
         ))
         .await
         .unwrap();
-    wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
+    apply_commit_notify.notified().await;
 
     let errored_notify = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
@@ -812,18 +950,18 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     // checkpoint cannot reach that future boundary.
     fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return(apply)").unwrap();
 
-    // Commit one published row at A while the table-sync worker is paused, then
-    // advance cluster WAL to T in another database. Logical decoding skips that
-    // transaction entirely, so no event batch exists at T.
+    // Commit one published row at A while the table-sync worker is paused.
     insert_users_data(&mut database, &users_schema.name, 1..=1).await;
+
     other_database
         .insert_values(other_database_table.clone(), &["value"], &[&1_i32])
         .await
         .unwrap();
 
-    // Ensure the apply worker observes T before choosing table sync's catchup
-    // target.
-    let target_lsn = wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
+    // The sender's next idle keepalive must advertise at least this post-commit
+    // cluster WAL frontier even though the transaction emitted no event batch.
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
 
     let table_sync_done_notify =
         store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
@@ -880,7 +1018,8 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     // Since no destination flush occurred, quiescent coordination must not
     // persist that received LSN as an apply checkpoint.
     other_database.insert_values(other_database_table, &["value"], &[&2_i32]).await.unwrap();
-    wait_for_apply_worker_to_reach_current_wal(&database, pipeline_id).await;
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
 
     let persisted_checkpoint_lsn =
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();

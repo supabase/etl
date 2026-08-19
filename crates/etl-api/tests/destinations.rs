@@ -13,7 +13,10 @@ use etl_api::{
     },
     startup::get_connection_pool,
 };
-use etl_config::{SerializableSecretString, shared::DestinationConfig};
+use etl_config::{
+    SerializableSecretString,
+    shared::{BigQueryTableOptionsConfig, DestinationConfig},
+};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
@@ -78,6 +81,30 @@ async fn bigquery_destination_can_be_created() {
     let response: CreateDestinationResponse =
         response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_bigquery_table_options_cannot_be_created() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let mut config = new_bigquery_destination_config();
+    let ApiDestinationConfig::BigQuery { table_options, .. } = &mut config else {
+        panic!("Config type doesn't match");
+    };
+    *table_options = BigQueryTableOptionsConfig {
+        tables: vec![etl_config::shared::BigQueryTableOptions {
+            table_id: 16384,
+            partition_by: None,
+            cluster_by: Vec::new(),
+        }],
+    };
+
+    let destination = CreateDestinationRequest { name: new_name(), config };
+    let response = app.create_destination(tenant_id, &destination).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.text().await.unwrap().contains("table_options.tables[0]"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -202,6 +229,36 @@ async fn an_existing_bigquery_destination_can_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn invalid_bigquery_table_options_cannot_be_updated() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+    let update = UpdateDestinationRequest {
+        name: updated_name(),
+        config: UpdateApiDestinationConfig::BigQuery {
+            project_id: UpdateField::Preserve,
+            dataset_id: UpdateField::Preserve,
+            service_account_key: UpdateField::Preserve,
+            max_staleness_mins: UpdateField::Preserve,
+            connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Set(BigQueryTableOptionsConfig {
+                tables: vec![etl_config::shared::BigQueryTableOptions {
+                    table_id: 16384,
+                    partition_by: None,
+                    cluster_by: Vec::new(),
+                }],
+            }),
+        },
+    };
+
+    let response = app.update_destination(tenant_id, destination_id, &update).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.text().await.unwrap().contains("table_options.tables[0]"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn destination_config_update_preserves_omitted_fields_and_resets_default_fields() {
     init_test_tracing();
     let app = spawn_test_app().await;
@@ -222,6 +279,7 @@ async fn destination_config_update_preserves_omitted_fields_and_resets_default_f
             service_account_key: UpdateField::Preserve,
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Clear,
+            table_options: UpdateField::Preserve,
         },
     };
     let response = app.update_destination(tenant_id, destination_id, &update_request).await;
@@ -270,6 +328,7 @@ async fn destination_config_update_preserves_and_reencrypts_secret_fields_in_sto
             service_account_key: UpdateField::Preserve,
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Preserve,
         },
     };
     let response = app.update_destination(tenant_id, destination_id, &update_request).await;
@@ -291,6 +350,7 @@ async fn destination_config_update_preserves_and_reencrypts_secret_fields_in_sto
             )),
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Preserve,
         },
     };
     let response = app.update_destination(tenant_id, destination_id, &update_request).await;
@@ -335,6 +395,7 @@ async fn destination_config_update_materializes_stored_defaults() {
             service_account_key: UpdateField::Preserve,
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Preserve,
         },
     };
     let response = app.update_destination(tenant_id, destination_id, &update_request).await;
@@ -377,6 +438,7 @@ async fn destination_config_update_rejects_null_required_field() {
             service_account_key: UpdateField::Preserve,
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Preserve,
         },
     };
     let response = app.update_destination(tenant_id, destination_id, &update_request).await;

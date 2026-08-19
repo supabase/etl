@@ -1,8 +1,8 @@
 use etl_config::{
     SerializableSecretString,
     shared::{
-        ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode, DuckLakeTableSortingConfig,
-        IcebergConfig,
+        BigQueryTableOptionsConfig, ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode,
+        DuckLakeTableSortingConfig, IcebergConfig, Validate, ValidationError,
     },
 };
 use secrecy::ExposeSecret;
@@ -49,6 +49,10 @@ pub enum ApiDestinationConfig {
         #[schema(example = 8)]
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
+        /// Per-table partitioning and clustering applied only at physical table
+        /// creation time.
+        #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
+        table_options: BigQueryTableOptionsConfig,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -188,6 +192,17 @@ pub enum ApiDestinationConfig {
     },
 }
 
+impl Validate for ApiDestinationConfig {
+    /// Validates values that do not require access to the destination.
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::BigQuery { table_options, .. } => table_options.validate(),
+            Self::Ducklake { table_sorting, .. } => table_sorting.validate(),
+            Self::ClickHouse { .. } | Self::Iceberg { .. } | Self::Snowflake { .. } => Ok(()),
+        }
+    }
+}
+
 /// API representation of a destination configuration with credentials
 /// omitted.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -206,6 +221,9 @@ pub enum StrippedApiDestinationConfig {
         /// Size of the BigQuery Storage Write API connection pool.
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
+        /// Per-table partitioning and clustering options.
+        #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
+        table_options: BigQueryTableOptionsConfig,
     },
     /// ClickHouse destination configuration without its password.
     #[serde(rename = "clickhouse")]
@@ -278,6 +296,17 @@ pub enum StrippedApiDestinationConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         role: Option<String>,
     },
+}
+
+impl Validate for StrippedApiDestinationConfig {
+    /// Validates values that do not depend on omitted credentials.
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::BigQuery { table_options, .. } => table_options.validate(),
+            Self::Ducklake { table_sorting, .. } => table_sorting.validate(),
+            Self::ClickHouse { .. } | Self::Iceberg { .. } | Self::Snowflake { .. } => Ok(()),
+        }
+    }
 }
 
 /// Errors returned while merging destination update configuration.
@@ -411,6 +440,9 @@ pub enum UpdateApiDestinationConfig {
         #[schema(example = 8)]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         connection_pool_size: UpdateField<usize>,
+        /// Replaces all per-table creation options. `null` resets them.
+        #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+        table_options: UpdateField<BigQueryTableOptionsConfig>,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -603,12 +635,14 @@ impl UpdateApiDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => Self::BigQuery {
                 project_id: UpdateField::Set(project_id),
                 dataset_id: UpdateField::Set(dataset_id),
                 service_account_key: UpdateField::Set(service_account_key),
                 max_staleness_mins: UpdateField::from_option(max_staleness_mins),
                 connection_pool_size: UpdateField::from_option(connection_pool_size),
+                table_options: UpdateField::Set(table_options),
             },
             ApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse {
@@ -690,6 +724,7 @@ impl UpdateApiDestinationConfig {
                     service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
+                    table_options,
                 },
                 StoredDestinationConfig::BigQuery {
                     project_id: stored_project_id,
@@ -697,6 +732,7 @@ impl UpdateApiDestinationConfig {
                     service_account_key: stored_key,
                     max_staleness_mins: stored_max_staleness_mins,
                     connection_pool_size: stored_connection_pool_size,
+                    table_options: stored_table_options,
                 },
             ) => Ok(StoredDestinationConfig::BigQuery {
                 project_id: project_id.apply_to_required(
@@ -714,6 +750,8 @@ impl UpdateApiDestinationConfig {
                 max_staleness_mins: max_staleness_mins.apply_to_option(stored_max_staleness_mins),
                 connection_pool_size: connection_pool_size
                     .apply_to_value(stored_connection_pool_size, default_connection_pool_size),
+                table_options: table_options
+                    .apply_to_value(stored_table_options, BigQueryTableOptionsConfig::default),
             }),
             (
                 Self::ClickHouse { url, user, password, database, engine },
@@ -863,6 +901,7 @@ impl UpdateApiDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => Ok(StoredDestinationConfig::BigQuery {
                 project_id: project_id.into_required(
                     missing_required_field("BigQuery", "project_id"),
@@ -879,6 +918,10 @@ impl UpdateApiDestinationConfig {
                 max_staleness_mins: max_staleness_mins.apply_to_option(None),
                 connection_pool_size: connection_pool_size
                     .apply_to_value(default_connection_pool_size(), default_connection_pool_size),
+                table_options: table_options.apply_to_value(
+                    BigQueryTableOptionsConfig::default(),
+                    BigQueryTableOptionsConfig::default,
+                ),
             }),
             Self::ClickHouse { url, user, password, database, engine } => {
                 Ok(StoredDestinationConfig::ClickHouse {
@@ -984,6 +1027,25 @@ impl UpdateApiDestinationConfig {
     }
 }
 
+impl Validate for UpdateApiDestinationConfig {
+    /// Validates replacement values without resolving preserved fields.
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::BigQuery { table_options: UpdateField::Set(table_options), .. } => {
+                table_options.validate()
+            }
+            Self::Ducklake { table_sorting: UpdateField::Set(table_sorting), .. } => {
+                table_sorting.validate()
+            }
+            Self::BigQuery { .. }
+            | Self::ClickHouse { .. }
+            | Self::Iceberg { .. }
+            | Self::Ducklake { .. }
+            | Self::Snowflake { .. } => Ok(()),
+        }
+    }
+}
+
 /// Creates the error for an omitted required destination field.
 fn missing_required_field(
     destination: &'static str,
@@ -1017,12 +1079,14 @@ impl From<StoredDestinationConfig> for ApiDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size: Some(connection_pool_size),
+                table_options,
             },
             StoredDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse { url, user, password, database, engine }
@@ -1128,11 +1192,13 @@ impl From<StoredDestinationConfig> for StrippedApiDestinationConfig {
                 service_account_key: _,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
                 max_staleness_mins,
                 connection_pool_size: Some(connection_pool_size),
+                table_options,
             },
             StoredDestinationConfig::ClickHouse { url, user, password: _, database, engine } => {
                 Self::ClickHouse { url, user, database, engine }
@@ -1188,6 +1254,7 @@ pub enum StoredDestinationConfig {
         service_account_key: SerializableSecretString,
         max_staleness_mins: Option<u16>,
         connection_pool_size: usize,
+        table_options: BigQueryTableOptionsConfig,
     },
     ClickHouse {
         url: Url,
@@ -1236,12 +1303,14 @@ impl StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => DestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key: service_account_key.into(),
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             },
             Self::ClickHouse { url, user, password, database, engine } => {
                 DestinationConfig::ClickHouse {
@@ -1343,6 +1412,17 @@ impl StoredDestinationConfig {
     }
 }
 
+impl Validate for StoredDestinationConfig {
+    /// Validates values that do not require access to the destination.
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::BigQuery { table_options, .. } => table_options.validate(),
+            Self::Ducklake { table_sorting, .. } => table_sorting.validate(),
+            Self::ClickHouse { .. } | Self::Iceberg { .. } | Self::Snowflake { .. } => Ok(()),
+        }
+    }
+}
+
 impl From<ApiDestinationConfig> for StoredDestinationConfig {
     fn from(value: ApiDestinationConfig) -> Self {
         match value {
@@ -1352,6 +1432,7 @@ impl From<ApiDestinationConfig> for StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
@@ -1359,6 +1440,7 @@ impl From<ApiDestinationConfig> for StoredDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size: connection_pool_size
                     .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
+                table_options,
             },
             ApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse { url, user, password, database, engine }
@@ -1467,6 +1549,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => {
                 let encrypted_service_account_key =
                     encrypt_text(service_account_key.expose_secret().to_owned(), encryption_key)?;
@@ -1477,6 +1560,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     service_account_key: encrypted_service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
+                    table_options,
                 })
             }
             Self::ClickHouse { url, user, password, database, engine } => {
@@ -1635,6 +1719,8 @@ pub enum EncryptedStoredDestinationConfig {
         max_staleness_mins: Option<u16>,
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+        #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
+        table_options: BigQueryTableOptionsConfig,
     },
     ClickHouse {
         url: Url,
@@ -1692,6 +1778,17 @@ pub enum EncryptedStoredDestinationConfig {
     },
 }
 
+impl Validate for EncryptedStoredDestinationConfig {
+    /// Validates non-secret values without decrypting credentials.
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::BigQuery { table_options, .. } => table_options.validate(),
+            Self::Ducklake { table_sorting, .. } => table_sorting.validate(),
+            Self::ClickHouse { .. } | Self::Iceberg { .. } | Self::Snowflake { .. } => Ok(()),
+        }
+    }
+}
+
 impl Store for EncryptedStoredDestinationConfig {}
 
 impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
@@ -1706,6 +1803,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 service_account_key: encrypted_service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => {
                 let service_account_key = SerializableSecretString::from(decrypt_text(
                     encrypted_service_account_key,
@@ -1718,6 +1816,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
+                    table_options,
                 })
             }
             Self::Iceberg { config } => match config {
@@ -2377,6 +2476,30 @@ mod tests {
         .unwrap()
     }
 
+    fn bigquery_table_options() -> BigQueryTableOptionsConfig {
+        serde_json::from_value(serde_json::json!({
+            "tables": [{
+                "table_id": 16384,
+                "partition_by": {
+                    "kind": "time_column",
+                    "column": "created_at",
+                    "granularity": "day"
+                },
+                "cluster_by": ["tenant_id"]
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn invalid_bigquery_table_options() -> BigQueryTableOptionsConfig {
+        serde_json::from_value(serde_json::json!({
+            "tables": [{
+                "table_id": 16384
+            }]
+        }))
+        .unwrap()
+    }
+
     fn ducklake_api_config(table_sorting: DuckLakeTableSortingConfig) -> ApiDestinationConfig {
         ApiDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from(
@@ -2409,6 +2532,7 @@ mod tests {
                 ),
                 max_staleness_mins: Some(15),
                 connection_pool_size: 4,
+                table_options: BigQueryTableOptionsConfig::default(),
             },
             StoredDestinationConfig::ClickHouse {
                 url: Url::parse("https://clickhouse.example.com:8443").unwrap(),
@@ -2610,6 +2734,7 @@ mod tests {
             ),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            table_options: BigQueryTableOptionsConfig::default(),
         };
 
         let key = EncryptionKeyring::from(EncryptionKey {
@@ -2636,6 +2761,7 @@ mod tests {
                     service_account_key: key1,
                     max_staleness_mins: staleness1,
                     connection_pool_size: connection_pool_size1,
+                    table_options: table_options1,
                 },
                 StoredDestinationConfig::BigQuery {
                     project_id: p2,
@@ -2643,12 +2769,14 @@ mod tests {
                     service_account_key: key2,
                     max_staleness_mins: staleness2,
                     connection_pool_size: connection_pool_size2,
+                    table_options: table_options2,
                 },
             ) => {
                 assert_eq!(p1, p2);
                 assert_eq!(d1, d2);
                 assert_eq!(staleness1, staleness2);
                 assert_eq!(connection_pool_size1, connection_pool_size2);
+                assert_eq!(table_options1, table_options2);
                 // Assert that service account key was encrypted and decrypted correctly
                 assert_eq!(key1.expose_secret(), key2.expose_secret());
             }
@@ -2992,6 +3120,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: None,
+            table_options: BigQueryTableOptionsConfig::default(),
         };
 
         let stored: StoredDestinationConfig = api_config.clone().into();
@@ -3005,6 +3134,7 @@ mod tests {
                     service_account_key: p1_service_account_key,
                     max_staleness_mins: p1_max_staleness_mins,
                     connection_pool_size: p1_connection_pool_size,
+                    table_options: p1_table_options,
                 },
                 ApiDestinationConfig::BigQuery {
                     project_id: p2_project_id,
@@ -3012,6 +3142,7 @@ mod tests {
                     service_account_key: p2_service_account_key,
                     max_staleness_mins: p2_max_staleness_mins,
                     connection_pool_size: p2_connection_pool_size,
+                    table_options: p2_table_options,
                 },
             ) => {
                 assert_eq!(p1_project_id, p2_project_id);
@@ -3021,6 +3152,7 @@ mod tests {
                     p2_service_account_key.expose_secret()
                 );
                 assert_eq!(p1_max_staleness_mins, p2_max_staleness_mins);
+                assert_eq!(p1_table_options, p2_table_options);
                 // Note: connection_pool_size should be set to DEFAULT_POOL_SIZE when None
                 assert_eq!(p1_connection_pool_size, None);
                 assert_eq!(
@@ -3033,6 +3165,70 @@ mod tests {
     }
 
     #[test]
+    fn api_destination_config_serializes_independent_bigquery_table_options() {
+        let payload = serde_json::json!({
+            "big_query": {
+                "project_id": "example-project",
+                "dataset_id": "example_dataset",
+                "service_account_key": "placeholder-key",
+                "table_options": {
+                    "tables": [
+                        {
+                            "table_id": 16384,
+                            "partition_by": {
+                                "kind": "integer_range",
+                                "column": "id",
+                                "start": 0,
+                                "end": 100,
+                                "interval": 10
+                            }
+                        },
+                        {
+                            "table_id": 16385,
+                            "cluster_by": ["tenant_id"]
+                        }
+                    ]
+                }
+            }
+        });
+
+        let config: ApiDestinationConfig = serde_json::from_value(payload.clone()).unwrap();
+
+        assert_eq!(serde_json::to_value(config).unwrap(), payload);
+
+        let default_layout = ApiDestinationConfig::BigQuery {
+            project_id: "example-project".to_owned(),
+            dataset_id: "example_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("placeholder-key".to_owned()),
+            max_staleness_mins: None,
+            connection_pool_size: None,
+            table_options: BigQueryTableOptionsConfig::default(),
+        };
+        let serialized = serde_json::to_value(default_layout).unwrap();
+        assert!(serialized["big_query"].get("table_options").is_none());
+    }
+
+    #[test]
+    fn bigquery_validation_is_consistent_across_api_config_representations() {
+        let api = ApiDestinationConfig::BigQuery {
+            project_id: "example-project".to_owned(),
+            dataset_id: "example_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("placeholder-key".to_owned()),
+            max_staleness_mins: None,
+            connection_pool_size: None,
+            table_options: invalid_bigquery_table_options(),
+        };
+        let stored = StoredDestinationConfig::from(api.clone());
+        let stripped = StrippedApiDestinationConfig::from(stored.clone());
+        let update = UpdateApiDestinationConfig::from_api_config(api.clone());
+        let expected = api.validate().unwrap_err().to_string();
+
+        assert_eq!(stripped.validate().unwrap_err().to_string(), expected);
+        assert_eq!(update.validate().unwrap_err().to_string(), expected);
+        assert_eq!(stored.validate().unwrap_err().to_string(), expected);
+    }
+
+    #[test]
     fn update_api_destination_config_preserves_omitted_bigquery_secret() {
         let stored_config = StoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
@@ -3040,6 +3236,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("existing-key".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            table_options: BigQueryTableOptionsConfig::default(),
         };
         let update_config = UpdateApiDestinationConfig::BigQuery {
             project_id: UpdateField::Set("updated-project".to_owned()),
@@ -3047,6 +3244,7 @@ mod tests {
             service_account_key: UpdateField::Preserve,
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Preserve,
         };
 
         let updated_config = update_config.merge_into_stored(stored_config).unwrap();
@@ -3058,12 +3256,14 @@ mod tests {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => {
                 assert_eq!(project_id, "updated-project");
                 assert_eq!(dataset_id, "updated_dataset");
                 assert_eq!(service_account_key.expose_secret(), "existing-key");
                 assert_eq!(max_staleness_mins, Some(15));
                 assert_eq!(connection_pool_size, 8);
+                assert!(table_options.is_empty());
             }
             _ => panic!("Config types don't match"),
         }
@@ -3077,6 +3277,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("existing-key".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            table_options: BigQueryTableOptionsConfig::default(),
         };
         let update_config = UpdateApiDestinationConfig::BigQuery {
             project_id: UpdateField::Preserve,
@@ -3084,6 +3285,7 @@ mod tests {
             service_account_key: UpdateField::Preserve,
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Clear,
+            table_options: UpdateField::Preserve,
         };
 
         let updated_config = update_config.merge_into_stored(stored_config).unwrap();
@@ -3094,6 +3296,55 @@ mod tests {
             }
             _ => panic!("Config types don't match"),
         }
+    }
+
+    #[test]
+    fn update_api_destination_config_preserves_clears_and_replaces_bigquery_table_options() {
+        let stored_config = StoredDestinationConfig::BigQuery {
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("existing-key".to_owned()),
+            max_staleness_mins: Some(15),
+            connection_pool_size: 8,
+            table_options: bigquery_table_options(),
+        };
+
+        let preserve: UpdateApiDestinationConfig =
+            serde_json::from_value(serde_json::json!({"big_query": {}})).unwrap();
+        preserve.validate().unwrap();
+        let preserved = preserve.merge_into_stored(stored_config.clone()).unwrap();
+        let StoredDestinationConfig::BigQuery { table_options, .. } = preserved else {
+            panic!("Config type doesn't match");
+        };
+        assert_eq!(table_options, bigquery_table_options());
+
+        let clear: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "big_query": {"table_options": null}
+        }))
+        .unwrap();
+        clear.validate().unwrap();
+        let cleared = clear.merge_into_stored(stored_config.clone()).unwrap();
+        let StoredDestinationConfig::BigQuery { table_options, .. } = cleared else {
+            panic!("Config type doesn't match");
+        };
+        assert!(table_options.is_empty());
+
+        let replacement: BigQueryTableOptionsConfig = serde_json::from_value(serde_json::json!({
+            "tables": [{
+                "table_id": 16385,
+                "cluster_by": ["id"]
+            }]
+        }))
+        .unwrap();
+        let replace: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "big_query": {"table_options": replacement}
+        }))
+        .unwrap();
+        let replaced = replace.merge_into_stored(stored_config).unwrap();
+        let StoredDestinationConfig::BigQuery { table_options, .. } = replaced else {
+            panic!("Config type doesn't match");
+        };
+        assert_eq!(table_options, replacement);
     }
 
     #[test]
@@ -3145,6 +3396,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("existing-key".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            table_options: BigQueryTableOptionsConfig::default(),
         };
         let update_config = UpdateApiDestinationConfig::BigQuery {
             project_id: UpdateField::Set("updated-project".to_owned()),
@@ -3154,6 +3406,7 @@ mod tests {
             )),
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Preserve,
         };
 
         let updated_config = update_config.merge_into_stored(stored_config).unwrap();
@@ -3330,6 +3583,7 @@ mod tests {
             service_account_key: UpdateField::Preserve,
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Preserve,
         };
 
         let error = update_config.merge_into_stored(stored_config).unwrap_err();

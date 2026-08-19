@@ -15,7 +15,7 @@ use std::{
 
 use etl_postgres::{numeric::ParseNumericError, time::ParseTimeError};
 
-use crate::schema::SchemaError;
+use crate::schema::{SchemaError, SchemaPlanError};
 
 const MAX_SCHEMA_ERROR_COLUMN_NAMES: usize = 12;
 
@@ -1032,6 +1032,49 @@ impl From<SchemaError> for EtlError {
     }
 }
 
+/// Converts destination schema planning failures to classified ETL errors.
+impl From<SchemaPlanError> for EtlError {
+    #[track_caller]
+    fn from(err: SchemaPlanError) -> EtlError {
+        let (kind, description, detail) = match &err {
+            SchemaPlanError::DestinationColumnNameCollision {
+                endpoint,
+                column_name_mapping,
+                first_column_name,
+                second_column_name,
+            } => (
+                ErrorKind::SourceSchemaError,
+                Cow::Borrowed("Source column names collide in the destination"),
+                Cow::Owned(format!(
+                    "The {endpoint} source schema contains columns '{first_column_name}' and \
+                     '{second_column_name}', which both map to destination column '{}' under the \
+                     {column_name_mapping} column-name mapping. Rename or exclude one of these \
+                     source columns.",
+                    column_name_mapping.map_name(first_column_name)
+                )),
+            ),
+            SchemaPlanError::BlockedRenameAfterName { before_column_name, after_column_name } => (
+                ErrorKind::InvalidState,
+                Cow::Borrowed("Schema rename plan cannot make progress"),
+                Cow::Owned(format!(
+                    "The rename from '{before_column_name}' to '{after_column_name}' is blocked \
+                     by a column outside the pending rename set."
+                )),
+            ),
+            SchemaPlanError::ReadyRenameNotPending { ordinal_position } => (
+                ErrorKind::InvalidState,
+                Cow::Borrowed("Schema rename plan has inconsistent state"),
+                Cow::Owned(format!(
+                    "The ready rename at PostgreSQL ordinal {ordinal_position} is absent from the \
+                     pending rename set."
+                )),
+            ),
+        };
+
+        EtlError::from_components(kind, description, Some(detail), Some(Arc::new(err)))
+    }
+}
+
 /// Builds a readable detail for unknown replicated columns.
 fn unknown_replicated_columns_detail(columns: &[String]) -> String {
     if columns.is_empty() {
@@ -1072,7 +1115,10 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
-    use crate::{bail, etl_error};
+    use crate::{
+        bail, etl_error,
+        schema::{SchemaEndpoint, SchemaPlanError},
+    };
 
     #[test]
     fn simple_error_creation() {
@@ -1092,6 +1138,21 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::SourceQueryFailed);
         assert_eq!(err.detail(), Some("Table 'users' doesn't exist"));
         assert_eq!(err.kinds(), vec![ErrorKind::SourceQueryFailed]);
+    }
+
+    #[test]
+    fn destination_column_name_collision_is_a_source_schema_error() {
+        let err = EtlError::from(SchemaPlanError::DestinationColumnNameCollision {
+            endpoint: SchemaEndpoint::After,
+            column_name_mapping: crate::schema::ColumnNameMapping::AsciiLowercase,
+            first_column_name: "a".to_owned(),
+            second_column_name: "A".to_owned(),
+        });
+
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(err.description(), Some("Source column names collide in the destination"));
+        assert!(err.detail().is_some_and(|detail| detail.contains("'a' and 'A'")));
+        assert!(err.source().is_some());
     }
 
     #[test]

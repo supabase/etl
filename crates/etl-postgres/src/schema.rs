@@ -559,7 +559,7 @@ pub struct TableSchema {
     pub name: TableName,
     /// The schemas of all columns in the table.
     pub column_schemas: Vec<ColumnSchema>,
-    /// The snapshot identifier for this schema version.
+    /// The identifier for this stored source schema version.
     ///
     /// The commit LSN determines when the schema becomes active, and the
     /// message LSN orders multiple schema changes within the same transaction.

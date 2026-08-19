@@ -150,7 +150,7 @@ impl Validator for ReplicaIdentityValidator {
         .fetch_all(source_pool)
         .await?;
 
-        let mut critical_tables = Vec::new();
+        let mut currently_unsupported_tables = Vec::new();
         let mut warning_tables = Vec::new();
         for table_identity in table_identities {
             let identity_type = identity_type_for_table(
@@ -165,7 +165,7 @@ impl Validator for ReplicaIdentityValidator {
                 publication_publishes_deletes,
             );
             if !unsupported_current_operations.is_empty() {
-                critical_tables.push(UnsupportedTableIdentity {
+                currently_unsupported_tables.push(UnsupportedTableIdentity {
                     table_identity: format!("`{} ({})`", table_identity.table_name, identity_type),
                     unsupported_operations: unsupported_current_operations,
                 });
@@ -183,13 +183,14 @@ impl Validator for ReplicaIdentityValidator {
         }
 
         let mut failures = Vec::new();
-        if !critical_tables.is_empty() {
-            failures.push(ValidationFailure::critical(
+        if !currently_unsupported_tables.is_empty() {
+            failures.push(ValidationFailure::warning(
                 "Unsupported Replica Identity",
                 format!(
-                    "{} cannot safely replicate {} changes for these publication tables because \
-                     their replica identity is unsupported: {}.\n\nSet each table to {} before \
-                     starting the pipeline. If a table has columns with large values (TOAST \
+                    "{} can start, but these publication tables can emit {} changes whose replica \
+                     identity is unsupported: {}. If such a change is received, streaming \
+                     replication will fail before the destination write.\n\nSet each table to {} \
+                     to support those changes. If a table has columns with large values (TOAST \
                      columns), `REPLICA IDENTITY FULL` is recommended. A table owner can apply it \
                      with `ALTER TABLE <schema.table> REPLICA IDENTITY FULL`; alternatively, use \
                      `USING INDEX <unique_index>` when that identity type is listed as supported.",
@@ -198,7 +199,7 @@ impl Validator for ReplicaIdentityValidator {
                         publication_publishes_updates,
                         publication_publishes_deletes,
                     )),
-                    format_unsupported_tables(&critical_tables),
+                    format_unsupported_tables(&currently_unsupported_tables),
                     format_supported_identity_types(&self.supported_identity_types_for_operations(
                         publication_publishes_updates,
                         publication_publishes_deletes,

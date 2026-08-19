@@ -4,7 +4,7 @@ use crate::{
     Config,
     shared::{
         DestinationConfig, DestinationConfigWithoutSecrets, PipelineConfigWithoutSecrets,
-        SentryConfig, SupabaseConfig, SupabaseConfigWithoutSecrets, ValidationError,
+        SentryConfig, SupabaseConfig, SupabaseConfigWithoutSecrets, Validate, ValidationError,
         pipeline::PipelineConfig,
     },
 };
@@ -36,16 +36,26 @@ pub struct ReplicatorConfig {
 }
 
 impl ReplicatorConfig {
-    /// Validates the complete replicator configuration.
-    ///
-    /// Performs comprehensive validation of all configuration components.
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        self.pipeline.validate()
-    }
-
     /// Returns a reference to the project ref of this configuration.
     pub fn project_ref(&self) -> Option<&str> {
         self.supabase.as_ref().map(|s| s.project_ref.as_ref())
+    }
+}
+
+impl Validate for ReplicatorConfig {
+    /// Validates the complete replicator configuration.
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.destination.validate()?;
+        self.pipeline.validate()?;
+
+        if let Some(sentry) = &self.sentry {
+            sentry.validate()?;
+        }
+        if let Some(supabase) = &self.supabase {
+            supabase.validate()?;
+        }
+
+        Ok(())
     }
 }
 
@@ -71,6 +81,20 @@ pub struct ReplicatorConfigWithoutSecrets {
     pub supabase: Option<SupabaseConfigWithoutSecrets>,
 }
 
+impl Validate for ReplicatorConfigWithoutSecrets {
+    /// Validates the complete without-secret replicator configuration.
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.destination.validate()?;
+        self.pipeline.validate()?;
+
+        if let Some(supabase) = &self.supabase {
+            supabase.validate()?;
+        }
+
+        Ok(())
+    }
+}
+
 impl From<ReplicatorConfig> for ReplicatorConfigWithoutSecrets {
     fn from(value: ReplicatorConfig) -> Self {
         ReplicatorConfigWithoutSecrets {
@@ -78,5 +102,74 @@ impl From<ReplicatorConfig> for ReplicatorConfigWithoutSecrets {
             pipeline: value.pipeline.into(),
             supabase: value.supabase.map(Into::into),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::{
+        BatchConfig, BigQueryTableOptions, BigQueryTableOptionsConfig, InvalidatedSlotBehavior,
+        MemoryBackpressureConfig, PgConnectionConfig, TableSyncCopyConfig, TcpKeepaliveConfig,
+        TlsConfig,
+    };
+
+    fn pipeline_config() -> PipelineConfig {
+        PipelineConfig {
+            id: 1,
+            publication_name: "example_publication".to_owned(),
+            pg_connection: PgConnectionConfig {
+                host: "example.com".to_owned(),
+                hostaddr: None,
+                port: 5432,
+                name: "postgres".to_owned(),
+                username: "postgres".to_owned(),
+                password: None,
+                tls: TlsConfig::disabled(),
+                keepalive: TcpKeepaliveConfig::default(),
+            },
+            store_pg_connection: None,
+            batch: BatchConfig::default(),
+            table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
+            table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
+            max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
+            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+            memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
+            replication_lag_refresh_interval_ms:
+                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+            memory_backpressure: Some(MemoryBackpressureConfig::default()),
+            table_sync_copy: TableSyncCopyConfig::default(),
+            invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+            run_source_migrations: true,
+        }
+    }
+
+    #[test]
+    fn replicator_validation_recurses_with_and_without_secrets() {
+        let config = ReplicatorConfig {
+            destination: DestinationConfig::BigQuery {
+                project_id: "example-project".to_owned(),
+                dataset_id: "example_dataset".to_owned(),
+                service_account_key: "fake-service-account-key".to_owned().into(),
+                max_staleness_mins: None,
+                connection_pool_size: DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE,
+                table_options: BigQueryTableOptionsConfig {
+                    tables: vec![BigQueryTableOptions {
+                        table_id: 1,
+                        partition_by: None,
+                        cluster_by: Vec::new(),
+                    }],
+                },
+            },
+            pipeline: pipeline_config(),
+            sentry: None,
+            supabase: None,
+        };
+        let without_secrets = ReplicatorConfigWithoutSecrets::from(config.clone());
+
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            without_secrets.validate().unwrap_err().to_string()
+        );
     }
 }

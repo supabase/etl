@@ -7,6 +7,7 @@ mod destination;
 mod ducklake;
 #[cfg(feature = "iceberg")]
 mod iceberg;
+mod nullable_array;
 mod pipeline;
 mod primary_key;
 mod replica_identity;

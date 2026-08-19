@@ -57,11 +57,48 @@
   not run expensive checks reflexively for unrelated documentation, YAML-only, or
   similarly low-risk edits; in those cases, run the smallest relevant validation
   instead and report what actually ran.
-- Add local destination value validation only when it prevents silent data
-  corruption, such as rounding, truncation, clamping, coercion, or another
-  semantic change that the destination would accept. If the destination rejects
-  an unsupported value with an error, prefer delegating that check to the
-  destination instead of duplicating expensive validation in the write path.
+- Put predictive source-to-destination compatibility checks in the ETL API
+  preflight layer. Report value- or event-contingent incompatibilities as
+  non-blocking warnings using stable destination capabilities. Do not reject a
+  runtime schema merely because it permits a value or event shape that the
+  destination might not preserve; if that value or event never occurs,
+  replication should continue.
+- Do not add destination runtime value-domain validation merely to predict
+  whether the destination will reject, coerce, round, truncate, clamp, or
+  otherwise reinterpret a value. If ETL can faithfully construct the
+  destination request or wire representation, send the value and rely on the
+  destination's native behavior and errors.
+- Return a typed local error only when ETL cannot construct the destination
+  request or wire representation faithfully, or when a structural or state
+  invariant is violated. Keep wire-representation checks at the encoding point
+  and apply the same path to initial copy, inserts, and updates.
+
+## Migrations
+- Treat each committed migration as a durable deployment boundary. Prefer one
+  transactional migration for correlated schema changes, data backfills, and
+  cleanup that together form one semantic transition, so the whole transition
+  succeeds or fails together. Do not split migrations merely to make each file
+  or statement smaller.
+- Split correlated changes only when PostgreSQL or another real deployment
+  constraint prevents them from running safely in one transaction, such as a
+  database operation that must commit before its result can be used, an online
+  expand/backfill/contract rollout, compatibility with multiple application
+  versions, or a backfill whose locking or runtime must be managed separately.
+  Document the limitation and why the commit boundary exists.
+- Every intermediate state created by a split migration sequence must be valid,
+  restart-safe, and compatible with the deployment procedure. Make ordering and
+  dependencies explicit, and ensure a failure can be retried without leaving
+  ambiguous or partially classified data.
+- Include concise comments in migrations that provide enough context to review
+  and operate them later. As applicable, explain what changes, why it is needed,
+  how existing rows are handled, and any non-obvious impact on locking,
+  performance, compatibility, failure recovery, or rollback. No fixed comment
+  template is required, and comments should explain intent and consequences
+  rather than restating the SQL.
+- For reversible migrations, order down migrations so dependent data is made
+  compatible before removing the schema it depends on. Add focused migration
+  tests when classification, backfill, retry, or rollback behavior is not
+  obvious from the SQL alone.
 
 ## Public Repo Secret Safety
 - Treat this repository, every branch, every commit, every PR, and every review
@@ -291,12 +328,16 @@
 - Doctests use `cargo test --doc` (nextest does not support them).
 - If test output shows `0 passed; 0 failed; 0 ignored; n filtered out`, treat that as a failure to run tests.
 - Verify that expected tests actually ran, not just that Cargo exited successfully.
-- Avoid custom assertion messages that merely restate the condition or duplicate
-  values already reported by the assertion macro. Use a preceding comment to
-  explain why a non-obvious invariant matters. Add a concise custom message when
-  it supplies non-sensitive runtime context that the default failure output
-  cannot provide, such as a case identifier in table-driven tests, loops, or
-  shared assertion helpers.
+- In tests, prefer `unwrap()` and `unwrap_err()` over `expect()` and
+  `expect_err()`. Use an `expect` message only when it adds diagnostic context
+  that is not already clear from the expression and surrounding test. Put
+  non-obvious test intent in a preceding comment instead of a panic message.
+- Prefer assertions without custom messages. Avoid messages that merely restate
+  the condition or duplicate values already reported by the assertion macro.
+  Explain non-obvious test intent with a preceding comment. Use a concise
+  message only when it supplies non-sensitive runtime context that the default
+  failure output cannot provide, such as a case identifier in table-driven
+  tests, loops, or shared assertion helpers.
 - Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - When a test failure needs deeper debugging, rerun the targeted test with

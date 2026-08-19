@@ -213,8 +213,12 @@ fn quote_simple_string_literal(expression: &str) -> String {
     format!("'{expression}'")
 }
 
-/// Unquotes a SQL single-quoted string literal.
-fn unquote_string_literal(expression: &str) -> Option<String> {
+/// Decodes a PostgreSQL SQL single-quoted string literal.
+///
+/// The returned value contains semantic string content rather than SQL
+/// quoting, allowing destinations with different escape rules to quote it in
+/// their own dialect.
+pub fn unquote_postgres_string_literal(expression: &str) -> Option<String> {
     if !is_string_literal(expression) {
         return None;
     }
@@ -444,11 +448,11 @@ fn is_unsupported_portability_boundary(expression: &str) -> bool {
 fn parse_string_literal(expression: &str, typ: &Type) -> Option<DefaultExpression> {
     match typ {
         &Type::BOOL => {
-            let expression = unquote_string_literal(expression)?;
+            let expression = unquote_postgres_string_literal(expression)?;
             is_bool_literal(&expression).then_some(DefaultExpression::BooleanLiteral(expression))
         }
         typ if is_numeric_type(typ) => {
-            let expression = unquote_string_literal(expression)?;
+            let expression = unquote_postgres_string_literal(expression)?;
             is_numeric_literal(&expression).then_some(DefaultExpression::NumericLiteral(expression))
         }
         &Type::DATE => Some(DefaultExpression::DateLiteral(expression.to_owned())),
@@ -527,6 +531,15 @@ mod tests {
             Some(DefaultExpression::NumericLiteral("1".to_owned()))
         );
         assert_eq!(parse_default_expression("'abc'::text", &Type::INT4), None);
+    }
+
+    #[test]
+    fn unquotes_postgres_string_literal_without_interpreting_backslashes() {
+        assert_eq!(
+            unquote_postgres_string_literal(r#"'path\d''value'"#).as_deref(),
+            Some(r#"path\d'value"#)
+        );
+        assert_eq!(unquote_postgres_string_literal("not-a-literal"), None);
     }
 
     #[test]

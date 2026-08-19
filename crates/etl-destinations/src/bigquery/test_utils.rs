@@ -11,7 +11,8 @@ use gcp_bigquery_client::{
     client_builder::ClientBuilder,
     error::BQError,
     model::{
-        dataset::Dataset, query_request::QueryRequest, table_cell::TableCell, table_row::TableRow,
+        dataset::Dataset, query_request::QueryRequest, table::Table, table_cell::TableCell,
+        table_row::TableRow,
     },
 };
 use tokio::{runtime::Handle, time::sleep};
@@ -37,6 +38,13 @@ const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
 /// status code.
 const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &["backendError", "jobBackendError"];
+/// Environment variable name for the BigQuery project ID.
+pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
+/// Environment variable name for the BigQuery service account key path.
+pub const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
+/// When set, tests panic instead of skipping when BigQuery credentials are
+/// missing.
+pub const REQUIRE_BIGQUERY_CREDENTIALS_ENV: &str = "REQUIRE_BIGQUERY_CREDENTIALS";
 
 /// Retry policy for raw BigQuery operations in tests.
 const BIGQUERY_TEST_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -89,15 +97,12 @@ where
     .map_err(|failure| failure.last_error)
 }
 
-/// Environment variable name for the BigQuery project ID.
-pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
-
-/// Environment variable name for the BigQuery service account key path.
-pub const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
-
-/// When set, tests panic instead of skipping when BigQuery credentials are
-/// missing.
-pub const REQUIRE_BIGQUERY_CREDENTIALS_ENV: &str = "REQUIRE_BIGQUERY_CREDENTIALS";
+/// Builds a query request whose result must reflect current destination state.
+fn uncached_query_request(query: String) -> QueryRequest {
+    let mut request = QueryRequest::new(query);
+    request.use_query_cache = Some(false);
+    request
+}
 
 /// Returns whether BigQuery integration tests should be skipped.
 ///
@@ -271,7 +276,7 @@ impl BigQueryDatabase {
 
         loop {
             let (rows, not_found) = match retry_bigquery_test_operation("table query", || {
-                let request = QueryRequest::new(query.clone());
+                let request = uncached_query_request(query.clone());
                 async { self.client.job().query(&self.project_id, request).await }
             })
             .await
@@ -318,7 +323,7 @@ impl BigQueryDatabase {
             // could hide a table that still has rows, so it is retried like
             // a non-empty result.
             let observed_empty = match retry_bigquery_test_operation("table no-rows check", || {
-                let request = QueryRequest::new(query.clone());
+                let request = uncached_query_request(query.clone());
                 async { self.client.job().query(&self.project_id, request).await }
             })
             .await
@@ -364,7 +369,7 @@ impl BigQueryDatabase {
 
         loop {
             let rows = match retry_bigquery_test_operation("table schema query", || {
-                let request = QueryRequest::new(query.clone());
+                let request = uncached_query_request(query.clone());
                 async { self.client.job().query(project_id, request).await }
             })
             .await
@@ -392,6 +397,13 @@ impl BigQueryDatabase {
 
     /// Gets a table or view schema from the BigQuery table metadata API.
     pub async fn get_table_schema_by_id(&self, table_id: &str) -> Option<BigQueryTableSchema> {
+        let table = self.get_table_metadata_by_id(table_id).await?;
+
+        Some(BigQueryTableSchema::from_table_fields(table.schema.fields.unwrap_or_default()))
+    }
+
+    /// Gets table metadata for an exact table ID.
+    pub async fn get_table_metadata_by_id(&self, table_id: &str) -> Option<Table> {
         let table = match retry_bigquery_test_operation("table metadata query", || async {
             self.client.table().get(&self.project_id, &self.dataset_id, table_id, None).await
         })
@@ -402,14 +414,14 @@ impl BigQueryDatabase {
             Err(err) => panic!("Failed to get BigQuery table metadata: {err:?}"),
         };
 
-        Some(BigQueryTableSchema::from_table_fields(table.schema.fields.unwrap_or_default()))
+        Some(table)
     }
 
     /// Queries BigQuery column defaults for an exact table ID.
     pub async fn query_column_defaults_by_id(&self, table_id: &str) -> Vec<BigQueryColumnDefault> {
         let query = format!(
-            "SELECT column_name, column_default FROM `{}.{}.INFORMATION_SCHEMA.COLUMNS` WHERE \
-             table_name = '{}' ORDER BY ordinal_position",
+            "select column_name, column_default from `{}.{}.INFORMATION_SCHEMA.COLUMNS` where \
+             table_name = '{}' order by ordinal_position",
             self.project_id, self.dataset_id, table_id
         );
 
@@ -474,6 +486,22 @@ impl BigQueryDatabase {
         .await
         .expect("Failed to create BigQuery destination")
     }
+
+    /// Creates a [`BigQueryDestination`] with per-table creation options.
+    pub async fn build_destination_with_table_options<S>(
+        &self,
+        pipeline_id: PipelineId,
+        schema_store: S,
+        table_options: etl_config::shared::BigQueryTableOptionsConfig,
+    ) -> BigQueryDestination<S>
+    where
+        S: DestinationStore,
+    {
+        self.build_destination(pipeline_id, schema_store)
+            .await
+            .with_table_options(table_options)
+            .expect("Failed to configure BigQuery table options")
+    }
 }
 
 impl Drop for BigQueryDatabase {
@@ -527,10 +555,13 @@ pub struct BigQueryColumnDefault {
 impl From<TableRow> for BigQueryColumnDefault {
     fn from(value: TableRow) -> Self {
         let columns = value.columns.unwrap();
+        // BigQuery query rows encode a null STRING value as the string `NULL`.
+        let column_default = parse_table_cell(columns[1].clone())
+            .filter(|column_default: &String| column_default != "NULL");
 
         BigQueryColumnDefault {
             column_name: parse_table_cell(columns[0].clone()).unwrap(),
-            column_default: parse_table_cell(columns[1].clone()),
+            column_default,
         }
     }
 }

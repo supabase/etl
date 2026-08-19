@@ -28,7 +28,7 @@ pub trait Destination {
 |--------|---------|
 | `name()` | Returns identifier for logging and diagnostics |
 | `shutdown()` | Called when the pipeline shuts down. Default is a no-op. Override for cleanup or bookkeeping |
-| `startup()` | Called after store caches are loaded, removed-publication tables are purged, and before workers start. Default is a no-op. Override to reconcile destination state after restarts |
+| `startup()` | Called after store caches are loaded, removed-publication tables are purged, and before workers start. Default is a no-op. Override to recover pending operations or rebuild process-local state |
 | `drop_table_for_copy()` | Drops the existing destination object and destination-private replay state before restarting a table copy. Receives the previously stored replicated schema for locating the old object |
 | `write_table_rows()` | Writes rows during initial table copy. Receives the current replicated schema and may get an empty vector for an empty table or a deferred durability barrier |
 | `write_events()` | Processes ongoing replication events (inserts, updates, deletes, truncates, relations, and transaction markers). Batches may span multiple tables, or be empty for a required durability barrier |
@@ -44,7 +44,7 @@ pub trait Destination {
 - Preserve **per-table event order**. During initial sync and catch-up, transaction markers are not a reliable all-tables transaction boundary.
 - Treat `Event::Relation` as an ordered schema transition, not a `write_events()` batch boundary. ETL batches ongoing replication events by size and time, so one call can contain multiple schema changes, including multiple relation events for the same table.
 - Always complete the supplied async result handle. Dropping it reports a destination error to ETL.
-- `startup()` runs after ETL has loaded destination metadata and table schemas from the store and purged tables removed from the publication, so destinations can compare active persisted ETL state with their physical objects before replication work starts.
+- `startup()` runs after ETL has loaded destination metadata and table schemas from the store and purged tables removed from the publication. It may recover `Creating` or destination-recoverable `Applying` operations and rebuild process-local state. It should trust `Applied` metadata rather than recreate or structurally repair the data-bearing destination table; read-only destination metadata calls are appropriate only when indispensable to rebuild local write state or fail fast.
 - All three write-like methods use async results, but ETL waits differently. `drop_table_for_copy()` waits immediately before copy-scoped store cleanup. `write_table_rows()` also waits immediately, requesting the next batch only after the current one reports `Accepted` or `Durable` for that copy partition. `write_events()` is the method where ETL can keep processing other work while the destination finishes the current batch; ETL still waits for that result before handing over the next ongoing-replication batch.
 
 See [Events](/explanation/events/) for details on the events received by `write_events()`.
@@ -103,7 +103,6 @@ pub trait StateStore {
 
     // Destination table metadata
     fn get_destination_table_metadata(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<DestinationTableMetadata>>> + Send;
-    fn get_applied_destination_table_metadata(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<AppliedDestinationTableMetadata>>> + Send;
     fn load_destination_tables_metadata(&self) -> impl Future<Output = EtlResult<usize>> + Send;
     fn store_destination_table_metadata(&self, table_id: TableId, metadata: DestinationTableMetadata) -> impl Future<Output = EtlResult<()>> + Send;
 }
@@ -135,12 +134,11 @@ lets the worker resume safely after a restart.
 
 ### Destination Metadata Methods
 
-Destination table metadata connects source table IDs to destination state, including the **destination table identifier**, the **schema snapshot under management**, the **schema status** (`Applying` or `Applied`), and the **replication mask**. Only `AppliedDestinationTableMetadata` guarantees the destination schema is ready for normal reads and writes.
+Destination table metadata connects source table IDs to destination state. Its schema is explicitly `Creating`, `Applying`, or `Applied`; each variant contains the snapshots and replication masks required for that state. Destinations match the schema variant and decide whether to recover or reject an incomplete operation. `Applied` is authoritative: an empty process cache may be repopulated from it, but must not cause the data-bearing table to be created, inspected for repair, or structurally reconciled. External changes to ETL-owned tables are unsupported and should fail through ordinary destination operations.
 
 | Method | Purpose |
 |--------|---------|
 | `get_destination_table_metadata()` | Returns destination table metadata for a source table from cache |
-| `get_applied_destination_table_metadata()` | Returns destination table metadata only when the destination schema is fully applied. If metadata exists but is still `Applying`, this returns an error |
 | `load_destination_tables_metadata()` | Loads destination table metadata from persistent storage into cache. Call once during startup |
 | `store_destination_table_metadata()` | Saves destination table metadata to both cache and persistent storage |
 

@@ -11,7 +11,6 @@ pub(crate) const ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS: &str =
     "etl_batch_items_durable_duration_seconds";
 pub(crate) const ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS: &str =
     "etl_batch_items_durable_wait_duration_seconds";
-pub(crate) const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_seconds";
 pub(crate) const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
 pub(crate) const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub(crate) const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
@@ -82,7 +81,11 @@ pub(crate) const CONFIRMATION_LABEL: &str = "confirmation";
 /// register the metrics only once.
 pub(crate) fn register_metrics() {
     REGISTER_METRICS.call_once(|| {
-        describe_gauge!(ETL_TABLES_TOTAL, Unit::Count, "Total number of tables being copied");
+        describe_gauge!(
+            ETL_TABLES_TOTAL,
+            Unit::Count,
+            "Current number of replicated tables, labeled by state."
+        );
 
         describe_histogram!(
             ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
@@ -105,12 +108,6 @@ pub(crate) fn register_metrics() {
             "Time taken in seconds from the destination accepting a batch of items until a later \
              durable result confirms the batch durable, labeled by worker_type and action; covers \
              deferred streaming writes only"
-        );
-
-        describe_histogram!(
-            ETL_TRANSACTION_DURATION_SECONDS,
-            Unit::Seconds,
-            "Duration in seconds between BEGIN and COMMIT for a transaction"
         );
 
         describe_counter!(

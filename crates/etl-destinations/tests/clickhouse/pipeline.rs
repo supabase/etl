@@ -63,14 +63,14 @@ const DATE_2024_01_15_DAYS: i32 = 19737;
 /// Microseconds from epoch for `2024-01-15 12:00:00 UTC`.
 const TS_2024_01_15_12_00_US: i64 = 1_705_320_000_000_000;
 
-/// Tests that all Postgres column types (including nullable arrays) round-trip
+/// Tests that all supported Postgres column types round-trip
 /// correctly through the ClickHouse RowBinary encoding.
 ///
 /// # GIVEN
 ///
 /// A Postgres table covering every supported column type -- scalars (integers,
 /// floats, numeric, boolean, text, varchar, date, timestamp, timestamptz, time,
-/// interval, jsonb, json, bytea, inet, cidr, macaddr, uuid) and nullable array
+/// interval, jsonb, json, bytea, inet, cidr, macaddr, uuid) and array
 /// columns (`integer[]`, `text[]`). Two rows are inserted before the pipeline
 /// starts:
 ///
@@ -90,12 +90,8 @@ const TS_2024_01_15_12_00_US: i64 = 1_705_320_000_000_000;
 ///
 /// # Regression
 ///
-/// Row 2's non-empty arrays specifically catch the nullable-array encoding bug
-/// where `nullable_flags[i] = true` for array columns caused
-/// `rb_encode_nullable` to prepend an extra null-indicator byte. ClickHouse
-/// read that byte as `varint(0)` (empty array) and then parsed the actual
-/// element bytes as subsequent column data, failing with "Cannot read all data"
-/// at row 2.
+/// Row 2's non-empty arrays specifically catch array-length encoding bugs that
+/// can misalign the remaining RowBinary column data.
 #[tokio::test(flavor = "multi_thread")]
 async fn all_types_table_copy_merge_tree() {
     all_types_table_copy_inner(ClickHouseEngine::MergeTree).await;
@@ -136,11 +132,10 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
                 ("interval_col", "interval not null"),
                 ("jsonb_col", "jsonb not null"),
                 ("json_col", "json not null"),
-                // Nullable array columns (key for the regression test).
-                // These are intentionally nullable so that nullable_flags[i] would
-                // have been set to `true` before the fix, triggering the bug.
-                ("integer_array_col", "integer[]"),
-                ("text_array_col", "text[]"),
+                // Array columns are top-level non-nullable because ClickHouse cannot
+                // distinguish a NULL array from an empty array.
+                ("integer_array_col", "integer[] not null"),
+                ("text_array_col", "text[] not null"),
                 // Other types
                 ("bytea_col", "bytea not null"),
                 ("inet_col", "inet not null"),
@@ -150,13 +145,10 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
             ],
         )
         .await
-        .expect("Failed to create test table");
+        .unwrap();
 
     let publication_name = "test_pub_clickhouse";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     // Row 1: empty arrays.  With the old encoding bug, this accidentally
     //        produced valid RowBinary because `0x00` (null-indicator) ==
@@ -186,7 +178,7 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
             table = table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert row 1");
+        .unwrap();
 
     // Row 2: NON-EMPTY arrays.  With the old encoding bug, this row caused
     //        ClickHouse to fail with "Cannot read all data" because the extra
@@ -217,7 +209,7 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
             table = table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert row 2");
+        .unwrap();
 
     // --- WHEN: pipeline copies data to ClickHouse ---
     let clickhouse_db = setup_clickhouse_database().await;
@@ -293,12 +285,12 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
     assert_eq!(
         r2.integer_array_col,
         vec![Some(1), Some(2), Some(3)],
-        "row 2 integer_array_col mismatch -- nullable-array encoding bug likely present"
+        "row 2 integer_array_col mismatch -- array encoding bug likely present"
     );
     assert_eq!(
         r2.text_array_col,
         vec![Some("alpha".to_owned()), Some("beta".to_owned())],
-        "row 2 text_array_col mismatch -- nullable-array encoding bug likely present"
+        "row 2 text_array_col mismatch -- array encoding bug likely present"
     );
 }
 
@@ -325,13 +317,10 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create update_flow test table");
+        .unwrap();
 
     let publication_name = "test_pub_clickhouse_updates";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create update_flow publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -339,7 +328,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert initial update_flow row");
+        .unwrap();
 
     // --- WHEN: pipeline copies data and an UPDATE is streamed ---
     let clickhouse_db = setup_clickhouse_database().await;
@@ -372,7 +361,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to update update_flow row");
+        .unwrap();
 
     events_notify.notified().await;
 
@@ -392,8 +381,9 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
 ///
 /// # GIVEN
 ///
-/// A Postgres table with nullable scalar columns and nullable array columns,
-/// populated with four rows that exercise encoding boundary conditions:
+/// A Postgres table with nullable scalar columns and non-nullable array
+/// columns, populated with four rows that exercise encoding boundary
+/// conditions:
 ///
 /// 1. **All NULLs** -- nullable scalars are NULL, arrays are empty.
 /// 2. **NULL elements inside arrays** -- `{1, NULL, 3}`, `{'a', NULL, 'c'}`.
@@ -437,20 +427,17 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
             table_name.clone(),
             true,
             &[
-                ("nullable_text", "text"),      // nullable
-                ("nullable_int", "integer"),    // nullable
-                ("int_array_col", "integer[]"), // Array(Nullable(Int32))
-                ("text_array_col", "text[]"),   // Array(Nullable(String))
+                ("nullable_text", "text"),               // nullable
+                ("nullable_int", "integer"),             // nullable
+                ("int_array_col", "integer[] not null"), // Array(Nullable(Int32))
+                ("text_array_col", "text[] not null"),   // Array(Nullable(String))
             ],
         )
         .await
-        .expect("Failed to create boundary_values table");
+        .unwrap();
 
     let publication_name = "test_pub_ch_boundary";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     // Row 1: all nullable columns are NULL, arrays are empty.
     database
@@ -460,7 +447,7 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert row 1 (all NULLs)");
+        .unwrap();
 
     // Row 2: arrays with interior NULL elements -- the element at index 1 is NULL
     // while surrounding elements are present.
@@ -471,7 +458,7 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert row 2 (NULL array elements)");
+        .unwrap();
 
     // Row 3: empty string (not NULL) for text, NULL for integer, and
     // single-element arrays (varint length byte = 0x01).
@@ -482,7 +469,7 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert row 3 (empty string + single-element arrays)");
+        .unwrap();
 
     // Row 4: multi-byte UTF-8 -- emoji (4 bytes per char) and CJK (3 bytes per
     // char). The RowBinary varint encodes byte length, not character count.
@@ -493,7 +480,7 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert row 4 (multi-byte UTF-8)");
+        .unwrap();
 
     // --- WHEN: pipeline copies data to ClickHouse ---
     let clickhouse_db = setup_clickhouse_database().await;
@@ -629,13 +616,10 @@ async fn pre_1970_and_far_future_dates_round_trip_inner(engine: ClickHouseEngine
     let table_id = database
         .create_table(table_name.clone(), true, &[("date_col", "date not null")])
         .await
-        .expect("Failed to create date_boundaries table");
+        .unwrap();
 
     let publication_name = "test_pub_ch_date_boundaries";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     for date_literal in ["1900-01-01", "1969-12-31", "1970-01-01", "2024-01-15", "2299-12-31"] {
         database
@@ -734,7 +718,7 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create delete_flow test table");
+        .unwrap();
 
     database
         .run_sql(&format!(
@@ -742,13 +726,10 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to set replica identity full");
+        .unwrap();
 
     let publication_name = "test_pub_clickhouse_deletes";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create delete_flow publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -756,7 +737,7 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert delete_flow rows");
+        .unwrap();
 
     // --- WHEN: pipeline copies data and a DELETE is streamed ---
 
@@ -787,7 +768,7 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     database
         .run_sql(&format!("DELETE FROM {} WHERE id = 2", table_name.as_quoted_identifier(),))
         .await
-        .expect("Failed to delete delete_flow row");
+        .unwrap();
 
     events_notify.notified().await;
 
@@ -844,13 +825,10 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create restart_flow test table");
+        .unwrap();
 
     let publication_name = "test_pub_clickhouse_restart";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create restart_flow publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -858,7 +836,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert initial restart_flow row");
+        .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -914,7 +892,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert post-restart row");
+        .unwrap();
 
     events_notify.notified().await;
 
@@ -953,13 +931,10 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create reset_copy test table");
+        .unwrap();
 
     let publication_name = "test_pub_clickhouse_reset_copy";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create reset_copy publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -967,7 +942,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert initial reset_copy rows");
+        .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -1003,14 +978,14 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
     database
         .run_sql(&format!("DELETE FROM {} WHERE true", table_name.as_quoted_identifier()))
         .await
-        .expect("Failed to delete reset_copy source rows");
+        .unwrap();
     database
         .run_sql(&format!(
             "INSERT INTO {} (value) VALUES ('after')",
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert recopy reset_copy row");
+        .unwrap();
 
     store.reset_table_state(table_id).await.unwrap();
 
@@ -1064,13 +1039,10 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create truncate_flow test table");
+        .unwrap();
 
     let publication_name = "test_pub_clickhouse_truncate";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create truncate_flow publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -1078,7 +1050,7 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert truncate_flow rows");
+        .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -1111,10 +1083,7 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
         .wait_for_events(vec![EventCondition::TableCount(EventType::Truncate, table_id, 1)])
         .await;
 
-    database
-        .truncate_table(table_name.clone())
-        .await
-        .expect("Failed to truncate table in Postgres");
+    database.truncate_table(table_name.clone()).await.unwrap();
 
     truncate_notify.notified().await;
 
@@ -1131,7 +1100,7 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert post-truncate row");
+        .unwrap();
 
     insert_notify.notified().await;
 
@@ -1168,13 +1137,10 @@ async fn intermediate_flush_preserves_all_rows_inner(engine: ClickHouseEngine) {
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create flush_split test table");
+        .unwrap();
 
     let publication_name = "test_pub_clickhouse_flush";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create flush_split publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     let row_count = 10;
     let values: Vec<String> = (1..=row_count).map(|i| format!("('row_{i}')")).collect();
@@ -1185,7 +1151,7 @@ async fn intermediate_flush_preserves_all_rows_inner(engine: ClickHouseEngine) {
             values.join(", "),
         ))
         .await
-        .expect("Failed to insert flush_split rows");
+        .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -1269,21 +1235,17 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
     let table_a = test_table_name("multi_a");
     let table_b = test_table_name("multi_b");
 
-    let table_a_id = database
-        .create_table(table_a.clone(), true, &[("value", "text not null")])
-        .await
-        .expect("Failed to create multi_a table");
+    let table_a_id =
+        database.create_table(table_a.clone(), true, &[("value", "text not null")]).await.unwrap();
 
-    let table_b_id = database
-        .create_table(table_b.clone(), true, &[("value", "text not null")])
-        .await
-        .expect("Failed to create multi_b table");
+    let table_b_id =
+        database.create_table(table_b.clone(), true, &[("value", "text not null")]).await.unwrap();
 
     let publication_name = "test_pub_clickhouse_multi";
     database
         .create_publication(publication_name, &[table_a.clone(), table_b.clone()])
         .await
-        .expect("Failed to create multi-table publication");
+        .unwrap();
 
     database
         .run_sql(&format!(
@@ -1291,7 +1253,7 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
             table_a.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert into multi_a");
+        .unwrap();
 
     database
         .run_sql(&format!(
@@ -1299,7 +1261,7 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
             table_b.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert into multi_b");
+        .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -1336,7 +1298,7 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
             table_a.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert streamed row into multi_a");
+        .unwrap();
 
     database
         .run_sql(&format!(
@@ -1344,7 +1306,7 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
             table_b.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert streamed row into multi_b");
+        .unwrap();
 
     events_notify.notified().await;
 
@@ -1386,7 +1348,7 @@ const DEFAULT_IDENTITY_TABLE: &str = "test_default__identity__delete";
 ///   boolean, text, varchar, date, timestamp, timestamptz, time, jsonb, bytea,
 ///   uuid
 /// - Nullable scalars: text, integer
-/// - Nullable arrays: integer[], text[]
+/// - Non-nullable arrays with nullable elements: integer[], text[]
 /// Two rows inserted and copied to ClickHouse.
 ///
 /// # WHEN
@@ -1441,20 +1403,17 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
                 ("uuid_col", "uuid not null"),
                 ("nullable_text", "text"),
                 ("nullable_int", "integer"),
-                ("int_array_col", "integer[]"),
-                ("text_array_col", "text[]"),
+                ("int_array_col", "integer[] not null"),
+                ("text_array_col", "text[] not null"),
             ],
         )
         .await
-        .expect("Failed to create test table");
+        .unwrap();
 
     // Deliberately NOT setting REPLICA IDENTITY FULL -- default (PK only).
 
     let publication_name = "test_pub_ch_default_ident";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -1480,7 +1439,7 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
             table = table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert rows");
+        .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -1513,7 +1472,7 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
     database
         .run_sql(&format!("DELETE FROM {} WHERE id = 2", table_name.as_quoted_identifier()))
         .await
-        .expect("Failed to delete row");
+        .unwrap();
 
     database
         .run_sql(&format!(
@@ -1533,9 +1492,11 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
             table = table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert post-delete row");
+        .unwrap();
 
     events_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 
     let query = current_state_query(
         engine,
@@ -1545,8 +1506,6 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
         "id",
     );
     let rows: Vec<DefaultIdentityRow> = clickhouse_db.query(&query).await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: deleted row absent; surviving + post-insert rows present ---
     assert_eq!(rows.len(), 2, "current state should show id=1 and id=3 only");
@@ -1592,13 +1551,10 @@ async fn exclusive_large_batch_table_copy_inner(engine: ClickHouseEngine) {
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create large_batch test table");
+        .unwrap();
 
     let publication_name = "test_pub_clickhouse_large_batch";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create large_batch publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     let row_count: usize = 1024;
     let values: Vec<String> = (1..=row_count).map(|i| format!("('val_{i:04}')")).collect();
@@ -1611,7 +1567,7 @@ async fn exclusive_large_batch_table_copy_inner(engine: ClickHouseEngine) {
                 chunk.join(", "),
             ))
             .await
-            .expect("Failed to insert large_batch rows");
+            .unwrap();
     }
 
     let clickhouse_db = setup_clickhouse_database().await;
@@ -1657,7 +1613,7 @@ struct AddColumnRow {
     name: String,
     age: i32,
     email: Option<String>,
-    score: Option<i32>,
+    score: i32,
 }
 
 /// Row struct for the defaulted ADD COLUMN test.
@@ -1716,13 +1672,10 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
             &[("name", "text not null"), ("age", "integer not null")],
         )
         .await
-        .expect("Failed to create table");
+        .unwrap();
 
     let publication_name = "test_pub_ch_schema_add";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -1730,7 +1683,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert Alice");
+        .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -1756,12 +1709,9 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(initial_columns, vec!["id", "name", "age"]);
 
-    let initial_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after table creation");
-    let initial_snapshot_id = initial_metadata.snapshot_id;
+    let initial_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(initial_metadata.is_applied());
+    let initial_snapshot_id = initial_metadata.snapshot_id();
 
     // --- WHEN: add column and insert with new schema ---
     let events_notify = destination
@@ -1790,7 +1740,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert Bob");
+        .unwrap();
 
     events_notify.notified().await;
 
@@ -1814,21 +1764,13 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
         None
     };
 
-    pipeline.shutdown_and_wait().await.unwrap();
-
     // --- THEN: ClickHouse has the new columns, both rows present ---
     let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(final_columns, vec!["id", "name", "age", "email", "score"]);
 
-    let final_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after schema change");
-    assert!(
-        final_metadata.snapshot_id > initial_snapshot_id,
-        "snapshot_id should increase after schema change"
-    );
+    let final_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(final_metadata.is_applied());
+    assert!(final_metadata.snapshot_id() > initial_snapshot_id);
 
     let final_column_types = clickhouse_db.column_types(clickhouse_table_name).await;
     assert_eq!(
@@ -1838,32 +1780,29 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
             ("name".to_owned(), "String".to_owned()),
             ("age".to_owned(), "Int32".to_owned()),
             ("email".to_owned(), "Nullable(String)".to_owned()),
-            ("score".to_owned(), "Nullable(Int32)".to_owned()),
+            ("score".to_owned(), "Int32".to_owned()),
         ]
     );
 
-    assert_eq!(rows.len(), 2, "expected Alice + Bob");
+    assert_eq!(rows.len(), 2);
 
     // Alice: pre-change row, added columns use the destination's add-time defaults
     // where supported.
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].name, "Alice");
     assert_eq!(rows[0].age, 25);
-    assert_eq!(rows[0].email, None, "Alice's email should be NULL (column added after her row)");
-    assert_eq!(rows[0].score, Some(0), "Alice's score should use the add-column default");
+    assert_eq!(rows[0].email, None);
+    assert_eq!(rows[0].score, 0);
 
     // Bob: post-change row, added columns present.
     assert_eq!(rows[1].id, 2);
     assert_eq!(rows[1].name, "Bob");
     assert_eq!(rows[1].age, 30);
     assert_eq!(rows[1].email, Some("bob@example.com".to_owned()));
-    assert_eq!(rows[1].score, Some(7));
+    assert_eq!(rows[1].score, 7);
 
     if let Some(view_rows) = current_view_rows {
-        assert_eq!(
-            view_rows, rows,
-            "__current view should match the evolved ReplacingMergeTree schema"
-        );
+        assert_eq!(view_rows, rows);
     }
 }
 
@@ -1878,20 +1817,17 @@ async fn schema_change_add_column_defaults_merge_tree() {
     let table_id = database
         .create_table(table_name.clone(), true, &[("name", "text not null")])
         .await
-        .expect("failed to create source table");
+        .unwrap();
 
     let publication_name = "test_pub_ch_defaults_schema";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
     database
         .run_sql(&format!(
             "INSERT INTO {} (name) VALUES ('Alice')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert initial source row");
+        .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -1936,7 +1872,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
             ],
         )
         .await
-        .expect("failed to alter source table");
+        .unwrap();
 
     database
         .run_sql(&format!(
@@ -1944,7 +1880,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert defaulted source row");
+        .unwrap();
 
     events_notify.notified().await;
 
@@ -1980,60 +1916,32 @@ async fn schema_change_add_column_defaults_merge_tree() {
     );
 }
 
-/// Row struct for the combined schema change test after all changes.
-/// Columns: id, full_name (renamed), status (kept), email (added).
-/// age is dropped.
+/// Row returned after a rename cycle and same-name column replacement.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
 struct CombinedSchemaChangeRow {
     id: i64,
-    full_name: String,
-    status: Option<String>,
-    email: Option<String>,
+    status: String,
+    name: Option<String>,
+    age: Option<String>,
 }
 
-/// Tests that multiple schema changes (ADD, DROP, RENAME) in Postgres all
-/// propagate to ClickHouse correctly.
-///
-/// # GIVEN
-///
-/// A Postgres table with columns (id serial PK, name text not null, age integer
-/// not null, status text) and one row ('Alice', 25, 'active'), copied to
-/// ClickHouse.
-///
-/// # WHEN
-///
-/// Three schema changes are applied:
-/// 1. RENAME COLUMN name TO full_name
-/// 2. DROP COLUMN age
-/// 3. ADD COLUMN email text
-/// A new row ('Bob', 'pending', 'bob@example.com') is inserted with the updated
-/// schema.
-///
-/// # THEN
-///
-/// The ClickHouse table has columns: id, full_name, status, email.
-/// - 'age' is dropped.
-/// - 'name' is renamed to 'full_name'.
-/// - 'email' is added.
-/// Alice's row has 'Alice' under 'full_name', 'active' for status, NULL for
-/// email. Bob's row has the new values.
+/// Exercises the ordered planner adapter for both ClickHouse engines.
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_add_drop_rename_merge_tree() {
-    schema_change_add_drop_rename_inner(ClickHouseEngine::MergeTree).await;
+async fn schema_change_ordered_name_reuse_merge_tree() {
+    schema_change_ordered_name_reuse_inner(ClickHouseEngine::MergeTree).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_add_drop_rename_replacing_merge_tree() {
-    schema_change_add_drop_rename_inner(ClickHouseEngine::ReplacingMergeTree).await;
+async fn schema_change_ordered_name_reuse_replacing_merge_tree() {
+    schema_change_ordered_name_reuse_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
-async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
+async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
     init_test_tracing();
     install_crypto_provider();
 
     let clickhouse_table_name = "test_schema__multi";
 
-    // --- GIVEN: table with one row, copied to ClickHouse ---
     let database = spawn_source_database().await;
     let table_name = test_table_name("schema_multi");
 
@@ -2044,21 +1952,18 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
             &[("name", "text not null"), ("age", "integer not null"), ("status", "text")],
         )
         .await
-        .expect("Failed to create table");
+        .unwrap();
 
     let publication_name = "test_pub_ch_schema_multi";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (name, age, status) VALUES ('Alice', 25, 'active')",
+            "insert into {} (name, age, status) values ('Alice', 25, 'active')",
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert Alice");
+        .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -2080,18 +1985,13 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     pipeline.start().await.unwrap();
     table_sync_complete_notify.notified().await;
 
-    // Verify initial schema.
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(initial_columns, vec!["id", "name", "age", "status"]);
 
-    let initial_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after table creation");
-    let initial_snapshot_id = initial_metadata.snapshot_id;
+    let initial_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(initial_metadata.is_applied());
+    let initial_snapshot_id = initial_metadata.snapshot_id();
 
-    // --- WHEN: rename + drop + add and insert with new schema ---
     let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 1),
@@ -2101,90 +2001,97 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "supabase_etl_source_swap",
+            }],
         )
-        .await
-        .unwrap();
-
-    database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
         .await
         .unwrap();
 
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn { name: "email", data_type: "text" }],
+            &[TableModification::RenameColumn { old_name: "status", new_name: "name" }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "supabase_etl_source_swap",
+                new_name: "status",
+            }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::DropColumn { name: "age" },
+                TableModification::AddColumn { name: "age", data_type: "text" },
+            ],
         )
         .await
         .unwrap();
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (full_name, status, email) VALUES ('Bob', 'pending', \
-             'bob@example.com')",
+            "insert into {} (status, name, age) values ('Bob', 'pending', 'thirty')",
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert Bob");
+        .unwrap();
 
     events_notify.notified().await;
 
-    let query = current_state_query(
-        engine,
-        clickhouse_table_name,
-        "id, full_name, status, email",
-        &["id"],
-        "id",
-    );
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let query =
+        current_state_query(engine, clickhouse_table_name, "id, status, name, age", &["id"], "id");
     let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db.query(&query).await;
     let current_view_rows = if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
         let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db
-            .query(
-                "SELECT id, full_name, status, email FROM \"test_schema__multi__current\" ORDER \
-                 BY id",
-            )
+            .query("select id, status, name, age from \"test_schema__multi__current\" order by id")
             .await;
         Some(rows)
     } else {
         None
     };
 
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // --- THEN: ClickHouse schema reflects all changes ---
     let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
-    assert_eq!(final_columns, vec!["id", "full_name", "status", "email"]);
+    assert_eq!(final_columns, vec!["id", "status", "name", "age"]);
 
-    let final_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after schema change");
-    assert!(
-        final_metadata.snapshot_id > initial_snapshot_id,
-        "snapshot_id should increase after schema change"
+    let final_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(final_metadata.is_applied());
+    // Applying the relation must advance the durable destination schema.
+    assert!(final_metadata.snapshot_id() > initial_snapshot_id);
+
+    assert_eq!(
+        rows,
+        vec![
+            CombinedSchemaChangeRow {
+                id: 1,
+                status: "Alice".to_owned(),
+                name: Some("active".to_owned()),
+                age: None,
+            },
+            CombinedSchemaChangeRow {
+                id: 2,
+                status: "Bob".to_owned(),
+                name: Some("pending".to_owned()),
+                age: Some("thirty".to_owned()),
+            },
+        ]
     );
 
-    assert_eq!(rows.len(), 2, "expected Alice + Bob");
-
-    // Alice: pre-change row.
-    assert_eq!(rows[0].id, 1);
-    assert_eq!(rows[0].full_name, "Alice", "renamed column should preserve data");
-    assert_eq!(rows[0].status, Some("active".to_owned()));
-    assert_eq!(rows[0].email, None, "Alice's email should be NULL (added after her row)");
-
-    // Bob: post-change row.
-    assert_eq!(rows[1].id, 2);
-    assert_eq!(rows[1].full_name, "Bob");
-    assert_eq!(rows[1].status, Some("pending".to_owned()));
-    assert_eq!(rows[1].email, Some("bob@example.com".to_owned()));
-
     if let Some(view_rows) = current_view_rows {
-        assert_eq!(
-            view_rows, rows,
-            "__current view should match the evolved ReplacingMergeTree schema"
-        );
+        // The current view must expose the same evolved rows as the base query.
+        assert_eq!(view_rows, rows);
     }
 }
 
@@ -2243,13 +2150,10 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
     let table_id = database
         .create_table(table_name.clone(), true, &[("name", "text not null")])
         .await
-        .expect("Failed to create table");
+        .unwrap();
 
     let publication_name = "test_pub_ch_stale_replay";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -2257,7 +2161,7 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert Alice");
+        .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -2279,20 +2183,14 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
     pipeline.start().await.unwrap();
     table_sync_complete.notified().await;
 
-    let initial_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after table creation");
-    let initial_snapshot_id = initial_metadata.snapshot_id;
-    let stale_table_schema = store
-        .get_table_schema(&table_id, initial_snapshot_id)
-        .await
-        .unwrap()
-        .expect("initial schema snapshot should exist before schema change");
+    let initial_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(initial_metadata.is_applied());
+    let initial_snapshot_id = initial_metadata.snapshot_id();
+    let stale_table_schema =
+        store.get_table_schema(&table_id, initial_snapshot_id).await.unwrap().unwrap();
     let stale_schema = ReplicatedTableSchema::from_mask(
         stale_table_schema,
-        initial_metadata.replication_mask.clone(),
+        initial_metadata.replication_mask().clone(),
     );
 
     // Add a column and stream one row that carries data in it.
@@ -2315,22 +2213,19 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert Bob");
+        .unwrap();
     event_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let applied_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after schema change");
-    let applied_snapshot_id = applied_metadata.snapshot_id;
+    let applied_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(applied_metadata.is_applied());
+    let applied_snapshot_id = applied_metadata.snapshot_id();
     assert!(
         applied_snapshot_id > initial_snapshot_id,
         "snapshot_id should increase after schema change"
     );
-    let clickhouse_table_name = applied_metadata.destination_table_id.clone();
+    let clickhouse_table_name = applied_metadata.table_id().to_owned();
 
     // --- WHEN: a fresh destination on the same store replays the old relation ---
     let restarted_destination =
@@ -2342,7 +2237,7 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         .await;
 
     // --- THEN: the stale snapshot is rejected and no reverse DDL ran ---
-    let err = result.expect_err("stale relation replay should be rejected");
+    let err = result.unwrap_err();
     assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
 
     let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
@@ -2362,13 +2257,11 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         "newer column data must survive the stale replay"
     );
 
-    let final_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should still exist after the rejected replay");
+    let final_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(final_metadata.is_applied());
     assert_eq!(
-        final_metadata.snapshot_id, applied_snapshot_id,
+        final_metadata.snapshot_id(),
+        applied_snapshot_id,
         "metadata must stay at the newer snapshot"
     );
 }

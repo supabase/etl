@@ -11,7 +11,7 @@ use tokio::sync::{Notify, RwLock};
 use tokio_postgres::types::PgLsn;
 
 use crate::{
-    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    destination::DestinationTableMetadata,
     error::{ErrorKind, EtlResult},
     etl_error,
     replication::{
@@ -405,20 +405,6 @@ impl StateStore for NotifyingStore {
     ) -> EtlResult<Option<DestinationTableMetadata>> {
         let inner = self.inner.read().await;
         Ok(inner.destination_tables_metadata.get(&table_id).cloned())
-    }
-
-    async fn get_applied_destination_table_metadata(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
-        let inner = self.inner.read().await;
-
-        inner
-            .destination_tables_metadata
-            .get(&table_id)
-            .cloned()
-            .map(DestinationTableMetadata::into_applied)
-            .transpose()
     }
 
     async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {

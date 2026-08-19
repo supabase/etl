@@ -15,12 +15,19 @@ use std::fmt;
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    schema::TableName,
+    schema::{ColumnNameMapping, TableName},
 };
 use serde::{Deserialize, Serialize};
 
 /// The DuckDB catalog alias used in every `lake.<table>` qualified name.
 pub(super) const LAKE_CATALOG: &str = "lake";
+/// Column-name mapping used at every DuckLake destination boundary.
+///
+/// DuckLake identifiers are canonicalized to deterministic ASCII lowercase.
+/// Table creation, row writes, schema planning, and recovery must use this same
+/// mapping. Changing it for existing tables requires compatibility handling or
+/// a resync.
+const DUCKLAKE_COLUMN_NAME_MAPPING: ColumnNameMapping = ColumnNameMapping::AsciiLowercase;
 
 /// A table reference inside the DuckLake catalog.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]

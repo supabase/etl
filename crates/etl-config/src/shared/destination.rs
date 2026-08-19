@@ -1,8 +1,12 @@
+use std::collections::HashSet;
+
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use url::Url;
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
+
+use crate::shared::{Validate, ValidationError};
 
 const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
@@ -10,6 +14,196 @@ const fn default_connection_pool_size() -> usize {
 
 const fn default_ducklake_pool_size() -> u32 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
+}
+
+/// Per-table creation options for BigQuery destinations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct BigQueryTableOptionsConfig {
+    /// Source tables whose BigQuery counterparts use custom physical layouts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<BigQueryTableOptions>,
+}
+
+impl BigQueryTableOptionsConfig {
+    /// Returns whether no table creation options are configured.
+    pub fn is_empty(&self) -> bool {
+        self.tables.is_empty()
+    }
+}
+
+impl Validate for BigQueryTableOptionsConfig {
+    fn validate(&self) -> Result<(), ValidationError> {
+        let mut table_ids = HashSet::with_capacity(self.tables.len());
+
+        for (table_index, table) in self.tables.iter().enumerate() {
+            let table_field = format!("table_options.tables[{table_index}]");
+
+            if !table_ids.insert(table.table_id) {
+                return Err(ValidationError::InvalidFieldValue {
+                    field: format!("{table_field}.table_id"),
+                    constraint: format!(
+                        "must be unique; table id {} is configured more than once",
+                        table.table_id
+                    ),
+                });
+            }
+
+            if table.partition_by.is_none() && table.cluster_by.is_empty() {
+                return Err(ValidationError::InvalidFieldValue {
+                    field: table_field,
+                    constraint: "must configure partition_by, cluster_by, or both".to_owned(),
+                });
+            }
+
+            if let Some(partition_by) = &table.partition_by {
+                validate_bigquery_partition_by(partition_by, &table_field)?;
+            }
+
+            if table.cluster_by.len() > 4 {
+                return Err(ValidationError::InvalidFieldValue {
+                    field: format!("{table_field}.cluster_by"),
+                    constraint: "must contain at most four columns".to_owned(),
+                });
+            }
+
+            let mut cluster_columns = HashSet::with_capacity(table.cluster_by.len());
+            for (column_index, column) in table.cluster_by.iter().enumerate() {
+                validate_bigquery_column_name(
+                    column,
+                    &format!("{table_field}.cluster_by[{column_index}]"),
+                )?;
+
+                if !cluster_columns.insert(column) {
+                    return Err(ValidationError::InvalidFieldValue {
+                        field: format!("{table_field}.cluster_by[{column_index}]"),
+                        constraint: format!(
+                            "must be unique; column `{column}` is configured more than once"
+                        ),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Validates one BigQuery partitioning configuration.
+fn validate_bigquery_partition_by(
+    partition_by: &BigQueryPartitionBy,
+    table_field: &str,
+) -> Result<(), ValidationError> {
+    match partition_by {
+        BigQueryPartitionBy::TimeColumn { column, .. } => {
+            validate_bigquery_column_name(column, &format!("{table_field}.partition_by.column"))
+        }
+        BigQueryPartitionBy::IntegerRange { column, start, end, interval } => {
+            validate_bigquery_column_name(column, &format!("{table_field}.partition_by.column"))?;
+
+            if start >= end {
+                return Err(ValidationError::InvalidFieldValue {
+                    field: format!("{table_field}.partition_by.end"),
+                    constraint: "must be greater than partition_by.start".to_owned(),
+                });
+            }
+
+            if *interval <= 0 {
+                return Err(ValidationError::InvalidFieldValue {
+                    field: format!("{table_field}.partition_by.interval"),
+                    constraint: "must be greater than 0".to_owned(),
+                });
+            }
+
+            Ok(())
+        }
+        BigQueryPartitionBy::IngestionTime { .. } => Ok(()),
+    }
+}
+
+/// Validates a BigQuery column name without requiring a source schema.
+fn validate_bigquery_column_name(column: &str, field: &str) -> Result<(), ValidationError> {
+    if column.is_empty() {
+        return Err(ValidationError::InvalidFieldValue {
+            field: field.to_owned(),
+            constraint: "must not be empty".to_owned(),
+        });
+    }
+
+    if column.chars().any(char::is_control) {
+        return Err(ValidationError::InvalidFieldValue {
+            field: field.to_owned(),
+            constraint: "must not contain control characters".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+/// BigQuery creation options for one source table.
+///
+/// At least one of [`Self::partition_by`] or [`Self::cluster_by`] must be
+/// configured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct BigQueryTableOptions {
+    /// Source PostgreSQL table OID, stable across renames for the relation's
+    /// lifetime.
+    pub table_id: u32,
+    /// Optional BigQuery partitioning configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_by: Option<BigQueryPartitionBy>,
+    /// Ordered BigQuery clustering columns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cluster_by: Vec<String>,
+}
+
+/// Supported BigQuery table partitioning strategies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BigQueryPartitionBy {
+    /// Partition by a replicated `DATE`, `TIMESTAMP`, or `DATETIME` column.
+    TimeColumn {
+        /// Source column name.
+        column: String,
+        /// Partition granularity.
+        #[serde(default)]
+        granularity: BigQueryTimePartitionGranularity,
+    },
+    /// Partition by ranges of a replicated integer column.
+    IntegerRange {
+        /// Source column name.
+        column: String,
+        /// Inclusive start of the first partition range.
+        start: i64,
+        /// Exclusive end of the last partition range.
+        end: i64,
+        /// Width of each partition range.
+        interval: i64,
+    },
+    /// Partition by the time at which BigQuery ingests each row.
+    IngestionTime {
+        /// Partition granularity.
+        #[serde(default)]
+        granularity: BigQueryTimePartitionGranularity,
+    },
+}
+
+/// Time granularity for BigQuery time-based partitioning.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum BigQueryTimePartitionGranularity {
+    /// Hourly partitions.
+    Hour,
+    /// Daily partitions.
+    #[default]
+    Day,
+    /// Monthly partitions.
+    Month,
+    /// Yearly partitions.
+    Year,
 }
 
 /// Table engine used by the ClickHouse destination when creating replicated
@@ -77,6 +271,8 @@ impl DuckLakeTableSortingConfig {
         self.tables.is_empty()
     }
 }
+
+impl Validate for DuckLakeTableSortingConfig {}
 
 /// Sort-order configuration for one source table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +403,10 @@ pub enum DestinationConfig {
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+        /// Per-table partitioning and clustering applied only when ETL creates
+        /// a physical table.
+        #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
+        table_options: BigQueryTableOptionsConfig,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -297,6 +497,17 @@ impl DestinationConfig {
     }
 }
 
+impl Validate for DestinationConfig {
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            DestinationConfig::BigQuery { table_options, .. } => table_options.validate(),
+            DestinationConfig::Iceberg { config } => config.validate(),
+            DestinationConfig::Ducklake { table_sorting, .. } => table_sorting.validate(),
+            DestinationConfig::ClickHouse { .. } | DestinationConfig::Snowflake { .. } => Ok(()),
+        }
+    }
+}
+
 /// Configuration for the iceberg destination with two variants
 ///
 /// 1. Supabase - for analytics buckets on Supabase
@@ -343,6 +554,8 @@ pub enum IcebergConfig {
     },
 }
 
+impl Validate for IcebergConfig {}
+
 /// Same as [`IcebergConfig`] but without secrets. This type
 /// implements [`Serialize`] because it does not contains secrets
 /// so is safe to serialize.
@@ -372,6 +585,8 @@ pub enum IcebergConfigWithoutSecrets {
         s3_endpoint: String,
     },
 }
+
+impl Validate for IcebergConfigWithoutSecrets {}
 
 impl From<IcebergConfig> for IcebergConfigWithoutSecrets {
     fn from(value: IcebergConfig) -> Self {
@@ -439,6 +654,10 @@ pub enum DestinationConfigWithoutSecrets {
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+        /// Per-table partitioning and clustering applied only when ETL creates
+        /// a physical table.
+        #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
+        table_options: BigQueryTableOptionsConfig,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -500,6 +719,22 @@ pub enum DestinationConfigWithoutSecrets {
     },
 }
 
+impl Validate for DestinationConfigWithoutSecrets {
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            DestinationConfigWithoutSecrets::BigQuery { table_options, .. } => {
+                table_options.validate()
+            }
+            DestinationConfigWithoutSecrets::Iceberg { config } => config.validate(),
+            DestinationConfigWithoutSecrets::Ducklake { table_sorting, .. } => {
+                table_sorting.validate()
+            }
+            DestinationConfigWithoutSecrets::ClickHouse { .. }
+            | DestinationConfigWithoutSecrets::Snowflake { .. } => Ok(()),
+        }
+    }
+}
+
 impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
     fn from(value: DestinationConfig) -> Self {
         match value {
@@ -509,11 +744,13 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 service_account_key: _,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => DestinationConfigWithoutSecrets::BigQuery {
                 project_id,
                 dataset_id,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             },
             DestinationConfig::ClickHouse { url, user, password: _, database, engine } => {
                 DestinationConfigWithoutSecrets::ClickHouse { url, user, database, engine }
@@ -650,6 +887,184 @@ mod tests {
         assert_eq!(columns[1].direction, DuckLakeSortDirection::Desc);
         assert_eq!(columns[1].nulls, Some(DuckLakeSortNulls::First));
         assert_eq!(config.tables[1].sort_by, DuckLakeSortBy::PrimaryKey);
+    }
+
+    #[test]
+    fn bigquery_table_options_deserialize_typed_partitioning_and_clustering() {
+        let config: BigQueryTableOptionsConfig = serde_json::from_value(serde_json::json!({
+            "tables": [
+                {
+                    "table_id": 16384,
+                    "partition_by": {
+                        "kind": "time_column",
+                        "column": "created_at",
+                        "granularity": "month"
+                    },
+                    "cluster_by": ["tenant_id", "event_type"]
+                },
+                {
+                    "table_id": 16385,
+                    "partition_by": {
+                        "kind": "integer_range",
+                        "column": "id",
+                        "start": 0,
+                        "end": 1000,
+                        "interval": 100
+                    }
+                },
+                {
+                    "table_id": 16386,
+                    "cluster_by": ["tenant_id"]
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(config.tables.len(), 3);
+        assert_eq!(config.tables[0].table_id, 16384);
+        assert_eq!(
+            config.tables[0].partition_by,
+            Some(BigQueryPartitionBy::TimeColumn {
+                column: "created_at".to_owned(),
+                granularity: BigQueryTimePartitionGranularity::Month,
+            })
+        );
+        assert_eq!(config.tables[0].cluster_by, ["tenant_id", "event_type"]);
+        assert_eq!(
+            config.tables[1].partition_by,
+            Some(BigQueryPartitionBy::IntegerRange {
+                column: "id".to_owned(),
+                start: 0,
+                end: 1000,
+                interval: 100,
+            })
+        );
+        assert_eq!(config.tables[1].table_id, 16385);
+        assert!(config.tables[1].cluster_by.is_empty());
+        assert_eq!(config.tables[2].table_id, 16386);
+        assert_eq!(config.tables[2].partition_by, None);
+        assert_eq!(config.tables[2].cluster_by, ["tenant_id"]);
+
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert!(serialized["tables"][1].get("cluster_by").is_none());
+        assert!(serialized["tables"][2].get("partition_by").is_none());
+    }
+
+    #[test]
+    fn empty_bigquery_table_options_use_the_default_layout() {
+        let config: BigQueryTableOptionsConfig =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+
+        assert!(config.is_empty());
+        assert_eq!(serde_json::to_value(config).unwrap(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn bigquery_table_options_validate_static_constraints() {
+        let table = |table_id, partition_by, cluster_by: &[&str]| BigQueryTableOptions {
+            table_id,
+            partition_by,
+            cluster_by: cluster_by.iter().map(|column| (*column).to_owned()).collect(),
+        };
+        let config = |tables| BigQueryTableOptionsConfig { tables };
+
+        let valid = config(vec![
+            table(
+                1,
+                Some(BigQueryPartitionBy::IntegerRange {
+                    column: "id".to_owned(),
+                    start: 0,
+                    end: 100,
+                    interval: 10,
+                }),
+                &[],
+            ),
+            table(2, None, &["tenant_id"]),
+        ]);
+        valid.validate().unwrap();
+
+        let invalid = [
+            (config(vec![table(1, None, &[])]), "table_options.tables[0]"),
+            (
+                config(vec![table(1, None, &["id"]), table(1, None, &["tenant_id"])]),
+                "table_options.tables[1].table_id",
+            ),
+            (
+                config(vec![table(
+                    1,
+                    Some(BigQueryPartitionBy::TimeColumn {
+                        column: String::new(),
+                        granularity: BigQueryTimePartitionGranularity::Day,
+                    }),
+                    &[],
+                )]),
+                "table_options.tables[0].partition_by.column",
+            ),
+            (
+                config(vec![table(1, None, &["tenant\nid"])]),
+                "table_options.tables[0].cluster_by[0]",
+            ),
+            (
+                config(vec![table(1, None, &["a", "b", "c", "d", "e"])]),
+                "table_options.tables[0].cluster_by",
+            ),
+            (config(vec![table(1, None, &["id", "id"])]), "table_options.tables[0].cluster_by[1]"),
+            (
+                config(vec![table(
+                    1,
+                    Some(BigQueryPartitionBy::IntegerRange {
+                        column: "id".to_owned(),
+                        start: 100,
+                        end: 100,
+                        interval: 10,
+                    }),
+                    &[],
+                )]),
+                "table_options.tables[0].partition_by.end",
+            ),
+            (
+                config(vec![table(
+                    1,
+                    Some(BigQueryPartitionBy::IntegerRange {
+                        column: "id".to_owned(),
+                        start: 0,
+                        end: 100,
+                        interval: 0,
+                    }),
+                    &[],
+                )]),
+                "table_options.tables[0].partition_by.interval",
+            ),
+        ];
+
+        for (config, expected_field) in invalid {
+            let ValidationError::InvalidFieldValue { field, .. } = config.validate().unwrap_err();
+            assert_eq!(field, expected_field);
+        }
+    }
+
+    #[test]
+    fn destination_validation_is_identical_without_secrets() {
+        let config = DestinationConfig::BigQuery {
+            project_id: "example-project".to_owned(),
+            dataset_id: "example_dataset".to_owned(),
+            service_account_key: "fake-service-account-key".to_owned().into(),
+            max_staleness_mins: None,
+            connection_pool_size: DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE,
+            table_options: BigQueryTableOptionsConfig {
+                tables: vec![BigQueryTableOptions {
+                    table_id: 1,
+                    partition_by: None,
+                    cluster_by: Vec::new(),
+                }],
+            },
+        };
+        let without_secrets = DestinationConfigWithoutSecrets::from(config.clone());
+
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            without_secrets.validate().unwrap_err().to_string()
+        );
     }
 
     #[test]

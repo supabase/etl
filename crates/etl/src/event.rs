@@ -198,6 +198,20 @@ impl TruncateEvent {
 /// current replication mask for the table. This event notifies downstream
 /// consumers about which columns are being replicated for a table.
 ///
+/// PostgreSQL generates relation messages at runtime from `pgoutput`'s
+/// session-local schema cache; they are not WAL-backed changes. Which relation
+/// messages appear is therefore session-dependent: a fresh session resets the
+/// cache and can re-emit schema metadata during replay. This event
+/// intentionally has no LSN, transaction ordinal, or sequence key because such
+/// metadata would not be a durable replay identity. Consumers should instead
+/// treat it as an ordered schema barrier for the row events that follow it.
+///
+/// The carried [`crate::schema::SnapshotId`] identifies the underlying stored
+/// table schema, and it is created as `0:0` when a table is just copied. Then
+/// it evolves based on the DDL messages that are received when there is a
+/// change to the table being replicated or the publication used by this
+/// pipeline.
+///
 /// PostgreSQL emits relation-message columns in `pg_attribute.attnum` order,
 /// skipping unpublished columns, and sends tuple data in that same order. The
 /// masks are built by unique column name, so ordering is not needed for mask
@@ -213,8 +227,8 @@ impl TruncateEvent {
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct RelationEvent {
-    /// The replicated table schema containing the table schema, replication
-    /// mask, and identity mask.
+    /// The replicated table schema containing the stable snapshot ID, table
+    /// schema, replication mask, and identity mask.
     pub replicated_table_schema: ReplicatedTableSchema,
 }
 
@@ -306,7 +320,8 @@ impl SizeHint for Event {
 pub struct EventSequenceKey {
     /// Commit LSN identifying transaction order across transactions.
     pub commit_lsn: PgLsn,
-    /// Zero-based ordinal identifying order within the same transaction.
+    /// Zero-based ordinal identifying sequence-key-bearing event order within
+    /// the same transaction.
     pub tx_ordinal: u64,
 }
 

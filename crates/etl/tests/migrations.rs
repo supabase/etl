@@ -22,6 +22,7 @@ const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 const POSTGRES_STORE_BASE_VERSION: i64 = 20250827000000;
 const POSTGRES_STORE_PRE_COMPOSITE_SNAPSHOT_VERSION: i64 = 20260610120000;
+const POSTGRES_STORE_PRE_CREATING_STATUS_VERSION: i64 = 20260810120000;
 const APP_NAME_TEST_MIGRATIONS: &str = "supabase_etl_test_migrations";
 
 static TEST_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
@@ -233,6 +234,72 @@ async fn postgres_store_startup_runs_only_postgres_store_migrations() {
     assert!(!source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, postgres_store_migration_versions());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn creating_status_migration_disambiguates_initial_setup() {
+    init_test_tracing();
+
+    let database = spawn_unmigrated_database().await;
+    let mut conn = migration_connection(&database.config).await;
+    postgres_store_migrator()
+        .run_direct(Some(POSTGRES_STORE_PRE_CREATING_STATUS_VERSION), &mut conn, false)
+        .await
+        .unwrap();
+
+    conn.execute(
+        "insert into etl.destination_tables_metadata (
+            pipeline_id,
+            table_id,
+            destination_table_id,
+            snapshot_id,
+            previous_snapshot_id,
+            previous_replication_mask,
+            schema_status,
+            replication_mask
+        )
+        values
+            (1, 41, 'creating_table', '10:11', null, null, 'applying', decode('01', 'hex')),
+            (1, 42, 'applying_table', '20:21', '10:11', decode('01', 'hex'), 'applying', \
+         decode('0101', 'hex')),
+            (1, 43, 'applied_table', '30:31', null, null, 'applied', decode('01', 'hex'))",
+    )
+    .await
+    .unwrap();
+
+    postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
+
+    let statuses: Vec<(String, String)> = sqlx::query_as(
+        "select destination_table_id, schema_status::text
+         from etl.destination_tables_metadata
+         order by destination_table_id",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        statuses,
+        vec![
+            ("applied_table".to_owned(), "applied".to_owned()),
+            ("applying_table".to_owned(), "applying".to_owned()),
+            ("creating_table".to_owned(), "creating".to_owned()),
+        ]
+    );
+
+    postgres_store_migrator()
+        .undo(&mut conn, POSTGRES_STORE_PRE_CREATING_STATUS_VERSION)
+        .await
+        .unwrap();
+
+    let statuses: Vec<String> = sqlx::query_scalar(
+        "select schema_status::text
+         from etl.destination_tables_metadata
+         order by destination_table_id",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(statuses, vec!["applied", "applying", "applying"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

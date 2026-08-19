@@ -16,6 +16,7 @@ fn create_bigquery_config() -> ApiDestinationConfig {
         service_account_key: SerializableSecretString::from("service-account-key".to_owned()),
         max_staleness_mins: None,
         connection_pool_size: Some(1),
+        table_options: Default::default(),
     }
 }
 
@@ -98,6 +99,57 @@ async fn create_nested_partitioned_table_without_primary_key(pool: &sqlx::PgPool
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn validate_destination_warns_for_nullable_arrays_only_where_unsupported() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    pool.execute(
+        "create table nullable_array_table (
+            id integer primary key,
+            nullable_values integer[],
+            required_values integer[] not null
+        )",
+    )
+    .await
+    .unwrap();
+    pool.execute("create publication nullable_array_pub for table nullable_array_table")
+        .await
+        .unwrap();
+
+    let pipeline_config = create_pipeline_config("nullable_array_pub");
+    let failures = validate_destination(&ctx, &create_bigquery_config(), Some(&pipeline_config))
+        .await
+        .unwrap();
+    let nullable_array_failure =
+        failures.iter().find(|failure| failure.name == "Nullable Array Semantics Differ").unwrap();
+
+    assert_eq!(nullable_array_failure.failure_type, FailureType::Warning);
+    assert!(nullable_array_failure.reason.contains("nullable_array_table.nullable_values"));
+    assert!(!nullable_array_failure.reason.contains("required_values"));
+    assert!(nullable_array_failure.reason.contains("BigQuery"));
+    assert!(nullable_array_failure.reason.contains("stores top-level NULL values as empty arrays"));
+    assert!(
+        nullable_array_failure.reason.contains("NULL and empty arrays become indistinguishable")
+    );
+
+    let failures = validate_destination(
+        &ctx,
+        &create_clickhouse_config(ClickHouseEngine::MergeTree),
+        Some(&pipeline_config),
+    )
+    .await
+    .unwrap();
+    let nullable_array_failure =
+        failures.iter().find(|failure| failure.name == "Nullable Array Semantics Differ").unwrap();
+
+    assert_eq!(nullable_array_failure.failure_type, FailureType::Warning);
+    assert!(nullable_array_failure.reason.contains("nullable_array_table.nullable_values"));
+    assert!(nullable_array_failure.reason.contains("ClickHouse"));
+    assert!(nullable_array_failure.reason.contains("cannot encode top-level NULL values"));
+
+    drop_pg_database(&config).await;
 }
 
 #[tokio::test]
@@ -376,7 +428,7 @@ async fn validate_destination_fails_for_nested_partition_leaf_without_parent_pri
 }
 
 #[tokio::test]
-async fn validate_destination_fails_for_blocking_unsupported_replica_identity() {
+async fn validate_destination_warns_for_currently_unsupported_replica_identity() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
     pool.execute(
@@ -403,18 +455,16 @@ async fn validate_destination_fails_for_blocking_unsupported_replica_identity() 
         .await
         .unwrap();
 
-    let replica_identity_failure = failures
-        .iter()
-        .find(|failure| failure.name == "Unsupported Replica Identity")
-        .expect("Should fail for alternative replica identity");
-    assert_eq!(replica_identity_failure.failure_type, FailureType::Critical);
+    let replica_identity_failure =
+        failures.iter().find(|failure| failure.name == "Unsupported Replica Identity").unwrap();
+    assert_eq!(replica_identity_failure.failure_type, FailureType::Warning);
     assert!(
         replica_identity_failure.reason.contains("alt_identity_table (alternative_key)"),
         "Failure reason should mention the table and identity type"
     );
     assert!(
-        replica_identity_failure.reason.contains("cannot safely replicate UPDATE or DELETE"),
-        "Failure reason should explain this blocks pipeline start"
+        replica_identity_failure.reason.contains("can emit UPDATE or DELETE changes"),
+        "Failure reason should explain the operation-dependent risk"
     );
     assert!(
         replica_identity_failure.reason.contains("REPLICA IDENTITY DEFAULT"),
@@ -502,7 +552,7 @@ async fn validate_destination_warns_for_insert_only_unsupported_replica_identity
 }
 
 #[tokio::test]
-async fn validate_destination_fails_when_snowflake_update_uses_alternative_replica_identity() {
+async fn validate_destination_warns_when_snowflake_update_uses_alternative_replica_identity() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
     pool.execute(
@@ -539,11 +589,9 @@ async fn validate_destination_fails_when_snowflake_update_uses_alternative_repli
         .await
         .unwrap();
 
-    let replica_identity_failure = failures
-        .iter()
-        .find(|failure| failure.name == "Unsupported Replica Identity")
-        .expect("Should fail when Snowflake UPDATE replication does not have full identity");
-    assert_eq!(replica_identity_failure.failure_type, FailureType::Critical);
+    let replica_identity_failure =
+        failures.iter().find(|failure| failure.name == "Unsupported Replica Identity").unwrap();
+    assert_eq!(replica_identity_failure.failure_type, FailureType::Warning);
     assert!(
         replica_identity_failure
             .reason

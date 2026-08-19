@@ -6,9 +6,8 @@ use tracing::info;
 use crate::{
     data::TableRow,
     destination::{
-        Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
-        DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
+        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -94,18 +93,17 @@ where
         let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
         let metadata = match existing_metadata {
             Some(metadata)
-                if metadata.snapshot_id == replicated_table_schema.inner().snapshot_id
-                    && metadata.replication_mask == *replicated_table_schema.replication_mask() =>
+                if metadata.snapshot_id() == replicated_table_schema.inner().snapshot_id
+                    && metadata.replication_mask()
+                        == replicated_table_schema.replication_mask() =>
             {
-                return Ok(());
+                metadata.to_applied()
             }
-            Some(metadata) => metadata
-                .with_schema_change(
-                    replicated_table_schema.inner().snapshot_id,
-                    replicated_table_schema.replication_mask().clone(),
-                    DestinationTableSchemaStatus::Applied,
-                )
-                .to_applied(),
+            Some(metadata) => DestinationTableMetadata::new_applied(
+                metadata.table_id().to_owned(),
+                replicated_table_schema.inner().snapshot_id,
+                replicated_table_schema.replication_mask().clone(),
+            ),
             None => Self::build_destination_table_metadata(replicated_table_schema),
         };
 

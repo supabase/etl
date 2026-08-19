@@ -106,9 +106,10 @@ impl DestinationError {
 impl IntoResponse for DestinationError {
     fn into_response(self) -> Response {
         let status_code = match &self {
-            DestinationError::DestinationsDb(DestinationsDbError::DestinationConfigUpdate(_)) => {
-                StatusCode::BAD_REQUEST
-            }
+            DestinationError::DestinationsDb(
+                DestinationsDbError::DestinationConfigUpdate(_)
+                | DestinationsDbError::InvalidConfig(_),
+            ) => StatusCode::BAD_REQUEST,
             DestinationError::DestinationsDb(_)
             | DestinationError::PipelinesDb(_)
             | DestinationError::SourcesDb(_)

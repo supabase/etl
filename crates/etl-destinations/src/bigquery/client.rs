@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use etl::{
     data::Cell,
@@ -6,6 +9,9 @@ use etl::{
     etl_error,
     pipeline::PipelineId,
     schema::{ColumnSchema, ReplicatedTableSchema, Type, is_array_type},
+};
+use etl_config::shared::{
+    BigQueryPartitionBy, BigQueryTableOptions, BigQueryTimePartitionGranularity,
 };
 use gcp_bigquery_client::{
     Client,
@@ -34,11 +40,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     bigquery::{
+        BIGQUERY_COLUMN_NAME_MAPPING,
         encoding::BigQueryTableRow,
         metrics::{
             ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
         },
-        schema::{create_columns_spec, default_expression_sql, postgres_to_bigquery_type},
+        schema::{create_columns_spec, postgres_to_bigquery_type},
         sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
     },
     retry::{RetryDecision, RetryPolicy, retry_with_backoff},
@@ -75,8 +82,17 @@ const QUERY_RETRY_POLICY: RetryPolicy = RetryPolicy {
 };
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
 /// status code.
-const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] =
-    &["backendError", "jobBackendError", "jobRateLimitExceeded", "rateLimitExceeded"];
+const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] = &[
+    "backendError",
+    "jobBackendError",
+    "jobInternalError",
+    "jobRateLimitExceeded",
+    "rateLimitExceeded",
+];
+/// BigQuery response reasons documented as identifying a created, failed query
+/// job that should be retried as a new job.
+const FAILED_BIGQUERY_QUERY_JOB_REASONS: &[&str] =
+    &["jobBackendError", "jobInternalError", "jobRateLimitExceeded"];
 /// Protobuf type name for BigQuery storage errors embedded in gRPC status
 /// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
@@ -87,6 +103,124 @@ pub type BigQueryProjectId = String;
 pub type BigQueryDatasetId = String;
 /// BigQuery table identifier.
 pub type BigQueryTableId = String;
+
+/// Renders creation-only partitioning and clustering clauses for a table.
+///
+/// Configuration-controlled column names must remain quoted through
+/// [`quote_identifier`]. All other interpolated values are typed integers or
+/// keywords selected from enums in this module.
+fn create_table_options_sql(
+    options: Option<&BigQueryTableOptions>,
+    schema: &ReplicatedTableSchema,
+) -> EtlResult<String> {
+    let Some(options) = options else {
+        return Ok(String::new());
+    };
+
+    let mut clauses = Vec::with_capacity(2);
+
+    if let Some(partition_by) = &options.partition_by {
+        clauses.push(format!("partition by {}", partition_expression(partition_by, schema)?));
+    }
+
+    if !options.cluster_by.is_empty() {
+        let cluster_columns = options
+            .cluster_by
+            .iter()
+            .map(|column| {
+                require_replicated_column(schema, column)?;
+                quote_identifier(column, "BigQuery clustering column")
+            })
+            .collect::<EtlResult<Vec<_>>>()?
+            .join(", ");
+        clauses.push(format!("cluster by {cluster_columns}"));
+    }
+
+    Ok(clauses.join(" "))
+}
+
+/// Creates a consistent table-options configuration error.
+fn invalid_table_options_config(detail: impl Into<String>) -> EtlError {
+    etl_error!(
+        ErrorKind::ConfigError,
+        "BigQuery table options configuration is invalid",
+        detail.into()
+    )
+}
+
+/// Renders one supported BigQuery partition expression.
+fn partition_expression(
+    partition_by: &BigQueryPartitionBy,
+    schema: &ReplicatedTableSchema,
+) -> EtlResult<String> {
+    match partition_by {
+        BigQueryPartitionBy::TimeColumn { column, granularity } => {
+            let typ = require_replicated_column(schema, column)?;
+            let column = quote_identifier(column, "BigQuery partitioning column")?;
+            let granularity_sql = granularity_sql(*granularity);
+
+            match *typ {
+                Type::DATE if *granularity == BigQueryTimePartitionGranularity::Day => Ok(column),
+                Type::DATE if *granularity != BigQueryTimePartitionGranularity::Hour => {
+                    Ok(format!("date_trunc({column}, {granularity_sql})"))
+                }
+                Type::TIMESTAMP => Ok(format!("datetime_trunc({column}, {granularity_sql})")),
+                Type::TIMESTAMPTZ => Ok(format!("timestamp_trunc({column}, {granularity_sql})")),
+                _ => Err(invalid_table_options_config(format!(
+                    "Column `{}` on table `{}` does not support {} time partitioning",
+                    column,
+                    schema.name(),
+                    granularity_sql.to_ascii_lowercase()
+                ))),
+            }
+        }
+        BigQueryPartitionBy::IntegerRange { column, start, end, interval } => {
+            let typ = require_replicated_column(schema, column)?;
+            if !matches!(typ, &Type::INT2 | &Type::INT4 | &Type::INT8 | &Type::OID) {
+                return Err(invalid_table_options_config(format!(
+                    "Column `{column}` on table `{}` is not an integer partitioning column",
+                    schema.name()
+                )));
+            }
+
+            let column = quote_identifier(column, "BigQuery partitioning column")?;
+            Ok(format!("range_bucket({column}, generate_array({start}, {end}, {interval}))"))
+        }
+        BigQueryPartitionBy::IngestionTime { granularity } => match granularity {
+            BigQueryTimePartitionGranularity::Day => Ok("_partitiondate".to_owned()),
+            granularity => {
+                Ok(format!("timestamp_trunc(_partitiontime, {})", granularity_sql(*granularity)))
+            }
+        },
+    }
+}
+
+/// Returns one replicated source column type or a configuration error.
+fn require_replicated_column<'a>(
+    schema: &'a ReplicatedTableSchema,
+    column: &str,
+) -> EtlResult<&'a Type> {
+    schema
+        .column_schemas()
+        .find(|column_schema| column_schema.name == column)
+        .map(|column_schema| &column_schema.typ)
+        .ok_or_else(|| {
+            invalid_table_options_config(format!(
+                "Table `{}` does not replicate configured column `{column}`",
+                schema.name()
+            ))
+        })
+}
+
+/// Returns the GoogleSQL keyword for one partition granularity.
+fn granularity_sql(granularity: BigQueryTimePartitionGranularity) -> &'static str {
+    match granularity {
+        BigQueryTimePartitionGranularity::Hour => "HOUR",
+        BigQueryTimePartitionGranularity::Day => "DAY",
+        BigQueryTimePartitionGranularity::Month => "MONTH",
+        BigQueryTimePartitionGranularity::Year => "YEAR",
+    }
+}
 
 /// Change Data Capture operation types for BigQuery streaming.
 #[derive(Debug)]
@@ -195,7 +329,7 @@ fn compute_max_inflight_requests(connection_pool_size: usize) -> usize {
 }
 
 /// Adds equal jitter to a retry delay.
-fn storage_write_retry_delay_with_jitter(delay: Duration) -> Duration {
+fn retry_delay_with_jitter(delay: Duration) -> Duration {
     if delay.is_zero() {
         return delay;
     }
@@ -285,6 +419,34 @@ fn is_transient_query_error(error: &BQError) -> RetryDecision {
         }
         _ => RetryDecision::Stop,
     }
+}
+
+/// Returns whether retrying a query error requires creating a new query job.
+fn query_retry_requires_new_request_id(error: &BQError) -> bool {
+    let BQError::ResponseError { error } = error else {
+        return false;
+    };
+
+    error.error.errors.iter().any(|nested_error| {
+        nested_error
+            .get("reason")
+            .is_some_and(|reason| FAILED_BIGQUERY_QUERY_JOB_REASONS.contains(&reason.as_str()))
+    })
+}
+
+/// Generates an idempotency key accepted by BigQuery request-ID fields.
+fn generate_bigquery_request_id() -> String {
+    format!("{:032x}", random::<u128>())
+}
+
+/// Ensures local retries of one BigQuery query job share an idempotency key.
+///
+/// BigQuery retains `jobs.query` request IDs for 15 minutes. The bounded retry
+/// policy below is shorter than that window, so one generated ID safely covers
+/// every in-process attempt while preserving an ID supplied by a caller.
+fn with_query_request_id(mut request: QueryRequest) -> QueryRequest {
+    request.request_id.get_or_insert_with(generate_bigquery_request_id);
+    request
 }
 
 /// Returns whether BigQuery rejected `DROP DEFAULT` because no default exists.
@@ -773,18 +935,20 @@ impl BigQueryClient {
     ///
     /// Returns `true` if the table was created fresh, `false` if it already
     /// existed and was replaced.
-    pub async fn create_or_replace_table(
+    pub(super) async fn create_or_replace_table(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
+        table_options: Option<&BigQueryTableOptions>,
     ) -> EtlResult<bool> {
         let table_exists = self.table_exists(dataset_id, table_id).await?;
 
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
         let columns_spec = create_columns_spec(replicated_table_schema)?;
+        let table_options_sql = create_table_options_sql(table_options, replicated_table_schema)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -798,7 +962,8 @@ impl BigQueryClient {
         );
 
         let query = format!(
-            "create or replace table {full_table_name} {columns_spec} {max_staleness_option}"
+            "create or replace table {full_table_name} {columns_spec} {table_options_sql} \
+             {max_staleness_option}"
         );
 
         let _ = self.query(QueryRequest::new(query)).await?;
@@ -810,19 +975,26 @@ impl BigQueryClient {
     /// Creates a table in BigQuery if it doesn't already exist.
     ///
     /// Returns `true` if the table was created, `false` if it already existed.
-    pub async fn create_table_if_missing(
+    pub(super) async fn create_table_if_missing(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
+        table_options: Option<&BigQueryTableOptions>,
     ) -> EtlResult<bool> {
         if self.table_exists(dataset_id, table_id).await? {
             return Ok(false);
         }
 
-        self.create_table(dataset_id, table_id, replicated_table_schema, max_staleness_mins)
-            .await?;
+        self.create_table(
+            dataset_id,
+            table_id,
+            replicated_table_schema,
+            max_staleness_mins,
+            table_options,
+        )
+        .await?;
 
         Ok(true)
     }
@@ -831,16 +1003,18 @@ impl BigQueryClient {
     ///
     /// Builds and executes a CREATE TABLE statement with the provided column
     /// schemas and optional staleness configuration for CDC operations.
-    pub async fn create_table(
+    async fn create_table(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
+        table_options: Option<&BigQueryTableOptions>,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
         let columns_spec = create_columns_spec(replicated_table_schema)?;
+        let table_options_sql = create_table_options_sql(table_options, replicated_table_schema)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -849,7 +1023,10 @@ impl BigQueryClient {
 
         info!(%full_table_name, "creating table in bigquery");
 
-        let query = format!("create table {full_table_name} {columns_spec} {max_staleness_option}");
+        let query = format!(
+            "create table {full_table_name} {columns_spec} {table_options_sql} \
+             {max_staleness_option}"
+        );
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -1073,26 +1250,14 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Sets a supported default expression on a BigQuery column.
-    pub async fn set_column_default(
+    /// Sets a rendered default expression on a BigQuery column.
+    pub(super) async fn set_column_default(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         column_name: &str,
-        typ: &Type,
         default_expression: &str,
     ) -> EtlResult<()> {
-        let Some(rendered_default_expression) = default_expression_sql(default_expression, typ)
-        else {
-            warn!(
-                dataset_id = %dataset_id,
-                table_id = %table_id,
-                column_name = %column_name,
-                "skipping unsupported source column default for bigquery"
-            );
-            return Ok(());
-        };
-
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
         let column_name = quote_identifier(column_name, "BigQuery column name")?;
 
@@ -1100,7 +1265,7 @@ impl BigQueryClient {
 
         let query = format!(
             "alter table {full_table_name} alter column {column_name} set default \
-             {rendered_default_expression}"
+             {default_expression}"
         );
 
         let _ = self.query(QueryRequest::new(query)).await?;
@@ -1109,7 +1274,7 @@ impl BigQueryClient {
     }
 
     /// Clears a default expression from a BigQuery column when present.
-    pub async fn clear_column_default(
+    pub(super) async fn clear_column_default(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
@@ -1156,7 +1321,7 @@ impl BigQueryClient {
             .fields
             .unwrap_or_default()
             .into_iter()
-            .find(|field| field.name == column_name)
+            .find(|field| BIGQUERY_COLUMN_NAME_MAPPING.equivalent(&field.name, column_name))
             .ok_or_else(|| {
                 etl_error!(
                     ErrorKind::DestinationError,
@@ -1262,8 +1427,7 @@ impl BigQueryClient {
                         return Err(storage_write_retry_timeout_error(&retry_summary));
                     }
 
-                    let sleep_delay =
-                        storage_write_retry_delay_with_jitter(retry_delay.min(remaining_timeout));
+                    let sleep_delay = retry_delay_with_jitter(retry_delay.min(remaining_timeout));
 
                     if sleep_delay.is_zero() {
                         return Err(storage_write_retry_timeout_error(&retry_summary));
@@ -1454,12 +1618,24 @@ impl BigQueryClient {
 
     /// Executes a BigQuery SQL query while preserving the provider error.
     async fn query_with_bigquery_error(&self, request: QueryRequest) -> Result<ResultSet, BQError> {
+        let mut request = with_query_request_id(request);
+        let requires_new_request_id = AtomicBool::new(false);
         let query_response = retry_with_backoff(
             QUERY_RETRY_POLICY,
-            is_transient_query_error,
-            |delay| delay,
+            |error| {
+                let decision = is_transient_query_error(error);
+                requires_new_request_id.store(
+                    decision == RetryDecision::Retry && query_retry_requires_new_request_id(error),
+                    Ordering::Relaxed,
+                );
+                decision
+            },
+            retry_delay_with_jitter,
             log_query_retry,
             || {
+                if requires_new_request_id.swap(false, Ordering::Relaxed) {
+                    request.request_id = Some(generate_bigquery_request_id());
+                }
                 let request = request.clone();
                 async move { self.client.job().query(&self.project_id, request).await }
             },
@@ -1485,12 +1661,156 @@ impl fmt::Debug for BigQueryClient {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use etl::schema::{TableId, TableName, TableSchema};
     use gcp_bigquery_client::{
         error::{NestedResponseError, ResponseError},
         google::cloud::bigquery::storage::v1::{AppendRowsResponse, append_rows_response},
     };
 
     use super::*;
+
+    fn replicated_schema_with_identity(table_id: u32, table_name: &str) -> ReplicatedTableSchema {
+        ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(table_id),
+            TableName::new("public".to_owned(), table_name.to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("tenant_id".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("created_at".to_owned(), Type::TIMESTAMPTZ, -1, 3, false),
+            ],
+        )))
+    }
+
+    fn replicated_schema() -> ReplicatedTableSchema {
+        replicated_schema_with_identity(1, "events")
+    }
+
+    fn table_options(
+        partition_by: Option<BigQueryPartitionBy>,
+        cluster_by: Vec<&str>,
+    ) -> BigQueryTableOptions {
+        BigQueryTableOptions {
+            table_id: 1,
+            partition_by,
+            cluster_by: cluster_by.into_iter().map(str::to_owned).collect(),
+        }
+    }
+
+    #[test]
+    fn renders_time_partitioning_and_ordered_clustering() {
+        let options = table_options(
+            Some(BigQueryPartitionBy::TimeColumn {
+                column: "created_at".to_owned(),
+                granularity: BigQueryTimePartitionGranularity::Month,
+            }),
+            vec!["tenant_id", "id"],
+        );
+        let schema = replicated_schema();
+
+        let sql = create_table_options_sql(Some(&options), &schema).unwrap();
+
+        assert_eq!(
+            sql,
+            "partition by timestamp_trunc(`created_at`, MONTH) cluster by `tenant_id`, `id`"
+        );
+    }
+
+    #[test]
+    fn renders_integer_range_and_ingestion_time_partitioning() {
+        let range = table_options(
+            Some(BigQueryPartitionBy::IntegerRange {
+                column: "id".to_owned(),
+                start: 0,
+                end: 100,
+                interval: 10,
+            }),
+            vec![],
+        );
+        let schema = replicated_schema();
+        assert_eq!(
+            create_table_options_sql(Some(&range), &schema).unwrap(),
+            "partition by range_bucket(`id`, generate_array(0, 100, 10))"
+        );
+
+        let ingestion = table_options(
+            Some(BigQueryPartitionBy::IngestionTime {
+                granularity: BigQueryTimePartitionGranularity::Hour,
+            }),
+            vec![],
+        );
+        assert_eq!(
+            create_table_options_sql(Some(&ingestion), &schema).unwrap(),
+            "partition by timestamp_trunc(_partitiontime, HOUR)"
+        );
+    }
+
+    #[test]
+    fn renders_partitioning_and_clustering_independently() {
+        let schema = replicated_schema();
+
+        let partition_only = table_options(
+            Some(BigQueryPartitionBy::IntegerRange {
+                column: "id".to_owned(),
+                start: 0,
+                end: 100,
+                interval: 10,
+            }),
+            vec![],
+        );
+        assert_eq!(
+            create_table_options_sql(Some(&partition_only), &schema).unwrap(),
+            "partition by range_bucket(`id`, generate_array(0, 100, 10))"
+        );
+
+        let clustering_only = table_options(None, vec!["tenant_id", "id"]);
+        assert_eq!(
+            create_table_options_sql(Some(&clustering_only), &schema).unwrap(),
+            "cluster by `tenant_id`, `id`"
+        );
+
+        assert_eq!(create_table_options_sql(None, &schema).unwrap(), "");
+    }
+
+    #[test]
+    fn table_option_identifiers_cannot_inject_sql() {
+        let partition_column = r#"id` ) options(description="injected") --"#;
+        let cluster_column = "tenant` cluster by injected --";
+        let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![
+                ColumnSchema::new(partition_column.to_owned(), Type::INT8, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new(cluster_column.to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        )));
+        let options = table_options(
+            Some(BigQueryPartitionBy::IntegerRange {
+                column: partition_column.to_owned(),
+                start: 0,
+                end: 100,
+                interval: 10,
+            }),
+            vec![cluster_column],
+        );
+
+        assert_eq!(
+            create_table_options_sql(Some(&options), &schema).unwrap(),
+            r#"partition by range_bucket(`id\` ) options(description="injected") --`, generate_array(0, 100, 10)) cluster by `tenant\` cluster by injected --`"#
+        );
+    }
+
+    #[test]
+    fn rejects_unreplicated_table_option_columns() {
+        let missing_column = table_options(None, vec!["missing"]);
+        let schema = replicated_schema();
+        assert!(matches!(
+            create_table_options_sql(Some(&missing_column), &schema),
+            Err(error) if error.kind() == ErrorKind::ConfigError
+        ));
+    }
 
     fn successful_append_response() -> AppendRowsResponse {
         AppendRowsResponse {
@@ -1522,24 +1842,66 @@ mod tests {
         assert!(!error.to_string().contains("customer@example.com"));
     }
 
-    #[test]
-    fn query_retry_classifies_bigquery_table_update_rate_limit_as_transient() {
-        let error = BQError::ResponseError {
+    fn query_response_error(code: i64, reason: &str) -> BQError {
+        BQError::ResponseError {
             error: ResponseError {
                 error: NestedResponseError {
-                    code: 400,
-                    errors: vec![
-                        [("reason".to_owned(), "jobRateLimitExceeded".to_owned())]
-                            .into_iter()
-                            .collect(),
-                    ],
-                    message: "Job exceeded rate limits".to_owned(),
-                    status: "INVALID_ARGUMENT".to_owned(),
+                    code,
+                    errors: vec![[("reason".to_owned(), reason.to_owned())].into_iter().collect()],
+                    message: "Placeholder BigQuery error".to_owned(),
+                    status: "PLACEHOLDER_STATUS".to_owned(),
                 },
             },
-        };
+        }
+    }
 
-        assert_eq!(is_transient_query_error(&error), RetryDecision::Retry);
+    #[test]
+    fn query_retry_classification_matches_bigquery_job_lifecycle() {
+        let cases = [
+            ("jobBackendError", 400, RetryDecision::Retry, true),
+            ("jobInternalError", 400, RetryDecision::Retry, true),
+            ("jobRateLimitExceeded", 400, RetryDecision::Retry, true),
+            ("backendError", 500, RetryDecision::Retry, false),
+            ("internalError", 500, RetryDecision::Retry, false),
+            ("rateLimitExceeded", 403, RetryDecision::Retry, false),
+            ("unknownServerError", 503, RetryDecision::Retry, false),
+            ("invalidQuery", 400, RetryDecision::Stop, false),
+            ("resourcesExceeded", 400, RetryDecision::Stop, false),
+            ("timeout", 400, RetryDecision::Stop, false),
+        ];
+
+        for (reason, code, expected_decision, expected_new_request_id) in cases {
+            let error = query_response_error(code, reason);
+
+            assert_eq!(is_transient_query_error(&error), expected_decision, "{reason}");
+            assert_eq!(
+                query_retry_requires_new_request_id(&error),
+                expected_new_request_id,
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn query_request_id_is_generated_once_and_survives_cloning() {
+        let request = with_query_request_id(QueryRequest::new("select 1"));
+        let request_id = request.request_id.clone().unwrap();
+        let cloned_request = request.clone();
+
+        assert_eq!(request_id.len(), 32);
+        assert!(request_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(cloned_request.request_id, Some(request_id.clone()));
+        assert_eq!(request.request_id, Some(request_id));
+    }
+
+    #[test]
+    fn query_request_id_preserves_caller_value() {
+        let mut request = QueryRequest::new("select 1");
+        request.request_id = Some("caller-request-id".to_owned());
+
+        let request = with_query_request_id(request);
+
+        assert_eq!(request.request_id.as_deref(), Some("caller-request-id"));
     }
 
     #[test]
@@ -1636,11 +1998,11 @@ mod tests {
     }
 
     #[test]
-    fn storage_write_retry_jitter_stays_within_delay_bounds() {
+    fn retry_jitter_stays_within_delay_bounds() {
         let delay = Duration::from_secs(10);
 
         for _ in 0..100 {
-            let jittered_delay = storage_write_retry_delay_with_jitter(delay);
+            let jittered_delay = retry_delay_with_jitter(delay);
 
             assert!(jittered_delay >= Duration::from_secs(5));
             assert!(jittered_delay <= delay);

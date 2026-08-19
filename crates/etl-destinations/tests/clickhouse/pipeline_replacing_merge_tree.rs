@@ -37,7 +37,7 @@ struct CountRow {
 }
 
 /// ReplacingMergeTree: source table must have a primary key.
-/// `ensure_table_exists` rejects PK-less schemas under ReplacingMergeTree with
+/// Table preparation rejects PK-less schemas under ReplacingMergeTree with
 /// `SourceSchemaError`.
 #[tokio::test(flavor = "multi_thread")]
 async fn replacing_merge_tree_rejects_pkless_source_table() {

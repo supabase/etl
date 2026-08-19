@@ -17,9 +17,7 @@ use tracing::{debug, info};
 
 use crate::{
     config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
-    destination::{
-        AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
-    },
+    destination::{DestinationTableMetadata, DestinationTableSchema},
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::{ETL_TABLES_TOTAL, STATE_LABEL},
@@ -397,20 +395,6 @@ impl StateStore for PostgresStore {
         Ok(inner.destination_tables_metadata.get(&table_id).cloned())
     }
 
-    async fn get_applied_destination_table_metadata(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
-        let inner = self.inner.lock().await;
-
-        inner
-            .destination_tables_metadata
-            .get(&table_id)
-            .cloned()
-            .map(DestinationTableMetadata::into_applied)
-            .transpose()
-    }
-
     /// Loads all destination table metadata from Postgres into memory cache.
     ///
     /// This method connects to the source database, retrieves all destination
@@ -434,16 +418,55 @@ impl StateStore for PostgresStore {
 
         let mut metadata: BTreeMap<TableId, DestinationTableMetadata> = BTreeMap::new();
         for (table_id, row) in rows {
-            metadata.insert(
-                table_id,
-                DestinationTableMetadata {
-                    destination_table_id: row.destination_table_id,
-                    snapshot_id: row.snapshot_id,
-                    previous_snapshot_id: row.previous_snapshot_id,
-                    schema_status: row.schema_status.into(),
-                    replication_mask: ReplicationMask::from_bytes(row.replication_mask),
-                },
-            );
+            let target_mask = ReplicationMask::from_bytes(row.replication_mask);
+            let destination_metadata = match (
+                row.schema_status,
+                row.previous_snapshot_id,
+                row.previous_replication_mask,
+            ) {
+                (
+                    pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Creating,
+                    None,
+                    None,
+                ) => DestinationTableMetadata::new_creating(
+                    row.destination_table_id,
+                    row.snapshot_id,
+                    target_mask,
+                ),
+                (
+                    pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applying,
+                    Some(previous_snapshot_id),
+                    Some(previous_replication_mask),
+                ) => DestinationTableMetadata::new_applied(
+                    row.destination_table_id,
+                    previous_snapshot_id,
+                    ReplicationMask::from_bytes(previous_replication_mask),
+                )
+                .with_schema_change(row.snapshot_id, target_mask)?,
+                (
+                    pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applied,
+                    None,
+                    None,
+                ) => DestinationTableMetadata::new_applied(
+                    row.destination_table_id,
+                    row.snapshot_id,
+                    target_mask,
+                ),
+                (schema_status, previous_snapshot_id, previous_replication_mask) => {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "Destination table metadata has an invalid schema endpoint",
+                        format!(
+                            "table '{}' has schema status '{schema_status:?}', previous snapshot \
+                             present: {}, previous replication mask present: {}",
+                            row.destination_table_id,
+                            previous_snapshot_id.is_some(),
+                            previous_replication_mask.is_some()
+                        )
+                    ));
+                }
+            };
+            metadata.insert(table_id, destination_metadata);
         }
 
         let metadata_len = metadata.len();
@@ -462,20 +485,44 @@ impl StateStore for PostgresStore {
     ) -> EtlResult<()> {
         debug!(
             %table_id,
-            destination_table_id = %metadata.destination_table_id,
+            destination_table_id = %metadata.table_id(),
             "storing destination table metadata"
         );
+
+        let (previous_snapshot_id, previous_replication_mask, schema_status) =
+            match metadata.table_schema() {
+                DestinationTableSchema::Creating { .. } => (
+                    None,
+                    None,
+                    pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Creating,
+                ),
+                DestinationTableSchema::Applying {
+                    previous_snapshot_id,
+                    previous_replication_mask,
+                    ..
+                } => (
+                    Some(*previous_snapshot_id),
+                    Some(previous_replication_mask.as_slice()),
+                    pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applying,
+                ),
+                DestinationTableSchema::Applied { .. } => (
+                    None,
+                    None,
+                    pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applied,
+                ),
+            };
 
         let mut inner = self.inner.lock().await;
         pg_destination_table_metadata::store_destination_table_metadata(
             &self.pool,
             self.pipeline_id as i64,
             table_id,
-            &metadata.destination_table_id,
-            metadata.snapshot_id,
-            metadata.previous_snapshot_id,
-            metadata.schema_status.into(),
-            metadata.replication_mask.as_slice(),
+            metadata.table_id(),
+            metadata.snapshot_id(),
+            metadata.replication_mask().as_slice(),
+            previous_snapshot_id,
+            previous_replication_mask,
+            schema_status,
         )
         .await
         .map_err(|err| {
@@ -791,36 +838,6 @@ impl TableStateLifecycleStore for PostgresStore {
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
 
                 Ok(affected_table_count)
-            }
-        }
-    }
-}
-
-impl From<pg_destination_table_metadata::StoredDestinationTableSchemaStatus>
-    for DestinationTableSchemaStatus
-{
-    fn from(value: pg_destination_table_metadata::StoredDestinationTableSchemaStatus) -> Self {
-        match value {
-            pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applying => {
-                DestinationTableSchemaStatus::Applying
-            }
-            pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applied => {
-                DestinationTableSchemaStatus::Applied
-            }
-        }
-    }
-}
-
-impl From<DestinationTableSchemaStatus>
-    for pg_destination_table_metadata::StoredDestinationTableSchemaStatus
-{
-    fn from(value: DestinationTableSchemaStatus) -> Self {
-        match value {
-            DestinationTableSchemaStatus::Applying => {
-                pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applying
-            }
-            DestinationTableSchemaStatus::Applied => {
-                pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applied
             }
         }
     }

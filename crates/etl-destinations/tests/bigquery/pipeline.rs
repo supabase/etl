@@ -7,7 +7,7 @@ use etl::{
     error::ErrorKind,
     event::{Event, EventType},
     pipeline::PipelineId,
-    store::{StateStore, TableState, TableStateType},
+    store::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -17,10 +17,14 @@ use etl::{
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
 };
+use etl_config::shared::{
+    BigQueryPartitionBy, BigQueryTableOptions, BigQueryTableOptionsConfig,
+    BigQueryTimePartitionGranularity,
+};
 use etl_destinations::bigquery::test_utils::{
     setup_bigquery_database, skip_if_missing_bigquery_env_vars,
 };
-use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::{Rng, distr::Alphanumeric, random};
 use tokio::time::sleep;
@@ -56,7 +60,7 @@ fn find_update_event(events: &[Event], update_index: usize) -> &etl::event::Upda
             _ => None,
         })
         .nth(update_index)
-        .expect("expected update event")
+        .unwrap()
 }
 
 fn find_delete_event(events: &[Event]) -> &etl::event::DeleteEvent {
@@ -66,7 +70,228 @@ fn find_delete_event(events: &[Event]) -> &etl::event::DeleteEvent {
             Event::Delete(delete) => Some(delete),
             _ => None,
         })
-        .expect("expected delete event")
+        .unwrap()
+}
+
+fn pipeline_table_options(
+    table_id: etl::schema::TableId,
+    partition_by: Option<BigQueryPartitionBy>,
+    cluster_by: &[&str],
+) -> BigQueryTableOptionsConfig {
+    BigQueryTableOptionsConfig {
+        tables: vec![pipeline_table_option(table_id, partition_by, cluster_by)],
+    }
+}
+
+fn pipeline_table_option(
+    table_id: etl::schema::TableId,
+    partition_by: Option<BigQueryPartitionBy>,
+    cluster_by: &[&str],
+) -> BigQueryTableOptions {
+    BigQueryTableOptions {
+        table_id: table_id.into_inner(),
+        partition_by,
+        cluster_by: cluster_by.iter().map(|column| (*column).to_owned()).collect(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_creates_partitioned_and_clustered_tables_without_reconfiguring_them_on_restart() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"initial", &42])
+        .await
+        .unwrap();
+
+    let bigquery_database = setup_bigquery_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let initial_options = pipeline_table_options(
+        users_schema.id,
+        Some(BigQueryPartitionBy::IntegerRange {
+            column: "age".to_owned(),
+            start: 0,
+            end: 100,
+            interval: 10,
+        }),
+        &["name", "id"],
+    );
+    let raw_destination = bigquery_database
+        .build_destination_with_table_options(pipeline_id, store.clone(), initial_options)
+        .await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+    let sync_complete = store.notify_on_table_sync_complete(users_schema.id).await;
+
+    pipeline.start().await.unwrap();
+    sync_complete.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let physical_table_id = store
+        .get_destination_table_metadata(users_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist")
+        .table_id()
+        .to_owned();
+    let metadata = bigquery_database
+        .get_table_metadata_by_id(&physical_table_id)
+        .await
+        .expect("physical BigQuery table should exist");
+    assert_eq!(
+        metadata.range_partitioning.and_then(|partitioning| partitioning.field),
+        Some("age".to_owned())
+    );
+    assert_eq!(
+        metadata.clustering.and_then(|clustering| clustering.fields),
+        Some(vec!["name".to_owned(), "id".to_owned()])
+    );
+
+    let changed_options = pipeline_table_options(
+        users_schema.id,
+        Some(BigQueryPartitionBy::IngestionTime {
+            granularity: BigQueryTimePartitionGranularity::Month,
+        }),
+        &["age"],
+    );
+    let raw_destination = bigquery_database
+        .build_destination_with_table_options(pipeline_id, store.clone(), changed_options)
+        .await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let events = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, users_schema.id, 1)])
+        .await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"restart", &43])
+        .await
+        .unwrap();
+    events.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let metadata = bigquery_database
+        .get_table_metadata_by_id(&physical_table_id)
+        .await
+        .expect("physical BigQuery table should still exist");
+    assert_eq!(
+        metadata.range_partitioning.and_then(|partitioning| partitioning.field),
+        Some("age".to_owned())
+    );
+    assert_eq!(
+        metadata.clustering.and_then(|clustering| clustering.fields),
+        Some(vec!["name".to_owned(), "id".to_owned()])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_supports_partitioning_and_clustering_independently() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+    let users_schema = database_schema.users_schema();
+    let orders_schema = database_schema.orders_schema();
+    insert_mock_data(&mut database, &users_schema.name, &orders_schema.name, 1..=1, false).await;
+
+    let bigquery_database = setup_bigquery_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let options = BigQueryTableOptionsConfig {
+        tables: vec![
+            pipeline_table_option(
+                users_schema.id,
+                Some(BigQueryPartitionBy::IntegerRange {
+                    column: "age".to_owned(),
+                    start: 0,
+                    end: 100,
+                    interval: 10,
+                }),
+                &[],
+            ),
+            pipeline_table_option(orders_schema.id, None, &["description"]),
+        ],
+    };
+    let raw_destination = bigquery_database
+        .build_destination_with_table_options(pipeline_id, store.clone(), options)
+        .await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+    let users_sync_complete = store.notify_on_table_sync_complete(users_schema.id).await;
+    let orders_sync_complete = store.notify_on_table_sync_complete(orders_schema.id).await;
+
+    pipeline.start().await.unwrap();
+    users_sync_complete.notified().await;
+    orders_sync_complete.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let users_physical_table_id = store
+        .get_destination_table_metadata(users_schema.id)
+        .await
+        .unwrap()
+        .expect("users destination metadata should exist")
+        .table_id()
+        .to_owned();
+    let users_metadata = bigquery_database
+        .get_table_metadata_by_id(&users_physical_table_id)
+        .await
+        .expect("users physical BigQuery table should exist");
+    assert_eq!(
+        users_metadata.range_partitioning.and_then(|partitioning| partitioning.field),
+        Some("age".to_owned())
+    );
+    assert!(users_metadata.clustering.is_none());
+
+    let orders_physical_table_id = store
+        .get_destination_table_metadata(orders_schema.id)
+        .await
+        .unwrap()
+        .expect("orders destination metadata should exist")
+        .table_id()
+        .to_owned();
+    let orders_metadata = bigquery_database
+        .get_table_metadata_by_id(&orders_physical_table_id)
+        .await
+        .expect("orders physical BigQuery table should exist");
+    assert!(orders_metadata.range_partitioning.is_none());
+    assert!(orders_metadata.time_partitioning.is_none());
+    assert_eq!(
+        orders_metadata.clustering.and_then(|clustering| clustering.fields),
+        Some(vec!["description".to_owned()])
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -640,7 +865,7 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -864,7 +1089,7 @@ async fn table_nullable_scalar_columns() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1018,7 +1243,7 @@ async fn table_nullable_scalar_columns() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_nullable_array_columns() {
+async fn table_nullable_array_columns_follow_bigquery_null_coercion() {
     if skip_if_missing_bigquery_env_vars() {
         return;
     }
@@ -1029,213 +1254,59 @@ async fn table_nullable_array_columns() {
     let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_database().await;
     let table_name = test_table_name("nullable_cols_array");
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[
-                ("b_arr", "bool[]"),
-                ("t_arr", "text[]"),
-                ("i2_arr", "int2[]"),
-                ("i4_arr", "int4[]"),
-                ("i8_arr", "int8[]"),
-                ("f4_arr", "float4[]"),
-                ("f8_arr", "float8[]"),
-                ("n_arr", "numeric[]"),
-                ("by_arr", "bytea[]"),
-                ("d_arr", "date[]"),
-                ("ti_arr", "time[]"),
-                ("ts_arr", "timestamp[]"),
-                ("tstz_arr", "timestamptz[]"),
-                ("u_arr", "uuid[]"),
-                ("j_arr", "json[]"),
-                ("jb_arr", "jsonb[]"),
-                ("o_arr", "oid[]"),
-            ],
+    let table_id =
+        database.create_table(table_name.clone(), true, &[("values", "integer[]")]).await.unwrap();
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "insert into {} (values) values (array[]::integer[])",
+                table_name.as_quoted_identifier()
+            ),
+            &[],
         )
         .await
         .unwrap();
+
+    let publication_name = "test_pub_array";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
-
-    let publication_name = "test_pub_array".to_owned();
-    database
-        .create_publication(&publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
-
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name,
+        publication_name.to_owned(),
         store.clone(),
         destination.clone(),
     );
 
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
-
     pipeline.start().await.unwrap();
-
     table_sync_complete_notify.notified().await;
 
-    // insert with null arrays
-    let events_notify = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
-        .await;
-
-    database
-        .insert_values(
-            table_name.clone(),
-            &[
-                "b_arr", "t_arr", "i2_arr", "i4_arr", "i8_arr", "f4_arr", "f8_arr", "n_arr",
-                "by_arr", "d_arr", "ti_arr", "ts_arr", "tstz_arr", "u_arr", "j_arr", "jb_arr",
-                "o_arr",
-            ],
-            &[
-                &Option::<Vec<bool>>::None,
-                &Option::<Vec<String>>::None,
-                &Option::<Vec<i16>>::None,
-                &Option::<Vec<i32>>::None,
-                &Option::<Vec<i64>>::None,
-                &Option::<Vec<f32>>::None,
-                &Option::<Vec<f64>>::None,
-                &Option::<Vec<PgNumeric>>::None,
-                &Option::<Vec<Vec<u8>>>::None,
-                &Option::<Vec<NaiveDate>>::None,
-                &Option::<Vec<NaiveTime>>::None,
-                &Option::<Vec<NaiveDateTime>>::None,
-                &Option::<Vec<DateTime<Utc>>>::None,
-                &Option::<Vec<uuid::Uuid>>::None,
-                &Option::<Vec<serde_json::Value>>::None,
-                &Option::<Vec<serde_json::Value>>::None,
-                &Option::<Vec<u32>>::None,
-            ],
-        )
-        .await
-        .unwrap();
-
-    events_notify.notified().await;
-
-    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
-    let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
-    // null arrays are returned as empty arrays by big query: See this section:
-    // https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#array_nulls
-    assert_eq!(parsed_table_rows, vec![NullableColsArray::all_empty(1),]);
-
-    // update with array values
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
         .await;
-
-    // Define test array values
-    let updated_bool_arr = vec![true, false, true];
-    let updated_text_arr = vec!["hello".to_owned(), "world".to_owned()];
-    let updated_i2_arr = vec![1i16, 2i16, 3i16];
-    let updated_i4_arr = vec![100i32, 200i32];
-    let updated_i8_arr = vec![1000i64, 2000i64, 3000i64];
-    let updated_f4_arr = vec![1.5f32, 2.5f32];
-    let updated_f8_arr = vec![std::f64::consts::PI, std::f64::consts::E];
-    let updated_n_arr =
-        vec![PgNumeric::from_str("3.141").unwrap(), PgNumeric::from_str("2.718").unwrap()];
-    let updated_bytes_arr = vec![b"test_bytes1".to_vec(), b"test_bytes2".to_vec()];
-    let updated_date_arr = vec![
-        NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
-    ];
-    let updated_time_arr = vec![
-        NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
-        NaiveTime::from_hms_opt(17, 30, 0).unwrap(),
-    ];
-    let base_date = NaiveDate::from_ymd_opt(2023, 6, 15).unwrap();
-    let updated_timestamp_arr = vec![
-        NaiveDateTime::new(base_date, NaiveTime::from_hms_opt(10, 30, 0).unwrap()),
-        NaiveDateTime::new(base_date, NaiveTime::from_hms_opt(15, 45, 0).unwrap()),
-    ];
-    let updated_timestamptz_arr = vec![
-        DateTime::<Utc>::from_naive_utc_and_offset(updated_timestamp_arr[0], Utc),
-        DateTime::<Utc>::from_naive_utc_and_offset(updated_timestamp_arr[1], Utc),
-    ];
-    let updated_uuid_arr = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
-    let updated_json_arr =
-        vec![serde_json::json!({"key1": "value1"}), serde_json::json!({"key2": "value2"})];
-    let updated_jsonb_arr =
-        vec![serde_json::json!({"jsonb1": "data1"}), serde_json::json!({"jsonb2": "data2"})];
-    let updated_oid_arr = vec![12345u32, 67890u32];
-
     database
-        .update_values(
-            table_name.clone(),
-            &[
-                "b_arr", "t_arr", "i2_arr", "i4_arr", "i8_arr", "f4_arr", "f8_arr", "n_arr",
-                "by_arr", "d_arr", "ti_arr", "ts_arr", "tstz_arr", "u_arr", "j_arr", "jb_arr",
-                "o_arr",
-            ],
-            &[
-                &Some(updated_bool_arr.clone()),
-                &Some(updated_text_arr.clone()),
-                &Some(updated_i2_arr.clone()),
-                &Some(updated_i4_arr.clone()),
-                &Some(updated_i8_arr.clone()),
-                &Some(updated_f4_arr.clone()),
-                &Some(updated_f8_arr.clone()),
-                &Some(updated_n_arr.clone()),
-                &Some(updated_bytes_arr.clone()),
-                &Some(updated_date_arr.clone()),
-                &Some(updated_time_arr.clone()),
-                &Some(updated_timestamp_arr.clone()),
-                &Some(updated_timestamptz_arr.clone()),
-                &Some(updated_uuid_arr.clone()),
-                &Some(updated_json_arr.clone()),
-                &Some(updated_jsonb_arr.clone()),
-                &Some(updated_oid_arr.clone()),
-            ],
-        )
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(&format!("update {} set values = null", table_name.as_quoted_identifier()), &[])
         .await
         .unwrap();
 
     events_notify.notified().await;
-
-    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
-    let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
-
-    let expected_row = NullableColsArray::with_non_null_values(
-        1,
-        updated_bool_arr,
-        updated_text_arr,
-        updated_i2_arr,
-        updated_i4_arr,
-        updated_i8_arr,
-        updated_f4_arr,
-        updated_f8_arr,
-        updated_n_arr,
-        updated_bytes_arr,
-        updated_date_arr,
-        updated_time_arr,
-        updated_timestamp_arr,
-        updated_timestamptz_arr,
-        updated_uuid_arr,
-        updated_json_arr,
-        updated_jsonb_arr,
-        updated_oid_arr,
-    );
-
-    assert_eq!(parsed_table_rows, vec![expected_row]);
-
-    // delete
-    let events_notify = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
-        .await;
-
-    database.delete_values(table_name.clone(), &["id"], &["'1'"], "").await.unwrap();
-
-    events_notify.notified().await;
-
-    assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
-
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_rows = bigquery_database.query_table(table_name).await.unwrap();
+    assert_eq!(table_rows.len(), 1);
+    let columns = table_rows[0].columns.as_ref().unwrap();
+    assert_eq!(columns[1].value.as_ref().unwrap().as_array().unwrap().len(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1286,7 +1357,7 @@ async fn table_non_nullable_scalar_columns() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1528,7 +1599,7 @@ async fn table_non_nullable_array_columns() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1768,8 +1839,10 @@ async fn table_array_with_null_values() {
     let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_database().await;
     let table_name = test_table_name("array_with_nulls");
-    let table_id =
-        database.create_table(table_name.clone(), true, &[("int_array", "int4[]")]).await.unwrap();
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("int_array", "int4[] not null")])
+        .await
+        .unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -1780,7 +1853,7 @@ async fn table_array_with_null_values() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1891,213 +1964,6 @@ async fn table_array_with_null_values() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_validation_out_of_bounds_values() {
-    if skip_if_missing_bigquery_env_vars() {
-        return;
-    }
-
-    init_test_tracing();
-    install_crypto_provider();
-
-    let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_database().await;
-
-    // Create tables with different error types
-    let huge_numeric_table = test_table_name("huge_numeric");
-    let huge_numeric_table_id = database
-        .create_table(huge_numeric_table.clone(), true, &[("huge_numeric", "numeric")])
-        .await
-        .unwrap();
-
-    let infinite_numeric_table = test_table_name("infinite_numeric");
-    let infinite_numeric_table_id = database
-        .create_table(infinite_numeric_table.clone(), true, &[("infinite_numeric", "numeric")])
-        .await
-        .unwrap();
-
-    let old_date_table = test_table_name("old_date");
-    let old_date_table_id = database
-        .create_table(old_date_table.clone(), true, &[("test_date", "date")])
-        .await
-        .unwrap();
-
-    let nan_array_table = test_table_name("nan_array");
-    let nan_array_table_id = database
-        .create_table(nan_array_table.clone(), true, &[("numeric_array", "numeric[]")])
-        .await
-        .unwrap();
-
-    let wide_json_table = test_table_name("wide_json");
-    let wide_json_table_id =
-        database.create_table(wide_json_table.clone(), true, &[("payload", "json")]).await.unwrap();
-
-    let imprecise_json_integer_table = test_table_name("imprecise_json_integer");
-    let imprecise_json_integer_table_id = database
-        .create_table(imprecise_json_integer_table.clone(), true, &[("payload", "json")])
-        .await
-        .unwrap();
-
-    // Insert out-of-bounds data into each table
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (huge_numeric) values ({})",
-                huge_numeric_table.as_quoted_identifier(),
-                "'123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890'"
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (infinite_numeric) values ('Infinity'::numeric)",
-                infinite_numeric_table.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (test_date) values ('0001-01-01'::date - interval '1 day')",
-                old_date_table.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (numeric_array) values (array['NaN'::numeric, '123.45'::numeric])",
-                nan_array_table.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (payload) values ('{{\"value\":1e309}}'::json)",
-                wide_json_table.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (payload) values ('{{\"value\":18446744073709551616}}'::json)",
-                imprecise_json_integer_table.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
-
-    let publication_name = "test_pub_validation".to_owned();
-    database
-        .create_publication(
-            &publication_name,
-            &[
-                huge_numeric_table,
-                infinite_numeric_table,
-                old_date_table,
-                nan_array_table,
-                wide_json_table,
-                imprecise_json_integer_table,
-            ],
-        )
-        .await
-        .expect("Failed to create publication");
-
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        store.clone(),
-        destination.clone(),
-    );
-
-    // Register notifications for errored table state
-    let huge_numeric_error_notify =
-        store.notify_on_table_state_type(huge_numeric_table_id, TableStateType::Errored).await;
-
-    let infinite_numeric_error_notify =
-        store.notify_on_table_state_type(infinite_numeric_table_id, TableStateType::Errored).await;
-
-    let old_date_error_notify =
-        store.notify_on_table_state_type(old_date_table_id, TableStateType::Errored).await;
-
-    let nan_array_error_notify =
-        store.notify_on_table_state_type(nan_array_table_id, TableStateType::Errored).await;
-
-    let wide_json_error_notify =
-        store.notify_on_table_state_type(wide_json_table_id, TableStateType::Errored).await;
-
-    let imprecise_json_integer_error_notify = store
-        .notify_on_table_state_type(imprecise_json_integer_table_id, TableStateType::Errored)
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    // Wait for all tables to enter errored state
-    huge_numeric_error_notify.notified().await;
-    infinite_numeric_error_notify.notified().await;
-    old_date_error_notify.notified().await;
-    nan_array_error_notify.notified().await;
-    wide_json_error_notify.notified().await;
-    imprecise_json_integer_error_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    for table_id in [
-        huge_numeric_table_id,
-        infinite_numeric_table_id,
-        old_date_table_id,
-        nan_array_table_id,
-        wide_json_table_id,
-        imprecise_json_integer_table_id,
-    ] {
-        let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
-        assert!(matches!(table_state, TableState::Errored { .. }));
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn schema_change_add_column_defaults() {
     if skip_if_missing_bigquery_env_vars() {
         return;
@@ -2112,20 +1978,20 @@ async fn schema_change_add_column_defaults() {
     let table_id = database
         .create_table(table_name.clone(), true, &[("name", "text not null")])
         .await
-        .expect("failed to create source table");
+        .unwrap();
 
     let publication_name = "test_pub_bq_defaults_schema".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("failed to create publication");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name) values ('Alice')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert initial source row");
+        .unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -2165,7 +2031,7 @@ async fn schema_change_add_column_defaults() {
             ],
         )
         .await
-        .expect("failed to alter source table");
+        .unwrap();
 
     database
         .run_sql(&format!(
@@ -2173,11 +2039,38 @@ async fn schema_change_add_column_defaults() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert defaulted source row");
+        .unwrap();
 
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let destination_metadata =
+        store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(destination_metadata.is_applied());
+    let defaults =
+        bigquery_database.query_column_defaults_by_id(destination_metadata.table_id()).await;
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "status")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("'new'")
+    );
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "score")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("15")
+    );
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "active")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("true")
+    );
 
     let rows = bigquery_database.query_table(table_name).await.unwrap();
     let mut rows = parse_bigquery_table_rows::<BigQueryDefaultsRow>(rows);
@@ -2196,6 +2089,143 @@ async fn schema_change_add_column_defaults() {
                 id: 2,
                 name: "Bob".to_owned(),
                 status: Some("new".to_owned()),
+                score: Some(15),
+                active: Some(true),
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_mask_adds_nullable_columns_with_future_only_defaults() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for publication column lists");
+        return;
+    }
+
+    let bigquery_database = setup_bigquery_database().await;
+    let table_name = test_table_name("publication_defaults");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("name", "text not null"),
+                ("status", "text not null default 'pending'::text"),
+                ("score", "integer not null default 15"),
+                ("active", "boolean not null default true"),
+            ],
+        )
+        .await
+        .unwrap();
+    let publication_name = "test_pub_bq_publication_defaults";
+    database
+        .run_sql(&format!(
+            "create publication {publication_name} for table {} (id, name)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Alice')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
+        .await;
+    database
+        .run_sql(&format!(
+            "alter publication {publication_name} set table {} (id, name, status, score, active)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Bob')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    events_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let destination_metadata =
+        store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(destination_metadata.is_applied());
+    let defaults =
+        bigquery_database.query_column_defaults_by_id(destination_metadata.table_id()).await;
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "status")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("'pending'")
+    );
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "score")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("15")
+    );
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "active")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("true")
+    );
+
+    let rows = bigquery_database.query_table(table_name).await.unwrap();
+    let mut rows = parse_bigquery_table_rows::<BigQueryDefaultsRow>(rows);
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            BigQueryDefaultsRow {
+                id: 1,
+                name: "Alice".to_owned(),
+                status: None,
+                score: None,
+                active: None,
+            },
+            BigQueryDefaultsRow {
+                id: 2,
+                name: "Bob".to_owned(),
+                status: Some("pending".to_owned()),
                 score: Some(15),
                 active: Some(true),
             },
@@ -2226,13 +2256,13 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             ],
         )
         .await
-        .expect("failed to create source table");
+        .unwrap();
 
     let publication_name = "test_pub_bq_nullability_schema".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("failed to create publication");
+        .unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -2275,7 +2305,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             ],
         )
         .await
-        .expect("failed to set source not null constraint");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, initially_required, divergent_default) values ('before-drop', \
@@ -2283,7 +2313,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert non-null source row");
+        .unwrap();
 
     set_not_null_notify.notified().await;
 
@@ -2306,14 +2336,14 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             ],
         )
         .await
-        .expect("failed to drop source not null constraint");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, initially_required) values (null, null)",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert null source row");
+        .unwrap();
 
     drop_not_null_notify.notified().await;
 
@@ -2333,7 +2363,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             }],
         )
         .await
-        .expect("failed to drop supported source default");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, initially_required, divergent_default) values \
@@ -2341,11 +2371,24 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert source row after dropping default");
+        .unwrap();
 
     drop_default_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let destination_metadata =
+        store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(destination_metadata.is_applied());
+    let defaults =
+        bigquery_database.query_column_defaults_by_id(destination_metadata.table_id()).await;
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "divergent_default")
+            .and_then(|column| column.column_default.as_deref()),
+        None
+    );
 
     let rows = bigquery_database.query_table(table_name).await.unwrap();
     let mut rows = parse_bigquery_table_rows::<BigQuerySchemaDivergenceRow>(rows);
@@ -2376,7 +2419,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_change() {
+async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
     if skip_if_missing_bigquery_env_vars() {
         return;
     }
@@ -2404,7 +2447,7 @@ async fn table_schema_change() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -2420,12 +2463,9 @@ async fn table_schema_change() {
 
     table_sync_complete_notify.notified().await;
 
-    let initial_state = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("destination schema state should exist after table creation");
-    let initial_snapshot_id = initial_state.snapshot_id;
+    let initial_state = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(initial_state.is_applied());
+    let initial_snapshot_id = initial_state.snapshot_id();
 
     // Insert the initial row.
     let events_notify = destination
@@ -2439,16 +2479,9 @@ async fn table_schema_change() {
 
     events_notify.notified().await;
 
-    // Apply multiple schema changes:
-    // 1. Rename name -> full_name
-    // 2. Drop the status column
-    // 3. Add email column
-    //
-    // Note: Each DDL change is captured via the DDL event trigger and stored in the
-    // schema store, but PostgreSQL sends only ONE Relation message with the
-    // final schema when the next DML operation (INSERT) occurs. The schema
-    // diffing in handle_relation_event then computes and applies all changes at
-    // once.
+    // PostgreSQL requires each column rename to be a separate statement. With
+    // no intervening DML, pgoutput emits no intermediate Relation, so the
+    // destination observes the old and final names as one rename cycle.
     let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, 2),
@@ -2459,20 +2492,42 @@ async fn table_schema_change() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "supabase_etl_source_swap",
+            }],
         )
-        .await
-        .unwrap();
-
-    database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "status" }])
         .await
         .unwrap();
 
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn { name: "email", data_type: "text" }],
+            &[TableModification::RenameColumn { old_name: "status", new_name: "name" }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "supabase_etl_source_swap",
+                new_name: "status",
+            }],
+        )
+        .await
+        .unwrap();
+
+    // Exercise same-name replacement in one multi-action ALTER TABLE. DDL
+    // capture records only its final snapshot, where `age` has a new attnum.
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::DropColumn { name: "age" },
+                TableModification::AddColumn { name: "age", data_type: "text" },
+            ],
         )
         .await
         .unwrap();
@@ -2481,8 +2536,8 @@ async fn table_schema_change() {
     database
         .insert_values(
             table_name.clone(),
-            &["full_name", "age", "email"],
-            &[&"Bob", &30, &"bob@example.com"],
+            &["status", "name", "age"],
+            &[&"Bob", &"pending", &"thirty"],
         )
         .await
         .unwrap();
@@ -2491,14 +2546,18 @@ async fn table_schema_change() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let final_state = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("destination schema state should exist after schema change");
+    let final_state = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(final_state.is_applied());
+    // Applying the relation must advance the durable destination schema.
+    assert!(final_state.snapshot_id() > initial_snapshot_id);
+
+    let table_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
+    // A successful plan must consume every planner-generated temporary column.
     assert!(
-        final_state.snapshot_id > initial_snapshot_id,
-        "snapshot_id should have increased after schema change"
+        table_schema
+            .column_names()
+            .iter()
+            .all(|name| !name.starts_with("supabase_etl_ddl_tmp_column_"))
     );
 
     let rows = bigquery_database.query_table(table_name).await.unwrap();
@@ -2507,12 +2566,17 @@ async fn table_schema_change() {
     assert_eq!(
         rows,
         vec![
-            BigQuerySchemaChangeRow { id: 1, full_name: "Alice".to_owned(), age: 25, email: None },
+            BigQuerySchemaChangeRow {
+                id: 1,
+                status: "Alice".to_owned(),
+                name: Some("active".to_owned()),
+                age: None,
+            },
             BigQuerySchemaChangeRow {
                 id: 2,
-                full_name: "Bob".to_owned(),
-                age: 30,
-                email: Some("bob@example.com".to_owned()),
+                status: "Bob".to_owned(),
+                name: Some("pending".to_owned()),
+                age: Some("thirty".to_owned()),
             },
         ]
     );

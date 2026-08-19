@@ -4,16 +4,16 @@ use tokio::{sync::Notify, time::timeout};
 
 /// Default timeout duration for notifications.
 ///
-/// This duration was chosen empirically since most waiting should not take more
-/// than a few seconds.
-pub const DEFAULT_NOTIFY_TIMEOUT: Duration = Duration::from_secs(240);
+/// This duration accommodates slower integration-test services and loaded CI
+/// runners while keeping permanently missed notifications bounded.
+pub const DEFAULT_NOTIFY_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// A wrapper around [`Arc<Notify>`] that provides automatic timeout
 /// functionality for tests.
 ///
 /// This prevents tests from hanging indefinitely when waiting for state changes
-/// that may never occur. The timeout ensures tests fail quickly with a clear
-/// timeout error instead of hanging forever.
+/// that may never occur. The timeout ensures tests fail with a clear timeout
+/// error instead of hanging forever.
 #[derive(Clone)]
 pub struct TimedNotify {
     notify: Arc<Notify>,
