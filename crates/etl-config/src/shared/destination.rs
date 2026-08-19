@@ -17,6 +17,10 @@ const fn default_ducklake_pool_size() -> u32 {
 }
 
 /// Per-table creation options for BigQuery destinations.
+///
+/// Applied only when a table is created or recreated (first replication,
+/// a replication state reset, or a source `TRUNCATE`), never to a table
+/// that already exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct BigQueryTableOptionsConfig {
@@ -190,6 +194,10 @@ pub enum BigQueryTimePartitionGranularity {
 /// `ReplacingMergeTree` (default) gives current-state reads via `FINAL` and
 /// reclaims deleted rows on `OPTIMIZE ... FINAL CLEANUP`. `MergeTree` is an
 /// append-only event-log layout retained for PK-less source tables.
+///
+/// Applied only when a table is created or recreated. ClickHouse cannot
+/// alter a table's engine, so a mismatch against an existing table is a
+/// write error, not a silent no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ClickHouseEngine {
@@ -250,7 +258,27 @@ impl DuckLakeTableSortingConfig {
     }
 }
 
-impl Validate for DuckLakeTableSortingConfig {}
+impl Validate for DuckLakeTableSortingConfig {
+    fn validate(&self) -> Result<(), ValidationError> {
+        let mut table_keys = HashSet::with_capacity(self.tables.len());
+
+        for (table_index, table) in self.tables.iter().enumerate() {
+            let key = (table.schema.as_str(), table.table.as_str());
+
+            if !table_keys.insert(key) {
+                return Err(ValidationError::InvalidFieldValue {
+                    field: format!("table_sorting.tables[{table_index}]"),
+                    constraint: format!(
+                        "must be unique; table {}.{} is configured more than once",
+                        table.schema, table.table
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
 
 /// Sort-order configuration for one source table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,6 +398,8 @@ pub enum DestinationConfig {
         ///
         /// If not set, the default staleness behavior is used. See
         /// <https://cloud.google.com/bigquery/docs/change-data-capture#create-max-staleness>.
+        /// Applied only when the physical table is created or recreated;
+        /// changing it does not affect a table that already exists.
         max_staleness_mins: Option<u16>,
         /// Size of the BigQuery Storage Write API connection pool.
         ///
@@ -381,8 +411,8 @@ pub enum DestinationConfig {
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
-        /// Per-table partitioning and clustering applied only when ETL creates
-        /// a physical table.
+        /// Per-table partitioning and clustering, applied only when the
+        /// physical table is created or recreated.
         #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
         table_options: BigQueryTableOptionsConfig,
     },
@@ -398,7 +428,9 @@ pub enum DestinationConfig {
         database: String,
         /// Table engine used for replicated tables. Defaults to
         /// `ReplacingMergeTree`; set to `merge_tree` for the append-only
-        /// event-log layout.
+        /// event-log layout. Applied only when a table is created or
+        /// recreated; changing it does not affect a table that already
+        /// exists.
         #[serde(default)]
         engine: ClickHouseEngine,
     },
@@ -620,6 +652,8 @@ pub enum DestinationConfigWithoutSecrets {
         ///
         /// If not set, the default staleness behavior is used. See
         /// <https://cloud.google.com/bigquery/docs/change-data-capture#create-max-staleness>.
+        /// Applied only when the physical table is created or recreated;
+        /// changing it does not affect a table that already exists.
         #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
         /// Size of the BigQuery Storage Write API connection pool.
@@ -632,8 +666,8 @@ pub enum DestinationConfigWithoutSecrets {
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
-        /// Per-table partitioning and clustering applied only when ETL creates
-        /// a physical table.
+        /// Per-table partitioning and clustering, applied only when the
+        /// physical table is created or recreated.
         #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
         table_options: BigQueryTableOptionsConfig,
     },
@@ -647,7 +681,9 @@ pub enum DestinationConfigWithoutSecrets {
         database: String,
         /// Table engine used for replicated tables. Defaults to
         /// `ReplacingMergeTree`; set to `merge_tree` for the append-only
-        /// event-log layout.
+        /// event-log layout. Applied only when a table is created or
+        /// recreated; changing it does not affect a table that already
+        /// exists.
         #[serde(default)]
         engine: ClickHouseEngine,
     },
@@ -865,6 +901,26 @@ mod tests {
         assert_eq!(columns[1].direction, DuckLakeSortDirection::Desc);
         assert_eq!(columns[1].nulls, Some(DuckLakeSortNulls::First));
         assert_eq!(config.tables[1].sort_by, DuckLakeSortBy::PrimaryKey);
+    }
+
+    #[test]
+    fn ducklake_table_sorting_rejects_duplicate_tables() {
+        let config = DuckLakeTableSortingConfig {
+            tables: vec![
+                DuckLakeTableSortConfig {
+                    schema: "public".to_owned(),
+                    table: "events".to_owned(),
+                    sort_by: DuckLakeSortBy::PrimaryKey,
+                },
+                DuckLakeTableSortConfig {
+                    schema: "public".to_owned(),
+                    table: "events".to_owned(),
+                    sort_by: DuckLakeSortBy::Columns { columns: vec![] },
+                },
+            ],
+        };
+
+        config.validate().unwrap_err();
     }
 
     #[test]

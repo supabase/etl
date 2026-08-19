@@ -82,10 +82,14 @@ as its default example.
 ### Table partitioning and clustering
 
 Use `table_options` to select the physical layout for individual source
-tables. ETL applies these options only when it creates a physical BigQuery
-table. Restarting a pipeline does not modify an existing table, and schema
-changes do not reconcile partitioning or clustering. A truncate or table
-recopy that creates a new physical table uses the configured options again.
+tables. `table_options`, along with `max_staleness_mins`, is applied only
+when a table is created or recreated, never to a table that already exists.
+Restarting a pipeline does not modify an existing table, and changing either
+setting has no effect until the table is created again. A table is created,
+and so picks up the current settings, when it is replicated for the first
+time, when its replication state is reset (for example from the dashboard
+or the pipeline resync API), or when a source truncate makes ETL create a
+new physical table.
 
 ```yaml
 destination:
@@ -152,6 +156,13 @@ and [clustering column requirements](https://cloud.google.com/bigquery/docs/crea
 
 ClickHouse supports a current-state layout with `ReplacingMergeTree` and an
 append-only event-log layout with `MergeTree`.
+
+`engine` is applied only when a table is created or recreated; restarting a
+pipeline or changing `engine` does not modify an existing table. ClickHouse
+has no way to alter a table's engine, so if `engine` no longer matches a
+table that already exists, ETL returns an error on write instead of silently
+applying the new setting. Drop and resynchronize the table, or revert
+`engine` to match it.
 
 ### Limitations
 

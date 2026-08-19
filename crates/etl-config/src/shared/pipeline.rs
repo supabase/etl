@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
@@ -181,7 +183,31 @@ impl TableSyncCopyConfig {
     }
 }
 
-impl Validate for TableSyncCopyConfig {}
+impl Validate for TableSyncCopyConfig {
+    fn validate(&self) -> Result<(), ValidationError> {
+        let table_ids = match self {
+            TableSyncCopyConfig::IncludeAllTables | TableSyncCopyConfig::SkipAllTables => {
+                return Ok(());
+            }
+            TableSyncCopyConfig::IncludeTables { table_ids }
+            | TableSyncCopyConfig::SkipTables { table_ids } => table_ids,
+        };
+
+        let mut seen_table_ids = HashSet::with_capacity(table_ids.len());
+        for table_id in table_ids {
+            if !seen_table_ids.insert(table_id) {
+                return Err(ValidationError::InvalidFieldValue {
+                    field: "table_sync_copy.table_ids".to_owned(),
+                    constraint: format!(
+                        "must be unique; table id {table_id} is configured more than once"
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
 
 /// Memory-based backpressure configuration.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -365,7 +391,8 @@ impl Validate for PipelineConfig {
             self.memory_backpressure.as_ref(),
             self.memory_refresh_interval_ms,
             self.replication_lag_refresh_interval_ms,
-        )
+        )?;
+        self.table_sync_copy.validate()
     }
 }
 
@@ -535,7 +562,8 @@ impl Validate for PipelineConfigWithoutSecrets {
             self.memory_backpressure.as_ref(),
             self.memory_refresh_interval_ms,
             self.replication_lag_refresh_interval_ms,
-        )
+        )?;
+        self.table_sync_copy.validate()
     }
 }
 
@@ -685,6 +713,20 @@ mod tests {
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(selection, decoded);
+    }
+
+    #[test]
+    fn table_sync_copy_validate_accepts_unique_table_ids() {
+        TableSyncCopyConfig::IncludeAllTables.validate().unwrap();
+        TableSyncCopyConfig::SkipAllTables.validate().unwrap();
+        TableSyncCopyConfig::IncludeTables { table_ids: vec![1, 2, 3] }.validate().unwrap();
+        TableSyncCopyConfig::SkipTables { table_ids: vec![4, 5] }.validate().unwrap();
+    }
+
+    #[test]
+    fn table_sync_copy_validate_rejects_duplicate_table_ids() {
+        TableSyncCopyConfig::IncludeTables { table_ids: vec![1, 2, 1] }.validate().unwrap_err();
+        TableSyncCopyConfig::SkipTables { table_ids: vec![4, 4] }.validate().unwrap_err();
     }
 
     #[test]

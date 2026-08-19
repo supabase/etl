@@ -117,7 +117,7 @@ fn create_table_options_sql(
         return Ok(String::new());
     };
 
-    let mut clauses = Vec::with_capacity(2);
+    let mut clauses = Vec::new();
 
     if let Some(partition_by) = &options.partition_by {
         clauses.push(format!("partition by {}", partition_expression(partition_by, schema)?));
@@ -136,15 +136,6 @@ fn create_table_options_sql(
     Ok(clauses.join(" "))
 }
 
-/// Creates a consistent table-options configuration error.
-fn invalid_table_options_config(detail: impl Into<String>) -> EtlError {
-    etl_error!(
-        ErrorKind::ConfigError,
-        "BigQuery table options configuration is invalid",
-        detail.into()
-    )
-}
-
 /// Renders one supported BigQuery partition expression.
 fn partition_expression(
     partition_by: &BigQueryPartitionBy,
@@ -161,12 +152,16 @@ fn partition_expression(
                 Type::DATE => Ok(format!("date_trunc({column}, {granularity_sql})")),
                 Type::TIMESTAMP => Ok(format!("datetime_trunc({column}, {granularity_sql})")),
                 Type::TIMESTAMPTZ => Ok(format!("timestamp_trunc({column}, {granularity_sql})")),
-                _ => Err(invalid_table_options_config(format!(
-                    "Column `{}` on table `{}` does not support {} time partitioning",
-                    column,
-                    schema.name(),
-                    granularity_sql.to_ascii_lowercase()
-                ))),
+                _ => Err(etl_error!(
+                    ErrorKind::ConfigError,
+                    "BigQuery table options configuration is invalid",
+                    format!(
+                        "Column `{}` on table `{}` does not support {} time partitioning",
+                        column,
+                        schema.name(),
+                        granularity_sql.to_ascii_lowercase()
+                    )
+                )),
             }
         }
         BigQueryPartitionBy::IntegerRange { column, start, end, interval } => {
@@ -192,10 +187,14 @@ fn require_replicated_column<'a>(
         .find(|column_schema| column_schema.name == column)
         .map(|column_schema| &column_schema.typ)
         .ok_or_else(|| {
-            invalid_table_options_config(format!(
-                "Table `{}` does not replicate configured column `{column}`",
-                schema.name()
-            ))
+            etl_error!(
+                ErrorKind::ConfigError,
+                "BigQuery table options configuration is invalid",
+                format!(
+                    "Table `{}` does not replicate configured column `{column}`",
+                    schema.name()
+                )
+            )
         })
 }
 

@@ -35,22 +35,29 @@ pub const fn default_ducklake_pool_size() -> u32 {
 #[serde(rename_all = "snake_case")]
 pub enum ApiDestinationConfig {
     BigQuery {
+        /// Google Cloud project identifier.
         #[schema(example = "my-gcp-project")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         project_id: String,
+        /// BigQuery dataset identifier.
         #[schema(example = "my_dataset")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         dataset_id: String,
+        /// Service account key for authenticating with BigQuery.
         #[schema(example = "{\"type\": \"service_account\", \"project_id\": \"my-project\"}")]
         service_account_key: SerializableSecretString,
+        /// Maximum staleness in minutes for BigQuery CDC reads. Applied only
+        /// when the physical table is created or recreated; changing it does
+        /// not affect a table that already exists.
         #[schema(example = 15)]
         #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
+        /// Size of the BigQuery Storage Write API connection pool.
         #[schema(example = 8)]
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
-        /// Per-table partitioning and clustering applied only at physical table
-        /// creation time.
+        /// Per-table partitioning and clustering, applied only when the
+        /// physical table is created or recreated.
         #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
         table_options: BigQueryTableOptionsConfig,
     },
@@ -71,7 +78,9 @@ pub enum ApiDestinationConfig {
         #[schema(example = "my_db")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         database: String,
-        /// Table engine used for replicated tables.
+        /// Table engine used for replicated tables. Applied only when a
+        /// table is created or recreated; changing it does not affect a
+        /// table that already exists.
         #[schema(value_type = String, example = "replacing_merge_tree")]
         #[serde(default)]
         engine: ClickHouseEngine,
@@ -81,6 +90,7 @@ pub enum ApiDestinationConfig {
         config: ApiIcebergConfig,
     },
     Ducklake {
+        /// DuckLake catalog URL.
         #[schema(value_type = String, example = "postgres://localhost:5432/ducklake_catalog")]
         #[serde(deserialize_with = "crate::utils::trim_secret_string")]
         catalog_url: SerializableSecretString,
@@ -92,12 +102,15 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_secret_string"
         )]
         catalog_pooler_url: Option<SerializableSecretString>,
+        /// DuckLake data path.
         #[schema(example = "s3://bucket/path")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         data_path: String,
+        /// Size of the DuckDB connection pool.
         #[schema(example = 4)]
         #[serde(skip_serializing_if = "Option::is_none")]
         pool_size: Option<u32>,
+        /// Optional S3-compatible storage access key ID.
         #[schema(example = "my-access-key")]
         #[serde(
             default,
@@ -105,6 +118,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_secret_string"
         )]
         s3_access_key_id: Option<SerializableSecretString>,
+        /// Optional S3-compatible storage secret access key.
         #[schema(example = "my-secret-key")]
         #[serde(
             default,
@@ -112,6 +126,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_secret_string"
         )]
         s3_secret_access_key: Option<SerializableSecretString>,
+        /// Optional S3-compatible storage region.
         #[schema(example = "us-east-1")]
         #[serde(
             default,
@@ -119,6 +134,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         s3_region: Option<String>,
+        /// Optional S3-compatible storage endpoint.
         #[schema(example = "127.0.0.1:5000/s3")]
         #[serde(
             default,
@@ -126,6 +142,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         s3_endpoint: Option<String>,
+        /// Optional S3 URL style.
         #[schema(example = "path")]
         #[serde(
             default,
@@ -133,9 +150,11 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         s3_url_style: Option<String>,
+        /// Optional S3 SSL toggle.
         #[schema(example = false)]
         #[serde(skip_serializing_if = "Option::is_none")]
         s3_use_ssl: Option<bool>,
+        /// Optional metadata schema for DuckLake metadata tables.
         #[schema(example = "ducklake")]
         #[serde(
             default,
@@ -143,6 +162,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         metadata_schema: Option<String>,
+        /// Optional DuckLake maintenance target file size.
         #[schema(example = "500MB")]
         #[serde(
             default,
@@ -150,6 +170,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         maintenance_target_file_size: Option<String>,
+        /// Optional DuckLake snapshot-retention interval.
         #[schema(example = "7 days")]
         #[serde(
             default,
@@ -157,6 +178,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         expire_snapshots_older_than: Option<String>,
+        /// External maintenance coordination backend.
         #[schema(example = "kubernetes")]
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
@@ -166,22 +188,29 @@ pub enum ApiDestinationConfig {
         table_sorting: DuckLakeTableSortingConfig,
     },
     Snowflake {
+        /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
         #[schema(example = "ORGNAME-ACCOUNTNAME")]
         #[serde(deserialize_with = "crate::utils::trim_snowflake_account_id")]
         account_id: String,
+        /// Snowflake user with RSA public key configured.
         #[schema(example = "ETL_USER")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         user: String,
+        /// RSA private key in PEM format (PKCS#8 or PKCS#1).
         #[schema(example = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADA...")]
         private_key: SerializableSecretString,
+        /// Optional passphrase for encrypted private key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         private_key_passphrase: Option<SerializableSecretString>,
+        /// Target database name.
         #[schema(example = "ANALYTICS")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         database: String,
+        /// Target schema name.
         #[schema(example = "PUBLIC")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         schema: String,
+        /// Snowflake role.
         #[schema(example = "ETL_ROLE")]
         #[serde(
             default,
@@ -204,13 +233,16 @@ pub enum StrippedApiDestinationConfig {
         project_id: String,
         /// BigQuery dataset identifier.
         dataset_id: String,
-        /// Maximum staleness in minutes for BigQuery CDC reads.
+        /// Maximum staleness in minutes for BigQuery CDC reads. Applied only
+        /// when the physical table is created or recreated; changing it does
+        /// not affect a table that already exists.
         #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
         /// Size of the BigQuery Storage Write API connection pool.
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
-        /// Per-table partitioning and clustering options.
+        /// Per-table partitioning and clustering options, applied only when
+        /// the physical table is created or recreated.
         #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
         table_options: BigQueryTableOptionsConfig,
     },
@@ -224,7 +256,9 @@ pub enum StrippedApiDestinationConfig {
         user: String,
         /// ClickHouse target database.
         database: String,
-        /// Table engine used for replicated tables.
+        /// Table engine used for replicated tables. Applied only when a
+        /// table is created or recreated; changing it does not affect a
+        /// table that already exists.
         #[schema(value_type = String)]
         engine: ClickHouseEngine,
     },
@@ -391,6 +425,7 @@ where
 #[serde(rename_all = "snake_case")]
 pub enum UpdateApiDestinationConfig {
     BigQuery {
+        /// Google Cloud project identifier.
         #[schema(example = "my-gcp-project")]
         #[serde(
             default,
@@ -398,6 +433,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         project_id: UpdateField<String>,
+        /// BigQuery dataset identifier.
         #[schema(example = "my_dataset")]
         #[serde(
             default,
@@ -405,6 +441,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         dataset_id: UpdateField<String>,
+        /// Service account key for authenticating with BigQuery.
         #[schema(example = "{\"type\": \"service_account\", \"project_id\": \"my-project\"}")]
         #[serde(
             default,
@@ -412,18 +449,25 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_secret_string"
         )]
         service_account_key: UpdateField<SerializableSecretString>,
+        /// Maximum staleness in minutes for BigQuery CDC reads. Applied only
+        /// when a table is created or recreated, not to a table that
+        /// already exists.
         #[schema(example = 15)]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         max_staleness_mins: UpdateField<u16>,
+        /// Size of the BigQuery Storage Write API connection pool.
         #[schema(example = 8)]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         connection_pool_size: UpdateField<usize>,
         /// Replaces all per-table creation options. `null` resets them.
+        /// Applied only when a table is created or recreated, not to a
+        /// table that already exists.
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         table_options: UpdateField<BigQueryTableOptionsConfig>,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
+        /// ClickHouse HTTP(S) endpoint URL.
         #[schema(value_type = String, example = "http://test:8123")]
         #[serde(
             default,
@@ -431,6 +475,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_http_url"
         )]
         url: UpdateField<Url>,
+        /// ClickHouse user name.
         #[schema(example = "foo")]
         #[serde(
             default,
@@ -438,12 +483,14 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         user: UpdateField<String>,
+        /// ClickHouse password (omit for passwordless access).
         #[serde(
             default,
             skip_serializing_if = "UpdateField::is_preserve",
             deserialize_with = "deserialize_update_secret_string"
         )]
         password: UpdateField<SerializableSecretString>,
+        /// ClickHouse target database.
         #[schema(example = "my_db")]
         #[serde(
             default,
@@ -451,6 +498,8 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         database: UpdateField<String>,
+        /// Applied only when a table is created or recreated, not to a
+        /// table that already exists.
         #[schema(value_type = String, example = "replacing_merge_tree")]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         engine: UpdateField<ClickHouseEngine>,
@@ -460,6 +509,7 @@ pub enum UpdateApiDestinationConfig {
         config: UpdateApiIcebergConfig,
     },
     Ducklake {
+        /// DuckLake catalog URL.
         #[schema(value_type = String, example = "postgres://localhost:5432/ducklake_catalog")]
         #[serde(
             default,
@@ -475,6 +525,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_secret_string"
         )]
         catalog_pooler_url: UpdateField<SerializableSecretString>,
+        /// DuckLake data path.
         #[schema(example = "s3://bucket/path")]
         #[serde(
             default,
@@ -482,9 +533,11 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         data_path: UpdateField<String>,
+        /// Size of the DuckDB connection pool.
         #[schema(example = 4)]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         pool_size: UpdateField<u32>,
+        /// Optional S3-compatible storage access key ID.
         #[schema(example = "my-access-key")]
         #[serde(
             default,
@@ -492,6 +545,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_secret_string"
         )]
         s3_access_key_id: UpdateField<SerializableSecretString>,
+        /// Optional S3-compatible storage secret access key.
         #[schema(example = "my-secret-key")]
         #[serde(
             default,
@@ -499,6 +553,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_secret_string"
         )]
         s3_secret_access_key: UpdateField<SerializableSecretString>,
+        /// Optional S3-compatible storage region.
         #[schema(example = "us-east-1")]
         #[serde(
             default,
@@ -506,6 +561,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         s3_region: UpdateField<String>,
+        /// Optional S3-compatible storage endpoint.
         #[schema(example = "127.0.0.1:5000/s3")]
         #[serde(
             default,
@@ -513,6 +569,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         s3_endpoint: UpdateField<String>,
+        /// Optional S3 URL style.
         #[schema(example = "path")]
         #[serde(
             default,
@@ -520,9 +577,11 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         s3_url_style: UpdateField<String>,
+        /// Optional S3 SSL toggle.
         #[schema(example = false)]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         s3_use_ssl: UpdateField<bool>,
+        /// Optional metadata schema for DuckLake metadata tables.
         #[schema(example = "ducklake")]
         #[serde(
             default,
@@ -530,6 +589,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         metadata_schema: UpdateField<String>,
+        /// Optional DuckLake maintenance target file size.
         #[schema(example = "500MB")]
         #[serde(
             default,
@@ -537,6 +597,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         maintenance_target_file_size: UpdateField<String>,
+        /// Optional DuckLake snapshot-retention interval.
         #[schema(example = "7 days")]
         #[serde(
             default,
@@ -544,6 +605,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         expire_snapshots_older_than: UpdateField<String>,
+        /// External maintenance coordination backend.
         #[schema(example = "kubernetes")]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         maintenance_mode: UpdateField<DuckLakeMaintenanceMode>,
@@ -552,6 +614,7 @@ pub enum UpdateApiDestinationConfig {
         table_sorting: UpdateField<DuckLakeTableSortingConfig>,
     },
     Snowflake {
+        /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
         #[schema(example = "ORGNAME-ACCOUNTNAME")]
         #[serde(
             default,
@@ -559,6 +622,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_snowflake_account_id"
         )]
         account_id: UpdateField<String>,
+        /// Snowflake user with RSA public key configured.
         #[schema(example = "ETL_USER")]
         #[serde(
             default,
@@ -566,6 +630,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         user: UpdateField<String>,
+        /// RSA private key in PEM format (PKCS#8 or PKCS#1).
         #[schema(example = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADA...")]
         #[serde(
             default,
@@ -573,9 +638,11 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_secret_string"
         )]
         private_key: UpdateField<SerializableSecretString>,
+        /// Optional passphrase for encrypted private key.
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         #[schema(value_type = Option<String>)]
         private_key_passphrase: UpdateField<SerializableSecretString>,
+        /// Target database name.
         #[schema(example = "ANALYTICS")]
         #[serde(
             default,
@@ -583,6 +650,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         database: UpdateField<String>,
+        /// Target schema name.
         #[schema(example = "PUBLIC")]
         #[serde(
             default,
@@ -590,6 +658,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         schema: UpdateField<String>,
+        /// Snowflake role.
         #[schema(example = "ETL_ROLE")]
         #[serde(
             default,
