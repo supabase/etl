@@ -23,7 +23,7 @@ use etl::{
     },
     store::DestinationStore,
 };
-use etl_config::shared::{BigQueryTableOptions, BigQueryTableOptionsConfig, Validate};
+use etl_config::shared::{BigQueryTableOptions, BigQueryTableOptionsConfig};
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
 use metrics::histogram;
 use prost::Message;
@@ -435,14 +435,7 @@ where
 
     /// Configures per-table partitioning and clustering for physical tables
     /// created by this destination.
-    pub fn with_table_options(
-        mut self,
-        table_options: BigQueryTableOptionsConfig,
-    ) -> EtlResult<Self> {
-        table_options.validate().map_err(|error| {
-            EtlError::from((ErrorKind::ConfigError, "BigQuery table options are invalid"))
-                .with_source(error)
-        })?;
+    pub fn with_table_options(mut self, table_options: BigQueryTableOptionsConfig) -> Self {
         self.table_options = Arc::new(
             table_options
                 .tables
@@ -451,7 +444,7 @@ where
                 .collect(),
         );
 
-        Ok(self)
+        self
     }
 
     /// Resolves or creates the sequenced BigQuery table for a schema endpoint.

@@ -2,10 +2,7 @@ use etl_api::{
     configs::destination::ApiDestinationConfig,
     validation::{FailureType, ValidationContext, validate_destination, validate_pipeline},
 };
-use etl_config::{
-    Environment, SerializableSecretString,
-    shared::{BigQueryTableOptions, BigQueryTableOptionsConfig},
-};
+use etl_config::{Environment, SerializableSecretString};
 use etl_destinations::bigquery::test_utils::{
     setup_bigquery_database, setup_bigquery_database_without_dataset,
     skip_if_missing_bigquery_env_vars,
@@ -44,29 +41,6 @@ async fn validate_bigquery_connection_success() {
     let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(failures.is_empty(), "Expected no failures: {failures:?}");
-}
-
-#[tokio::test]
-async fn validate_bigquery_reports_invalid_static_table_options_without_connecting() {
-    let ctx = create_validation_context();
-    let mut config = create_bigquery_config("fake-project", "fake-dataset", "{}");
-    let ApiDestinationConfig::BigQuery { table_options, .. } = &mut config else {
-        panic!("Config type doesn't match");
-    };
-    *table_options = BigQueryTableOptionsConfig {
-        tables: vec![BigQueryTableOptions {
-            table_id: 16384,
-            partition_by: None,
-            cluster_by: Vec::new(),
-        }],
-    };
-
-    let failures = validate_destination(&ctx, &config, None).await.unwrap();
-
-    assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].name, "BigQuery Table Options Invalid");
-    assert_eq!(failures[0].failure_type, FailureType::Critical);
-    assert!(failures[0].reason.contains("table_options.tables[0]"));
 }
 
 #[tokio::test]

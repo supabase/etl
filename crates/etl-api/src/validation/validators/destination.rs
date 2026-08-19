@@ -184,7 +184,6 @@ macro_rules! disabled_destination {
 /// BigQuery validation adapter.
 #[cfg(feature = "bigquery")]
 mod bigquery {
-    use etl_config::shared::Validate;
     use secrecy::ExposeSecret;
 
     use super::{ApiDestinationConfig, ValidationContext, ValidationError, ValidationFailure};
@@ -200,13 +199,6 @@ mod bigquery {
         else {
             unreachable!("Destination config should match BigQuery.");
         };
-
-        if let Err(error) = config.validate() {
-            return Ok(vec![ValidationFailure::critical(
-                "BigQuery Table Options Invalid",
-                error.to_string(),
-            )]);
-        }
 
         BigQueryValidator::new(
             project_id.clone(),

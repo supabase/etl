@@ -1,6 +1,5 @@
 use std::fmt::Debug;
 
-use etl_config::shared::{Validate, ValidationError};
 use sqlx::{PgConnection, PgExecutor};
 use thiserror::Error;
 
@@ -29,9 +28,6 @@ pub enum DestinationsDbError {
 
     #[error(transparent)]
     DestinationConfigUpdate(#[from] DestinationConfigUpdateError),
-
-    #[error("Invalid destination configuration: {0}")]
-    InvalidConfig(#[from] ValidationError),
 }
 
 #[derive(Debug)]
@@ -52,7 +48,6 @@ pub async fn create_destination<'c, E>(
 where
     E: PgExecutor<'c>,
 {
-    config.validate()?;
     let config = encrypt_and_serialize(StoredDestinationConfig::from(config), encryption_key)?;
 
     let record = sqlx::query!(
@@ -122,8 +117,6 @@ pub async fn update_destination(
     config: UpdateApiDestinationConfig,
     encryption_key: &EncryptionKeyring,
 ) -> Result<Option<i64>, DestinationsDbError> {
-    config.validate()?;
-
     let stored_config_value = sqlx::query_scalar::<_, serde_json::Value>(
         r#"
         select config
@@ -146,7 +139,6 @@ pub async fn update_destination(
         StoredDestinationConfig,
     >(stored_config_value, encryption_key)?;
     let merged_config = config.merge_into_stored(stored_config)?;
-    merged_config.validate()?;
     let serialized_config = encrypt_and_serialize(merged_config, encryption_key)?;
 
     let record = sqlx::query!(

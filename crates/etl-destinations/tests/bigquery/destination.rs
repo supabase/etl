@@ -35,6 +35,17 @@ fn make_users_schema_with_id(table_id: u32, table_name: &str) -> TableSchema {
     )
 }
 
+fn make_events_schema_with_id(table_id: u32, table_name: &str) -> TableSchema {
+    TableSchema::new(
+        TableId::new(table_id),
+        TableName::new("public".to_owned(), table_name.to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("occurred_on".to_owned(), Type::DATE, -1, 2, false),
+        ],
+    )
+}
+
 fn table_options(
     table_id: TableId,
     partition_by: Option<BigQueryPartitionBy>,
@@ -239,6 +250,106 @@ async fn table_options_support_all_partitioning_and_clustering_combinations() {
             }
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_options_support_time_column_and_ingestion_time_partitioning() {
+    install_crypto_provider();
+    init_test_tracing();
+
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    let bigquery_database = setup_bigquery_database().await;
+    let store = MemoryStore::new();
+    let table_suffix = uuid::Uuid::new_v4().simple();
+    let time_column_schema = make_events_schema_with_id(
+        14,
+        &format!("destination_time_column_partition_{table_suffix}"),
+    );
+    let ingestion_time_schema = make_users_schema_with_id(
+        15,
+        &format!("destination_ingestion_time_partition_{table_suffix}"),
+    );
+    let options = BigQueryTableOptionsConfig {
+        tables: vec![
+            BigQueryTableOptions {
+                table_id: time_column_schema.id.into_inner(),
+                partition_by: Some(BigQueryPartitionBy::TimeColumn {
+                    column: "occurred_on".to_owned(),
+                    granularity: BigQueryTimePartitionGranularity::Month,
+                }),
+                cluster_by: vec![],
+            },
+            BigQueryTableOptions {
+                table_id: ingestion_time_schema.id.into_inner(),
+                partition_by: Some(BigQueryPartitionBy::IngestionTime {
+                    granularity: BigQueryTimePartitionGranularity::Hour,
+                }),
+                cluster_by: vec![],
+            },
+        ],
+    };
+    let destination =
+        bigquery_database.build_destination_with_table_options(1_u64, store.clone(), options).await;
+
+    store.store_table_schema(time_column_schema.clone()).await.unwrap();
+    destination
+        .write_table_rows_for_tests(
+            &ReplicatedTableSchema::all(Arc::new(time_column_schema.clone())),
+            vec![TableRow::new(vec![
+                Cell::I32(1),
+                Cell::Date(chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap()),
+            ])],
+        )
+        .await
+        .unwrap();
+
+    store.store_table_schema(ingestion_time_schema.clone()).await.unwrap();
+    destination
+        .write_table_rows_for_tests(
+            &ReplicatedTableSchema::all(Arc::new(ingestion_time_schema.clone())),
+            vec![TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("ingested".to_owned()),
+                Cell::I32(42),
+            ])],
+        )
+        .await
+        .unwrap();
+
+    let time_column_table_id = store
+        .get_destination_table_metadata(time_column_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist")
+        .table_id()
+        .to_owned();
+    let time_column_partitioning = bigquery_database
+        .get_table_metadata_by_id(&time_column_table_id)
+        .await
+        .expect("physical BigQuery table should exist")
+        .time_partitioning
+        .expect("time partitioning should exist");
+    assert_eq!(time_column_partitioning.field.as_deref(), Some("occurred_on"));
+    assert_eq!(time_column_partitioning.r#type, "MONTH");
+
+    let ingestion_time_table_id = store
+        .get_destination_table_metadata(ingestion_time_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist")
+        .table_id()
+        .to_owned();
+    let ingestion_time_partitioning = bigquery_database
+        .get_table_metadata_by_id(&ingestion_time_table_id)
+        .await
+        .expect("physical BigQuery table should exist")
+        .time_partitioning
+        .expect("time partitioning should exist");
+    assert!(ingestion_time_partitioning.field.is_none());
+    assert_eq!(ingestion_time_partitioning.r#type, "HOUR");
 }
 
 #[tokio::test(flavor = "multi_thread")]

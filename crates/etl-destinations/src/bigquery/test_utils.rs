@@ -497,10 +497,7 @@ impl BigQueryDatabase {
     where
         S: DestinationStore,
     {
-        self.build_destination(pipeline_id, schema_store)
-            .await
-            .with_table_options(table_options)
-            .expect("Failed to configure BigQuery table options")
+        self.build_destination(pipeline_id, schema_store).await.with_table_options(table_options)
     }
 }
 

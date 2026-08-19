@@ -127,10 +127,7 @@ fn create_table_options_sql(
         let cluster_columns = options
             .cluster_by
             .iter()
-            .map(|column| {
-                require_replicated_column(schema, column)?;
-                quote_identifier(column, "BigQuery clustering column")
-            })
+            .map(|column| quote_identifier(column, "BigQuery clustering column"))
             .collect::<EtlResult<Vec<_>>>()?
             .join(", ");
         clauses.push(format!("cluster by {cluster_columns}"));
@@ -161,9 +158,7 @@ fn partition_expression(
 
             match *typ {
                 Type::DATE if *granularity == BigQueryTimePartitionGranularity::Day => Ok(column),
-                Type::DATE if *granularity != BigQueryTimePartitionGranularity::Hour => {
-                    Ok(format!("date_trunc({column}, {granularity_sql})"))
-                }
+                Type::DATE => Ok(format!("date_trunc({column}, {granularity_sql})")),
                 Type::TIMESTAMP => Ok(format!("datetime_trunc({column}, {granularity_sql})")),
                 Type::TIMESTAMPTZ => Ok(format!("timestamp_trunc({column}, {granularity_sql})")),
                 _ => Err(invalid_table_options_config(format!(
@@ -175,14 +170,6 @@ fn partition_expression(
             }
         }
         BigQueryPartitionBy::IntegerRange { column, start, end, interval } => {
-            let typ = require_replicated_column(schema, column)?;
-            if !matches!(typ, &Type::INT2 | &Type::INT4 | &Type::INT8 | &Type::OID) {
-                return Err(invalid_table_options_config(format!(
-                    "Column `{column}` on table `{}` is not an integer partitioning column",
-                    schema.name()
-                )));
-            }
-
             let column = quote_identifier(column, "BigQuery partitioning column")?;
             Ok(format!("range_bucket({column}, generate_array({start}, {end}, {interval}))"))
         }
@@ -1803,13 +1790,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unreplicated_table_option_columns() {
+    fn leaves_clustering_column_validation_to_bigquery() {
         let missing_column = table_options(None, vec!["missing"]);
         let schema = replicated_schema();
-        assert!(matches!(
-            create_table_options_sql(Some(&missing_column), &schema),
-            Err(error) if error.kind() == ErrorKind::ConfigError
-        ));
+
+        assert_eq!(
+            create_table_options_sql(Some(&missing_column), &schema).unwrap(),
+            "cluster by `missing`"
+        );
     }
 
     fn successful_append_response() -> AppendRowsResponse {

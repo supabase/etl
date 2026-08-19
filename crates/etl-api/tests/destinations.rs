@@ -84,7 +84,7 @@ async fn bigquery_destination_can_be_created() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn invalid_bigquery_table_options_cannot_be_created() {
+async fn bigquery_table_options_are_not_validated_when_created() {
     init_test_tracing();
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -103,8 +103,11 @@ async fn invalid_bigquery_table_options_cannot_be_created() {
     let destination = CreateDestinationRequest { name: new_name(), config };
     let response = app.create_destination(tenant_id, &destination).await;
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(response.text().await.unwrap().contains("table_options.tables[0]"));
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    let stored_config = read_stored_destination_config(&app, response.id).await;
+    assert_eq!(stored_config["big_query"]["table_options"]["tables"][0]["table_id"], 16384);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -229,7 +232,7 @@ async fn an_existing_bigquery_destination_can_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn invalid_bigquery_table_options_cannot_be_updated() {
+async fn bigquery_table_options_are_not_validated_when_updated() {
     init_test_tracing();
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -254,8 +257,9 @@ async fn invalid_bigquery_table_options_cannot_be_updated() {
 
     let response = app.update_destination(tenant_id, destination_id, &update).await;
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(response.text().await.unwrap().contains("table_options.tables[0]"));
+    assert_eq!(response.status(), StatusCode::OK);
+    let stored_config = read_stored_destination_config(&app, destination_id).await;
+    assert_eq!(stored_config["big_query"]["table_options"]["tables"][0]["table_id"], 16384);
 }
 
 #[tokio::test(flavor = "multi_thread")]

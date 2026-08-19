@@ -34,6 +34,8 @@ impl BigQueryTableOptionsConfig {
 
 impl Validate for BigQueryTableOptionsConfig {
     fn validate(&self) -> Result<(), ValidationError> {
+        // Keep this limited to ETL-owned invariants. BigQuery validates
+        // destination-specific column rules and limits when it executes DDL.
         let mut table_ids = HashSet::with_capacity(self.tables.len());
 
         for (table_index, table) in self.tables.iter().enumerate() {
@@ -60,28 +62,11 @@ impl Validate for BigQueryTableOptionsConfig {
                 validate_bigquery_partition_by(partition_by, &table_field)?;
             }
 
-            if table.cluster_by.len() > 4 {
-                return Err(ValidationError::InvalidFieldValue {
-                    field: format!("{table_field}.cluster_by"),
-                    constraint: "must contain at most four columns".to_owned(),
-                });
-            }
-
-            let mut cluster_columns = HashSet::with_capacity(table.cluster_by.len());
             for (column_index, column) in table.cluster_by.iter().enumerate() {
                 validate_bigquery_column_name(
                     column,
                     &format!("{table_field}.cluster_by[{column_index}]"),
                 )?;
-
-                if !cluster_columns.insert(column) {
-                    return Err(ValidationError::InvalidFieldValue {
-                        field: format!("{table_field}.cluster_by[{column_index}]"),
-                        constraint: format!(
-                            "must be unique; column `{column}` is configured more than once"
-                        ),
-                    });
-                }
             }
         }
 
@@ -121,19 +106,12 @@ fn validate_bigquery_partition_by(
     }
 }
 
-/// Validates a BigQuery column name without requiring a source schema.
+/// Validates that an ETL table option names a column.
 fn validate_bigquery_column_name(column: &str, field: &str) -> Result<(), ValidationError> {
     if column.is_empty() {
         return Err(ValidationError::InvalidFieldValue {
             field: field.to_owned(),
             constraint: "must not be empty".to_owned(),
-        });
-    }
-
-    if column.chars().any(char::is_control) {
-        return Err(ValidationError::InvalidFieldValue {
-            field: field.to_owned(),
-            constraint: "must not contain control characters".to_owned(),
         });
     }
 
@@ -960,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_table_options_validate_static_constraints() {
+    fn bigquery_table_options_validate_etl_owned_invariants() {
         let table = |table_id, partition_by, cluster_by: &[&str]| BigQueryTableOptions {
             table_id,
             partition_by,
@@ -1000,15 +978,7 @@ mod tests {
                 )]),
                 "table_options.tables[0].partition_by.column",
             ),
-            (
-                config(vec![table(1, None, &["tenant\nid"])]),
-                "table_options.tables[0].cluster_by[0]",
-            ),
-            (
-                config(vec![table(1, None, &["a", "b", "c", "d", "e"])]),
-                "table_options.tables[0].cluster_by",
-            ),
-            (config(vec![table(1, None, &["id", "id"])]), "table_options.tables[0].cluster_by[1]"),
+            (config(vec![table(1, None, &[""])]), "table_options.tables[0].cluster_by[0]"),
             (
                 config(vec![table(
                     1,
@@ -1041,30 +1011,6 @@ mod tests {
             let ValidationError::InvalidFieldValue { field, .. } = config.validate().unwrap_err();
             assert_eq!(field, expected_field);
         }
-    }
-
-    #[test]
-    fn destination_validation_is_identical_without_secrets() {
-        let config = DestinationConfig::BigQuery {
-            project_id: "example-project".to_owned(),
-            dataset_id: "example_dataset".to_owned(),
-            service_account_key: "fake-service-account-key".to_owned().into(),
-            max_staleness_mins: None,
-            connection_pool_size: DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE,
-            table_options: BigQueryTableOptionsConfig {
-                tables: vec![BigQueryTableOptions {
-                    table_id: 1,
-                    partition_by: None,
-                    cluster_by: Vec::new(),
-                }],
-            },
-        };
-        let without_secrets = DestinationConfigWithoutSecrets::from(config.clone());
-
-        assert_eq!(
-            config.validate().unwrap_err().to_string(),
-            without_secrets.validate().unwrap_err().to_string()
-        );
     }
 
     #[test]

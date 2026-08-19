@@ -87,6 +87,9 @@ pub enum DestinationError {
 impl DestinationError {
     pub fn to_message(&self) -> String {
         match self {
+            DestinationError::Pipeline(PipelineError::InvalidPipelineRequest(message)) => {
+                format!("Invalid pipeline request: {message}")
+            }
             // Do not expose internal details in error messages.
             DestinationError::DestinationsDb(DestinationsDbError::Database(_))
             | DestinationError::PipelinesDb(PipelinesDbError::Database(_))
@@ -106,10 +109,12 @@ impl DestinationError {
 impl IntoResponse for DestinationError {
     fn into_response(self) -> Response {
         let status_code = match &self {
-            DestinationError::DestinationsDb(
-                DestinationsDbError::DestinationConfigUpdate(_)
-                | DestinationsDbError::InvalidConfig(_),
-            ) => StatusCode::BAD_REQUEST,
+            DestinationError::Pipeline(PipelineError::InvalidPipelineRequest(_)) => {
+                StatusCode::BAD_REQUEST
+            }
+            DestinationError::DestinationsDb(DestinationsDbError::DestinationConfigUpdate(_)) => {
+                StatusCode::BAD_REQUEST
+            }
             DestinationError::DestinationsDb(_)
             | DestinationError::PipelinesDb(_)
             | DestinationError::SourcesDb(_)

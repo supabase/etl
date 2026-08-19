@@ -126,7 +126,7 @@ mod bigquery {
             store.clone(),
         )
         .await?
-        .with_table_options(table_options.clone())?;
+        .with_table_options(table_options.clone());
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
         pipeline::start(pipeline).await

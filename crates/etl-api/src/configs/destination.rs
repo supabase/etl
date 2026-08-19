@@ -2,7 +2,7 @@ use etl_config::{
     SerializableSecretString,
     shared::{
         BigQueryTableOptionsConfig, ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode,
-        DuckLakeTableSortingConfig, IcebergConfig, Validate, ValidationError,
+        DuckLakeTableSortingConfig, IcebergConfig,
     },
 };
 use secrecy::ExposeSecret;
@@ -192,17 +192,6 @@ pub enum ApiDestinationConfig {
     },
 }
 
-impl Validate for ApiDestinationConfig {
-    /// Validates values that do not require access to the destination.
-    fn validate(&self) -> Result<(), ValidationError> {
-        match self {
-            Self::BigQuery { table_options, .. } => table_options.validate(),
-            Self::Ducklake { table_sorting, .. } => table_sorting.validate(),
-            Self::ClickHouse { .. } | Self::Iceberg { .. } | Self::Snowflake { .. } => Ok(()),
-        }
-    }
-}
-
 /// API representation of a destination configuration with credentials
 /// omitted.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -296,17 +285,6 @@ pub enum StrippedApiDestinationConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         role: Option<String>,
     },
-}
-
-impl Validate for StrippedApiDestinationConfig {
-    /// Validates values that do not depend on omitted credentials.
-    fn validate(&self) -> Result<(), ValidationError> {
-        match self {
-            Self::BigQuery { table_options, .. } => table_options.validate(),
-            Self::Ducklake { table_sorting, .. } => table_sorting.validate(),
-            Self::ClickHouse { .. } | Self::Iceberg { .. } | Self::Snowflake { .. } => Ok(()),
-        }
-    }
 }
 
 /// Errors returned while merging destination update configuration.
@@ -1027,25 +1005,6 @@ impl UpdateApiDestinationConfig {
     }
 }
 
-impl Validate for UpdateApiDestinationConfig {
-    /// Validates replacement values without resolving preserved fields.
-    fn validate(&self) -> Result<(), ValidationError> {
-        match self {
-            Self::BigQuery { table_options: UpdateField::Set(table_options), .. } => {
-                table_options.validate()
-            }
-            Self::Ducklake { table_sorting: UpdateField::Set(table_sorting), .. } => {
-                table_sorting.validate()
-            }
-            Self::BigQuery { .. }
-            | Self::ClickHouse { .. }
-            | Self::Iceberg { .. }
-            | Self::Ducklake { .. }
-            | Self::Snowflake { .. } => Ok(()),
-        }
-    }
-}
-
 /// Creates the error for an omitted required destination field.
 fn missing_required_field(
     destination: &'static str,
@@ -1412,17 +1371,6 @@ impl StoredDestinationConfig {
     }
 }
 
-impl Validate for StoredDestinationConfig {
-    /// Validates values that do not require access to the destination.
-    fn validate(&self) -> Result<(), ValidationError> {
-        match self {
-            Self::BigQuery { table_options, .. } => table_options.validate(),
-            Self::Ducklake { table_sorting, .. } => table_sorting.validate(),
-            Self::ClickHouse { .. } | Self::Iceberg { .. } | Self::Snowflake { .. } => Ok(()),
-        }
-    }
-}
-
 impl From<ApiDestinationConfig> for StoredDestinationConfig {
     fn from(value: ApiDestinationConfig) -> Self {
         match value {
@@ -1776,17 +1724,6 @@ pub enum EncryptedStoredDestinationConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<String>,
     },
-}
-
-impl Validate for EncryptedStoredDestinationConfig {
-    /// Validates non-secret values without decrypting credentials.
-    fn validate(&self) -> Result<(), ValidationError> {
-        match self {
-            Self::BigQuery { table_options, .. } => table_options.validate(),
-            Self::Ducklake { table_sorting, .. } => table_sorting.validate(),
-            Self::ClickHouse { .. } | Self::Iceberg { .. } | Self::Snowflake { .. } => Ok(()),
-        }
-    }
 }
 
 impl Store for EncryptedStoredDestinationConfig {}
@@ -2486,15 +2423,6 @@ mod tests {
                     "granularity": "day"
                 },
                 "cluster_by": ["tenant_id"]
-            }]
-        }))
-        .unwrap()
-    }
-
-    fn invalid_bigquery_table_options() -> BigQueryTableOptionsConfig {
-        serde_json::from_value(serde_json::json!({
-            "tables": [{
-                "table_id": 16384
             }]
         }))
         .unwrap()
@@ -3209,26 +3137,6 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_validation_is_consistent_across_api_config_representations() {
-        let api = ApiDestinationConfig::BigQuery {
-            project_id: "example-project".to_owned(),
-            dataset_id: "example_dataset".to_owned(),
-            service_account_key: SerializableSecretString::from("placeholder-key".to_owned()),
-            max_staleness_mins: None,
-            connection_pool_size: None,
-            table_options: invalid_bigquery_table_options(),
-        };
-        let stored = StoredDestinationConfig::from(api.clone());
-        let stripped = StrippedApiDestinationConfig::from(stored.clone());
-        let update = UpdateApiDestinationConfig::from_api_config(api.clone());
-        let expected = api.validate().unwrap_err().to_string();
-
-        assert_eq!(stripped.validate().unwrap_err().to_string(), expected);
-        assert_eq!(update.validate().unwrap_err().to_string(), expected);
-        assert_eq!(stored.validate().unwrap_err().to_string(), expected);
-    }
-
-    #[test]
     fn update_api_destination_config_preserves_omitted_bigquery_secret() {
         let stored_config = StoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
@@ -3311,7 +3219,6 @@ mod tests {
 
         let preserve: UpdateApiDestinationConfig =
             serde_json::from_value(serde_json::json!({"big_query": {}})).unwrap();
-        preserve.validate().unwrap();
         let preserved = preserve.merge_into_stored(stored_config.clone()).unwrap();
         let StoredDestinationConfig::BigQuery { table_options, .. } = preserved else {
             panic!("Config type doesn't match");
@@ -3322,7 +3229,6 @@ mod tests {
             "big_query": {"table_options": null}
         }))
         .unwrap();
-        clear.validate().unwrap();
         let cleared = clear.merge_into_stored(stored_config.clone()).unwrap();
         let StoredDestinationConfig::BigQuery { table_options, .. } = cleared else {
             panic!("Config type doesn't match");
