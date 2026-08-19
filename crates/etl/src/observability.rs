@@ -81,7 +81,11 @@ pub(crate) const CONFIRMATION_LABEL: &str = "confirmation";
 /// register the metrics only once.
 pub(crate) fn register_metrics() {
     REGISTER_METRICS.call_once(|| {
-        describe_gauge!(ETL_TABLES_TOTAL, Unit::Count, "Total number of tables being copied");
+        describe_gauge!(
+            ETL_TABLES_TOTAL,
+            Unit::Count,
+            "Current number of replicated tables, labeled by state."
+        );
 
         describe_histogram!(
             ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
