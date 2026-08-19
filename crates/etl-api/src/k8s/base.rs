@@ -26,6 +26,19 @@ pub enum K8sError {
     /// server.
     #[error("An error occurred with kube when dealing with K8s: {0}")]
     Kube(#[from] kube::Error),
+    /// A Kubernetes resource remained present after deletion was requested.
+    #[error(
+        "Timed out waiting for Kubernetes {kind} resource '{name}' to be deleted after \
+         {timeout_seconds} seconds"
+    )]
+    ResourceDeletionTimeout {
+        /// Kubernetes resource kind.
+        kind: &'static str,
+        /// Kubernetes resource name.
+        name: String,
+        /// Deletion timeout in seconds.
+        timeout_seconds: u64,
+    },
 }
 
 /// A file to be stored in a [`ConfigMap`] that is used to configure a
@@ -356,7 +369,7 @@ pub trait K8sClient: Send + Sync {
         config: DuckLakeMaintenanceResourceConfig,
     ) -> Result<(), K8sError>;
 
-    /// Deletes the DuckLake maintenance CR.
+    /// Deletes the DuckLake maintenance CR and waits until it is absent.
     async fn delete_ducklake_maintenance(&self, resource_prefix: &str) -> Result<(), K8sError>;
 
     /// Retrieves the current status of a replicator pod.
