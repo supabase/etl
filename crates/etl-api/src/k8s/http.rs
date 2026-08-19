@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
@@ -131,6 +131,10 @@ const DUCKLAKE_MAINTENANCE_GROUP: &str = "etl.supabase.com";
 const DUCKLAKE_MAINTENANCE_VERSION: &str = "v1alpha1";
 /// DuckLake maintenance CRD kind.
 const DUCKLAKE_MAINTENANCE_KIND: &str = "DuckLakeMaintenance";
+/// Maximum time to wait for a deleted DuckLake maintenance CR to disappear.
+const DUCKLAKE_MAINTENANCE_DELETE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Interval between checks for a deleted DuckLake maintenance CR.
+const DUCKLAKE_MAINTENANCE_DELETE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Vertical Pod Autoscaler CRD group.
 const VERTICAL_POD_AUTOSCALER_GROUP: &str = "autoscaling.k8s.io";
 /// Vertical Pod Autoscaler CRD version.
@@ -1007,7 +1011,24 @@ impl K8sClient for HttpK8sClient {
             self.ducklake_maintenance_api.delete(&name, &dp).await,
         )?;
 
-        Ok(())
+        match tokio::time::timeout(DUCKLAKE_MAINTENANCE_DELETE_TIMEOUT, async {
+            loop {
+                if self.ducklake_maintenance_api.get_opt(&name).await?.is_none() {
+                    return Ok(());
+                }
+
+                tokio::time::sleep(DUCKLAKE_MAINTENANCE_DELETE_POLL_INTERVAL).await;
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(K8sError::ResourceDeletionTimeout {
+                kind: DUCKLAKE_MAINTENANCE_KIND,
+                name,
+                timeout_seconds: DUCKLAKE_MAINTENANCE_DELETE_TIMEOUT.as_secs(),
+            }),
+        }
     }
 
     async fn get_replicator_pod_status(
