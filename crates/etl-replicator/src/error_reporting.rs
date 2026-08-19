@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use etl::{
-    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    destination::DestinationTableMetadata,
     error::{EtlError, EtlResult},
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
@@ -130,13 +130,6 @@ where
         table_id: TableId,
     ) -> EtlResult<Option<DestinationTableMetadata>> {
         self.inner.get_destination_table_metadata(table_id).await
-    }
-
-    async fn get_applied_destination_table_metadata(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
-        self.inner.get_applied_destination_table_metadata(table_id).await
     }
 
     async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {

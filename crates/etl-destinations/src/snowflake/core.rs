@@ -8,7 +8,7 @@ use etl::{
     bail,
     data::{OldTableRow, TableRow, UpdatedTableRow},
     destination::{
-        DestinationTableMetadata, DestinationTableSchemaStatus, DestinationWriteStatus,
+        DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
         DropTableForCopyResult, TaskSet, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
@@ -25,9 +25,9 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    recovery::ensure_relation_schema_transition,
+    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
     snowflake::{
-        Client,
+        Client, SNOWFLAKE_COLUMN_NAME_MAPPING,
         auth::{AuthManager, HttpExchanger, TokenProvider},
         encoding::{CdcMeta, CdcOperation},
         metrics::register_metrics,
@@ -36,6 +36,26 @@ use crate::{
     },
     table_name::try_stringify_table_name,
 };
+
+/// Ensures Snowflake metadata is ready for streaming operations.
+fn ensure_snowflake_metadata_applied(
+    table_id: TableId,
+    metadata: &DestinationTableMetadata,
+) -> EtlResult<()> {
+    if matches!(metadata.table_schema(), DestinationTableSchema::Applied { .. }) {
+        return Ok(());
+    }
+
+    Err(etl_error!(
+        ErrorKind::InvalidState,
+        "Snowflake destination table schema is not applied",
+        format!(
+            "Table {table_id} has schema state '{:?}' and cannot accept streaming events until \
+             the destination-specific recovery path completes",
+            metadata.table_schema()
+        )
+    ))
+}
 
 type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
 
@@ -67,9 +87,9 @@ fn take_truncate_operations(iter: &mut EventIter) -> Vec<(ReplicatedTableSchema,
 /// Coordinates the initial Snowflake setup of each table.
 ///
 /// Copy partitions can concurrently observe missing destination metadata. A
-/// per-table gate gives one caller ownership of the complete `Applying` ->
+/// per-table gate gives one caller ownership of the complete `Creating` ->
 /// remote setup -> `Applied` transition so a stale caller cannot overwrite
-/// completed metadata with `Applying`. The registry mutex is released before a
+/// completed metadata with `Creating`. The registry mutex is released before a
 /// caller waits for its table gate.
 #[derive(Clone)]
 struct TableInitializer {
@@ -95,17 +115,25 @@ impl TableInitializer {
         T: TokenProvider + 'static,
         C: StreamClient,
     {
+        table_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
         let table_id = table_schema.id();
         let table_name = try_stringify_table_name(table_schema.name())?.to_uppercase();
-        let columns: Vec<_> = table_schema.column_schemas().cloned().collect();
+        let columns: Vec<_> =
+            table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
 
         // Applied metadata needs no transition coordination, but this process
         // may still need to reopen its local channel state.
         if let Some(metadata) = store.get_destination_table_metadata(table_id).await?
             && metadata.is_applied()
         {
+            ensure_destination_schema_matches_metadata(
+                "Snowflake",
+                table_id,
+                &metadata,
+                table_schema,
+            )?;
             client
-                .prepare_existing_table(table_id, &metadata.destination_table_id, &columns)
+                .prepare_existing_table(table_id, metadata.table_id(), &columns)
                 .await
                 .map_err(EtlError::from)?;
             return Ok(());
@@ -118,17 +146,23 @@ impl TableInitializer {
             Arc::clone(gates.entry(table_id).or_insert_with(|| Arc::new(Semaphore::new(1))))
         };
 
-        // The permit owns the complete Applying -> remote setup -> Applied
+        // The permit owns the complete Creating -> remote setup -> Applied
         // transition for this table.
-        let _permit =
-            gate.acquire_owned().await.expect("table initialization gates are never closed");
+        let _permit = gate.acquire_owned().await.map_err(|error| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "Snowflake table initialization gate is closed",
+                format!("Table {table_id}"),
+                source: error
+            )
+        })?;
 
         // Re-read under the table gate because another copy partition may have
         // completed setup after the fast-path read.
         let snapshot_id = table_schema.inner().snapshot_id;
         let replication_mask = table_schema.replication_mask().clone();
         schema::validate_no_cdc_collisions(&columns).map_err(EtlError::from)?;
-        let applying_metadata = match store.get_destination_table_metadata(table_id).await? {
+        let creating_metadata = match store.get_destination_table_metadata(table_id).await? {
             None => {
                 if client.table_exists(&table_name).await.map_err(EtlError::from)? {
                     bail!(
@@ -144,7 +178,7 @@ impl TableInitializer {
 
                 // Record ownership before creating remote state so a restart can
                 // find and remove a partial setup.
-                let metadata = DestinationTableMetadata::new_applying(
+                let metadata = DestinationTableMetadata::new_creating(
                     table_name.clone(),
                     snapshot_id,
                     replication_mask.clone(),
@@ -154,26 +188,35 @@ impl TableInitializer {
             }
             Some(metadata) if metadata.is_applied() => {
                 // Another copy partition completed setup while this caller waited.
+                ensure_destination_schema_matches_metadata(
+                    "Snowflake",
+                    table_id,
+                    &metadata,
+                    table_schema,
+                )?;
                 client
-                    .prepare_existing_table(table_id, &metadata.destination_table_id, &columns)
+                    .prepare_existing_table(table_id, metadata.table_id(), &columns)
                     .await
                     .map_err(EtlError::from)?;
                 return Ok(());
             }
-            Some(metadata) if metadata.previous_snapshot_id.is_none() => {
+            Some(metadata) if metadata.is_creating() => {
                 // Resume a matching initial setup left by an earlier failure or
                 // cancellation.
-                if metadata.destination_table_id != table_name
-                    || metadata.snapshot_id != snapshot_id
-                    || metadata.replication_mask != replication_mask
-                {
+                ensure_destination_schema_matches_metadata(
+                    "Snowflake",
+                    table_id,
+                    &metadata,
+                    table_schema,
+                )?;
+                if metadata.table_id() != table_name {
                     bail!(
                         ErrorKind::CorruptedTableSchema,
-                        "Interrupted Snowflake table setup metadata does not match current schema",
+                        "Interrupted Snowflake table setup metadata does not match current table",
                         format!(
-                            "Table {table_id} has interrupted initial setup metadata for snapshot \
-                             {}, but the current setup uses snapshot {snapshot_id}.",
-                            metadata.snapshot_id
+                            "Table {table_id} has interrupted initial setup metadata for '{}', \
+                             but the current setup resolves to '{table_name}'.",
+                            metadata.table_id()
                         )
                     );
                 }
@@ -181,8 +224,8 @@ impl TableInitializer {
                 Some(metadata)
             }
             Some(_) => {
-                // Applying metadata with a previous snapshot belongs to schema
-                // evolution, which requires its separate recovery path.
+                // Applying metadata belongs to schema evolution, which requires
+                // its separate recovery path.
                 bail!(
                     ErrorKind::InvalidState,
                     "Snowflake table schema is still being applied",
@@ -198,7 +241,7 @@ impl TableInitializer {
         client.initialize_table(table_id, &table_name, &columns).await.map_err(EtlError::from)?;
 
         // Publish completion only after both the table and channel exist.
-        if let Some(metadata) = applying_metadata {
+        if let Some(metadata) = creating_metadata {
             store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
         }
 
@@ -289,46 +332,36 @@ where
 
     /// Loads the durable applied schema and prepares its existing table for
     /// events.
-    async fn prepare_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn prepare_table_for_writes(
+        &self,
+        table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_id = table_schema.id();
         // Check durable state before the warm-channel fast path so an interrupted
         // schema change continues to block DML.
         let metadata =
-            self.store.get_applied_destination_table_metadata(table_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::CorruptedTableSchema,
-                        "Destination metadata missing for Snowflake streaming table",
-                        format!(
-                            "Table {table_id} received a streaming event before initial copy \
-                             created applied destination metadata."
-                        )
+            self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::CorruptedTableSchema,
+                    "Destination metadata missing for Snowflake streaming table",
+                    format!(
+                        "Table {table_id} received a streaming event before initial copy created \
+                         destination metadata."
                     )
-                },
-            )?;
+                )
+            })?;
+        ensure_snowflake_metadata_applied(table_id, &metadata)?;
+        ensure_destination_schema_matches_metadata("Snowflake", table_id, &metadata, table_schema)?;
 
         if self.client.has_channel(table_id).await {
             return Ok(());
         }
 
-        let table_schema =
-            self.store.get_table_schema(&table_id, metadata.snapshot_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::MissingTableSchema,
-                        "Stored schema snapshot missing for Snowflake streaming table",
-                        format!(
-                            "Table {table_id} needs stored schema snapshot {} to prepare the \
-                             destination channel.",
-                            metadata.snapshot_id
-                        )
-                    )
-                },
-            )?;
-        let replicated_schema =
-            ReplicatedTableSchema::from_mask(table_schema, metadata.replication_mask.clone());
-        let columns: Vec<_> = replicated_schema.column_schemas().cloned().collect();
+        table_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
+        let columns: Vec<_> =
+            table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
         self.client
-            .prepare_existing_table(table_id, &metadata.destination_table_id, &columns)
+            .prepare_existing_table(table_id, metadata.table_id(), &columns)
             .await
             .map_err(EtlError::from)?;
 
@@ -379,7 +412,9 @@ where
             if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                 break;
             }
-            let event = iter.next().expect("iterator is non-empty after peek");
+            let Some(event) = iter.next() else {
+                break;
+            };
             match event {
                 Event::Insert(e) => self.encode_insert(e, &mut builders, &mut column_cache).await?,
                 Event::Update(e) => self.encode_update(e, &mut builders, &mut column_cache).await?,
@@ -415,7 +450,7 @@ where
         let had_truncates = !operations.is_empty();
 
         for (schema, offset) in operations {
-            self.prepare_table(schema.id()).await?;
+            self.prepare_table_for_writes(&schema).await?;
             self.client.truncate_table(schema.id(), &offset).await.map_err(EtlError::from)?;
         }
 
@@ -501,8 +536,11 @@ where
                     .map_err(EtlError::from)
             }
             SnowflakeDeleteRow::Key(key_row) => {
-                let identity_cols: Vec<_> =
-                    e.replicated_table_schema.identity_column_schemas().cloned().collect();
+                let identity_cols: Vec<_> = e
+                    .replicated_table_schema
+                    .identity_column_schemas()
+                    .map(|column| SNOWFLAKE_COLUMN_NAME_MAPPING.map_column_schema(column))
+                    .collect();
                 builders
                     .entry(table_id)
                     .or_default()
@@ -525,8 +563,9 @@ where
     ) -> EtlResult<()> {
         #[allow(clippy::map_entry)]
         if !column_cache.contains_key(&table_id) {
-            self.prepare_table(table_id).await?;
-            let cols: Vec<_> = table_schema.column_schemas().cloned().collect();
+            self.prepare_table_for_writes(table_schema).await?;
+            let cols: Vec<_> =
+                table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
             column_cache.insert(table_id, cols);
         }
         Ok(())
@@ -536,8 +575,7 @@ where
         let table_id = new_schema.id();
         let new_snapshot_id = new_schema.inner().snapshot_id;
 
-        let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await?
-        else {
+        let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
             bail!(
                 ErrorKind::CorruptedTableSchema,
                 "Destination metadata missing for Snowflake schema change",
@@ -547,9 +585,10 @@ where
                 )
             );
         };
+        ensure_snowflake_metadata_applied(table_id, &metadata)?;
 
-        let current_snapshot_id = metadata.snapshot_id;
-        let current_replication_mask = metadata.replication_mask.clone();
+        let current_snapshot_id = metadata.snapshot_id();
+        let current_replication_mask = metadata.replication_mask().clone();
         let new_replication_mask = new_schema.replication_mask().clone();
 
         // A relation carries no channel offset proving replay coverage or
@@ -574,7 +613,9 @@ where
             "schema change detected: snapshot_id {current_snapshot_id} -> {new_snapshot_id}"
         );
 
-        let target_columns: Vec<_> = new_schema.column_schemas().cloned().collect();
+        new_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
+        let target_columns: Vec<_> =
+            new_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
         schema::validate_no_cdc_collisions(&target_columns).map_err(EtlError::from)?;
 
         let current_table_schema = self
@@ -596,30 +637,27 @@ where
             current_table_schema,
             current_replication_mask.clone(),
         );
-        let current_columns: Vec<_> = current_schema.column_schemas().cloned().collect();
-        let table_name = metadata.destination_table_id.clone();
+        let current_columns: Vec<_> =
+            current_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
+        let table_name = metadata.table_id().to_owned();
         self.client
             .prepare_existing_table(table_id, &table_name, &current_columns)
             .await
             .map_err(EtlError::from)?;
 
+        let plan = current_schema.plan_schema_change(new_schema, SNOWFLAKE_COLUMN_NAME_MAPPING)?;
         self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
 
         let updated_metadata = DestinationTableMetadata::new_applied(
-            metadata.destination_table_id.clone(),
+            metadata.table_id().to_owned(),
             current_snapshot_id,
             current_replication_mask,
         )
-        .with_schema_change(
-            new_snapshot_id,
-            new_replication_mask,
-            DestinationTableSchemaStatus::Applying,
-        );
+        .with_schema_change(new_snapshot_id, new_replication_mask)?;
         self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
-        let diff = current_schema.diff(new_schema);
         if let Err(err) =
-            self.client.apply_schema_diff(&table_name, &diff).await.map_err(EtlError::from)
+            self.client.apply_schema_plan(&table_name, &plan).await.map_err(EtlError::from)
         {
             warn!(
                 table_id = ?table_id,
@@ -761,7 +799,9 @@ where
             }
 
             let table_id = replicated_table_schema.id();
-            let columns: Vec<_> = replicated_table_schema.column_schemas().cloned().collect();
+            let columns: Vec<_> = replicated_table_schema
+                .destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING)
+                .collect();
 
             // Build row batches. Snowflake has limits on max size of input, so we slice
             // into proper batches, when necessary.
@@ -935,7 +975,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interrupted_initial_setup_failure_preserves_metadata_applying() {
+    async fn initial_setup_failure_leaves_metadata_creating() {
         let (destination, store) = test_destination();
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(2),
@@ -943,7 +983,7 @@ mod tests {
             vec![ColumnSchema::new("_cdc_operation".to_owned(), Type::TEXT, -1, 1, true)],
         ));
         let schema = ReplicatedTableSchema::all(table_schema);
-        let metadata = DestinationTableMetadata::new_applying(
+        let metadata = DestinationTableMetadata::new_creating(
             try_stringify_table_name(schema.name()).unwrap().to_uppercase(),
             schema.inner().snapshot_id,
             schema.replication_mask().clone(),
@@ -958,14 +998,45 @@ mod tests {
             .await
             .unwrap()
             .expect("initial setup metadata should remain available for recovery");
-        assert!(metadata.is_applying());
-        assert_eq!(metadata.previous_snapshot_id, None);
-        assert_eq!(metadata.snapshot_id, schema.inner().snapshot_id);
-        assert_eq!(metadata.replication_mask, *schema.replication_mask());
+        assert!(metadata.is_creating());
+        assert_eq!(metadata.snapshot_id(), schema.inner().snapshot_id);
+        assert_eq!(metadata.replication_mask(), schema.replication_mask());
         assert_eq!(
-            metadata.destination_table_id,
+            metadata.table_id(),
             try_stringify_table_name(schema.name()).unwrap().to_uppercase()
         );
+    }
+
+    #[test]
+    fn snowflake_streaming_requires_applied_metadata() {
+        let table_id = TableId::new(2);
+        let creating_metadata = DestinationTableMetadata::new_creating(
+            "PUBLIC.USERS".to_owned(),
+            SnapshotId::initial(),
+            ReplicationMask::from_bytes(vec![1]),
+        );
+
+        let error = ensure_snowflake_metadata_applied(table_id, &creating_metadata).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+
+        let applied_metadata = creating_metadata.to_applied();
+        ensure_snowflake_metadata_applied(table_id, &applied_metadata).unwrap();
+    }
+
+    #[tokio::test]
+    async fn applied_initialization_rejects_a_different_schema_endpoint_before_remote_work() {
+        let (destination, store) = test_destination();
+        let schema = replicated_schema();
+        let metadata = DestinationTableMetadata::new_applied(
+            "PUBLIC_USERS".to_owned(),
+            test_snapshot_id(100_u64, 100_u64),
+            schema.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(schema.id(), metadata).await.unwrap();
+
+        let error = destination.writer.initialize_table(&schema).await.unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 
     #[tokio::test]
@@ -1024,7 +1095,7 @@ mod tests {
                 replicated_table_schema: stale_schema,
             })])
             .await
-            .expect_err("stale relation event should be rejected");
+            .unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
         assert_eq!(store.get_destination_table_metadata(table_id).await.unwrap(), Some(metadata));

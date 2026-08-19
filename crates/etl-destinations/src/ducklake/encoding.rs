@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::{NaiveDate, NaiveTime};
+use chrono::{NaiveDate, NaiveTime, Timelike};
 use duckdb::{
     arrow::{
         array::{
@@ -20,6 +20,8 @@ use etl::{
     schema::{ColumnSchema, ReplicatedTableSchema, Type, is_array_type},
 };
 use pg_escape::quote_literal;
+
+use crate::ducklake::DUCKLAKE_COLUMN_NAME_MAPPING;
 
 /// Prepared row payload reused across retry attempts.
 pub(super) enum PreparedRows {
@@ -177,7 +179,7 @@ impl ArrowColumnValues {
             }
             (Self::Time64Microsecond(values), Cell::Null) => values.push(None),
             (Self::Time64Microsecond(values), Cell::Time(value)) => {
-                values.push(Some(time_micros_since_midnight(value, column_name)?));
+                values.push(Some(time_micros_since_midnight(value)));
             }
             (Self::TimestampMicrosecond(values), Cell::Null) => values.push(None),
             (Self::TimestampMicrosecond(values), Cell::Timestamp(value)) => {
@@ -306,7 +308,18 @@ fn copy_rows_to_arrow_record_batch(
     table_rows: Vec<TableRow>,
 ) -> EtlResult<RecordBatch> {
     let row_count = table_rows.len();
-    let column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
+    let column_schemas = replicated_table_schema.column_schemas().collect::<Vec<_>>();
+    let fields = column_schemas
+        .iter()
+        .zip(column_kinds.iter())
+        .map(|(column_schema, kind)| {
+            Field::new(
+                DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column_schema.name),
+                kind.data_type(),
+                column_schema.nullable,
+            )
+        })
+        .collect::<Vec<_>>();
     let mut column_values = column_kinds
         .iter()
         .copied()
@@ -314,20 +327,13 @@ fn copy_rows_to_arrow_record_batch(
         .collect::<Vec<_>>();
 
     for row in table_rows {
-        for ((column_value, column_schema), cell) in
-            column_values.iter_mut().zip(column_schemas.iter()).zip(row.into_values())
+        for ((column_value, field), cell) in
+            column_values.iter_mut().zip(fields.iter()).zip(row.into_values())
         {
-            column_value.push_cell(&column_schema.name, cell)?;
+            column_value.push_cell(field.name(), cell)?;
         }
     }
 
-    let fields = column_schemas
-        .iter()
-        .zip(column_kinds.iter())
-        .map(|(column_schema, kind)| {
-            Field::new(column_schema.name.clone(), kind.data_type(), column_schema.nullable)
-        })
-        .collect::<Vec<_>>();
     let arrays = column_values.into_iter().map(ArrowColumnValues::into_array).collect::<Vec<_>>();
 
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(|error| {
@@ -351,16 +357,9 @@ fn date_days_since_epoch(value: NaiveDate, column_name: &str) -> EtlResult<i32> 
     })
 }
 
-/// Converts a time to DuckDB's Arrow time representation.
-fn time_micros_since_midnight(value: NaiveTime, column_name: &str) -> EtlResult<i64> {
-    let epoch_time = NaiveTime::from_hms_opt(0, 0, 0).expect("midnight time should be valid");
-    value.signed_duration_since(epoch_time).num_microseconds().ok_or_else(|| {
-        etl_error!(
-            ErrorKind::ConversionError,
-            "DuckLake Arrow copy conversion failed",
-            format!("Column '{column_name}' contains a time outside DuckDB's supported range")
-        )
-    })
+/// Converts a time to DuckDB's microseconds-since-midnight representation.
+fn time_micros_since_midnight(value: NaiveTime) -> i64 {
+    i64::from(value.num_seconds_from_midnight()) * 1_000_000 + i64::from(value.nanosecond() / 1_000)
 }
 
 /// Serializes a borrowed row into a SQL `VALUES (...)` tuple.
@@ -620,7 +619,6 @@ fn encode_hex(bytes: &[u8]) -> String {
 /// INSERT statements.
 fn cell_to_value(cell: Cell) -> Value {
     let epoch_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-    let epoch_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
 
     match cell {
         Cell::Null => Value::Null,
@@ -635,10 +633,7 @@ fn cell_to_value(cell: Cell) -> Value {
         // NUMERIC stored as VARCHAR to avoid precision loss.
         Cell::Numeric(n) => Value::Text(n.to_string()),
         Cell::Date(d) => Value::Date32(d.signed_duration_since(epoch_date).num_days() as i32),
-        Cell::Time(t) => {
-            let micros = t.signed_duration_since(epoch_time).num_microseconds().unwrap_or(0);
-            Value::Time64(TimeUnit::Microsecond, micros)
-        }
+        Cell::Time(t) => Value::Time64(TimeUnit::Microsecond, time_micros_since_midnight(t)),
         Cell::TimeTz(t) => Value::Text(t.to_string()),
         Cell::Timestamp(dt) => {
             Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros())
@@ -681,18 +676,14 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
                 })
                 .collect()
         }
-        ArrayCell::Time(v) => {
-            let epoch_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
-            v.into_iter()
-                .map(|o| {
-                    o.map_or(Value::Null, |t| {
-                        let micros =
-                            t.signed_duration_since(epoch_time).num_microseconds().unwrap_or(0);
-                        Value::Time64(TimeUnit::Microsecond, micros)
-                    })
+        ArrayCell::Time(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map_or(Value::Null, |t| {
+                    Value::Time64(TimeUnit::Microsecond, time_micros_since_midnight(t))
                 })
-                .collect()
-        }
+            })
+            .collect(),
         ArrayCell::TimeTz(v) => {
             v.into_iter().map(|o| o.map_or(Value::Null, |t| Value::Text(t.to_string()))).collect()
         }
@@ -750,6 +741,19 @@ mod tests {
         assert_eq!(cell_to_value(Cell::I32(42)), Value::Int(42));
         assert_eq!(cell_to_value(Cell::I64(-1)), Value::BigInt(-1));
         assert_eq!(cell_to_value(Cell::F64(3.46)), Value::Double(3.46));
+    }
+
+    #[test]
+    fn cell_to_value_preserves_time_microseconds_for_scalars_and_arrays() {
+        let time = NaiveTime::from_hms_micro_opt(12, 34, 56, 789_012).unwrap();
+        let micros = 45_296_789_012;
+        let value = Value::Time64(TimeUnit::Microsecond, micros);
+
+        assert_eq!(cell_to_value(Cell::Time(time)), value);
+        assert_eq!(
+            array_cell_to_value(ArrayCell::Time(vec![Some(time), None])),
+            Value::List(vec![value, Value::Null])
+        );
     }
 
     #[test]

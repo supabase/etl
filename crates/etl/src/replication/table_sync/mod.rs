@@ -73,7 +73,7 @@ where
     };
 
     let Some(table_schema) =
-        store.get_table_schema(&table_id, current_metadata.snapshot_id).await?
+        store.get_table_schema(&table_id, current_metadata.snapshot_id()).await?
     else {
         bail!(
             ErrorKind::InvalidState,
@@ -82,7 +82,7 @@ where
     };
 
     let existing_replicated_table_schema =
-        ReplicatedTableSchema::from_mask(table_schema, current_metadata.replication_mask.clone());
+        ReplicatedTableSchema::from_mask(table_schema, current_metadata.replication_mask().clone());
 
     Ok(Some((current_metadata, existing_replicated_table_schema)))
 }
@@ -201,8 +201,8 @@ where
             {
                 warn!(
                     table_id = table_id.0,
-                    destination_table_id = %current_metadata.destination_table_id,
-                    snapshot_id = %current_metadata.snapshot_id,
+                    destination_table_id = %current_metadata.table_id(),
+                    snapshot_id = %current_metadata.snapshot_id(),
                     "dropping pre-existing destination table before table copy"
                 );
 

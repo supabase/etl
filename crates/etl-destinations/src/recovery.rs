@@ -1,12 +1,36 @@
 //! Shared helpers for destination schema-transition safety and recovery.
 
-#[cfg(feature = "ducklake")]
-use etl::schema::TableSchema;
+use std::fmt::Display;
+
 use etl::{
+    destination::DestinationTableMetadata,
     error::{ErrorKind, EtlResult},
     etl_error,
-    schema::{ReplicationMask, SnapshotId, TableId},
+    schema::{ColumnAlteration, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId},
 };
+use tracing::warn;
+
+/// Warns that a destination is intentionally skipping a column type change.
+pub(crate) fn warn_unsupported_column_type_change(
+    destination_name: &str,
+    destination_table_id: impl Display,
+    alteration: &ColumnAlteration,
+) {
+    let before = alteration.before_column_schema();
+    let after = alteration.after_column_schema();
+    warn!(
+        destination_name,
+        destination_table_id = %destination_table_id,
+        column_name = %before.name,
+        before_data_type = before.typ.name(),
+        before_type_modifier = before.modifier,
+        after_data_type = after.typ.name(),
+        after_type_modifier = after.modifier,
+        "{destination_name} column type changes are currently unsupported; subsequent schema \
+         changes and row writes may fail or behave unpredictably until type-change support is \
+         implemented"
+    );
+}
 
 /// Validates that a relation can advance an applied destination schema.
 ///
@@ -54,35 +78,56 @@ pub(crate) fn ensure_relation_schema_transition(
     Ok(())
 }
 
-/// Builds a conservative previous replication mask for interrupted DDL.
+/// Requires an arriving schema to match the exact endpoint in destination
+/// metadata.
 ///
-/// [`etl::destination::DestinationTableMetadata`] stores the target mask, not
-/// the previous mask. Treat every previous-schema column as potentially
-/// present so an idempotent DDL planner removes target-excluded columns if they
-/// exist. Callers must separately reconcile target columns that may have been
-/// absent from the previous physical schema.
-#[cfg(feature = "ducklake")]
-pub(crate) fn conservative_previous_replication_mask(
-    previous_schema: &TableSchema,
-) -> ReplicationMask {
-    ReplicationMask::all(previous_schema)
+/// Caches may avoid remote work after this check, but they cannot replace it:
+/// the durable snapshot ID and replication mask define the only row shape the
+/// current destination table may accept.
+pub(crate) fn ensure_destination_schema_matches_metadata(
+    destination_name: &str,
+    table_id: TableId,
+    metadata: &DestinationTableMetadata,
+    received_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    let received_snapshot_id = received_schema.inner().snapshot_id;
+    let received_replication_mask = received_schema.replication_mask();
+    if metadata.snapshot_id() == received_snapshot_id
+        && metadata.replication_mask() == received_replication_mask
+    {
+        return Ok(());
+    }
+
+    Err(etl_error!(
+        ErrorKind::DestinationSchemaRewind,
+        "Destination metadata does not match the received schema",
+        format!(
+            "{destination_name} table {table_id} has destination metadata for snapshot {} and \
+             replication mask {}, but received snapshot {received_snapshot_id} and replication \
+             mask {received_replication_mask}. Recover the recorded destination operation or \
+             resynchronize the table before retrying.",
+            metadata.snapshot_id(),
+            metadata.replication_mask(),
+        )
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "ducklake")]
     use std::sync::Arc;
 
-    #[cfg(feature = "ducklake")]
-    use etl::schema::{ColumnSchema, ReplicatedTableSchema, TableName, TableSchema, Type};
     use etl::{
+        destination::DestinationTableMetadata,
         error::ErrorKind,
-        schema::{PgLsn, ReplicationMask, SnapshotId, TableId},
+        schema::{
+            ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
+            TableName, TableSchema, Type,
+        },
     };
 
-    #[cfg(feature = "ducklake")]
-    use crate::recovery::conservative_previous_replication_mask;
-    use crate::recovery::ensure_relation_schema_transition;
+    use crate::recovery::{
+        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
+    };
 
     /// Creates a synthetic composite snapshot ID for tests.
     fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
@@ -103,7 +148,7 @@ mod tests {
             applied_snapshot_id,
             &applied_mask,
         )
-        .expect("an identical applied schema should be accepted");
+        .unwrap();
         ensure_relation_schema_transition(
             "Test",
             table_id,
@@ -112,7 +157,7 @@ mod tests {
             test_snapshot_id(300_u64, 300_u64),
             &ReplicationMask::from_bytes(vec![1, 0, 1]),
         )
-        .expect("a newer schema snapshot should be accepted");
+        .unwrap();
     }
 
     #[test]
@@ -128,7 +173,7 @@ mod tests {
             test_snapshot_id(100_u64, 100_u64),
             &applied_mask,
         )
-        .expect_err("an older schema snapshot should be rejected");
+        .unwrap_err();
         assert_eq!(older_error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 
@@ -145,73 +190,51 @@ mod tests {
             applied_snapshot_id,
             &ReplicationMask::from_bytes(vec![1, 0, 1]),
         )
-        .expect_err("an equal snapshot with a different mask should be rejected");
+        .unwrap_err();
         assert_eq!(ambiguous_error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 
-    #[cfg(feature = "ducklake")]
     #[test]
-    fn conservative_previous_mask_exposes_filter_contraction_to_diff() {
-        let previous_schema = Arc::new(TableSchema::new(
-            TableId::new(5),
+    fn destination_schema_match_requires_snapshot_and_replication_mask() {
+        let table_id = TableId::new(7);
+        let snapshot_id = test_snapshot_id(200_u64, 200_u64);
+        let table_schema = Arc::new(TableSchema::with_snapshot_id(
+            table_id,
             TableName::new("public".to_owned(), "users".to_owned()),
-            vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("hidden".to_owned(), Type::TEXT, -1, 2, true),
-            ],
+            vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)],
+            snapshot_id,
         ));
-        let target_schema = Arc::new(TableSchema::with_snapshot_id(
-            previous_schema.id,
-            previous_schema.name.clone(),
-            previous_schema.column_schemas.clone(),
-            test_snapshot_id(42_u64, 42_u64),
-        ));
-        let previous_mask = conservative_previous_replication_mask(&previous_schema);
-        assert_eq!(previous_mask.as_slice(), &[1, 1]);
-        let previous = ReplicatedTableSchema::from_mask(previous_schema, previous_mask);
-        let target = ReplicatedTableSchema::from_mask(
-            target_schema,
-            ReplicationMask::from_bytes(vec![1, 0]),
+        let schema = ReplicatedTableSchema::all(table_schema);
+        let metadata = DestinationTableMetadata::new_applied(
+            "users".to_owned(),
+            snapshot_id,
+            schema.replication_mask().clone(),
         );
 
-        let diff = previous.diff(&target);
+        ensure_destination_schema_matches_metadata("Test", table_id, &metadata, &schema).unwrap();
 
-        assert_eq!(
-            diff.columns_to_remove.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
-            vec!["hidden"]
+        let different_snapshot = DestinationTableMetadata::new_applied(
+            "users".to_owned(),
+            test_snapshot_id(300_u64, 300_u64),
+            schema.replication_mask().clone(),
         );
-    }
+        let snapshot_error = ensure_destination_schema_matches_metadata(
+            "Test",
+            table_id,
+            &different_snapshot,
+            &schema,
+        )
+        .unwrap_err();
+        assert_eq!(snapshot_error.kind(), ErrorKind::DestinationSchemaRewind);
 
-    #[cfg(feature = "ducklake")]
-    #[test]
-    fn conservative_previous_mask_exposes_removed_source_column_to_diff() {
-        let previous_schema = Arc::new(TableSchema::new(
-            TableId::new(6),
-            TableName::new("public".to_owned(), "users".to_owned()),
-            vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
-                ColumnSchema::new("old_col".to_owned(), Type::TEXT, -1, 3, true),
-            ],
-        ));
-        let target_schema = Arc::new(TableSchema::with_snapshot_id(
-            previous_schema.id,
-            previous_schema.name.clone(),
-            vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
-            ],
-            test_snapshot_id(43_u64, 43_u64),
-        ));
-        let previous_mask = conservative_previous_replication_mask(&previous_schema);
-        let previous = ReplicatedTableSchema::from_mask(previous_schema, previous_mask);
-        let target = ReplicatedTableSchema::all(target_schema);
-
-        let diff = previous.diff(&target);
-
-        assert_eq!(
-            diff.columns_to_remove.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
-            vec!["old_col"]
+        let different_mask = DestinationTableMetadata::new_applied(
+            "users".to_owned(),
+            snapshot_id,
+            ReplicationMask::from_bytes(vec![0]),
         );
+        let mask_error =
+            ensure_destination_schema_matches_metadata("Test", table_id, &different_mask, &schema)
+                .unwrap_err();
+        assert_eq!(mask_error.kind(), ErrorKind::DestinationSchemaRewind);
     }
 }

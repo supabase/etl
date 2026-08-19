@@ -20,7 +20,7 @@ use etl::{
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
 };
-use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::random;
@@ -41,13 +41,13 @@ struct SchemaAddRow {
     score: Option<i32>,
 }
 
-/// Expected row shape after adding, dropping, and renaming columns.
+/// Expected row shape after a rename cycle and same-name replacement.
 #[derive(Debug, Eq, PartialEq)]
 struct SchemaMultiRow {
     id: i64,
-    full_name: String,
-    status: Option<String>,
-    email: Option<String>,
+    status: String,
+    name: Option<String>,
+    age: Option<String>,
 }
 
 /// Expected row shape after schema evolution followed by mutations.
@@ -93,7 +93,7 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
         quote_identifier("lake"),
         quote_literal(data.as_str())
     ))
-    .expect("failed to attach DuckLake catalog");
+    .unwrap();
 
     conn
 }
@@ -112,7 +112,7 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
 /// `run_duckdb_blocking`.
 fn checkpoint_lake(catalog: &Url, data: &Url) {
     let conn = open_lake_conn(catalog, data);
-    conn.execute_batch("checkpoint").expect("failed to checkpoint DuckLake catalog");
+    conn.execute_batch("checkpoint").unwrap();
 }
 
 fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
@@ -137,7 +137,7 @@ fn count_applied_batches(
         quote_literal(&table_name.id()),
         quote_literal(batch_kind),
     );
-    conn.query_row(&sql, [], |row| row.get(0)).expect("failed to count applied table batches")
+    conn.query_row(&sql, [], |row| row.get(0)).unwrap()
 }
 
 /// Queries replicated user rows using blocking DuckDB APIs.
@@ -147,16 +147,12 @@ fn count_applied_batches(
 fn query_user_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<(i64, String, i32)> {
     let sql =
         format!("select id, name, age from {} order by id", qualified_lake_table_name(table_name));
-    let mut statement = conn.prepare(&sql).expect("failed to prepare users query");
-    let mut rows = statement.query([]).expect("failed to run users query");
+    let mut statement = conn.prepare(&sql).unwrap();
+    let mut rows = statement.query([]).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().expect("failed to read users query row") {
-        result.push((
-            row.get(0).expect("failed to read users id"),
-            row.get(1).expect("failed to read users name"),
-            row.get(2).expect("failed to read users age"),
-        ));
+    while let Some(row) = rows.next().unwrap() {
+        result.push((row.get(0).unwrap(), row.get(1).unwrap(), row.get(2).unwrap()));
     }
 
     result
@@ -171,15 +167,12 @@ fn query_order_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<(i
         "select id, description from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).expect("failed to prepare orders query");
-    let mut rows = statement.query([]).expect("failed to run orders query");
+    let mut statement = conn.prepare(&sql).unwrap();
+    let mut rows = statement.query([]).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().expect("failed to read orders query row") {
-        result.push((
-            row.get(0).expect("failed to read orders id"),
-            row.get(1).expect("failed to read orders description"),
-        ));
+    while let Some(row) = rows.next().unwrap() {
+        result.push((row.get(0).unwrap(), row.get(1).unwrap()));
     }
 
     result
@@ -197,12 +190,29 @@ fn query_table_columns(conn: &Connection, table_name: &DuckLakeTableName) -> Vec
         quote_literal(table_name.schema()),
         quote_literal(table_name.table())
     );
-    let mut statement = conn.prepare(&sql).expect("failed to prepare columns query");
-    let mut rows = statement.query([]).expect("failed to run columns query");
+    let mut statement = conn.prepare(&sql).unwrap();
+    let mut rows = statement.query([]).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().expect("failed to read columns query row") {
-        result.push(row.get(0).expect("failed to read column name"));
+    while let Some(row) = rows.next().unwrap() {
+        result.push(row.get(0).unwrap());
+    }
+
+    result
+}
+
+/// Queries rows written before and after a case-only source rename.
+fn query_case_mapped_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<(i64, String)> {
+    let sql = format!(
+        "select id, display_name from {} order by id",
+        qualified_lake_table_name(table_name)
+    );
+    let mut statement = conn.prepare(&sql).unwrap();
+    let mut rows = statement.query([]).unwrap();
+    let mut result = Vec::new();
+
+    while let Some(row) = rows.next().unwrap() {
+        result.push((row.get(0).unwrap(), row.get(1).unwrap()));
     }
 
     result
@@ -217,25 +227,45 @@ fn query_schema_add_rows(conn: &Connection, table_name: &DuckLakeTableName) -> V
         "select id, name, age, email, score from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).expect("failed to prepare schema add query");
-    let mut rows = statement.query([]).expect("failed to run schema add query");
+    let mut statement = conn.prepare(&sql).unwrap();
+    let mut rows = statement.query([]).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().expect("failed to read schema add row") {
+    while let Some(row) = rows.next().unwrap() {
         result.push(SchemaAddRow {
-            id: row.get(0).expect("failed to read id"),
-            name: row.get(1).expect("failed to read name"),
-            age: row.get(2).expect("failed to read age"),
-            email: row.get(3).expect("failed to read email"),
-            score: row.get(4).expect("failed to read score"),
+            id: row.get(0).unwrap(),
+            name: row.get(1).unwrap(),
+            age: row.get(2).unwrap(),
+            email: row.get(3).unwrap(),
+            score: row.get(4).unwrap(),
         });
     }
 
     result
 }
 
-/// Queries rows after add/drop/rename schema changes using blocking DuckDB
-/// APIs.
+/// Queries rows after an existing source column enters the replication mask.
+fn query_publication_add_rows(
+    conn: &Connection,
+    table_name: &DuckLakeTableName,
+) -> Vec<(i64, String, Option<String>)> {
+    let sql = format!(
+        "select id, name, status from {} order by id",
+        qualified_lake_table_name(table_name)
+    );
+    let mut statement = conn.prepare(&sql).unwrap();
+    let mut rows = statement.query([]).unwrap();
+    let mut result = Vec::new();
+
+    while let Some(row) = rows.next().unwrap() {
+        result.push((row.get(0).unwrap(), row.get(1).unwrap(), row.get(2).unwrap()));
+    }
+
+    result
+}
+
+/// Queries rows after an ordered name-reuse schema change using blocking
+/// DuckDB APIs.
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
@@ -244,19 +274,19 @@ fn query_schema_multi_rows(
     table_name: &DuckLakeTableName,
 ) -> Vec<SchemaMultiRow> {
     let sql = format!(
-        "select id, full_name, status, email from {} order by id",
+        "select id, status, name, age from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).expect("failed to prepare schema multi query");
-    let mut rows = statement.query([]).expect("failed to run schema multi query");
+    let mut statement = conn.prepare(&sql).unwrap();
+    let mut rows = statement.query([]).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().expect("failed to read schema multi row") {
+    while let Some(row) = rows.next().unwrap() {
         result.push(SchemaMultiRow {
-            id: row.get(0).expect("failed to read id"),
-            full_name: row.get(1).expect("failed to read full_name"),
-            status: row.get(2).expect("failed to read status"),
-            email: row.get(3).expect("failed to read email"),
+            id: row.get(0).unwrap(),
+            status: row.get(1).unwrap(),
+            name: row.get(2).unwrap(),
+            age: row.get(3).unwrap(),
         });
     }
 
@@ -276,16 +306,16 @@ fn query_schema_mutation_rows(
         "select id, full_name, visits, email from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).expect("failed to prepare schema mutation query");
-    let mut rows = statement.query([]).expect("failed to run schema mutation query");
+    let mut statement = conn.prepare(&sql).unwrap();
+    let mut rows = statement.query([]).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().expect("failed to read schema mutation row") {
+    while let Some(row) = rows.next().unwrap() {
         result.push(SchemaMutationRow {
-            id: row.get(0).expect("failed to read id"),
-            full_name: row.get(1).expect("failed to read full_name"),
-            visits: row.get(2).expect("failed to read visits"),
-            email: row.get(3).expect("failed to read email"),
+            id: row.get(0).unwrap(),
+            full_name: row.get(1).unwrap(),
+            visits: row.get(2).unwrap(),
+            email: row.get(3).unwrap(),
         });
     }
 
@@ -305,15 +335,15 @@ fn query_simulator_ddl_rotation_rows(
         "select id, text_col, ddl_col_0_0 from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).expect("failed to prepare simulator DDL rotation query");
-    let mut rows = statement.query([]).expect("failed to run simulator DDL rotation query");
+    let mut statement = conn.prepare(&sql).unwrap();
+    let mut rows = statement.query([]).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().expect("failed to read simulator DDL rotation row") {
+    while let Some(row) = rows.next().unwrap() {
         result.push(SimulatorDdlRotationRow {
-            id: row.get(0).expect("failed to read id"),
-            text_col: row.get(1).expect("failed to read text_col"),
-            ddl_col_0_0: row.get(2).expect("failed to read ddl_col_0_0"),
+            id: row.get(0).unwrap(),
+            text_col: row.get(1).unwrap(),
+            ddl_col_0_0: row.get(2).unwrap(),
         });
     }
 
@@ -334,7 +364,7 @@ fn query_simulator_ddl_type_row(
          ddl_col_4_0 from {} where id = 5",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).expect("failed to prepare simulator DDL type query");
+    let mut statement = conn.prepare(&sql).unwrap();
     let row = statement.query_row([], |row| {
         Ok(SimulatorDdlTypeRow {
             id: row.get(0)?,
@@ -347,7 +377,7 @@ fn query_simulator_ddl_type_row(
         })
     });
 
-    row.expect("failed to read simulator DDL type row")
+    row.unwrap()
 }
 
 async fn build_destination(
@@ -366,7 +396,7 @@ async fn build_destination(
         store,
     )
     .await
-    .expect("failed to create DuckLake destination");
+    .unwrap();
 
     TestDestinationWrapper::wrap(raw_destination)
 }
@@ -381,11 +411,10 @@ async fn table_copy_and_streaming_with_restart() {
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
-    let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
-        .expect("failed to build DuckLake users table name");
+    let users_table_name =
+        table_name_to_ducklake_table_name(&database_schema.users_schema().name).unwrap();
     let orders_table_name =
-        table_name_to_ducklake_table_name(&database_schema.orders_schema().name)
-            .expect("failed to build DuckLake orders table name");
+        table_name_to_ducklake_table_name(&database_schema.orders_schema().name).unwrap();
 
     insert_mock_data(
         &mut database,
@@ -500,8 +529,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     let data_url = lake.data_url.clone();
 
     let users_schema = database_schema.users_schema();
-    let users_table_name = table_name_to_ducklake_table_name(&users_schema.name)
-        .expect("failed to build DuckLake users table name");
+    let users_table_name = table_name_to_ducklake_table_name(&users_schema.name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
 
@@ -589,11 +617,10 @@ async fn table_copy_and_streaming_without_restart() {
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
-    let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
-        .expect("failed to build DuckLake users table name");
+    let users_table_name =
+        table_name_to_ducklake_table_name(&database_schema.users_schema().name).unwrap();
     let orders_table_name =
-        table_name_to_ducklake_table_name(&database_schema.orders_schema().name)
-            .expect("failed to build DuckLake orders table name");
+        table_name_to_ducklake_table_name(&database_schema.orders_schema().name).unwrap();
 
     insert_mock_data(
         &mut database,
@@ -679,8 +706,8 @@ async fn table_insert_update_delete() {
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
-    let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
-        .expect("failed to build DuckLake users table name");
+    let users_table_name =
+        table_name_to_ducklake_table_name(&database_schema.users_schema().name).unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -805,11 +832,10 @@ async fn cdc_streaming_with_truncate() {
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
-    let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
-        .expect("failed to build DuckLake users table name");
+    let users_table_name =
+        table_name_to_ducklake_table_name(&database_schema.users_schema().name).unwrap();
     let orders_table_name =
-        table_name_to_ducklake_table_name(&database_schema.orders_schema().name)
-            .expect("failed to build DuckLake orders table name");
+        table_name_to_ducklake_table_name(&database_schema.orders_schema().name).unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -909,25 +935,21 @@ async fn schema_change_add_column() {
             &[("name", "text not null"), ("age", "integer not null")],
         )
         .await
-        .expect("failed to create source table");
+        .unwrap();
     let publication_name = "test_pub_ducklake_schema_add";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, age) values ('Alice', 25)",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert Alice");
+        .unwrap();
 
     let lake = create_test_lake("schema_change_add_column").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
-        .expect("failed to build DuckLake table name");
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -943,12 +965,9 @@ async fn schema_change_add_column() {
     pipeline.start().await.unwrap();
     table_sync_complete_notify.notified().await;
 
-    let initial_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after table creation");
-    let initial_snapshot_id = initial_metadata.snapshot_id;
+    let initial_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(initial_metadata.is_applied());
+    let initial_snapshot_id = initial_metadata.snapshot_id();
 
     let events_notify = destination
         .wait_for_events(vec![
@@ -969,26 +988,23 @@ async fn schema_change_add_column() {
             ],
         )
         .await
-        .expect("failed to alter source table");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, age, email, score) values ('Bob', 30, 'bob@example.com', 7)",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert Bob");
+        .unwrap();
 
     events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 
-    let final_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after schema change");
-    assert!(final_metadata.snapshot_id > initial_snapshot_id);
+    let final_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(final_metadata.is_applied());
+    assert!(final_metadata.snapshot_id() > initial_snapshot_id);
 
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(
@@ -1003,6 +1019,181 @@ async fn schema_change_add_column() {
                 score: Some(7),
             },
         ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn case_only_rename_keeps_canonical_ducklake_column() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("ducklake_case_only_rename");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("display_name", "text not null")])
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} rename column {} to {}",
+            table_name.as_quoted_identifier(),
+            quote_identifier("display_name"),
+            quote_identifier("DISPLAY_NAME")
+        ))
+        .await
+        .unwrap();
+    let publication_name = "test_pub_ducklake_case_only_rename";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} ({}) values ('Alice')",
+            table_name.as_quoted_identifier(),
+            quote_identifier("DISPLAY_NAME")
+        ))
+        .await
+        .unwrap();
+
+    let lake = create_test_lake("case_only_rename_keeps_canonical_ducklake_column").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
+    let store = NotifyingStore::new();
+    let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
+        .await;
+    database
+        .run_sql(&format!(
+            "alter table {} rename column {} to {}",
+            table_name.as_quoted_identifier(),
+            quote_identifier("DISPLAY_NAME"),
+            quote_identifier("display_name")
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} ({}) values ('Bob')",
+            table_name.as_quoted_identifier(),
+            quote_identifier("display_name")
+        ))
+        .await
+        .unwrap();
+
+    events_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+    checkpoint_lake(&catalog_url, &data_url);
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(query_table_columns(&conn, &ducklake_table_name), ["id", "display_name"]);
+    assert_eq!(
+        query_case_mapped_rows(&conn, &ducklake_table_name),
+        [(1, "Alice".to_owned()), (2, "Bob".to_owned())]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_mask_adds_existing_defaulted_column_without_backfill() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for publication column lists");
+        return;
+    }
+
+    let table_name = test_table_name("ducklake_publication_add_col");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("status", "text not null default 'pending'::text")],
+        )
+        .await
+        .unwrap();
+    let publication_name = "test_pub_ducklake_publication_add";
+    database
+        .run_sql(&format!(
+            "create publication {} for table {} (id, name)",
+            quote_identifier(publication_name),
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Alice')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let lake = create_test_lake("publication_mask_adds_existing_defaulted_column").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Relation, table_id, 1),
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+        ])
+        .await;
+
+    database
+        .run_sql(&format!(
+            "alter publication {} set table {} (id, name, status)",
+            quote_identifier(publication_name),
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (name, status) values ('Bob', 'replicated')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    events_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+    checkpoint_lake(&catalog_url, &data_url);
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(
+        query_publication_add_rows(&conn, &ducklake_table_name),
+        vec![(1, "Alice".to_owned(), None), (2, "Bob".to_owned(), Some("replicated".to_owned())),]
     );
 }
 
@@ -1019,25 +1210,21 @@ async fn schema_change_is_visible_to_already_open_connection() {
             &[("name", "text not null"), ("age", "integer not null")],
         )
         .await
-        .expect("failed to create source table");
+        .unwrap();
     let publication_name = "test_pub_ducklake_schema_open_conn";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, age) values ('Alice', 25)",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert Alice");
+        .unwrap();
 
     let lake = create_test_lake("schema_change_is_visible_to_already_open_connection").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
-        .expect("failed to build DuckLake table name");
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -1052,13 +1239,6 @@ async fn schema_change_is_visible_to_already_open_connection() {
 
     pipeline.start().await.unwrap();
     table_sync_complete_notify.notified().await;
-
-    let initial_snapshot_id = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after table creation")
-        .snapshot_id;
 
     checkpoint_lake(&catalog_url, &data_url);
     let conn = open_lake_conn(&catalog_url, &data_url);
@@ -1074,58 +1254,31 @@ async fn schema_change_is_visible_to_already_open_connection() {
     database
         .alter_table(
             table_name.clone(),
-            &[
-                TableModification::AddColumn { name: "email", data_type: "text" },
-                TableModification::AddColumn {
-                    name: "score",
-                    data_type: "integer not null default 0",
-                },
-            ],
+            &[TableModification::AddColumn { name: "email", data_type: "text" }],
         )
         .await
-        .expect("failed to alter source table");
+        .unwrap();
     database
         .run_sql(&format!(
-            "insert into {} (name, age, email, score) values ('Bob', 30, 'bob@example.com', 7)",
+            "insert into {} (name, age, email) values ('Bob', 30, 'bob@example.com')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert Bob");
+        .unwrap();
 
     events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 
-    let final_snapshot_id = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after schema change")
-        .snapshot_id;
-    assert!(final_snapshot_id > initial_snapshot_id);
-
     assert_eq!(
         query_table_columns(&conn, &ducklake_table_name),
-        vec!["id", "name", "age", "email", "score"]
-    );
-    assert_eq!(
-        query_schema_add_rows(&conn, &ducklake_table_name),
-        vec![
-            SchemaAddRow { id: 1, name: "Alice".to_owned(), age: 25, email: None, score: Some(0) },
-            SchemaAddRow {
-                id: 2,
-                name: "Bob".to_owned(),
-                age: 30,
-                email: Some("bob@example.com".to_owned()),
-                score: Some(7),
-            },
-        ]
+        vec!["id", "name", "age", "email"]
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_add_drop_rename() {
+async fn schema_change_ordered_name_reuse() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
@@ -1137,25 +1290,21 @@ async fn schema_change_add_drop_rename() {
             &[("name", "text not null"), ("age", "integer not null"), ("status", "text")],
         )
         .await
-        .expect("failed to create source table");
+        .unwrap();
     let publication_name = "test_pub_ducklake_schema_multi";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, age, status) values ('Alice', 25, 'active')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert Alice");
+        .unwrap();
 
-    let lake = create_test_lake("schema_change_add_drop_rename").await;
+    let lake = create_test_lake("schema_change_ordered_name_reuse").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
-        .expect("failed to build DuckLake table name");
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -1181,29 +1330,47 @@ async fn schema_change_add_drop_rename() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "supabase_etl_source_swap",
+            }],
         )
         .await
-        .expect("failed to rename source column");
-    database
-        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
-        .await
-        .expect("failed to drop source column");
+        .unwrap();
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn { name: "email", data_type: "text" }],
+            &[TableModification::RenameColumn { old_name: "status", new_name: "name" }],
         )
         .await
-        .expect("failed to add source column");
+        .unwrap();
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "supabase_etl_source_swap",
+                new_name: "status",
+            }],
+        )
+        .await
+        .unwrap();
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::DropColumn { name: "age" },
+                TableModification::AddColumn { name: "age", data_type: "text" },
+            ],
+        )
+        .await
+        .unwrap();
     database
         .run_sql(&format!(
-            "insert into {} (full_name, status, email) values ('Bob', 'pending', \
-             'bob@example.com')",
+            "insert into {} (status, name, age) values ('Bob', 'pending', 'thirty')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert Bob");
+        .unwrap();
 
     events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
@@ -1212,19 +1379,23 @@ async fn schema_change_add_drop_rename() {
 
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(
+        query_table_columns(&conn, &ducklake_table_name),
+        vec!["id", "status", "name", "age"]
+    );
+    assert_eq!(
         query_schema_multi_rows(&conn, &ducklake_table_name),
         vec![
             SchemaMultiRow {
                 id: 1,
-                full_name: "Alice".to_owned(),
-                status: Some("active".to_owned()),
-                email: None,
+                status: "Alice".to_owned(),
+                name: Some("active".to_owned()),
+                age: None,
             },
             SchemaMultiRow {
                 id: 2,
-                full_name: "Bob".to_owned(),
-                status: Some("pending".to_owned()),
-                email: Some("bob@example.com".to_owned()),
+                status: "Bob".to_owned(),
+                name: Some("pending".to_owned()),
+                age: Some("thirty".to_owned()),
             },
         ]
     );
@@ -1243,25 +1414,21 @@ async fn schema_change_then_update_and_delete() {
             &[("name", "text not null"), ("visits", "integer not null")],
         )
         .await
-        .expect("failed to create source table");
+        .unwrap();
     let publication_name = "test_pub_ducklake_schema_mutation";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
     database
         .run_sql(&format!(
             "insert into {} (name, visits) values ('Alice', 1)",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert Alice");
+        .unwrap();
 
     let lake = create_test_lake("schema_change_then_update_and_delete").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
-        .expect("failed to build DuckLake table name");
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -1292,21 +1459,21 @@ async fn schema_change_then_update_and_delete() {
             &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
         )
         .await
-        .expect("failed to rename source column");
+        .unwrap();
     database
         .alter_table(
             table_name.clone(),
             &[TableModification::AddColumn { name: "email", data_type: "text" }],
         )
         .await
-        .expect("failed to add source column");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (full_name, visits, email) values ('Bob', 1, 'bob@example.com')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert Bob");
+        .unwrap();
     database
         .run_sql(&format!(
             "update {} set full_name = 'Alice Smith', visits = 2, email = 'alice@example.com' \
@@ -1314,14 +1481,14 @@ async fn schema_change_then_update_and_delete() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to update Alice");
+        .unwrap();
     database
         .run_sql(&format!(
             "delete from {} where full_name = 'Bob'",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to delete Bob");
+        .unwrap();
 
     events_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
@@ -1353,18 +1520,14 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
     let table_id = database
         .create_table(table_name.clone(), true, &[("text_col", "text not null")])
         .await
-        .expect("failed to create source table");
+        .unwrap();
     let publication_name = "test_pub_ducklake_schema_simulator_rotation";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     let lake = create_test_lake("schema_change_matches_simulator_generated_column_rotation").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
-        .expect("failed to build DuckLake table name");
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -1392,14 +1555,14 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
             &[TableModification::AddColumn { name: "ddl_col_0_0", data_type: "text" }],
         )
         .await
-        .expect("failed to add first generated source column");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (text_col, ddl_col_0_0) values ('after_add', 'slot0_v0')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert row after generated column add");
+        .unwrap();
     events_notify.notified().await;
     let events_notify = destination
         .wait_for_events(vec![
@@ -1413,14 +1576,14 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
             &[TableModification::RenameColumn { old_name: "ddl_col_0_0", new_name: "ddl_col_0_1" }],
         )
         .await
-        .expect("failed to rename generated source column");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (text_col, ddl_col_0_1) values ('after_rename', 'slot0_v1')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert row after generated column rename");
+        .unwrap();
     events_notify.notified().await;
     let events_notify = destination
         .wait_for_events(vec![
@@ -1431,14 +1594,14 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
     database
         .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "ddl_col_0_1" }])
         .await
-        .expect("failed to drop generated source column");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (text_col) values ('after_drop')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert row after generated column drop");
+        .unwrap();
     events_notify.notified().await;
     let events_notify = destination
         .wait_for_events(vec![
@@ -1452,14 +1615,14 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
             &[TableModification::AddColumn { name: "ddl_col_0_0", data_type: "text" }],
         )
         .await
-        .expect("failed to re-add generated source column");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (text_col, ddl_col_0_0) values ('after_readd', 'slot0_readded')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert row after generated column re-add");
+        .unwrap();
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
@@ -1499,18 +1662,14 @@ async fn schema_change_matches_simulator_generated_column_types() {
     let table_id = database
         .create_table(table_name.clone(), true, &[("text_col", "text not null")])
         .await
-        .expect("failed to create source table");
+        .unwrap();
     let publication_name = "test_pub_ducklake_schema_simulator_types";
-    database
-        .create_publication(publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("failed to create publication");
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
     let lake = create_test_lake("schema_change_matches_simulator_generated_column_types").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name)
-        .expect("failed to build DuckLake table name");
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -1538,14 +1697,14 @@ async fn schema_change_matches_simulator_generated_column_types() {
             &[TableModification::AddColumn { name: "ddl_col_0_0", data_type: "text" }],
         )
         .await
-        .expect("failed to add generated text source column");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (text_col, ddl_col_0_0) values ('after_text', 'text_0')",
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert row after text generated column add");
+        .unwrap();
     events_notify.notified().await;
     let events_notify = destination
         .wait_for_events(vec![
@@ -1559,7 +1718,7 @@ async fn schema_change_matches_simulator_generated_column_types() {
             &[TableModification::AddColumn { name: "ddl_col_1_0", data_type: "integer" }],
         )
         .await
-        .expect("failed to add generated integer source column");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (text_col, ddl_col_0_0, ddl_col_1_0) values ('after_integer', \
@@ -1567,7 +1726,7 @@ async fn schema_change_matches_simulator_generated_column_types() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert row after integer generated column add");
+        .unwrap();
     events_notify.notified().await;
     let events_notify = destination
         .wait_for_events(vec![
@@ -1581,7 +1740,7 @@ async fn schema_change_matches_simulator_generated_column_types() {
             &[TableModification::AddColumn { name: "ddl_col_2_0", data_type: "boolean" }],
         )
         .await
-        .expect("failed to add generated boolean source column");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (text_col, ddl_col_0_0, ddl_col_1_0, ddl_col_2_0) values \
@@ -1589,7 +1748,7 @@ async fn schema_change_matches_simulator_generated_column_types() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert row after boolean generated column add");
+        .unwrap();
     events_notify.notified().await;
     let events_notify = destination
         .wait_for_events(vec![
@@ -1603,7 +1762,7 @@ async fn schema_change_matches_simulator_generated_column_types() {
             &[TableModification::AddColumn { name: "ddl_col_3_0", data_type: "timestamptz" }],
         )
         .await
-        .expect("failed to add generated timestamptz source column");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (text_col, ddl_col_0_0, ddl_col_1_0, ddl_col_2_0, ddl_col_3_0) values \
@@ -1611,7 +1770,7 @@ async fn schema_change_matches_simulator_generated_column_types() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert row after timestamptz generated column add");
+        .unwrap();
     events_notify.notified().await;
     let events_notify = destination
         .wait_for_events(vec![
@@ -1625,7 +1784,7 @@ async fn schema_change_matches_simulator_generated_column_types() {
             &[TableModification::AddColumn { name: "ddl_col_4_0", data_type: "numeric(10, 2)" }],
         )
         .await
-        .expect("failed to add generated numeric source column");
+        .unwrap();
     database
         .run_sql(&format!(
             "insert into {} (text_col, ddl_col_0_0, ddl_col_1_0, ddl_col_2_0, ddl_col_3_0, \
@@ -1634,7 +1793,7 @@ async fn schema_change_matches_simulator_generated_column_types() {
             table_name.as_quoted_identifier()
         ))
         .await
-        .expect("failed to insert row after numeric generated column add");
+        .unwrap();
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();

@@ -161,7 +161,12 @@ fn render_ducklake_default_expression(
             matches!(typ, &Type::INTERVAL).then(|| expression.clone())
         }
         DefaultExpression::JsonLiteral(expression) => is_json_type(typ).then(|| expression.clone()),
-        DefaultExpression::BooleanLiteral(_) => None,
+        DefaultExpression::BooleanLiteral(expression) => {
+            // DuckLake accepts only literal add-time defaults. DuckDB parses
+            // bare boolean keywords as expressions for this validation, while
+            // a quoted boolean remains a literal and is coerced to BOOLEAN.
+            matches!(typ, &Type::BOOL).then(|| quote_literal(expression))
+        }
     }
 }
 
@@ -197,11 +202,6 @@ fn is_json_type(typ: &Type) -> bool {
 /// Quotes a parser-validated numeric literal as a SQL string literal.
 fn quote_numeric_literal_as_string(expression: &str) -> String {
     format!("'{expression}'")
-}
-
-/// Returns whether a column default can be represented in DuckLake SQL.
-pub(super) fn supports_column_default_ducklake(default_expression: &str, typ: &Type) -> bool {
-    ducklake_default_expression(default_expression, typ).is_some()
 }
 
 /// Returns a rendered DuckLake default expression for a column, if supported.
@@ -339,6 +339,17 @@ pub(super) fn build_drop_default_sql_ducklake(
     format!("alter table {table_name} alter column {column_name} drop default")
 }
 
+/// Builds a DuckLake `alter table alter column drop not null` statement.
+pub(super) fn build_drop_not_null_sql_ducklake(
+    table_name: &DuckLakeTableName,
+    column_name: &str,
+) -> String {
+    let table_name = qualified_lake_table_name(table_name);
+    let column_name = quote_identifier(column_name);
+
+    format!("alter table {table_name} alter column {column_name} drop not null")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,17 +461,17 @@ mod tests {
     }
 
     #[test]
-    fn build_create_table_sql_qualifies_lake_catalog() {
+    fn build_create_table_sql_qualifies_names_and_omits_absent_defaults() {
         let sql = build_create_table_sql_ducklake(
             &table_name("odd\"table"),
             &[ColumnSchema::new("select".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
         );
 
-        assert!(sql.starts_with(
+        assert_eq!(
+            sql,
             "create schema if not exists \"lake\".\"public\";\ncreate table if not exists \
-             \"lake\".\"public\".\"odd\"\"table\""
-        ));
-        assert!(sql.contains("  \"select\" integer not null"));
+             \"lake\".\"public\".\"odd\"\"table\" (  \"select\" integer not null)"
+        );
     }
 
     #[test]
@@ -474,8 +485,8 @@ mod tests {
     }
 
     #[test]
-    fn build_add_column_sql_includes_supported_default() {
-        let column = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 4, true)
+    fn build_add_column_sql_keeps_not_null_column_nullable_with_supported_default() {
+        let column = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 4, false)
             .with_default_expression("'pending'::text".to_owned());
         let sql = build_add_column_sql_ducklake(&table_name("test_table"), &column);
 
@@ -488,6 +499,7 @@ mod tests {
     #[test]
     fn ducklake_default_clause_renders_portable_expressions() {
         let cases = [
+            (Type::BOOL, "true", " default 'true'"),
             (Type::TEXT, "true", " default 'true'"),
             (Type::JSONB, "'{}'::jsonb", " default '{}'"),
             (Type::NUMERIC, "42", " default '42'"),
@@ -514,8 +526,6 @@ mod tests {
         }
 
         let unsupported_cases = [
-            (Type::BOOL, "true"),
-            (Type::BOOL, "'true'::text"),
             (Type::INT4, "'abc'::text"),
             (Type::NUMERIC, "10 + 5"),
             (Type::UUID, "gen_random_uuid()"),

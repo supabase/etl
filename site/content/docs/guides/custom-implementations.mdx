@@ -29,13 +29,26 @@ ETL delivers data to destinations in **two phases**:
 </Callout>
 
 Schema changes are surfaced through `Event::Relation`. If your destination
-keeps physical schemas, flush pending writes before handling a relation event,
-apply the supported schema diff, then process following row events with the new
-schema. The built-in destinations handle column adds, drops, renames,
-nullability changes, and supported default changes, but default expressions and
-backfill semantics remain destination-specific. See
-[Schema Changes](/explanation/schema-changes/) for the current semantics and
-limitations.
+keeps physical schemas, flush writes using the previous schema, build a
+destination-aware plan, validate the complete plan, and apply its operations in
+the supplied order before processing following rows. Each alteration contains
+adjacent before and after column schemas. A default addition, removal, or
+replacement is one `Default` alteration; remove the old default idempotently,
+then set the new one only when currently supported.
+
+The `reason` carried by `SchemaOperation::AddColumn` distinguishes a physical
+PostgreSQL table addition from a column newly exposed by a publication
+replication mask. For a replication-mask addition, always create the destination
+column as nullable: its historical values were never replicated, even when the
+source column is `NOT NULL`. Keep those existing values `NULL`. Install source
+default metadata only if the destination guarantees that setting the default
+affects future writes without changing or virtually projecting values for
+existing rows. If the destination type cannot be nullable, reject the schema
+change before DDL and require resynchronization. Future ETL row events already
+contain the value evaluated by PostgreSQL.
+
+See [Schema Changes](/explanation/schema-changes/) for built-in destination
+behavior, recovery rules, and current limitations.
 
 ## Create the project [#create-the-project] [step]
 
@@ -95,7 +108,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use etl::{
-    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    destination::DestinationTableMetadata,
     error::{ErrorKind, EtlResult},
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
@@ -285,16 +298,6 @@ impl StateStore for CustomStore {
         Ok(tables
             .get(&table_id)
             .and_then(|e| e.destination_metadata.clone()))
-    }
-
-    async fn get_applied_destination_table_metadata(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
-        self.get_destination_table_metadata(table_id)
-            .await?
-            .map(|metadata| metadata.into_applied())
-            .transpose()
     }
 
     async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {

@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, future::Future, sync::Arc};
 
 use crate::{
-    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    destination::DestinationTableMetadata,
     error::EtlResult,
     schema::{PgLsn, TableId},
     store::{TableState, WorkerType},
@@ -106,21 +106,6 @@ pub trait StateStore {
         &self,
         table_id: TableId,
     ) -> impl Future<Output = EtlResult<Option<DestinationTableMetadata>>> + Send;
-
-    /// Returns destination table metadata only when the schema is fully
-    /// applied.
-    ///
-    /// This is the preferred accessor for normal application code. It converts
-    /// the raw metadata into [`AppliedDestinationTableMetadata`] and returns an
-    /// error if the stored metadata exists but is not in the applied state.
-    ///
-    /// Recovery and DDL transition code should continue to use
-    /// [`Self::get_destination_table_metadata`] directly so it can reason about
-    /// `Applying` metadata explicitly.
-    fn get_applied_destination_table_metadata(
-        &self,
-        table_id: TableId,
-    ) -> impl Future<Output = EtlResult<Option<AppliedDestinationTableMetadata>>> + Send;
 
     /// Loads all destination table metadata from the persistent store into the
     /// cache.

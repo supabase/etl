@@ -38,7 +38,7 @@ use tracing::{debug, trace, warn};
 
 use crate::{
     ducklake::{
-        DuckLakeTableName, LAKE_CATALOG,
+        DUCKLAKE_COLUMN_NAME_MAPPING, DuckLakeTableName, LAKE_CATALOG,
         client::{
             DuckLakeBlockingOperationContext, DuckLakeConnectionManager, format_query_error_detail,
             is_ducklake_shutdown_requested_error, run_duckdb_blocking,
@@ -315,7 +315,10 @@ struct DuckLakeBatchIdentity {
 
 /// Returns destination-visible column names in replicated write order.
 fn replicated_column_names(replicated_table_schema: &ReplicatedTableSchema) -> Vec<String> {
-    replicated_table_schema.column_schemas().map(|column| column.name.clone()).collect()
+    replicated_table_schema
+        .destination_column_schemas(DUCKLAKE_COLUMN_NAME_MAPPING)
+        .map(|column| column.name)
+        .collect()
 }
 
 /// Prepared per-table work executed atomically in one DuckLake transaction.
@@ -1302,7 +1305,8 @@ fn delete_predicate_from_row<'a>(
 
     let mut predicates = Vec::new();
     for (column_schema, value) in key_values {
-        let quoted_column = quote_identifier(&column_schema.name);
+        let quoted_column =
+            quote_identifier(&DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column_schema.name));
         let predicate = match value {
             Cell::Null => format!("{quoted_column} IS NULL"),
             _ => format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)),
@@ -1378,7 +1382,8 @@ fn update_assignments_from_partial_row(
                 )
             ));
         };
-        let quoted_column = quote_identifier(&column_schema.name);
+        let quoted_column =
+            quote_identifier(&DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column_schema.name));
         assignments.push(format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)));
     }
 
@@ -1496,7 +1501,8 @@ fn delete_predicate_from_copy_row(
             continue;
         }
 
-        let quoted_column = quote_identifier(&column_schema.name);
+        let quoted_column =
+            quote_identifier(&DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column_schema.name));
         let predicate = match value {
             Cell::Null => format!("{quoted_column} IS NULL"),
             _ => format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)),
@@ -2349,6 +2355,16 @@ mod tests {
             TableName::new("public".to_owned(), "users".to_owned()),
             columns,
         )))
+    }
+
+    #[test]
+    fn replicated_column_names_use_ducklake_mapping() {
+        let schema = make_replicated_schema_with_columns(vec![
+            ColumnSchema::new("ID".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("Display_Name".to_owned(), PgType::TEXT, -1, 2, true),
+        ]);
+
+        assert_eq!(replicated_column_names(&schema), ["id", "display_name"]);
     }
 
     fn ducklake_table_name() -> DuckLakeTableName {

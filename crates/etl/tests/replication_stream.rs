@@ -1240,6 +1240,85 @@ async fn logical_replication_replays_consecutive_ddl_only_transactions_without_r
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_replays_consecutive_renames_as_one_final_relation() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("consecutive_rename_cycle");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("a", "text"), ("b", "text")])
+        .await
+        .unwrap();
+
+    let publication_name = "consecutive_rename_cycle_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "consecutive_rename_cycle_slot").await;
+
+    database
+        .run_sql(&format!(
+            "alter table {quoted_table_name} rename column a to supabase_etl_source_swap"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("alter table {quoted_table_name} rename column b to a"))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {quoted_table_name} rename column supabase_etl_source_swap to b"
+        ))
+        .await
+        .unwrap();
+    database.insert_values(table_name, &["a", "b"], &[&"old-b", &"old-a"]).await.unwrap();
+
+    let expected = [
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "supabase_etl_source_swap".to_owned(), "b".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "supabase_etl_source_swap".to_owned(), "a".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "b".to_owned(), "a".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(
+            table_id.into_inner(),
+            vec!["id".to_owned(), "b".to_owned(), "a".to_owned()],
+        ),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_orders_concurrent_ddl_transactions_by_commit_lsn() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
