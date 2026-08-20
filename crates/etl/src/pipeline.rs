@@ -204,7 +204,7 @@ where
         // database queries that should not use the replication connection.
         let out_of_band_source_pool = OutOfBandSourcePool::new(
             &self.config.pg_connection,
-            Duration::from_millis(self.config.replication_lag_refresh_interval_ms),
+            Duration::from_millis(self.config.table_sync_monitor_refresh_interval_ms),
         );
 
         // We create and start the apply worker.

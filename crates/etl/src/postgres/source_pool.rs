@@ -9,6 +9,7 @@ use crate::{
     config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
     error::{ErrorKind, EtlResult},
     etl_error,
+    postgres::client::SlotState,
 };
 
 /// Maximum number of connections in the out-of-band pool.
@@ -37,10 +38,10 @@ impl OutOfBandSourcePool {
     /// Creates a new lazy out-of-band source pool.
     pub(crate) fn new(
         connection_config: &PgConnectionConfig,
-        replication_lag_refresh_interval: Duration,
+        table_sync_monitor_refresh_interval: Duration,
     ) -> Self {
         let connect_options = connection_config.with_db(Some(&OUT_OF_BAND_OPTIONS));
-        let idle_timeout = replication_lag_refresh_interval
+        let idle_timeout = table_sync_monitor_refresh_interval
             .saturating_add(IDLE_TIMEOUT_REFRESH_PADDING)
             .max(MIN_IDLE_TIMEOUT);
         let pool = PgPoolOptions::new()
@@ -76,6 +77,45 @@ impl OutOfBandSourcePool {
                 "Invalid source current LSN returned by Postgres",
                 current_wal_lsn
             )
+        })
+    }
+
+    /// Queries the current state of the replication slot named `slot_name`.
+    ///
+    /// Returns [`SlotState::Invalidated`] when the slot's `wal_status` is
+    /// `lost`, which happens once PostgreSQL has removed WAL segments the slot
+    /// still needed. Returns [`SlotState::NotInvalidated`] when the slot exists
+    /// and is not known to be invalidated, including when its `wal_status` is
+    /// `NULL`.
+    ///
+    /// Returns an error if the slot does not exist.
+    pub(crate) async fn get_slot_state(&self, slot_name: &str) -> EtlResult<SlotState> {
+        let row: Option<Option<String>> =
+            sqlx::query_scalar("select wal_status from pg_replication_slots where slot_name = $1")
+                .bind(slot_name)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(|error| {
+                    etl_error!(
+                        ErrorKind::SourceConnectionFailed,
+                        "Replication slot state query failed",
+                        source: error
+                    )
+                })?;
+
+        let Some(wal_status) = row else {
+            return Err(etl_error!(
+                ErrorKind::ReplicationSlotNotFound,
+                "Replication slot not found",
+                format!("Replication slot '{slot_name}' not found in database")
+            ));
+        };
+
+        // A NULL status means PostgreSQL cannot determine WAL availability from the
+        // slot's restart LSN, for example because the slot has not reserved WAL yet.
+        Ok(match wal_status.as_deref() {
+            Some("lost") => SlotState::Invalidated,
+            Some(_) | None => SlotState::NotInvalidated,
         })
     }
 }

@@ -8,29 +8,30 @@ use std::{
 
 use etl_config::shared::BatchConfig;
 use futures::{Stream, StreamExt};
-use metrics::{counter, gauge, histogram};
+use metrics::{counter, histogram};
 use tokio::{
     pin,
     sync::{Mutex, watch},
-    task::{JoinHandle, JoinSet},
-    time::MissedTickBehavior,
+    task::JoinSet,
 };
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
+use super::monitor::TableSyncMonitor;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
 use crate::{
+    bail,
     destination::{Destination, DestinationWriteStatus, WriteTableRowsResult},
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::{
         ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
         ETL_EVENTS_RECEIVED_TOTAL, ETL_TABLE_COPY_DURATION_SECONDS,
-        ETL_TABLE_COPY_EFFECTIVE_PARTITIONS, ETL_TABLE_COPY_END_TO_END_LAG_BYTES,
-        ETL_TABLE_COPY_PARTITION_BLOCKS, ETL_TABLE_COPY_PARTITION_DURATION_SECONDS,
-        ETL_TABLE_COPY_PARTITION_ROWS, ETL_TABLE_COPY_PARTITIONS_TOTAL,
-        ETL_TABLE_COPY_PLANNED_PARTITIONS, ETL_TABLE_COPY_ROWS_TOTAL, WORKER_TYPE_LABEL,
+        ETL_TABLE_COPY_EFFECTIVE_PARTITIONS, ETL_TABLE_COPY_PARTITION_BLOCKS,
+        ETL_TABLE_COPY_PARTITION_DURATION_SECONDS, ETL_TABLE_COPY_PARTITION_ROWS,
+        ETL_TABLE_COPY_PARTITIONS_TOTAL, ETL_TABLE_COPY_PLANNED_PARTITIONS,
+        ETL_TABLE_COPY_ROWS_TOTAL, WORKER_TYPE_LABEL,
     },
     postgres::{
         OutOfBandSourcePool, TableCopyRow, TableCopyStream,
@@ -59,14 +60,14 @@ const MAX_CTID_COPY_PARTITIONS: u16 = 1024;
 
 /// Mergeable progress accumulated across concurrent table-copy work.
 #[derive(Debug, Default)]
-struct CopyProgress {
+struct TableCopyProgress {
     /// Total number of rows copied.
     total_rows: u64,
     /// Whether any row batch was accepted without being durable.
     barrier_required: bool,
 }
 
-impl CopyProgress {
+impl TableCopyProgress {
     /// Records one successfully accepted or durable row batch.
     fn record_batch(&mut self, row_count: u64, status: DestinationWriteStatus) {
         self.total_rows += row_count;
@@ -98,7 +99,7 @@ pub(crate) enum TableCopyResult {
 
 /// A physical ctid range copied by one worker.
 #[derive(Debug)]
-struct CopyPartition {
+struct TableCopyPartition {
     /// The table to issue COPY against.
     source_table_id: TableId,
     /// The table used to resolve publication row filters.
@@ -111,9 +112,9 @@ struct CopyPartition {
 
 /// Outcome of one worker connection.
 #[derive(Debug)]
-enum CopyWorkerOutcome {
+enum TableCopyWorkerOutcome {
     /// The worker drained all available work and committed its transaction.
-    Completed(CopyProgress),
+    Completed(TableCopyProgress),
     /// The worker observed shutdown before committing its transaction.
     Shutdown,
 }
@@ -190,78 +191,6 @@ fn is_shutdown_requested(shutdown_rx: &ShutdownRx) -> bool {
     shutdown_rx.has_changed().unwrap_or(true)
 }
 
-/// Spawns a periodic reporter for table-copy replication lag.
-fn spawn_table_copy_lag_reporter(
-    table_id: TableId,
-    consistent_point: PgLsn,
-    out_of_band_source_pool: OutOfBandSourcePool,
-    replication_lag_refresh_interval: Duration,
-    mut shutdown_rx: ShutdownRx,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut replication_lag_interval = tokio::time::interval(replication_lag_refresh_interval);
-        replication_lag_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = shutdown_rx.changed() => {
-                    break;
-                }
-
-                _ = replication_lag_interval.tick() => {
-                    emit_table_copy_replication_lag_metrics(
-                        table_id,
-                        consistent_point,
-                        &out_of_band_source_pool,
-                    ).await;
-                }
-            }
-        }
-    })
-}
-
-/// Emits end-to-end lag metrics for a table sync while initial copy runs.
-async fn emit_table_copy_replication_lag_metrics(
-    table_id: TableId,
-    consistent_point: PgLsn,
-    out_of_band_source_pool: &OutOfBandSourcePool,
-) {
-    match out_of_band_source_pool.get_current_wal_lsn().await {
-        Ok(source_current_lsn) => {
-            let source_current_lsn = u64::from(source_current_lsn);
-            let consistent_point = u64::from(consistent_point);
-            let table_copy_lag_bytes = source_current_lsn.saturating_sub(consistent_point);
-
-            gauge!(ETL_TABLE_COPY_END_TO_END_LAG_BYTES).set(table_copy_lag_bytes as f64);
-        }
-        Err(error) => {
-            warn!(
-                table_id = table_id.0,
-                error = %error,
-                "table copy replication lag reporter failed to poll source database"
-            );
-        }
-    }
-}
-
-/// Stops the periodic replication lag reporter task.
-async fn stop_table_copy_lag_reporter(lag_reporter: &mut Option<JoinHandle<()>>) {
-    if let Some(mut handle) = lag_reporter.take() {
-        handle.abort();
-
-        if let Err(error) = (&mut handle).await
-            && !error.is_cancelled()
-        {
-            warn!(
-                error = %error,
-                "table copy lag reporter failed before completing"
-            );
-        }
-    }
-}
-
 /// Copies a table through ctid work items, using worker child connections.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
@@ -269,25 +198,27 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
+    slot_name: String,
     max_copy_connections: u16,
     consistent_point: PgLsn,
     out_of_band_source_pool: OutOfBandSourcePool,
-    replication_lag_refresh_interval: Duration,
+    table_sync_monitor_interval: Duration,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
 ) -> EtlResult<TableCopyResult> {
-    worker_table_copy(
+    run_table_copy(
         replication_transaction,
         table_id,
         replicated_table_schema,
         publication_name,
+        slot_name,
         max_copy_connections.max(1),
         consistent_point,
         out_of_band_source_pool,
-        replication_lag_refresh_interval,
+        table_sync_monitor_interval,
         batch_config,
         shutdown_rx,
         destination,
@@ -300,15 +231,16 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
 /// Copies a table by assigning physical ctid ranges to child-connection
 /// workers.
 #[expect(clippy::too_many_arguments)]
-async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
+async fn run_table_copy<D: Destination + Clone + Send + 'static>(
     replication_transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
+    slot_name: String,
     max_copy_connections: u16,
     consistent_point: PgLsn,
     out_of_band_source_pool: OutOfBandSourcePool,
-    replication_lag_refresh_interval: Duration,
+    table_sync_monitor_interval: Duration,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
     destination: D,
@@ -317,7 +249,7 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
     let copy_partitions =
-        plan_copy_partitions(replication_transaction, table_id, max_copy_connections).await?;
+        plan_table_copy_partitions(replication_transaction, table_id, max_copy_connections).await?;
     let worker_count = usize::from(max_copy_connections).min(copy_partitions.len());
 
     if copy_partitions.is_empty() {
@@ -347,13 +279,14 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
     let work_queue = Arc::new(Mutex::new(VecDeque::from(copy_partitions)));
     let publication_name = publication_name.map(str::to_owned);
     let mut join_set = JoinSet::new();
-    let mut lag_reporter = Some(spawn_table_copy_lag_reporter(
+    let mut monitor = TableSyncMonitor::spawn(
         table_id,
+        slot_name.clone(),
         consistent_point,
         out_of_band_source_pool,
-        replication_lag_refresh_interval,
+        table_sync_monitor_interval,
         shutdown_rx.clone(),
-    ));
+    );
 
     for worker_index in 0..worker_count {
         // We fork the connection for each worker since the main replication transaction
@@ -363,7 +296,7 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
         let child_replication_client = match replication_transaction.fork_child().await {
             Ok(child_replication_client) => child_replication_client,
             Err(error) => {
-                stop_table_copy_lag_reporter(&mut lag_reporter).await;
+                monitor.stop().await;
 
                 return Err(error);
             }
@@ -382,7 +315,7 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
         let batch_budget = batch_budget.clone();
 
         join_set.spawn(async move {
-            copy_worker(
+            table_copy_worker(
                 worker_index,
                 child_replication_client,
                 snapshot_id,
@@ -400,47 +333,83 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
         });
     }
 
-    let mut progress = CopyProgress::default();
-    while let Some(result) = join_set.join_next().await {
-        match result {
-            Ok(Ok(CopyWorkerOutcome::Completed(worker_progress))) => {
-                progress.merge(worker_progress);
-            }
-            Ok(Ok(CopyWorkerOutcome::Shutdown)) => {
+    let mut progress = TableCopyProgress::default();
+    loop {
+        tokio::select! {
+            biased;
+
+            _ = monitor.wait_for_slot_invalidated() => {
                 info!(
                     table_id = table_id.0,
-                    "shutting down table copy after worker received shutdown"
+                    slot_name,
+                    "aborting table copy after replication slot was invalidated"
                 );
 
-                stop_table_copy_lag_reporter(&mut lag_reporter).await;
+                join_set.abort_all();
+                while join_set.join_next().await.is_some() {}
 
-                return Ok(TableCopyResult::Shutdown);
+                monitor.stop().await;
+
+                bail!(
+                    ErrorKind::ReplicationSlotInvalidated,
+                    "Replication slot has been invalidated",
+                    format!(
+                        "The replication slot '{}' was invalidated while table {} was being \
+                         copied. This typically happens when PostgreSQL removes WAL segments the \
+                         slot still needed to protect against unbounded WAL growth. Consider \
+                         increasing max_slot_wal_keep_size, then reset the table state and \
+                         restart the pipeline.",
+                        slot_name, table_id.0
+                    )
+                );
             }
-            Ok(Err(error)) => {
-                stop_table_copy_lag_reporter(&mut lag_reporter).await;
 
-                return Err(error);
-            }
-            Err(join_error) if join_error.is_cancelled() => {
-                debug!(error = %join_error, "table copy worker task was cancelled");
+            result = join_set.join_next() => {
+                let Some(result) = result else {
+                    break;
+                };
 
-                stop_table_copy_lag_reporter(&mut lag_reporter).await;
+                match result {
+                    Ok(Ok(TableCopyWorkerOutcome::Completed(worker_progress))) => {
+                        progress.merge(worker_progress);
+                    }
+                    Ok(Ok(TableCopyWorkerOutcome::Shutdown)) => {
+                        info!(
+                            table_id = table_id.0,
+                            "shutting down table copy after worker received shutdown"
+                        );
 
-                return Ok(TableCopyResult::Shutdown);
-            }
-            Err(join_error) => {
-                stop_table_copy_lag_reporter(&mut lag_reporter).await;
+                        monitor.stop().await;
 
-                return Err(etl_error!(
-                    ErrorKind::TableCopyWorkerPanic,
-                    "Table copy worker panicked",
-                    source: join_error
-                ));
+                        return Ok(TableCopyResult::Shutdown);
+                    }
+                    Ok(Err(error)) => {
+                        monitor.stop().await;
+
+                        return Err(error);
+                    }
+                    Err(join_error) if join_error.is_cancelled() => {
+                        debug!(error = %join_error, "table copy worker task was cancelled");
+
+                        monitor.stop().await;
+
+                        return Ok(TableCopyResult::Shutdown);
+                    }
+                    Err(join_error) => {
+                        monitor.stop().await;
+
+                        return Err(etl_error!(
+                            ErrorKind::TableCopyWorkerPanic,
+                            "Table copy worker panicked",
+                            source: join_error
+                        ));
+                    }
+                }
             }
         }
     }
 
-    stop_table_copy_lag_reporter(&mut lag_reporter).await;
+    monitor.stop().await;
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
     counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(progress.total_rows);
@@ -454,11 +423,11 @@ async fn worker_table_copy<D: Destination + Clone + Send + 'static>(
 }
 
 /// Plans ctid work items for every physical table that backs `table_id`.
-async fn plan_copy_partitions(
+async fn plan_table_copy_partitions(
     replication_transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
     max_copy_connections: u16,
-) -> EtlResult<Vec<CopyPartition>> {
+) -> EtlResult<Vec<TableCopyPartition>> {
     let source_tables = if replication_transaction.is_partitioned_table(table_id).await? {
         replication_transaction.get_leaf_partitions(table_id).await?
     } else {
@@ -527,7 +496,7 @@ async fn plan_copy_partitions(
             // Partitioned parents have no physical CTIDs, so COPY runs against
             // the leaf table while publication row filters are resolved from
             // the tracked table.
-            copy_partitions.push(CopyPartition {
+            copy_partitions.push(TableCopyPartition {
                 source_table_id,
                 filter_table_id: table_id,
                 ctid_partition,
@@ -548,11 +517,11 @@ async fn plan_copy_partitions(
 
 /// Runs one child connection until there is no more copy work to claim.
 #[expect(clippy::too_many_arguments)]
-async fn copy_worker<D>(
+async fn table_copy_worker<D>(
     worker_index: usize,
     mut child_replication_client: ChildPgReplicationClient,
     snapshot_id: String,
-    work_queue: Arc<Mutex<VecDeque<CopyPartition>>>,
+    work_queue: Arc<Mutex<VecDeque<TableCopyPartition>>>,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<String>,
@@ -561,19 +530,19 @@ async fn copy_worker<D>(
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
-) -> EtlResult<CopyWorkerOutcome>
+) -> EtlResult<TableCopyWorkerOutcome>
 where
     D: Destination + Clone + Send + 'static,
 {
     let child_replication_transaction =
         child_replication_client.begin_transaction(&snapshot_id).await?;
-    let mut progress = CopyProgress::default();
+    let mut progress = TableCopyProgress::default();
 
     loop {
         if is_shutdown_requested(&shutdown_rx) {
             info!(table_id = table_id.0, worker_index, "table copy worker received shutdown");
 
-            return Ok(CopyWorkerOutcome::Shutdown);
+            return Ok(TableCopyWorkerOutcome::Shutdown);
         }
 
         let copy_partition = work_queue.lock().await.pop_front();
@@ -582,10 +551,10 @@ where
             // means all CTID work has been claimed.
             child_replication_transaction.commit().await?;
 
-            return Ok(CopyWorkerOutcome::Completed(progress));
+            return Ok(TableCopyWorkerOutcome::Completed(progress));
         };
 
-        match copy_partition_rows(
+        match table_copy_partition_rows(
             &child_replication_transaction,
             table_id,
             replicated_table_schema.clone(),
@@ -602,30 +571,30 @@ where
             ShutdownResult::Ok(partition_progress) => {
                 progress.merge(partition_progress);
             }
-            ShutdownResult::Shutdown(_) => return Ok(CopyWorkerOutcome::Shutdown),
+            ShutdownResult::Shutdown(_) => return Ok(TableCopyWorkerOutcome::Shutdown),
         }
     }
 }
 
 /// Copies a single physical ctid range into the destination.
 #[expect(clippy::too_many_arguments)]
-async fn copy_partition_rows<D>(
+async fn table_copy_partition_rows<D>(
     child_replication_transaction: &PgChildReplicationTransaction<'_>,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<String>,
-    partition: CopyPartition,
+    partition: TableCopyPartition,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
-) -> EtlResult<ShutdownResult<CopyProgress, CopyProgress>>
+) -> EtlResult<ShutdownResult<TableCopyProgress, TableCopyProgress>>
 where
     D: Destination + Clone + Send + 'static,
 {
     if is_shutdown_requested(&shutdown_rx) {
-        return Ok(ShutdownResult::Shutdown(CopyProgress::default()));
+        return Ok(ShutdownResult::Shutdown(TableCopyProgress::default()));
     }
 
     let start_time = Instant::now();
@@ -662,7 +631,7 @@ where
     );
     pin!(table_copy_stream);
 
-    let progress = match copy_table_rows_from_stream(
+    let progress = match table_copy_rows_from_stream(
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
@@ -695,18 +664,18 @@ where
 
 /// Copies rows from a batched table-copy stream into the destination with
 /// prioritized shutdown handling.
-async fn copy_table_rows_from_stream<D, S>(
+async fn table_copy_rows_from_stream<D, S>(
     mut table_copy_stream: Pin<&mut S>,
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     replicated_table_schema: ReplicatedTableSchema,
     destination: D,
-) -> EtlResult<ShutdownResult<CopyProgress, CopyProgress>>
+) -> EtlResult<ShutdownResult<TableCopyProgress, TableCopyProgress>>
 where
     D: Destination + Clone + Send + 'static,
     S: Stream<Item = EtlResult<Vec<TableCopyRow>>>,
 {
-    let mut progress = CopyProgress::default();
+    let mut progress = TableCopyProgress::default();
 
     loop {
         tokio::select! {
