@@ -317,7 +317,6 @@ impl TableSyncWorkerHandle {
 pub(crate) struct TableSyncWorker<S, D> {
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
-    pool: Arc<TableSyncWorkerPool>,
     table_id: TableId,
     store: S,
     destination: D,
@@ -340,7 +339,6 @@ impl<S, D> TableSyncWorker<S, D> {
     pub(crate) fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
-        pool: Arc<TableSyncWorkerPool>,
         table_id: TableId,
         store: S,
         destination: D,
@@ -353,7 +351,6 @@ impl<S, D> TableSyncWorker<S, D> {
         Self {
             pipeline_id,
             config,
-            pool,
             table_id,
             store,
             destination,
@@ -565,9 +562,6 @@ where
         state: TableSyncWorkerState,
         table_sync_worker_span: tracing::Span,
     ) -> EtlResult<TableSyncWorkerResult> {
-        let table_id = self.table_id;
-        let config = Arc::clone(&self.config);
-        let store = self.store.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
 
         let result = AssertUnwindSafe(
@@ -581,10 +575,10 @@ where
             Err(payload) => {
                 let err = table_sync_worker_panic_error(payload);
                 Self::handle_table_sync_worker_error(
-                    table_id,
-                    config.as_ref(),
+                    self.table_id,
+                    self.config.as_ref(),
                     &state,
-                    &store,
+                    &self.store,
                     &mut shutdown_rx,
                     err,
                 )
@@ -607,34 +601,13 @@ where
     /// cleanup operations while providing robust error recovery
     /// capabilities.
     async fn guarded_run_table_sync_worker(
-        self,
+        &self,
         state: TableSyncWorkerState,
     ) -> EtlResult<TableSyncWorkerResult> {
-        let table_id = self.table_id;
-        let pool = Arc::clone(&self.pool);
-        let store = self.store.clone();
-        let config = Arc::clone(&self.config);
-        let pipeline_id = self.pipeline_id;
-        let destination = self.destination.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let run_permit = Arc::clone(&self.run_permit);
+        let mut retry_shutdown_rx = self.shutdown_rx.clone();
 
         loop {
-            let worker = TableSyncWorker {
-                pipeline_id,
-                config: Arc::clone(&config),
-                pool: Arc::clone(&pool),
-                table_id,
-                store: store.clone(),
-                destination: destination.clone(),
-                out_of_band_source_pool: self.out_of_band_source_pool.clone(),
-                shutdown_rx: shutdown_rx.clone(),
-                run_permit: Arc::clone(&run_permit),
-                memory_monitor: self.memory_monitor.clone(),
-                batch_budget: self.batch_budget.clone(),
-            };
-
-            let result = worker.run_table_sync_worker(state.clone()).await;
+            let result = self.run_table_sync_worker(state.clone()).await;
 
             match result {
                 Ok(result) => {
@@ -645,11 +618,11 @@ where
                 }
                 Err(err) => {
                     let result = Self::handle_table_sync_worker_error(
-                        table_id,
-                        config.as_ref(),
+                        self.table_id,
+                        self.config.as_ref(),
                         &state,
-                        &store,
-                        &mut shutdown_rx,
+                        &self.store,
+                        &mut retry_shutdown_rx,
                         err,
                     )
                     .await?;
@@ -670,13 +643,15 @@ where
     /// handles both the bulk data copy state and the incremental
     /// table state.
     async fn run_table_sync_worker(
-        mut self,
+        &self,
         state: TableSyncWorkerState,
     ) -> EtlResult<TableSyncWorkerResult> {
         debug!(
             table_id = self.table_id.0,
             "waiting to acquire a running permit for table sync worker"
         );
+
+        let mut attempt_shutdown_rx = self.shutdown_rx.clone();
 
         // We acquire a permit to run the table sync worker. This helps us limit the
         // number of table sync workers running in parallel which in turn helps
@@ -685,7 +660,7 @@ where
         let _permit = tokio::select! {
             biased;
 
-            _ = self.shutdown_rx.changed() => {
+            _ = attempt_shutdown_rx.changed() => {
                 info!(table_id = self.table_id.0, "shutting down table sync worker while waiting for a run permit");
 
                 return Ok(TableSyncWorkerResult::Shutdown);
@@ -732,7 +707,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
-            self.shutdown_rx.clone(),
+            attempt_shutdown_rx.clone(),
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
         )
@@ -778,7 +753,7 @@ where
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
             worker_context,
-            self.shutdown_rx.clone(),
+            attempt_shutdown_rx,
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
             Some(replicated_table_schema),

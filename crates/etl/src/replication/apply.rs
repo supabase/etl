@@ -4214,7 +4214,6 @@ mod apply_worker {
         TableSyncWorker::new(
             ctx.pipeline_id,
             Arc::clone(&ctx.config),
-            Arc::clone(&ctx.pool),
             table_id,
             ctx.store.clone(),
             ctx.destination.clone(),
