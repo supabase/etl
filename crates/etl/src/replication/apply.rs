@@ -463,7 +463,7 @@ impl ApplyLoopTasks {
         out_of_band_source_pool: OutOfBandSourcePool,
         replication_lag_metrics: ReplicationLagMetrics,
         worker_type: WorkerType,
-        replication_lag_refresh_interval: Duration,
+        table_sync_monitor_refresh_interval: Duration,
     ) -> Self
     where
         S: SchemaStore + Send + Sync + 'static,
@@ -477,7 +477,7 @@ impl ApplyLoopTasks {
             out_of_band_source_pool,
             replication_lag_metrics,
             worker_type,
-            replication_lag_refresh_interval,
+            table_sync_monitor_refresh_interval,
         );
 
         Self {
@@ -642,14 +642,14 @@ impl ApplyLoopTasks {
         out_of_band_source_pool: OutOfBandSourcePool,
         replication_lag_metrics: ReplicationLagMetrics,
         worker_type: WorkerType,
-        replication_lag_refresh_interval: Duration,
+        table_sync_monitor_refresh_interval: Duration,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             Self::run_replication_lag_sampler(
                 out_of_band_source_pool,
                 replication_lag_metrics,
                 worker_type,
-                replication_lag_refresh_interval,
+                table_sync_monitor_refresh_interval,
             )
             .await;
         })
@@ -660,9 +660,9 @@ impl ApplyLoopTasks {
         out_of_band_source_pool: OutOfBandSourcePool,
         replication_lag_metrics: ReplicationLagMetrics,
         worker_type: WorkerType,
-        replication_lag_refresh_interval: Duration,
+        table_sync_monitor_refresh_interval: Duration,
     ) {
-        let mut interval = tokio::time::interval(replication_lag_refresh_interval);
+        let mut interval = tokio::time::interval(table_sync_monitor_refresh_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
@@ -1204,14 +1204,14 @@ where
 
         let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
 
-        let replication_lag_refresh_interval =
-            Duration::from_millis(config.replication_lag_refresh_interval_ms);
+        let table_sync_monitor_refresh_interval =
+            Duration::from_millis(config.table_sync_monitor_refresh_interval_ms);
         let tasks = ApplyLoopTasks::start(
             schema_store.clone(),
             out_of_band_source_pool,
             replication_lag_metrics.clone(),
             worker_type,
-            replication_lag_refresh_interval,
+            table_sync_monitor_refresh_interval,
         );
 
         let state = ApplyLoopState::new(

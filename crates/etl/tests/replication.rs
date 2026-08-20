@@ -2175,7 +2175,7 @@ async fn schema_change_messages_respect_skip_ddl_log_setting() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn get_slot_state_returns_valid_for_healthy_slot() {
+async fn get_slot_state_returns_not_invalidated_for_healthy_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -2185,9 +2185,9 @@ async fn get_slot_state_returns_valid_for_healthy_slot() {
     let slot_name = test_slot_name("healthy_slot");
     client.create_slot(&slot_name).await.unwrap();
 
-    // Check the slot state - it should be valid
+    // Check that PostgreSQL has not reported the slot as invalidated.
     let slot_state = client.get_slot_state(&slot_name).await.unwrap();
-    assert_eq!(slot_state, SlotState::Valid);
+    assert_eq!(slot_state, SlotState::NotInvalidated);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2217,9 +2217,9 @@ async fn exclusive_get_slot_state_returns_invalidated_for_lost_slot() {
     let slot_name = test_slot_name("invalidated_slot");
     client.create_slot(&slot_name).await.unwrap();
 
-    // Verify the slot is initially valid
+    // Verify the slot has not initially been reported as invalidated.
     let slot_state = client.get_slot_state(&slot_name).await.unwrap();
-    assert_eq!(slot_state, SlotState::Valid, "Slot should be valid initially");
+    assert_eq!(slot_state, SlotState::NotInvalidated);
 
     // Try to invalidate the slot using the database helper
     database.invalidate_slot(&slot_name).await;

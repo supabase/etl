@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 mod copy;
+mod monitor;
 
 pub(crate) use copy::{TableCopyResult, table_copy};
 use etl_config::shared::PipelineConfig;
@@ -312,10 +313,11 @@ where
                     table_id,
                     replicated_table_schema.clone(),
                     Some(&config.publication_name),
+                    slot_name.clone(),
                     config.max_copy_connections_per_table,
                     slot.consistent_point,
                     out_of_band_source_pool.clone(),
-                    Duration::from_millis(config.replication_lag_refresh_interval_ms),
+                    Duration::from_millis(config.table_sync_monitor_refresh_interval_ms),
                     config.batch.clone(),
                     shutdown_rx.clone(),
                     destination.clone(),

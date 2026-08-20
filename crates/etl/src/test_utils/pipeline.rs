@@ -78,6 +78,9 @@ pub struct PipelineBuilder<S, D> {
     memory_refresh_interval_ms: u64,
     /// Memory-based backpressure configuration. Default: enabled with defaults.
     memory_backpressure: MemoryBackpressureConfig,
+    /// The time between periodic table sync monitor checks. Default:
+    /// [`PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS`].
+    table_sync_monitor_refresh_interval_ms: u64,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -133,6 +136,8 @@ where
                 activate_threshold: 0.95,
                 resume_threshold: 0.85,
             },
+            table_sync_monitor_refresh_interval_ms:
+                PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
         }
     }
 
@@ -175,6 +180,14 @@ where
         self
     }
 
+    /// Sets the time between periodic table sync monitor checks, such as
+    /// reporting replication lag and checking replication slot validity
+    /// during table copy.
+    pub fn with_table_sync_monitor_refresh_interval_ms(mut self, interval_ms: u64) -> Self {
+        self.table_sync_monitor_refresh_interval_ms = interval_ms;
+        self
+    }
+
     /// Builds and returns the configured pipeline.
     ///
     /// This method consumes the builder and creates a `Pipeline` instance with
@@ -194,8 +207,7 @@ where
             invalidated_slot_behavior: self.invalidated_slot_behavior,
             max_copy_connections_per_table: self.max_copy_connections_per_table,
             memory_refresh_interval_ms: self.memory_refresh_interval_ms,
-            replication_lag_refresh_interval_ms:
-                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+            table_sync_monitor_refresh_interval_ms: self.table_sync_monitor_refresh_interval_ms,
             memory_backpressure: Some(self.memory_backpressure),
             run_source_migrations: true,
         };

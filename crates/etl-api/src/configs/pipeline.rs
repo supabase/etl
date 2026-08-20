@@ -28,8 +28,8 @@ const fn default_memory_refresh_interval_ms() -> u64 {
     PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
-const fn default_replication_lag_refresh_interval_ms() -> u64 {
-    PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS
+const fn default_table_sync_monitor_refresh_interval_ms() -> u64 {
+    PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS
 }
 
 const fn default_batch() -> BatchConfig {
@@ -252,7 +252,7 @@ pub struct ApiPipelineConfig {
     pub memory_refresh_interval_ms: Option<u64>,
     #[schema(example = 10000)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub replication_lag_refresh_interval_ms: Option<u64>,
+    pub table_sync_monitor_refresh_interval_ms: Option<u64>,
     #[serde(
         default = "default_memory_backpressure_option",
         skip_serializing_if = "Option::is_none"
@@ -313,7 +313,7 @@ pub struct UpdateApiPipelineConfig {
     pub memory_refresh_interval_ms: UpdateField<u64>,
     #[schema(example = 10000)]
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
-    pub replication_lag_refresh_interval_ms: UpdateField<u64>,
+    pub table_sync_monitor_refresh_interval_ms: UpdateField<u64>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub memory_backpressure: UpdateField<MemoryBackpressureConfig>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
@@ -346,8 +346,8 @@ impl UpdateApiPipelineConfig {
                 value.max_copy_connections_per_table,
             ),
             memory_refresh_interval_ms: UpdateField::from_option(value.memory_refresh_interval_ms),
-            replication_lag_refresh_interval_ms: UpdateField::from_option(
-                value.replication_lag_refresh_interval_ms,
+            table_sync_monitor_refresh_interval_ms: UpdateField::from_option(
+                value.table_sync_monitor_refresh_interval_ms,
             ),
             memory_backpressure: UpdateField::from_option(value.memory_backpressure),
             table_sync_copy: UpdateField::from_option(value.table_sync_copy),
@@ -401,11 +401,11 @@ impl UpdateApiPipelineConfig {
                 stored.memory_refresh_interval_ms,
                 default_memory_refresh_interval_ms,
             ),
-            replication_lag_refresh_interval_ms: self
-                .replication_lag_refresh_interval_ms
+            table_sync_monitor_refresh_interval_ms: self
+                .table_sync_monitor_refresh_interval_ms
                 .apply_to_value(
-                    stored.replication_lag_refresh_interval_ms,
-                    default_replication_lag_refresh_interval_ms,
+                    stored.table_sync_monitor_refresh_interval_ms,
+                    default_table_sync_monitor_refresh_interval_ms,
                 ),
             memory_backpressure: self
                 .memory_backpressure
@@ -453,7 +453,9 @@ impl From<StoredPipelineConfig> for ApiPipelineConfig {
             max_table_sync_workers: Some(value.max_table_sync_workers),
             max_copy_connections_per_table: Some(value.max_copy_connections_per_table),
             memory_refresh_interval_ms: Some(value.memory_refresh_interval_ms),
-            replication_lag_refresh_interval_ms: Some(value.replication_lag_refresh_interval_ms),
+            table_sync_monitor_refresh_interval_ms: Some(
+                value.table_sync_monitor_refresh_interval_ms,
+            ),
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: Some(value.table_sync_copy),
             invalidated_slot_behavior: Some(value.invalidated_slot_behavior),
@@ -479,8 +481,8 @@ pub struct StoredPipelineConfig {
     pub max_copy_connections_per_table: u16,
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
-    #[serde(default = "default_replication_lag_refresh_interval_ms")]
-    pub replication_lag_refresh_interval_ms: u64,
+    #[serde(default = "default_table_sync_monitor_refresh_interval_ms")]
+    pub table_sync_monitor_refresh_interval_ms: u64,
     #[serde(default = "default_memory_backpressure_option")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(default = "default_table_sync_copy")]
@@ -511,7 +513,7 @@ impl StoredPipelineConfig {
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
             max_table_sync_workers: self.max_table_sync_workers,
             memory_refresh_interval_ms: self.memory_refresh_interval_ms,
-            replication_lag_refresh_interval_ms: self.replication_lag_refresh_interval_ms,
+            table_sync_monitor_refresh_interval_ms: self.table_sync_monitor_refresh_interval_ms,
             memory_backpressure: self.memory_backpressure,
             table_sync_copy: self.table_sync_copy,
             invalidated_slot_behavior: self.invalidated_slot_behavior,
@@ -547,9 +549,9 @@ impl From<ApiPipelineConfig> for StoredPipelineConfig {
             memory_refresh_interval_ms: value
                 .memory_refresh_interval_ms
                 .unwrap_or(PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS),
-            replication_lag_refresh_interval_ms: value
-                .replication_lag_refresh_interval_ms
-                .unwrap_or(PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS),
+            table_sync_monitor_refresh_interval_ms: value
+                .table_sync_monitor_refresh_interval_ms
+                .unwrap_or(PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS),
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: value.table_sync_copy.unwrap_or_else(default_table_sync_copy),
             invalidated_slot_behavior: value
@@ -636,7 +638,7 @@ mod tests {
             max_table_sync_workers: 4,
             max_copy_connections_per_table: 8,
             memory_refresh_interval_ms: 100,
-            replication_lag_refresh_interval_ms: 10_000,
+            table_sync_monitor_refresh_interval_ms: 10_000,
             memory_backpressure: Some(MemoryBackpressureConfig {
                 activate_threshold: 0.8,
                 resume_threshold: 0.7,
@@ -678,7 +680,7 @@ mod tests {
             max_table_sync_workers: None,
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
-            replication_lag_refresh_interval_ms: None,
+            table_sync_monitor_refresh_interval_ms: None,
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -707,7 +709,7 @@ mod tests {
             max_table_sync_workers: None,
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
-            replication_lag_refresh_interval_ms: None,
+            table_sync_monitor_refresh_interval_ms: None,
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -737,8 +739,8 @@ mod tests {
             PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
         );
         assert_eq!(
-            stored.replication_lag_refresh_interval_ms,
-            PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS
+            stored.table_sync_monitor_refresh_interval_ms,
+            PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS
         );
         assert_eq!(stored.memory_backpressure, None);
         assert_eq!(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::Error);
@@ -758,7 +760,7 @@ mod tests {
             max_table_sync_workers: 4,
             max_copy_connections_per_table: 8,
             memory_refresh_interval_ms: 100,
-            replication_lag_refresh_interval_ms: 10_000,
+            table_sync_monitor_refresh_interval_ms: 10_000,
             memory_backpressure: Some(MemoryBackpressureConfig {
                 activate_threshold: 0.95,
                 resume_threshold: 0.9,
@@ -804,7 +806,7 @@ mod tests {
             max_table_sync_workers: None,
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
-            replication_lag_refresh_interval_ms: None,
+            table_sync_monitor_refresh_interval_ms: None,
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -835,7 +837,7 @@ mod tests {
             max_table_sync_workers: None,
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
-            replication_lag_refresh_interval_ms: None,
+            table_sync_monitor_refresh_interval_ms: None,
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -871,7 +873,7 @@ mod tests {
             max_table_sync_workers: None,
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
-            replication_lag_refresh_interval_ms: None,
+            table_sync_monitor_refresh_interval_ms: None,
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -906,7 +908,7 @@ mod tests {
             max_table_sync_workers: 4,
             max_copy_connections_per_table: 8,
             memory_refresh_interval_ms: 100,
-            replication_lag_refresh_interval_ms: 10_000,
+            table_sync_monitor_refresh_interval_ms: 10_000,
             memory_backpressure: Some(MemoryBackpressureConfig {
                 activate_threshold: 0.8,
                 resume_threshold: 0.7,
