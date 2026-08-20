@@ -449,9 +449,9 @@ impl PgReplicationClient {
     /// Gets the state of a replication slot by name.
     ///
     /// Queries the `pg_replication_slots` system catalog to determine if the
-    /// slot exists and whether it's valid or invalidated. A slot is
-    /// considered invalidated when its `wal_status` is 'lost', indicating
-    /// that required WAL segments have been removed.
+    /// slot exists and whether PostgreSQL has reported it as invalidated. A
+    /// slot is considered invalidated when its `wal_status` is 'lost',
+    /// indicating that required WAL segments have been removed.
     ///
     /// Returns an error if the slot doesn't exist.
     pub async fn get_slot_state(&self, slot_name: &str) -> EtlResult<SlotState> {
@@ -467,12 +467,11 @@ impl PgReplicationClient {
                 // A slot is invalidated when wal_status is 'lost'
                 let wal_status: Option<String> = row.try_get("wal_status")?.map(String::from);
 
+                // A NULL status means PostgreSQL cannot determine WAL availability from the
+                // slot's restart LSN, for example because the slot has not reserved WAL yet.
                 return match wal_status.as_deref() {
                     Some("lost") => Ok(SlotState::Invalidated),
-                    Some(_) |
-                    // If wal_status is NULL, assume the slot is valid
-                    // (this can happen on very old PostgreSQL versions)
-                    None => Ok(SlotState::Valid),
+                    Some(_) | None => Ok(SlotState::NotInvalidated),
                 };
             }
         }

@@ -564,7 +564,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         max_table_sync_workers: 4,
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
         memory_refresh_interval_ms: 100,
-        replication_lag_refresh_interval_ms: 10_000,
+        table_sync_monitor_refresh_interval_ms: 10_000,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

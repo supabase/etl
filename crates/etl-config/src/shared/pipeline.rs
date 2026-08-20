@@ -324,9 +324,6 @@ pub struct PipelineConfig {
     /// Number of milliseconds between one memory usage refresh and another.
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
-    /// Number of milliseconds between one replication lag refresh and another.
-    #[serde(default = "default_replication_lag_refresh_interval_ms")]
-    pub replication_lag_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
@@ -336,6 +333,12 @@ pub struct PipelineConfig {
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
+    /// Number of milliseconds between periodic table sync monitor checks,
+    /// such as reporting replication lag and checking replication slot
+    /// validity during table copy. Also used by the apply worker's periodic
+    /// replication lag sampling.
+    #[serde(default = "default_table_sync_monitor_refresh_interval_ms")]
+    pub table_sync_monitor_refresh_interval_ms: u64,
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
@@ -370,9 +373,9 @@ impl PipelineConfig {
     /// Default interval in milliseconds between one memory refresh and another.
     pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
 
-    /// Default interval in milliseconds between one replication lag refresh and
-    /// another.
-    pub const DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS: u64 = 10_000;
+    /// Default interval in milliseconds between periodic replication monitor
+    /// checks.
+    pub const DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS: u64 = 10_000;
 
     /// Returns the Postgres connection configuration for state storage.
     pub fn store_pg_connection(&self) -> &PgConnectionConfig {
@@ -390,7 +393,7 @@ impl Validate for PipelineConfig {
             self.max_copy_connections_per_table,
             self.memory_backpressure.as_ref(),
             self.memory_refresh_interval_ms,
-            self.replication_lag_refresh_interval_ms,
+            self.table_sync_monitor_refresh_interval_ms,
         )?;
         self.table_sync_copy.validate()
     }
@@ -404,7 +407,7 @@ fn validate_pipeline_settings(
     max_copy_connections_per_table: u16,
     memory_backpressure: Option<&MemoryBackpressureConfig>,
     memory_refresh_interval_ms: u64,
-    replication_lag_refresh_interval_ms: u64,
+    table_sync_monitor_refresh_interval_ms: u64,
 ) -> Result<(), ValidationError> {
     batch.validate()?;
 
@@ -440,9 +443,9 @@ fn validate_pipeline_settings(
         });
     }
 
-    if replication_lag_refresh_interval_ms == 0 {
+    if table_sync_monitor_refresh_interval_ms == 0 {
         return Err(ValidationError::InvalidFieldValue {
-            field: "replication_lag_refresh_interval_ms".to_owned(),
+            field: "table_sync_monitor_refresh_interval_ms".to_owned(),
             constraint: "must be greater than 0".to_owned(),
         });
     }
@@ -470,8 +473,8 @@ const fn default_memory_refresh_interval_ms() -> u64 {
     PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
-const fn default_replication_lag_refresh_interval_ms() -> u64 {
-    PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS
+const fn default_table_sync_monitor_refresh_interval_ms() -> u64 {
+    PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS
 }
 
 fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
@@ -530,9 +533,6 @@ pub struct PipelineConfigWithoutSecrets {
     /// Number of milliseconds between one memory usage refresh and another.
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
-    /// Number of milliseconds between one replication lag refresh and another.
-    #[serde(default = "default_replication_lag_refresh_interval_ms")]
-    pub replication_lag_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
@@ -542,6 +542,10 @@ pub struct PipelineConfigWithoutSecrets {
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
+    /// Number of milliseconds between periodic table sync monitor checks. See
+    /// the field of the same name on [`PipelineConfig`].
+    #[serde(default = "default_table_sync_monitor_refresh_interval_ms")]
+    pub table_sync_monitor_refresh_interval_ms: u64,
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
@@ -561,7 +565,7 @@ impl Validate for PipelineConfigWithoutSecrets {
             self.max_copy_connections_per_table,
             self.memory_backpressure.as_ref(),
             self.memory_refresh_interval_ms,
-            self.replication_lag_refresh_interval_ms,
+            self.table_sync_monitor_refresh_interval_ms,
         )?;
         self.table_sync_copy.validate()
     }
@@ -580,9 +584,9 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             max_table_sync_workers: value.max_table_sync_workers,
             max_copy_connections_per_table: value.max_copy_connections_per_table,
             memory_refresh_interval_ms: value.memory_refresh_interval_ms,
-            replication_lag_refresh_interval_ms: value.replication_lag_refresh_interval_ms,
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: value.table_sync_copy,
+            table_sync_monitor_refresh_interval_ms: value.table_sync_monitor_refresh_interval_ms,
             invalidated_slot_behavior: value.invalidated_slot_behavior,
             run_source_migrations: value.run_source_migrations,
         }
@@ -743,8 +747,8 @@ mod tests {
             max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
             max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
             memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
-            replication_lag_refresh_interval_ms:
-                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+            table_sync_monitor_refresh_interval_ms:
+                PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
@@ -768,8 +772,8 @@ mod tests {
             max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
             max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
             memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
-            replication_lag_refresh_interval_ms:
-                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+            table_sync_monitor_refresh_interval_ms:
+                PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

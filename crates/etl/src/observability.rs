@@ -274,7 +274,8 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_SLOT_INVALIDATIONS_TOTAL,
             Unit::Count,
-            "Total number of times a replication slot was found invalidated on pipeline start."
+            "Total number of times a replication slot was detected as invalidated or missing \
+             during pipeline startup or an active table copy."
         );
 
         describe_counter!(
