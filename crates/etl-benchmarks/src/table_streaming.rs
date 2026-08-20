@@ -10,7 +10,7 @@ use etl::{
     pipeline::Pipeline, schema::TableId, store::TableStateType,
     test_utils::notifying_store::NotifyingStore,
 };
-use etl_config::shared::TableSyncCopyConfig;
+use etl_config::shared::{TableSyncCopyConfig, Validate};
 use serde::Serialize;
 use tokio::task::JoinSet;
 use tracing::info;

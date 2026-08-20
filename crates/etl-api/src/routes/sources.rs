@@ -74,6 +74,9 @@ pub enum SourceError {
 impl SourceError {
     pub fn to_message(&self) -> String {
         match self {
+            SourceError::Pipeline(PipelineError::InvalidPipelineRequest(message)) => {
+                format!("Invalid pipeline request: {message}")
+            }
             // Do not expose internal database details in error messages
             SourceError::SourcesDb(_)
             | SourceError::PipelinesDb(_)
@@ -89,6 +92,9 @@ impl SourceError {
 impl IntoResponse for SourceError {
     fn into_response(self) -> Response {
         let status_code = match &self {
+            SourceError::Pipeline(PipelineError::InvalidPipelineRequest(_)) => {
+                StatusCode::BAD_REQUEST
+            }
             SourceError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             SourceError::TenantId(_) => StatusCode::BAD_REQUEST,
             SourceError::SourcesDb(_)
