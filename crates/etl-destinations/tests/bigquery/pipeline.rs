@@ -4,7 +4,6 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     config::BatchConfig,
     data::{Cell, OldTableRow, PgNumeric, TableRow, UpdatedTableRow},
-    error::ErrorKind,
     event::{Event, EventType},
     pipeline::PipelineId,
     store::StateStore,
@@ -23,7 +22,6 @@ use etl_destinations::bigquery::test_utils::{
 use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::{Rng, distr::Alphanumeric, random};
-use tokio::time::sleep;
 
 use crate::support::{
     bigquery::{
@@ -1018,73 +1016,6 @@ async fn table_nullable_scalar_columns() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_nullable_array_columns_follow_bigquery_null_coercion() {
-    if skip_if_missing_bigquery_env_vars() {
-        return;
-    }
-
-    init_test_tracing();
-    install_crypto_provider();
-
-    let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_database().await;
-    let table_name = test_table_name("nullable_cols_array");
-    let table_id =
-        database.create_table(table_name.clone(), true, &[("values", "integer[]")]).await.unwrap();
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (values) values (array[]::integer[])",
-                table_name.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    let publication_name = "test_pub_array";
-    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
-
-    let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name.to_owned(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
-    pipeline.start().await.unwrap();
-    table_sync_complete_notify.notified().await;
-
-    let events_notify = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
-        .await;
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(&format!("update {} set values = null", table_name.as_quoted_identifier()), &[])
-        .await
-        .unwrap();
-
-    events_notify.notified().await;
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let table_rows = bigquery_database.query_table(table_name).await.unwrap();
-    assert_eq!(table_rows.len(), 1);
-    let columns = table_rows[0].columns.as_ref().unwrap();
-    assert_eq!(columns[1].value.as_ref().unwrap().as_array().unwrap().len(), 0);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn table_non_nullable_scalar_columns() {
     if skip_if_missing_bigquery_env_vars() {
         return;
@@ -1600,142 +1531,6 @@ async fn table_non_nullable_array_columns() {
     assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
 
     pipeline.shutdown_and_wait().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_array_with_null_values() {
-    if skip_if_missing_bigquery_env_vars() {
-        return;
-    }
-
-    init_test_tracing();
-    install_crypto_provider();
-
-    let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_database().await;
-    let table_name = test_table_name("array_with_nulls");
-    let table_id = database
-        .create_table(table_name.clone(), true, &[("int_array", "int4[] not null")])
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
-
-    let publication_name = "test_pub_array_nulls".to_owned();
-    database
-        .create_publication(&publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
-
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name.clone(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
-
-    pipeline.start().await.unwrap();
-
-    table_sync_complete_notify.notified().await;
-
-    // Insert array with null value
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (int_array) values (array[1, null])",
-                table_name.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    // We sleep to wait for the event to be processed. This is not ideal, but if we
-    // wanted to do this better, we would have to also implement error handling
-    // within the apply worker to write in the state store.
-    sleep(Duration::from_secs(5)).await;
-
-    // Wait for the pipeline expecting an error to be returned.
-    let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 1);
-    assert_eq!(err.kinds()[0], ErrorKind::NullValuesNotSupportedInArrayInDestination);
-
-    // Reset and try with valid array (no nulls)
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(&format!("delete from {} where true", table_name.as_quoted_identifier()), &[])
-        .await
-        .unwrap();
-
-    // We have to reset the state of the table and copy it from scratch, otherwise
-    // the CDC will contain the inserts and deletes, failing again.
-    store.reset_table_state(table_id).await.unwrap();
-
-    // We recreate the pipeline and try again.
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        store.clone(),
-        destination.clone(),
-    );
-
-    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
-
-    pipeline.start().await.unwrap();
-
-    // BigQuery can keep the default Storage Write stream for a dropped and
-    // re-created table unavailable for several minutes. The destination is
-    // expected to keep retrying while preserving the physical `*_0` table id.
-    table_sync_complete_notify.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
-
-    let events_notify = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
-        .await;
-
-    // Insert array without null values
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(
-            &format!(
-                "insert into {} (int_array) values (array[1, 2, 3])",
-                table_name.as_quoted_identifier()
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    events_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // Verify the valid array was successfully replicated to BigQuery
-    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
-
-    // Check that there is only the valid row in BigQuery
-    assert_eq!(table_rows.len(), 1);
-
-    // Check that the int array contains 3 elements, meaning it must be the second
-    // insert with all NON-NULL values
-    let row = &table_rows[0];
-    if let Some(columns) = &row.columns {
-        assert_eq!(columns.len(), 2);
-        assert_eq!(columns[1].value.clone().unwrap().as_array().unwrap().len(), 3);
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

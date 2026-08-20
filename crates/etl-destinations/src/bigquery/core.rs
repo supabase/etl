@@ -1349,20 +1349,6 @@ where
     }
 }
 
-/// Returns whether a column name can be used directly as a protobuf field.
-///
-/// ETL supplies source column names directly in the protobuf descriptor used by
-/// the BigQuery Storage Write API. Flexible BigQuery column names require a
-/// separate `column_name` annotation, which the current writer does not emit.
-fn is_bigquery_storage_write_column_name(column_name: &str) -> bool {
-    let Some((&first, rest)) = column_name.as_bytes().split_first() else {
-        return false;
-    };
-
-    (first.is_ascii_alphabetic() || first == b'_')
-        && rest.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-}
-
 /// Returns the reserved BigQuery prefix matched by a source column name.
 fn bigquery_reserved_column_prefix(column_name: &str) -> Option<&'static str> {
     BIGQUERY_RESERVED_COLUMN_PREFIXES.into_iter().find(|prefix| {
@@ -1372,7 +1358,10 @@ fn bigquery_reserved_column_prefix(column_name: &str) -> Option<&'static str> {
     })
 }
 
-/// Validates that a source column name is writable through BigQuery CDC.
+/// Validates a source column name against BigQuery's reserved prefixes.
+///
+/// The Storage Write client maps flexible BigQuery column names to
+/// protobuf-safe placeholders using BigQuery's `column_name` field option.
 fn validate_bigquery_column_name(
     replicated_table_schema: &ReplicatedTableSchema,
     column_name: &str,
@@ -1390,27 +1379,14 @@ fn validate_bigquery_column_name(
         );
     }
 
-    if !is_bigquery_storage_write_column_name(column_name) {
-        bail!(
-            ErrorKind::SourceSchemaError,
-            "BigQuery source column name is unsupported",
-            format!(
-                "Table '{}' column '{}' is not an ASCII protobuf identifier. BigQuery flexible \
-                 column names are not supported by the current Storage Write encoder.",
-                replicated_table_schema.name(),
-                column_name
-            )
-        );
-    }
-
     Ok(())
 }
 
 /// Validates BigQuery-specific schema capabilities.
 ///
 /// Shared planning owns destination name-equivalence validation during schema
-/// changes. This check owns protobuf syntax, reserved names, and the source
-/// primary-key requirements used by BigQuery CDC.
+/// changes. This check owns reserved names and the source primary-key
+/// requirements used by BigQuery CDC.
 fn validate_bigquery_table_capabilities(
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
@@ -2405,14 +2381,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_bigquery_table_shape_rejects_flexible_column_names() {
+    fn validate_bigquery_table_shape_accepts_flexible_column_names() {
         for column_name in ["2fa", "user-name", "naïve"] {
             let replicated_table_schema = replicated_schema_with_column_name(column_name);
 
-            let error = validate_bigquery_table_shape(&replicated_table_schema).unwrap_err();
-
-            assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
-            assert_eq!(error.description(), Some("BigQuery source column name is unsupported"));
+            validate_bigquery_table_shape(&replicated_table_schema).unwrap();
         }
     }
 
