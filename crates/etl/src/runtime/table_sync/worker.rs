@@ -317,7 +317,6 @@ impl TableSyncWorkerHandle {
 pub(crate) struct TableSyncWorker<S, D> {
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
-    pool: Arc<TableSyncWorkerPool>,
     table_id: TableId,
     store: S,
     destination: D,
@@ -340,7 +339,6 @@ impl<S, D> TableSyncWorker<S, D> {
     pub(crate) fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
-        pool: Arc<TableSyncWorkerPool>,
         table_id: TableId,
         store: S,
         destination: D,
@@ -353,7 +351,6 @@ impl<S, D> TableSyncWorker<S, D> {
         Self {
             pipeline_id,
             config,
-            pool,
             table_id,
             store,
             destination,
@@ -565,9 +562,6 @@ where
         state: TableSyncWorkerState,
         table_sync_worker_span: tracing::Span,
     ) -> EtlResult<TableSyncWorkerResult> {
-        let table_id = self.table_id;
-        let config = Arc::clone(&self.config);
-        let store = self.store.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
 
         let result = AssertUnwindSafe(
@@ -581,10 +575,10 @@ where
             Err(payload) => {
                 let err = table_sync_worker_panic_error(payload);
                 Self::handle_table_sync_worker_error(
-                    table_id,
-                    config.as_ref(),
+                    self.table_id,
+                    self.config.as_ref(),
                     &state,
-                    &store,
+                    &self.store,
                     &mut shutdown_rx,
                     err,
                 )
@@ -607,34 +601,13 @@ where
     /// cleanup operations while providing robust error recovery
     /// capabilities.
     async fn guarded_run_table_sync_worker(
-        self,
+        &self,
         state: TableSyncWorkerState,
     ) -> EtlResult<TableSyncWorkerResult> {
-        let table_id = self.table_id;
-        let pool = Arc::clone(&self.pool);
-        let store = self.store.clone();
-        let config = Arc::clone(&self.config);
-        let pipeline_id = self.pipeline_id;
-        let destination = self.destination.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
-        let run_permit = Arc::clone(&self.run_permit);
 
         loop {
-            let worker = TableSyncWorker {
-                pipeline_id,
-                config: Arc::clone(&config),
-                pool: Arc::clone(&pool),
-                table_id,
-                store: store.clone(),
-                destination: destination.clone(),
-                out_of_band_source_pool: self.out_of_band_source_pool.clone(),
-                shutdown_rx: shutdown_rx.clone(),
-                run_permit: Arc::clone(&run_permit),
-                memory_monitor: self.memory_monitor.clone(),
-                batch_budget: self.batch_budget.clone(),
-            };
-
-            let result = worker.run_table_sync_worker(state.clone()).await;
+            let result = self.run_table_sync_worker(state.clone(), shutdown_rx.clone()).await;
 
             match result {
                 Ok(result) => {
@@ -645,10 +618,10 @@ where
                 }
                 Err(err) => {
                     let result = Self::handle_table_sync_worker_error(
-                        table_id,
-                        config.as_ref(),
+                        self.table_id,
+                        self.config.as_ref(),
                         &state,
-                        &store,
+                        &self.store,
                         &mut shutdown_rx,
                         err,
                     )
@@ -670,8 +643,9 @@ where
     /// handles both the bulk data copy state and the incremental
     /// table state.
     async fn run_table_sync_worker(
-        mut self,
+        &self,
         state: TableSyncWorkerState,
+        mut shutdown_rx: ShutdownRx,
     ) -> EtlResult<TableSyncWorkerResult> {
         debug!(
             table_id = self.table_id.0,
@@ -685,7 +659,7 @@ where
         let _permit = tokio::select! {
             biased;
 
-            _ = self.shutdown_rx.changed() => {
+            _ = shutdown_rx.changed() => {
                 info!(table_id = self.table_id.0, "shutting down table sync worker while waiting for a run permit");
 
                 return Ok(TableSyncWorkerResult::Shutdown);
@@ -732,7 +706,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
-            self.shutdown_rx.clone(),
+            shutdown_rx.clone(),
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
         )
@@ -778,7 +752,7 @@ where
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
             worker_context,
-            self.shutdown_rx.clone(),
+            shutdown_rx,
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
             Some(replicated_table_schema),
@@ -858,5 +832,98 @@ where
         replication_client.delete_slot_if_exists(&slot_name).await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use etl_config::shared::{
+        BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+    };
+
+    use super::*;
+    use crate::{
+        runtime::concurrency::create_shutdown_channel, store::MemoryStore,
+        test_utils::memory_destination::MemoryDestination,
+    };
+
+    #[tokio::test]
+    async fn dropping_pool_aborts_table_sync_worker() {
+        let pipeline_id = 1;
+        let table_id = TableId::new(1);
+        let pg_connection = PgConnectionConfig {
+            host: "127.0.0.1".to_owned(),
+            hostaddr: None,
+            port: 5432,
+            name: "example".to_owned(),
+            username: "example".to_owned(),
+            password: None,
+            tls: TlsConfig::disabled(),
+            keepalive: TcpKeepaliveConfig::default(),
+        };
+        let config = Arc::new(PipelineConfig {
+            id: pipeline_id,
+            publication_name: "example_publication".to_owned(),
+            pg_connection: pg_connection.clone(),
+            store_pg_connection: None,
+            batch: BatchConfig::default(),
+            table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
+            table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
+            max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
+            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+            memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
+            memory_backpressure: Some(MemoryBackpressureConfig::default()),
+            table_sync_copy: TableSyncCopyConfig::default(),
+            table_sync_monitor_refresh_interval_ms:
+                PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
+            invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+            run_source_migrations: false,
+        });
+        let store = MemoryStore::new();
+        store.update_table_state(table_id, TableState::Init).await.unwrap();
+        let destination = MemoryDestination::new(store.clone());
+        let out_of_band_source_pool = OutOfBandSourcePool::new(
+            &pg_connection,
+            Duration::from_millis(config.table_sync_monitor_refresh_interval_ms),
+        );
+        let (_shutdown_tx, shutdown_rx) = create_shutdown_channel();
+        // Keep the worker pending before it opens a source connection.
+        let run_permit = Arc::new(Semaphore::new(0));
+        let run_permit_weak = Arc::downgrade(&run_permit);
+        let memory_monitor = MemoryMonitor::new_for_test();
+        let batch_budget = BatchBudgetController::new(
+            pipeline_id,
+            memory_monitor.clone(),
+            config.batch.memory_budget_ratio,
+            config.batch.max_bytes,
+        );
+        let worker = TableSyncWorker::new(
+            pipeline_id,
+            config,
+            table_id,
+            store,
+            destination,
+            out_of_band_source_pool,
+            shutdown_rx,
+            run_permit,
+            memory_monitor,
+            batch_budget,
+        );
+        let pool = Arc::new(TableSyncWorkerPool::new());
+
+        Box::pin(worker.spawn_into_pool(pool.as_ref())).await.unwrap();
+        // The pool owns the task, so dropping it must release worker resources.
+        drop(pool);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while run_permit_weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

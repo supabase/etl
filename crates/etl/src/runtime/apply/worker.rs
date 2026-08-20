@@ -231,35 +231,16 @@ where
     /// `table_error_retry_max_attempts`) so retry behavior is
     /// coherent across worker types.
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
-        let pipeline_id = self.pipeline_id;
-        let config = Arc::clone(&self.config);
-        let pool = Arc::clone(&self.pool);
-        let store = self.store.clone();
-        let destination = self.destination.clone();
-        let table_sync_worker_permits = Arc::clone(&self.table_sync_worker_permits);
         let mut shutdown_rx = self.shutdown_rx.clone();
         let mut retry_attempts: u32 = 0;
 
         loop {
-            let worker = ApplyWorker {
-                pipeline_id,
-                config: Arc::clone(&config),
-                pool: Arc::clone(&pool),
-                store: store.clone(),
-                destination: destination.clone(),
-                out_of_band_source_pool: self.out_of_band_source_pool.clone(),
-                shutdown_rx: shutdown_rx.clone(),
-                table_sync_worker_permits: Arc::clone(&table_sync_worker_permits),
-                memory_monitor: self.memory_monitor.clone(),
-                batch_budget: self.batch_budget.clone(),
-            };
-
-            let result = worker.run_apply_worker().await;
+            let result = self.run_apply_worker(shutdown_rx.clone()).await;
             match result {
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     let should_shutdown = Self::handle_apply_worker_error(
-                        config.as_ref(),
+                        self.config.as_ref(),
                         &mut shutdown_rx,
                         &mut retry_attempts,
                         err,
@@ -275,7 +256,7 @@ where
     }
 
     /// Runs a single apply worker attempt.
-    async fn run_apply_worker(self) -> EtlResult<()> {
+    async fn run_apply_worker(&self, shutdown_rx: ShutdownRx) -> EtlResult<()> {
         let replication_client = PgReplicationClient::connect_for_apply_worker(
             self.config.pg_connection.clone(),
             self.pipeline_id,
@@ -293,12 +274,12 @@ where
         let worker_context = WorkerContext::Apply(ApplyWorkerContext {
             pipeline_id: self.pipeline_id,
             config: Arc::clone(&self.config),
-            pool: self.pool,
+            pool: Arc::clone(&self.pool),
             store: self.store.clone(),
             destination: self.destination.clone(),
             out_of_band_source_pool: self.out_of_band_source_pool.clone(),
-            shutdown_rx: self.shutdown_rx.clone(),
-            table_sync_worker_permits: self.table_sync_worker_permits,
+            shutdown_rx: shutdown_rx.clone(),
+            table_sync_worker_permits: Arc::clone(&self.table_sync_worker_permits),
             memory_monitor: self.memory_monitor.clone(),
             batch_budget: self.batch_budget.clone(),
         });
@@ -307,15 +288,15 @@ where
         let apply_loop_result = ApplyLoop::start(
             self.pipeline_id,
             start_lsn,
-            self.config,
+            Arc::clone(&self.config),
             &replication_client,
-            self.store,
-            self.destination,
-            self.out_of_band_source_pool,
+            self.store.clone(),
+            self.destination.clone(),
+            self.out_of_band_source_pool.clone(),
             worker_context,
-            self.shutdown_rx,
-            self.memory_monitor,
-            self.batch_budget,
+            shutdown_rx,
+            self.memory_monitor.clone(),
+            self.batch_budget.clone(),
             None,
         )
         .await?;
