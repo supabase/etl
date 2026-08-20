@@ -231,17 +231,17 @@ where
     /// `table_error_retry_max_attempts`) so retry behavior is
     /// coherent across worker types.
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
-        let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut retry_shutdown_rx = self.shutdown_rx.clone();
         let mut retry_attempts: u32 = 0;
 
         loop {
-            let result = self.run_apply_worker(shutdown_rx.clone()).await;
+            let result = self.run_apply_worker().await;
             match result {
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     let should_shutdown = Self::handle_apply_worker_error(
                         self.config.as_ref(),
-                        &mut shutdown_rx,
+                        &mut retry_shutdown_rx,
                         &mut retry_attempts,
                         err,
                     )
@@ -256,7 +256,7 @@ where
     }
 
     /// Runs a single apply worker attempt.
-    async fn run_apply_worker(&self, shutdown_rx: ShutdownRx) -> EtlResult<()> {
+    async fn run_apply_worker(&self) -> EtlResult<()> {
         let replication_client = PgReplicationClient::connect_for_apply_worker(
             self.config.pg_connection.clone(),
             self.pipeline_id,
@@ -271,6 +271,7 @@ where
         )
         .await?;
 
+        let attempt_shutdown_rx = self.shutdown_rx.clone();
         let worker_context = WorkerContext::Apply(ApplyWorkerContext {
             pipeline_id: self.pipeline_id,
             config: Arc::clone(&self.config),
@@ -278,7 +279,7 @@ where
             store: self.store.clone(),
             destination: self.destination.clone(),
             out_of_band_source_pool: self.out_of_band_source_pool.clone(),
-            shutdown_rx: shutdown_rx.clone(),
+            shutdown_rx: attempt_shutdown_rx.clone(),
             table_sync_worker_permits: Arc::clone(&self.table_sync_worker_permits),
             memory_monitor: self.memory_monitor.clone(),
             batch_budget: self.batch_budget.clone(),
@@ -294,7 +295,7 @@ where
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
             worker_context,
-            shutdown_rx,
+            attempt_shutdown_rx,
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
             None,

@@ -604,10 +604,10 @@ where
         &self,
         state: TableSyncWorkerState,
     ) -> EtlResult<TableSyncWorkerResult> {
-        let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut retry_shutdown_rx = self.shutdown_rx.clone();
 
         loop {
-            let result = self.run_table_sync_worker(state.clone(), shutdown_rx.clone()).await;
+            let result = self.run_table_sync_worker(state.clone()).await;
 
             match result {
                 Ok(result) => {
@@ -622,7 +622,7 @@ where
                         self.config.as_ref(),
                         &state,
                         &self.store,
-                        &mut shutdown_rx,
+                        &mut retry_shutdown_rx,
                         err,
                     )
                     .await?;
@@ -645,12 +645,13 @@ where
     async fn run_table_sync_worker(
         &self,
         state: TableSyncWorkerState,
-        mut shutdown_rx: ShutdownRx,
     ) -> EtlResult<TableSyncWorkerResult> {
         debug!(
             table_id = self.table_id.0,
             "waiting to acquire a running permit for table sync worker"
         );
+
+        let mut attempt_shutdown_rx = self.shutdown_rx.clone();
 
         // We acquire a permit to run the table sync worker. This helps us limit the
         // number of table sync workers running in parallel which in turn helps
@@ -659,7 +660,7 @@ where
         let _permit = tokio::select! {
             biased;
 
-            _ = shutdown_rx.changed() => {
+            _ = attempt_shutdown_rx.changed() => {
                 info!(table_id = self.table_id.0, "shutting down table sync worker while waiting for a run permit");
 
                 return Ok(TableSyncWorkerResult::Shutdown);
@@ -706,7 +707,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
-            shutdown_rx.clone(),
+            attempt_shutdown_rx.clone(),
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
         )
@@ -752,7 +753,7 @@ where
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
             worker_context,
-            shutdown_rx,
+            attempt_shutdown_rx,
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
             Some(replicated_table_schema),
