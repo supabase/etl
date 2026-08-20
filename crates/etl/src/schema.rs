@@ -360,12 +360,6 @@ impl<I: Iterator> ExactSizeIterator for SizedIterator<I> {
 /// existing tables may need compatibility handling or a resync before this
 /// mapping can change safely. Otherwise the planner could reject a valid
 /// schema, miss a collision, or classify a required rename as a no-op.
-///
-/// Destination-specific options that refer to source columns, such as
-/// partitioning, clustering, or sorting configuration, must also apply this
-/// mapping before rendering a physical identifier. In contrast, column names
-/// returned by [`SchemaPlan::ordered_operations`] are already mapped and must
-/// be executed without mapping them again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnNameMapping {
     /// Preserves the source name exactly.
