@@ -864,14 +864,27 @@ async fn table_truncate_with_batching() {
 
     let bigquery_database = setup_bigquery_database().await;
 
-    // We create table `test_users_1` to simulate an error in the system where a
-    // table with that name already exists and should be replaced for
-    // replication to work correctly.
+    // Simulate an interrupted truncate that already created `test_users_1`
+    // without the table options used by the restarted pipeline. BigQuery cannot
+    // replace it with a different partitioning kind, so recovery must preserve
+    // it and create the next unused generation.
     bigquery_database.create_table("test_users_1", &[("age", "integer")]).await;
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let table_options = pipeline_table_options(
+        database_schema.users_schema().id,
+        Some(BigQueryPartitionBy::IntegerRange {
+            column: "age".to_owned(),
+            start: 0,
+            end: 100,
+            interval: 10,
+        }),
+        &[],
+    );
+    let raw_destination = bigquery_database
+        .build_destination_with_table_options(pipeline_id, store.clone(), table_options)
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -934,6 +947,13 @@ async fn table_truncate_with_batching() {
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let users_metadata = store
+        .get_destination_table_metadata(database_schema.users_schema().id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(users_metadata.table_id(), "test_users_2");
 
     // We query BigQuery directly to get the data which tests have inserted,
     // expecting that only the rows after truncation are there.

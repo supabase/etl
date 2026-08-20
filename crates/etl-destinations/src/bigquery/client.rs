@@ -149,7 +149,9 @@ fn partition_expression(
 
             match *typ {
                 Type::DATE if *granularity == BigQueryTimePartitionGranularity::Day => Ok(column),
-                Type::DATE => Ok(format!("date_trunc({column}, {granularity_sql})")),
+                Type::DATE if *granularity != BigQueryTimePartitionGranularity::Hour => {
+                    Ok(format!("date_trunc({column}, {granularity_sql})"))
+                }
                 Type::TIMESTAMP => Ok(format!("datetime_trunc({column}, {granularity_sql})")),
                 Type::TIMESTAMPTZ => Ok(format!("timestamp_trunc({column}, {granularity_sql})")),
                 _ => Err(etl_error!(
@@ -1701,6 +1703,27 @@ mod tests {
             sql,
             "partition by timestamp_trunc(`created_at`, MONTH) cluster by `tenant_id`, `id`"
         );
+    }
+
+    #[test]
+    fn rejects_hour_partitioning_for_date_columns() {
+        let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![ColumnSchema::new("created_on".to_owned(), Type::DATE, -1, 1, false)],
+        )));
+        let options = table_options(
+            Some(BigQueryPartitionBy::TimeColumn {
+                column: "created_on".to_owned(),
+                granularity: BigQueryTimePartitionGranularity::Hour,
+            }),
+            vec![],
+        );
+
+        let error = create_table_options_sql(Some(&options), &schema).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
+        assert!(error.to_string().contains("does not support hour time partitioning"));
     }
 
     #[test]
