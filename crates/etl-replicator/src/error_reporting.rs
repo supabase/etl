@@ -5,8 +5,8 @@ use etl::{
     error::{EtlError, EtlResult},
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
-        SchemaStore, StateStore, TableState, TableStateLifecycleStore, TableStateOperation,
-        TableStates, WorkerType,
+        SchemaStore, StateStore, TableRetryPolicy, TableState, TableStateLifecycleStore,
+        TableStateOperation, TableStates, WorkerType,
     },
 };
 use tracing::info;
@@ -16,8 +16,10 @@ use crate::{error_notification::ErrorNotificationClient, sentry};
 /// State store decorator that reports persisted table replication errors.
 ///
 /// After [`StateStore::update_table_states`] succeeds, this wrapper
-/// reports each [`TableState::Errored`] update to Sentry and, when
-/// configured, to the Supabase error-notification endpoint.
+/// reports each terminal [`TableState::Errored`] update to Sentry and, when
+/// configured, to the Supabase error-notification endpoint. Errors with a
+/// timed retry remain visible in the state store but are not reported while
+/// automatic recovery is still in progress.
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorReportingStateStore<S> {
     inner: S,
@@ -61,6 +63,9 @@ impl<S> ErrorReportingStateStore<S> {
         updates
             .iter()
             .filter_map(|(table_id, state)| match state {
+                TableState::Errored {
+                    retry_policy: TableRetryPolicy::TimedRetry { .. }, ..
+                } => None,
                 TableState::Errored { source_err, .. } => Some(ReportableTableError {
                     table_id: *table_id,
                     source_err: source_err.clone(),

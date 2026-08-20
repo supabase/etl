@@ -2222,7 +2222,7 @@ async fn exclusive_get_slot_state_returns_invalidated_for_lost_slot() {
     assert_eq!(slot_state, SlotState::NotInvalidated);
 
     // Try to invalidate the slot using the database helper
-    database.invalidate_slot(&slot_name).await;
+    database.invalidate_slot(&slot_name).await.unwrap();
 
     // Verify the slot state is now Invalidated
     let slot_state = client.get_slot_state(&slot_name).await.unwrap();
