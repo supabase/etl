@@ -11,7 +11,8 @@ use gcp_bigquery_client::{
     client_builder::ClientBuilder,
     error::BQError,
     model::{
-        dataset::Dataset, query_request::QueryRequest, table_cell::TableCell, table_row::TableRow,
+        dataset::Dataset, query_request::QueryRequest, table::Table, table_cell::TableCell,
+        table_row::TableRow,
     },
 };
 use tokio::{runtime::Handle, time::sleep};
@@ -396,6 +397,13 @@ impl BigQueryDatabase {
 
     /// Gets a table or view schema from the BigQuery table metadata API.
     pub async fn get_table_schema_by_id(&self, table_id: &str) -> Option<BigQueryTableSchema> {
+        let table = self.get_table_metadata_by_id(table_id).await?;
+
+        Some(BigQueryTableSchema::from_table_fields(table.schema.fields.unwrap_or_default()))
+    }
+
+    /// Gets table metadata for an exact table ID.
+    pub async fn get_table_metadata_by_id(&self, table_id: &str) -> Option<Table> {
         let table = match retry_bigquery_test_operation("table metadata query", || async {
             self.client.table().get(&self.project_id, &self.dataset_id, table_id, None).await
         })
@@ -406,7 +414,7 @@ impl BigQueryDatabase {
             Err(err) => panic!("Failed to get BigQuery table metadata: {err:?}"),
         };
 
-        Some(BigQueryTableSchema::from_table_fields(table.schema.fields.unwrap_or_default()))
+        Some(table)
     }
 
     /// Queries BigQuery column defaults for an exact table ID.
@@ -477,6 +485,19 @@ impl BigQueryDatabase {
         )
         .await
         .expect("Failed to create BigQuery destination")
+    }
+
+    /// Creates a [`BigQueryDestination`] with per-table creation options.
+    pub async fn build_destination_with_table_options<S>(
+        &self,
+        pipeline_id: PipelineId,
+        schema_store: S,
+        table_options: etl_config::shared::BigQueryTableOptionsConfig,
+    ) -> BigQueryDestination<S>
+    where
+        S: DestinationStore,
+    {
+        self.build_destination(pipeline_id, schema_store).await.with_table_options(table_options)
     }
 }
 

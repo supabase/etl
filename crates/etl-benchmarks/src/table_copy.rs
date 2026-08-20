@@ -11,7 +11,7 @@ use etl::{
     store::TableStateType,
     test_utils::{notify::TimedNotify, notifying_store::NotifyingStore},
 };
-use etl_config::shared::TableSyncCopyConfig;
+use etl_config::shared::{TableSyncCopyConfig, Validate};
 use serde::Serialize;
 use tokio::task::JoinSet;
 use tracing::info;

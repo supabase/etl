@@ -1,8 +1,12 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
-use crate::shared::{PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError};
+use crate::shared::{
+    PgConnectionConfig, PgConnectionConfigWithoutSecrets, Validate, ValidationError,
+};
 
 /// Batch processing configuration for pipelines.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,11 +70,11 @@ impl BatchConfig {
     /// backpressure can observe new allocations, while still fitting thousands
     /// of typical CDC rows and staying near common streaming request limits.
     pub const DEFAULT_MAX_BYTES: usize = 8 * 1024 * 1024;
+}
 
+impl Validate for BatchConfig {
     /// Validates batch configuration settings.
-    ///
-    /// Ensures memory budget ratio is in range.
-    pub fn validate(&self) -> Result<(), ValidationError> {
+    fn validate(&self) -> Result<(), ValidationError> {
         if !(0.0..=1.0).contains(&self.memory_budget_ratio) || self.memory_budget_ratio == 0.0 {
             return Err(ValidationError::InvalidFieldValue {
                 field: "batch.memory_budget_ratio".to_owned(),
@@ -179,6 +183,32 @@ impl TableSyncCopyConfig {
     }
 }
 
+impl Validate for TableSyncCopyConfig {
+    fn validate(&self) -> Result<(), ValidationError> {
+        let table_ids = match self {
+            TableSyncCopyConfig::IncludeAllTables | TableSyncCopyConfig::SkipAllTables => {
+                return Ok(());
+            }
+            TableSyncCopyConfig::IncludeTables { table_ids }
+            | TableSyncCopyConfig::SkipTables { table_ids } => table_ids,
+        };
+
+        let mut seen_table_ids = HashSet::with_capacity(table_ids.len());
+        for table_id in table_ids {
+            if !seen_table_ids.insert(table_id) {
+                return Err(ValidationError::InvalidFieldValue {
+                    field: "table_sync_copy.table_ids".to_owned(),
+                    constraint: format!(
+                        "must be unique; table id {table_id} is configured more than once"
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Memory-based backpressure configuration.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -199,9 +229,11 @@ impl MemoryBackpressureConfig {
     pub const DEFAULT_ACTIVATE_THRESHOLD: f32 = 0.85;
     /// Default memory usage ratio to release backpressure.
     pub const DEFAULT_RESUME_THRESHOLD: f32 = 0.75;
+}
 
+impl Validate for MemoryBackpressureConfig {
     /// Validates memory backpressure thresholds.
-    pub fn validate(&self) -> Result<(), ValidationError> {
+    fn validate(&self) -> Result<(), ValidationError> {
         if !(0.0..=1.0).contains(&self.activate_threshold) || self.activate_threshold == 0.0 {
             return Err(ValidationError::InvalidFieldValue {
                 field: "memory_backpressure.activate_threshold".to_owned(),
@@ -345,59 +377,80 @@ impl PipelineConfig {
     /// checks.
     pub const DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS: u64 = 10_000;
 
-    /// Validates pipeline configuration settings.
-    ///
-    /// Checks batch configuration and ensures worker counts and retry attempts
-    /// are non-zero.
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        self.batch.validate()?;
-
-        if self.max_table_sync_workers == 0 {
-            return Err(ValidationError::InvalidFieldValue {
-                field: "max_table_sync_workers".to_owned(),
-                constraint: "must be greater than 0".to_owned(),
-            });
-        }
-
-        if self.table_error_retry_max_attempts == 0 {
-            return Err(ValidationError::InvalidFieldValue {
-                field: "table_error_retry_max_attempts".to_owned(),
-                constraint: "must be greater than 0".to_owned(),
-            });
-        }
-
-        if self.max_copy_connections_per_table == 0 {
-            return Err(ValidationError::InvalidFieldValue {
-                field: "max_copy_connections_per_table".to_owned(),
-                constraint: "must be greater than 0".to_owned(),
-            });
-        }
-
-        if let Some(memory_backpressure) = &self.memory_backpressure {
-            memory_backpressure.validate()?;
-        }
-
-        if self.memory_refresh_interval_ms == 0 {
-            return Err(ValidationError::InvalidFieldValue {
-                field: "memory_refresh_interval_ms".to_owned(),
-                constraint: "must be greater than 0".to_owned(),
-            });
-        }
-
-        if self.table_sync_monitor_refresh_interval_ms == 0 {
-            return Err(ValidationError::InvalidFieldValue {
-                field: "table_sync_monitor_refresh_interval_ms".to_owned(),
-                constraint: "must be greater than 0".to_owned(),
-            });
-        }
-
-        Ok(())
-    }
-
     /// Returns the Postgres connection configuration for state storage.
     pub fn store_pg_connection(&self) -> &PgConnectionConfig {
         self.store_pg_connection.as_ref().unwrap_or(&self.pg_connection)
     }
+}
+
+impl Validate for PipelineConfig {
+    /// Validates pipeline configuration settings.
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_pipeline_settings(
+            &self.batch,
+            self.max_table_sync_workers,
+            self.table_error_retry_max_attempts,
+            self.max_copy_connections_per_table,
+            self.memory_backpressure.as_ref(),
+            self.memory_refresh_interval_ms,
+            self.table_sync_monitor_refresh_interval_ms,
+        )?;
+        self.table_sync_copy.validate()
+    }
+}
+
+/// Validates pipeline settings shared by secret and without-secret configs.
+fn validate_pipeline_settings(
+    batch: &BatchConfig,
+    max_table_sync_workers: u16,
+    table_error_retry_max_attempts: u32,
+    max_copy_connections_per_table: u16,
+    memory_backpressure: Option<&MemoryBackpressureConfig>,
+    memory_refresh_interval_ms: u64,
+    table_sync_monitor_refresh_interval_ms: u64,
+) -> Result<(), ValidationError> {
+    batch.validate()?;
+
+    if max_table_sync_workers == 0 {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "max_table_sync_workers".to_owned(),
+            constraint: "must be greater than 0".to_owned(),
+        });
+    }
+
+    if table_error_retry_max_attempts == 0 {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "table_error_retry_max_attempts".to_owned(),
+            constraint: "must be greater than 0".to_owned(),
+        });
+    }
+
+    if max_copy_connections_per_table == 0 {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "max_copy_connections_per_table".to_owned(),
+            constraint: "must be greater than 0".to_owned(),
+        });
+    }
+
+    if let Some(memory_backpressure) = memory_backpressure {
+        memory_backpressure.validate()?;
+    }
+
+    if memory_refresh_interval_ms == 0 {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "memory_refresh_interval_ms".to_owned(),
+            constraint: "must be greater than 0".to_owned(),
+        });
+    }
+
+    if table_sync_monitor_refresh_interval_ms == 0 {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "table_sync_monitor_refresh_interval_ms".to_owned(),
+            constraint: "must be greater than 0".to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 const fn default_table_error_retry_delay_ms() -> u64 {
@@ -500,6 +553,22 @@ pub struct PipelineConfigWithoutSecrets {
     /// field of the same name on [`PipelineConfig`].
     #[serde(default = "default_run_source_migrations")]
     pub run_source_migrations: bool,
+}
+
+impl Validate for PipelineConfigWithoutSecrets {
+    /// Validates pipeline configuration settings.
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_pipeline_settings(
+            &self.batch,
+            self.max_table_sync_workers,
+            self.table_error_retry_max_attempts,
+            self.max_copy_connections_per_table,
+            self.memory_backpressure.as_ref(),
+            self.memory_refresh_interval_ms,
+            self.table_sync_monitor_refresh_interval_ms,
+        )?;
+        self.table_sync_copy.validate()
+    }
 }
 
 impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
@@ -648,6 +717,20 @@ mod tests {
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(selection, decoded);
+    }
+
+    #[test]
+    fn table_sync_copy_validate_accepts_unique_table_ids() {
+        TableSyncCopyConfig::IncludeAllTables.validate().unwrap();
+        TableSyncCopyConfig::SkipAllTables.validate().unwrap();
+        TableSyncCopyConfig::IncludeTables { table_ids: vec![1, 2, 3] }.validate().unwrap();
+        TableSyncCopyConfig::SkipTables { table_ids: vec![4, 5] }.validate().unwrap();
+    }
+
+    #[test]
+    fn table_sync_copy_validate_rejects_duplicate_table_ids() {
+        TableSyncCopyConfig::IncludeTables { table_ids: vec![1, 2, 1] }.validate().unwrap_err();
+        TableSyncCopyConfig::SkipTables { table_ids: vec![4, 4] }.validate().unwrap_err();
     }
 
     #[test]

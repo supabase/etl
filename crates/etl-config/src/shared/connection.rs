@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions as SqlxConnectOptions, PgSslMode as SqlxSslMode};
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
 
-use crate::Config;
+use crate::{Config, shared::Validate};
 
 /// Common Postgres settings shared across all ETL connection types.
 ///
@@ -197,6 +197,8 @@ pub struct PgConnectionConfig {
     pub keepalive: TcpKeepaliveConfig,
 }
 
+impl Validate for PgConnectionConfig {}
+
 impl Config for PgConnectionConfig {
     const LIST_PARSE_KEYS: &'static [&'static str] = &[];
 }
@@ -224,6 +226,8 @@ pub struct PgConnectionConfigWithoutSecrets {
     pub keepalive: TcpKeepaliveConfig,
 }
 
+impl Validate for PgConnectionConfigWithoutSecrets {}
+
 impl From<PgConnectionConfig> for PgConnectionConfigWithoutSecrets {
     fn from(value: PgConnectionConfig) -> Self {
         PgConnectionConfigWithoutSecrets {
@@ -247,6 +251,8 @@ pub struct TlsConfig {
     pub enabled: bool,
 }
 
+impl Validate for TlsConfig {}
+
 impl TlsConfig {
     /// Returns a TLS configuration that disables TLS.
     pub fn disabled() -> Self {
@@ -266,6 +272,8 @@ pub struct TcpKeepaliveConfig {
     /// dead.
     pub retries: u32,
 }
+
+impl Validate for TcpKeepaliveConfig {}
 
 impl Default for TcpKeepaliveConfig {
     fn default() -> Self {

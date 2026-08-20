@@ -9,4 +9,7 @@ BigQuery {
     connection_pool_size: Some(
         1,
     ),
+    table_options: BigQueryTableOptionsConfig {
+        tables: [],
+    },
 }

@@ -1,8 +1,8 @@
 use etl_config::{
     SerializableSecretString,
     shared::{
-        ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode, DuckLakeTableSortingConfig,
-        IcebergConfig,
+        BigQueryTableOptionsConfig, ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode,
+        DuckLakeTableSortingConfig, IcebergConfig,
     },
 };
 use secrecy::ExposeSecret;
@@ -35,20 +35,31 @@ pub const fn default_ducklake_pool_size() -> u32 {
 #[serde(rename_all = "snake_case")]
 pub enum ApiDestinationConfig {
     BigQuery {
+        /// Google Cloud project identifier.
         #[schema(example = "my-gcp-project")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         project_id: String,
+        /// BigQuery dataset identifier.
         #[schema(example = "my_dataset")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         dataset_id: String,
+        /// Service account key for authenticating with BigQuery.
         #[schema(example = "{\"type\": \"service_account\", \"project_id\": \"my-project\"}")]
         service_account_key: SerializableSecretString,
+        /// Maximum staleness in minutes for BigQuery CDC reads. Applied only
+        /// when the physical table is created or recreated; changing it does
+        /// not affect a table that already exists.
         #[schema(example = 15)]
         #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
+        /// Size of the BigQuery Storage Write API connection pool.
         #[schema(example = 8)]
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
+        /// Per-table partitioning and clustering, applied only when the
+        /// physical table is created or recreated.
+        #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
+        table_options: BigQueryTableOptionsConfig,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -67,7 +78,9 @@ pub enum ApiDestinationConfig {
         #[schema(example = "my_db")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         database: String,
-        /// Table engine used for replicated tables.
+        /// Table engine used for replicated tables. Applied only when a
+        /// table is created or recreated; changing it does not affect a
+        /// table that already exists.
         #[schema(value_type = String, example = "replacing_merge_tree")]
         #[serde(default)]
         engine: ClickHouseEngine,
@@ -77,6 +90,7 @@ pub enum ApiDestinationConfig {
         config: ApiIcebergConfig,
     },
     Ducklake {
+        /// DuckLake catalog URL.
         #[schema(value_type = String, example = "postgres://localhost:5432/ducklake_catalog")]
         #[serde(deserialize_with = "crate::utils::trim_secret_string")]
         catalog_url: SerializableSecretString,
@@ -88,12 +102,15 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_secret_string"
         )]
         catalog_pooler_url: Option<SerializableSecretString>,
+        /// DuckLake data path.
         #[schema(example = "s3://bucket/path")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         data_path: String,
+        /// Size of the DuckDB connection pool.
         #[schema(example = 4)]
         #[serde(skip_serializing_if = "Option::is_none")]
         pool_size: Option<u32>,
+        /// Optional S3-compatible storage access key ID.
         #[schema(example = "my-access-key")]
         #[serde(
             default,
@@ -101,6 +118,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_secret_string"
         )]
         s3_access_key_id: Option<SerializableSecretString>,
+        /// Optional S3-compatible storage secret access key.
         #[schema(example = "my-secret-key")]
         #[serde(
             default,
@@ -108,6 +126,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_secret_string"
         )]
         s3_secret_access_key: Option<SerializableSecretString>,
+        /// Optional S3-compatible storage region.
         #[schema(example = "us-east-1")]
         #[serde(
             default,
@@ -115,6 +134,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         s3_region: Option<String>,
+        /// Optional S3-compatible storage endpoint.
         #[schema(example = "127.0.0.1:5000/s3")]
         #[serde(
             default,
@@ -122,6 +142,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         s3_endpoint: Option<String>,
+        /// Optional S3 URL style.
         #[schema(example = "path")]
         #[serde(
             default,
@@ -129,9 +150,11 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         s3_url_style: Option<String>,
+        /// Optional S3 SSL toggle.
         #[schema(example = false)]
         #[serde(skip_serializing_if = "Option::is_none")]
         s3_use_ssl: Option<bool>,
+        /// Optional metadata schema for DuckLake metadata tables.
         #[schema(example = "ducklake")]
         #[serde(
             default,
@@ -139,6 +162,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         metadata_schema: Option<String>,
+        /// Optional DuckLake maintenance target file size.
         #[schema(example = "500MB")]
         #[serde(
             default,
@@ -146,6 +170,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         maintenance_target_file_size: Option<String>,
+        /// Optional DuckLake snapshot-retention interval.
         #[schema(example = "7 days")]
         #[serde(
             default,
@@ -153,6 +178,7 @@ pub enum ApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         expire_snapshots_older_than: Option<String>,
+        /// External maintenance coordination backend.
         #[schema(example = "kubernetes")]
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
@@ -162,22 +188,29 @@ pub enum ApiDestinationConfig {
         table_sorting: DuckLakeTableSortingConfig,
     },
     Snowflake {
+        /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
         #[schema(example = "ORGNAME-ACCOUNTNAME")]
         #[serde(deserialize_with = "crate::utils::trim_snowflake_account_id")]
         account_id: String,
+        /// Snowflake user with RSA public key configured.
         #[schema(example = "ETL_USER")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         user: String,
+        /// RSA private key in PEM format (PKCS#8 or PKCS#1).
         #[schema(example = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADA...")]
         private_key: SerializableSecretString,
+        /// Optional passphrase for encrypted private key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         private_key_passphrase: Option<SerializableSecretString>,
+        /// Target database name.
         #[schema(example = "ANALYTICS")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         database: String,
+        /// Target schema name.
         #[schema(example = "PUBLIC")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         schema: String,
+        /// Snowflake role.
         #[schema(example = "ETL_ROLE")]
         #[serde(
             default,
@@ -200,12 +233,18 @@ pub enum StrippedApiDestinationConfig {
         project_id: String,
         /// BigQuery dataset identifier.
         dataset_id: String,
-        /// Maximum staleness in minutes for BigQuery CDC reads.
+        /// Maximum staleness in minutes for BigQuery CDC reads. Applied only
+        /// when the physical table is created or recreated; changing it does
+        /// not affect a table that already exists.
         #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
         /// Size of the BigQuery Storage Write API connection pool.
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
+        /// Per-table partitioning and clustering options, applied only when
+        /// the physical table is created or recreated.
+        #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
+        table_options: BigQueryTableOptionsConfig,
     },
     /// ClickHouse destination configuration without its password.
     #[serde(rename = "clickhouse")]
@@ -217,7 +256,9 @@ pub enum StrippedApiDestinationConfig {
         user: String,
         /// ClickHouse target database.
         database: String,
-        /// Table engine used for replicated tables.
+        /// Table engine used for replicated tables. Applied only when a
+        /// table is created or recreated; changing it does not affect a
+        /// table that already exists.
         #[schema(value_type = String)]
         engine: ClickHouseEngine,
     },
@@ -384,6 +425,7 @@ where
 #[serde(rename_all = "snake_case")]
 pub enum UpdateApiDestinationConfig {
     BigQuery {
+        /// Google Cloud project identifier.
         #[schema(example = "my-gcp-project")]
         #[serde(
             default,
@@ -391,6 +433,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         project_id: UpdateField<String>,
+        /// BigQuery dataset identifier.
         #[schema(example = "my_dataset")]
         #[serde(
             default,
@@ -398,6 +441,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         dataset_id: UpdateField<String>,
+        /// Service account key for authenticating with BigQuery.
         #[schema(example = "{\"type\": \"service_account\", \"project_id\": \"my-project\"}")]
         #[serde(
             default,
@@ -405,15 +449,25 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_secret_string"
         )]
         service_account_key: UpdateField<SerializableSecretString>,
+        /// Maximum staleness in minutes for BigQuery CDC reads. Applied only
+        /// when a table is created or recreated, not to a table that
+        /// already exists.
         #[schema(example = 15)]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         max_staleness_mins: UpdateField<u16>,
+        /// Size of the BigQuery Storage Write API connection pool.
         #[schema(example = 8)]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         connection_pool_size: UpdateField<usize>,
+        /// Replaces all per-table creation options. `null` resets them.
+        /// Applied only when a table is created or recreated, not to a
+        /// table that already exists.
+        #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+        table_options: UpdateField<BigQueryTableOptionsConfig>,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
+        /// ClickHouse HTTP(S) endpoint URL.
         #[schema(value_type = String, example = "http://test:8123")]
         #[serde(
             default,
@@ -421,6 +475,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_http_url"
         )]
         url: UpdateField<Url>,
+        /// ClickHouse user name.
         #[schema(example = "foo")]
         #[serde(
             default,
@@ -428,12 +483,14 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         user: UpdateField<String>,
+        /// ClickHouse password (omit for passwordless access).
         #[serde(
             default,
             skip_serializing_if = "UpdateField::is_preserve",
             deserialize_with = "deserialize_update_secret_string"
         )]
         password: UpdateField<SerializableSecretString>,
+        /// ClickHouse target database.
         #[schema(example = "my_db")]
         #[serde(
             default,
@@ -441,6 +498,8 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         database: UpdateField<String>,
+        /// Applied only when a table is created or recreated, not to a
+        /// table that already exists.
         #[schema(value_type = String, example = "replacing_merge_tree")]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         engine: UpdateField<ClickHouseEngine>,
@@ -450,6 +509,7 @@ pub enum UpdateApiDestinationConfig {
         config: UpdateApiIcebergConfig,
     },
     Ducklake {
+        /// DuckLake catalog URL.
         #[schema(value_type = String, example = "postgres://localhost:5432/ducklake_catalog")]
         #[serde(
             default,
@@ -465,6 +525,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_secret_string"
         )]
         catalog_pooler_url: UpdateField<SerializableSecretString>,
+        /// DuckLake data path.
         #[schema(example = "s3://bucket/path")]
         #[serde(
             default,
@@ -472,9 +533,11 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         data_path: UpdateField<String>,
+        /// Size of the DuckDB connection pool.
         #[schema(example = 4)]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         pool_size: UpdateField<u32>,
+        /// Optional S3-compatible storage access key ID.
         #[schema(example = "my-access-key")]
         #[serde(
             default,
@@ -482,6 +545,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_secret_string"
         )]
         s3_access_key_id: UpdateField<SerializableSecretString>,
+        /// Optional S3-compatible storage secret access key.
         #[schema(example = "my-secret-key")]
         #[serde(
             default,
@@ -489,6 +553,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_secret_string"
         )]
         s3_secret_access_key: UpdateField<SerializableSecretString>,
+        /// Optional S3-compatible storage region.
         #[schema(example = "us-east-1")]
         #[serde(
             default,
@@ -496,6 +561,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         s3_region: UpdateField<String>,
+        /// Optional S3-compatible storage endpoint.
         #[schema(example = "127.0.0.1:5000/s3")]
         #[serde(
             default,
@@ -503,6 +569,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         s3_endpoint: UpdateField<String>,
+        /// Optional S3 URL style.
         #[schema(example = "path")]
         #[serde(
             default,
@@ -510,9 +577,11 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         s3_url_style: UpdateField<String>,
+        /// Optional S3 SSL toggle.
         #[schema(example = false)]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         s3_use_ssl: UpdateField<bool>,
+        /// Optional metadata schema for DuckLake metadata tables.
         #[schema(example = "ducklake")]
         #[serde(
             default,
@@ -520,6 +589,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         metadata_schema: UpdateField<String>,
+        /// Optional DuckLake maintenance target file size.
         #[schema(example = "500MB")]
         #[serde(
             default,
@@ -527,6 +597,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         maintenance_target_file_size: UpdateField<String>,
+        /// Optional DuckLake snapshot-retention interval.
         #[schema(example = "7 days")]
         #[serde(
             default,
@@ -534,6 +605,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         expire_snapshots_older_than: UpdateField<String>,
+        /// External maintenance coordination backend.
         #[schema(example = "kubernetes")]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         maintenance_mode: UpdateField<DuckLakeMaintenanceMode>,
@@ -542,6 +614,7 @@ pub enum UpdateApiDestinationConfig {
         table_sorting: UpdateField<DuckLakeTableSortingConfig>,
     },
     Snowflake {
+        /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
         #[schema(example = "ORGNAME-ACCOUNTNAME")]
         #[serde(
             default,
@@ -549,6 +622,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_snowflake_account_id"
         )]
         account_id: UpdateField<String>,
+        /// Snowflake user with RSA public key configured.
         #[schema(example = "ETL_USER")]
         #[serde(
             default,
@@ -556,6 +630,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         user: UpdateField<String>,
+        /// RSA private key in PEM format (PKCS#8 or PKCS#1).
         #[schema(example = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADA...")]
         #[serde(
             default,
@@ -563,9 +638,11 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_secret_string"
         )]
         private_key: UpdateField<SerializableSecretString>,
+        /// Optional passphrase for encrypted private key.
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         #[schema(value_type = Option<String>)]
         private_key_passphrase: UpdateField<SerializableSecretString>,
+        /// Target database name.
         #[schema(example = "ANALYTICS")]
         #[serde(
             default,
@@ -573,6 +650,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         database: UpdateField<String>,
+        /// Target schema name.
         #[schema(example = "PUBLIC")]
         #[serde(
             default,
@@ -580,6 +658,7 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         schema: UpdateField<String>,
+        /// Snowflake role.
         #[schema(example = "ETL_ROLE")]
         #[serde(
             default,
@@ -603,12 +682,14 @@ impl UpdateApiDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => Self::BigQuery {
                 project_id: UpdateField::Set(project_id),
                 dataset_id: UpdateField::Set(dataset_id),
                 service_account_key: UpdateField::Set(service_account_key),
                 max_staleness_mins: UpdateField::from_option(max_staleness_mins),
                 connection_pool_size: UpdateField::from_option(connection_pool_size),
+                table_options: UpdateField::Set(table_options),
             },
             ApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse {
@@ -690,6 +771,7 @@ impl UpdateApiDestinationConfig {
                     service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
+                    table_options,
                 },
                 StoredDestinationConfig::BigQuery {
                     project_id: stored_project_id,
@@ -697,6 +779,7 @@ impl UpdateApiDestinationConfig {
                     service_account_key: stored_key,
                     max_staleness_mins: stored_max_staleness_mins,
                     connection_pool_size: stored_connection_pool_size,
+                    table_options: stored_table_options,
                 },
             ) => Ok(StoredDestinationConfig::BigQuery {
                 project_id: project_id.apply_to_required(
@@ -714,6 +797,8 @@ impl UpdateApiDestinationConfig {
                 max_staleness_mins: max_staleness_mins.apply_to_option(stored_max_staleness_mins),
                 connection_pool_size: connection_pool_size
                     .apply_to_value(stored_connection_pool_size, default_connection_pool_size),
+                table_options: table_options
+                    .apply_to_value(stored_table_options, BigQueryTableOptionsConfig::default),
             }),
             (
                 Self::ClickHouse { url, user, password, database, engine },
@@ -863,6 +948,7 @@ impl UpdateApiDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => Ok(StoredDestinationConfig::BigQuery {
                 project_id: project_id.into_required(
                     missing_required_field("BigQuery", "project_id"),
@@ -879,6 +965,10 @@ impl UpdateApiDestinationConfig {
                 max_staleness_mins: max_staleness_mins.apply_to_option(None),
                 connection_pool_size: connection_pool_size
                     .apply_to_value(default_connection_pool_size(), default_connection_pool_size),
+                table_options: table_options.apply_to_value(
+                    BigQueryTableOptionsConfig::default(),
+                    BigQueryTableOptionsConfig::default,
+                ),
             }),
             Self::ClickHouse { url, user, password, database, engine } => {
                 Ok(StoredDestinationConfig::ClickHouse {
@@ -1017,12 +1107,14 @@ impl From<StoredDestinationConfig> for ApiDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size: Some(connection_pool_size),
+                table_options,
             },
             StoredDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse { url, user, password, database, engine }
@@ -1128,11 +1220,13 @@ impl From<StoredDestinationConfig> for StrippedApiDestinationConfig {
                 service_account_key: _,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
                 max_staleness_mins,
                 connection_pool_size: Some(connection_pool_size),
+                table_options,
             },
             StoredDestinationConfig::ClickHouse { url, user, password: _, database, engine } => {
                 Self::ClickHouse { url, user, database, engine }
@@ -1188,6 +1282,7 @@ pub enum StoredDestinationConfig {
         service_account_key: SerializableSecretString,
         max_staleness_mins: Option<u16>,
         connection_pool_size: usize,
+        table_options: BigQueryTableOptionsConfig,
     },
     ClickHouse {
         url: Url,
@@ -1236,12 +1331,14 @@ impl StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => DestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key: service_account_key.into(),
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             },
             Self::ClickHouse { url, user, password, database, engine } => {
                 DestinationConfig::ClickHouse {
@@ -1352,6 +1449,7 @@ impl From<ApiDestinationConfig> for StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
@@ -1359,6 +1457,7 @@ impl From<ApiDestinationConfig> for StoredDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size: connection_pool_size
                     .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
+                table_options,
             },
             ApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse { url, user, password, database, engine }
@@ -1467,6 +1566,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => {
                 let encrypted_service_account_key =
                     encrypt_text(service_account_key.expose_secret().to_owned(), encryption_key)?;
@@ -1477,6 +1577,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     service_account_key: encrypted_service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
+                    table_options,
                 })
             }
             Self::ClickHouse { url, user, password, database, engine } => {
@@ -1635,6 +1736,8 @@ pub enum EncryptedStoredDestinationConfig {
         max_staleness_mins: Option<u16>,
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+        #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
+        table_options: BigQueryTableOptionsConfig,
     },
     ClickHouse {
         url: Url,
@@ -1706,6 +1809,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 service_account_key: encrypted_service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => {
                 let service_account_key = SerializableSecretString::from(decrypt_text(
                     encrypted_service_account_key,
@@ -1718,6 +1822,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
+                    table_options,
                 })
             }
             Self::Iceberg { config } => match config {
@@ -2377,6 +2482,21 @@ mod tests {
         .unwrap()
     }
 
+    fn bigquery_table_options() -> BigQueryTableOptionsConfig {
+        serde_json::from_value(serde_json::json!({
+            "tables": [{
+                "table_id": 16384,
+                "partition_by": {
+                    "kind": "time_column",
+                    "column": "created_at",
+                    "granularity": "day"
+                },
+                "cluster_by": ["tenant_id"]
+            }]
+        }))
+        .unwrap()
+    }
+
     fn ducklake_api_config(table_sorting: DuckLakeTableSortingConfig) -> ApiDestinationConfig {
         ApiDestinationConfig::Ducklake {
             catalog_url: SerializableSecretString::from(
@@ -2409,6 +2529,7 @@ mod tests {
                 ),
                 max_staleness_mins: Some(15),
                 connection_pool_size: 4,
+                table_options: BigQueryTableOptionsConfig::default(),
             },
             StoredDestinationConfig::ClickHouse {
                 url: Url::parse("https://clickhouse.example.com:8443").unwrap(),
@@ -2610,6 +2731,7 @@ mod tests {
             ),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            table_options: BigQueryTableOptionsConfig::default(),
         };
 
         let key = EncryptionKeyring::from(EncryptionKey {
@@ -2636,6 +2758,7 @@ mod tests {
                     service_account_key: key1,
                     max_staleness_mins: staleness1,
                     connection_pool_size: connection_pool_size1,
+                    table_options: table_options1,
                 },
                 StoredDestinationConfig::BigQuery {
                     project_id: p2,
@@ -2643,12 +2766,14 @@ mod tests {
                     service_account_key: key2,
                     max_staleness_mins: staleness2,
                     connection_pool_size: connection_pool_size2,
+                    table_options: table_options2,
                 },
             ) => {
                 assert_eq!(p1, p2);
                 assert_eq!(d1, d2);
                 assert_eq!(staleness1, staleness2);
                 assert_eq!(connection_pool_size1, connection_pool_size2);
+                assert_eq!(table_options1, table_options2);
                 // Assert that service account key was encrypted and decrypted correctly
                 assert_eq!(key1.expose_secret(), key2.expose_secret());
             }
@@ -2992,6 +3117,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: None,
+            table_options: BigQueryTableOptionsConfig::default(),
         };
 
         let stored: StoredDestinationConfig = api_config.clone().into();
@@ -3005,6 +3131,7 @@ mod tests {
                     service_account_key: p1_service_account_key,
                     max_staleness_mins: p1_max_staleness_mins,
                     connection_pool_size: p1_connection_pool_size,
+                    table_options: p1_table_options,
                 },
                 ApiDestinationConfig::BigQuery {
                     project_id: p2_project_id,
@@ -3012,6 +3139,7 @@ mod tests {
                     service_account_key: p2_service_account_key,
                     max_staleness_mins: p2_max_staleness_mins,
                     connection_pool_size: p2_connection_pool_size,
+                    table_options: p2_table_options,
                 },
             ) => {
                 assert_eq!(p1_project_id, p2_project_id);
@@ -3021,6 +3149,7 @@ mod tests {
                     p2_service_account_key.expose_secret()
                 );
                 assert_eq!(p1_max_staleness_mins, p2_max_staleness_mins);
+                assert_eq!(p1_table_options, p2_table_options);
                 // Note: connection_pool_size should be set to DEFAULT_POOL_SIZE when None
                 assert_eq!(p1_connection_pool_size, None);
                 assert_eq!(
@@ -3033,6 +3162,50 @@ mod tests {
     }
 
     #[test]
+    fn api_destination_config_serializes_independent_bigquery_table_options() {
+        let payload = serde_json::json!({
+            "big_query": {
+                "project_id": "example-project",
+                "dataset_id": "example_dataset",
+                "service_account_key": "placeholder-key",
+                "table_options": {
+                    "tables": [
+                        {
+                            "table_id": 16384,
+                            "partition_by": {
+                                "kind": "integer_range",
+                                "column": "id",
+                                "start": 0,
+                                "end": 100,
+                                "interval": 10
+                            }
+                        },
+                        {
+                            "table_id": 16385,
+                            "cluster_by": ["tenant_id"]
+                        }
+                    ]
+                }
+            }
+        });
+
+        let config: ApiDestinationConfig = serde_json::from_value(payload.clone()).unwrap();
+
+        assert_eq!(serde_json::to_value(config).unwrap(), payload);
+
+        let default_layout = ApiDestinationConfig::BigQuery {
+            project_id: "example-project".to_owned(),
+            dataset_id: "example_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("placeholder-key".to_owned()),
+            max_staleness_mins: None,
+            connection_pool_size: None,
+            table_options: BigQueryTableOptionsConfig::default(),
+        };
+        let serialized = serde_json::to_value(default_layout).unwrap();
+        assert!(serialized["big_query"].get("table_options").is_none());
+    }
+
+    #[test]
     fn update_api_destination_config_preserves_omitted_bigquery_secret() {
         let stored_config = StoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
@@ -3040,6 +3213,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("existing-key".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            table_options: BigQueryTableOptionsConfig::default(),
         };
         let update_config = UpdateApiDestinationConfig::BigQuery {
             project_id: UpdateField::Set("updated-project".to_owned()),
@@ -3047,6 +3221,7 @@ mod tests {
             service_account_key: UpdateField::Preserve,
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Preserve,
         };
 
         let updated_config = update_config.merge_into_stored(stored_config).unwrap();
@@ -3058,12 +3233,14 @@ mod tests {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
+                table_options,
             } => {
                 assert_eq!(project_id, "updated-project");
                 assert_eq!(dataset_id, "updated_dataset");
                 assert_eq!(service_account_key.expose_secret(), "existing-key");
                 assert_eq!(max_staleness_mins, Some(15));
                 assert_eq!(connection_pool_size, 8);
+                assert!(table_options.is_empty());
             }
             _ => panic!("Config types don't match"),
         }
@@ -3077,6 +3254,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("existing-key".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            table_options: BigQueryTableOptionsConfig::default(),
         };
         let update_config = UpdateApiDestinationConfig::BigQuery {
             project_id: UpdateField::Preserve,
@@ -3084,6 +3262,7 @@ mod tests {
             service_account_key: UpdateField::Preserve,
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Clear,
+            table_options: UpdateField::Preserve,
         };
 
         let updated_config = update_config.merge_into_stored(stored_config).unwrap();
@@ -3094,6 +3273,53 @@ mod tests {
             }
             _ => panic!("Config types don't match"),
         }
+    }
+
+    #[test]
+    fn update_api_destination_config_preserves_clears_and_replaces_bigquery_table_options() {
+        let stored_config = StoredDestinationConfig::BigQuery {
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("existing-key".to_owned()),
+            max_staleness_mins: Some(15),
+            connection_pool_size: 8,
+            table_options: bigquery_table_options(),
+        };
+
+        let preserve: UpdateApiDestinationConfig =
+            serde_json::from_value(serde_json::json!({"big_query": {}})).unwrap();
+        let preserved = preserve.merge_into_stored(stored_config.clone()).unwrap();
+        let StoredDestinationConfig::BigQuery { table_options, .. } = preserved else {
+            panic!("Config type doesn't match");
+        };
+        assert_eq!(table_options, bigquery_table_options());
+
+        let clear: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "big_query": {"table_options": null}
+        }))
+        .unwrap();
+        let cleared = clear.merge_into_stored(stored_config.clone()).unwrap();
+        let StoredDestinationConfig::BigQuery { table_options, .. } = cleared else {
+            panic!("Config type doesn't match");
+        };
+        assert!(table_options.is_empty());
+
+        let replacement: BigQueryTableOptionsConfig = serde_json::from_value(serde_json::json!({
+            "tables": [{
+                "table_id": 16385,
+                "cluster_by": ["id"]
+            }]
+        }))
+        .unwrap();
+        let replace: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "big_query": {"table_options": replacement}
+        }))
+        .unwrap();
+        let replaced = replace.merge_into_stored(stored_config).unwrap();
+        let StoredDestinationConfig::BigQuery { table_options, .. } = replaced else {
+            panic!("Config type doesn't match");
+        };
+        assert_eq!(table_options, replacement);
     }
 
     #[test]
@@ -3145,6 +3371,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("existing-key".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
+            table_options: BigQueryTableOptionsConfig::default(),
         };
         let update_config = UpdateApiDestinationConfig::BigQuery {
             project_id: UpdateField::Set("updated-project".to_owned()),
@@ -3154,6 +3381,7 @@ mod tests {
             )),
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Preserve,
         };
 
         let updated_config = update_config.merge_into_stored(stored_config).unwrap();
@@ -3330,6 +3558,7 @@ mod tests {
             service_account_key: UpdateField::Preserve,
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Preserve,
         };
 
         let error = update_config.merge_into_stored(stored_config).unwrap_err();

@@ -2943,6 +2943,7 @@ mod tests {
                 service_account_key: "sa-key".into(),
                 max_staleness_mins: None,
                 connection_pool_size: 4,
+                table_options: Default::default(),
             },
             pipeline: PipelineConfig {
                 id: 42,

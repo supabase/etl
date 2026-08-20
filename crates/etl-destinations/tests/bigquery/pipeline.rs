@@ -16,6 +16,10 @@ use etl::{
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
 };
+use etl_config::shared::{
+    BigQueryPartitionBy, BigQueryTableOptions, BigQueryTableOptionsConfig,
+    BigQueryTimePartitionGranularity,
+};
 use etl_destinations::bigquery::test_utils::{
     setup_bigquery_database, skip_if_missing_bigquery_env_vars,
 };
@@ -65,6 +69,139 @@ fn find_delete_event(events: &[Event]) -> &etl::event::DeleteEvent {
             _ => None,
         })
         .unwrap()
+}
+
+fn pipeline_table_options(
+    table_id: etl::schema::TableId,
+    partition_by: Option<BigQueryPartitionBy>,
+    cluster_by: &[&str],
+) -> BigQueryTableOptionsConfig {
+    BigQueryTableOptionsConfig {
+        tables: vec![pipeline_table_option(table_id, partition_by, cluster_by)],
+    }
+}
+
+fn pipeline_table_option(
+    table_id: etl::schema::TableId,
+    partition_by: Option<BigQueryPartitionBy>,
+    cluster_by: &[&str],
+) -> BigQueryTableOptions {
+    BigQueryTableOptions {
+        table_id: table_id.into_inner(),
+        partition_by,
+        cluster_by: cluster_by.iter().map(|column| (*column).to_owned()).collect(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_creates_partitioned_and_clustered_tables_without_reconfiguring_them_on_restart() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"initial", &42])
+        .await
+        .unwrap();
+
+    let bigquery_database = setup_bigquery_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let initial_options = pipeline_table_options(
+        users_schema.id,
+        Some(BigQueryPartitionBy::IntegerRange {
+            column: "age".to_owned(),
+            start: 0,
+            end: 100,
+            interval: 10,
+        }),
+        &["name", "id"],
+    );
+    let raw_destination = bigquery_database
+        .build_destination_with_table_options(pipeline_id, store.clone(), initial_options)
+        .await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+    let sync_complete = store.notify_on_table_sync_complete(users_schema.id).await;
+
+    pipeline.start().await.unwrap();
+    sync_complete.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let physical_table_id = store
+        .get_destination_table_metadata(users_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist")
+        .table_id()
+        .to_owned();
+    let metadata = bigquery_database
+        .get_table_metadata_by_id(&physical_table_id)
+        .await
+        .expect("physical BigQuery table should exist");
+    assert_eq!(
+        metadata.range_partitioning.and_then(|partitioning| partitioning.field),
+        Some("age".to_owned())
+    );
+    assert_eq!(
+        metadata.clustering.and_then(|clustering| clustering.fields),
+        Some(vec!["name".to_owned(), "id".to_owned()])
+    );
+
+    let changed_options = pipeline_table_options(
+        users_schema.id,
+        Some(BigQueryPartitionBy::IngestionTime {
+            granularity: BigQueryTimePartitionGranularity::Month,
+        }),
+        &["age"],
+    );
+    let raw_destination = bigquery_database
+        .build_destination_with_table_options(pipeline_id, store.clone(), changed_options)
+        .await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let events = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, users_schema.id, 1)])
+        .await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"restart", &43])
+        .await
+        .unwrap();
+    events.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let metadata = bigquery_database
+        .get_table_metadata_by_id(&physical_table_id)
+        .await
+        .expect("physical BigQuery table should still exist");
+    assert_eq!(
+        metadata.range_partitioning.and_then(|partitioning| partitioning.field),
+        Some("age".to_owned())
+    );
+    assert_eq!(
+        metadata.clustering.and_then(|clustering| clustering.fields),
+        Some(vec!["name".to_owned(), "id".to_owned()])
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -725,14 +862,27 @@ async fn table_truncate_with_batching() {
 
     let bigquery_database = setup_bigquery_database().await;
 
-    // We create table `test_users_1` to simulate an error in the system where a
-    // table with that name already exists and should be replaced for
-    // replication to work correctly.
+    // Simulate an interrupted truncate that already created `test_users_1`
+    // without the table options used by the restarted pipeline. BigQuery cannot
+    // replace it with a different partitioning kind, so recovery must preserve
+    // it and create the next unused generation.
     bigquery_database.create_table("test_users_1", &[("age", "integer")]).await;
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let table_options = pipeline_table_options(
+        database_schema.users_schema().id,
+        Some(BigQueryPartitionBy::IntegerRange {
+            column: "age".to_owned(),
+            start: 0,
+            end: 100,
+            interval: 10,
+        }),
+        &[],
+    );
+    let raw_destination = bigquery_database
+        .build_destination_with_table_options(pipeline_id, store.clone(), table_options)
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -795,6 +945,13 @@ async fn table_truncate_with_batching() {
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let users_metadata = store
+        .get_destination_table_metadata(database_schema.users_schema().id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(users_metadata.table_id(), "test_users_2");
 
     // We query BigQuery directly to get the data which tests have inserted,
     // expecting that only the rows after truncation are there.
