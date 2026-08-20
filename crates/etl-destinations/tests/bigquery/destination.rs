@@ -51,59 +51,116 @@ async fn flexible_column_names_work_for_copy_cdc_and_schema_changes() {
     let bigquery_database = setup_bigquery_database().await;
     let store = MemoryStore::new();
     let table_id = TableId::new(1);
+    let flexible_column_names = [
+        "1st_value",
+        "café",
+        "metric١",
+        "link‿value",
+        "dash-value",
+        "accent\u{301}mark",
+        "value&unit",
+        "value%unit",
+        "value=unit",
+        "value+unit",
+        "value:unit",
+        "value'unit",
+        "value<unit",
+        "value>unit",
+        "value#unit",
+        "value|unit",
+        "display label",
+    ];
     let table_name = TableName::new(
         "public".to_owned(),
         format!("destination_flexible_names_{}", uuid::Uuid::new_v4().simple()),
     );
+    let initial_column_schemas = flexible_column_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let column_schema = ColumnSchema::new(
+                (*name).to_owned(),
+                if index == 0 { Type::INT4 } else { Type::TEXT },
+                -1,
+                i32::try_from(index).unwrap() + 1,
+                false,
+            );
+
+            match index {
+                0 => column_schema.with_primary_key(1),
+                1 => column_schema.with_default_expression("'copy-default'::text".to_owned()),
+                _ => column_schema,
+            }
+        })
+        .collect();
     let initial_table_schema = store
         .store_table_schema(TableSchema::with_snapshot_id(
             table_id,
             table_name.clone(),
-            vec![
-                ColumnSchema::new("Record ID".to_owned(), Type::INT4, -1, 1, false)
-                    .with_primary_key(1),
-                ColumnSchema::new("Display Label".to_owned(), Type::TEXT, -1, 2, false)
-                    .with_default_expression("'copy-default'::text".to_owned()),
-                ColumnSchema::new("2nd metric".to_owned(), Type::INT4, -1, 3, false),
-                ColumnSchema::new("Café Score".to_owned(), Type::INT4, -1, 4, false),
-            ],
+            initial_column_schemas,
             test_snapshot_id(100),
         ))
         .await
         .unwrap();
     let initial_schema = ReplicatedTableSchema::all(initial_table_schema);
     let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
+    let mut cells = vec![Cell::I32(1)];
+    cells.extend(
+        flexible_column_names
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(index, _)| Cell::String(format!("copied_{index}"))),
+    );
 
     destination
-        .write_table_rows_for_tests(
-            &initial_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("copied".to_owned()),
-                Cell::I32(10),
-                Cell::I32(80),
-            ])],
-        )
+        .write_table_rows_for_tests(&initial_schema, vec![TableRow::new(cells)])
         .await
         .unwrap();
 
+    let mut changed_column_schemas = flexible_column_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            if index == 2 {
+                return None;
+            }
+
+            let name = if index == 1 { "renamed label" } else { name };
+            let column_schema = ColumnSchema::new(
+                name.to_owned(),
+                if index == 0 { Type::INT4 } else { Type::TEXT },
+                -1,
+                i32::try_from(index).unwrap() + 1,
+                index == 1,
+            );
+
+            Some(if index == 0 { column_schema.with_primary_key(1) } else { column_schema })
+        })
+        .collect::<Vec<_>>();
+    changed_column_schemas.push(
+        ColumnSchema::new("service %".to_owned(), Type::TEXT, -1, 18, true)
+            .with_default_expression("'standard'::text".to_owned()),
+    );
     let changed_table_schema = store
         .store_table_schema(TableSchema::with_snapshot_id(
             table_id,
             table_name.clone(),
-            vec![
-                ColumnSchema::new("Record ID".to_owned(), Type::INT4, -1, 1, false)
-                    .with_primary_key(1),
-                ColumnSchema::new("Shipping Label".to_owned(), Type::TEXT, -1, 2, true),
-                ColumnSchema::new("Café Rating".to_owned(), Type::INT4, -1, 4, false),
-                ColumnSchema::new("Service %".to_owned(), Type::TEXT, -1, 5, true)
-                    .with_default_expression("'standard'::text".to_owned()),
-            ],
+            changed_column_schemas,
             test_snapshot_id(200),
         ))
         .await
         .unwrap();
     let changed_schema = ReplicatedTableSchema::all(changed_table_schema);
+    let mut streamed_cells = vec![Cell::I32(2), Cell::String("streamed_1".to_owned())];
+    streamed_cells.extend(
+        flexible_column_names
+            .iter()
+            .enumerate()
+            .skip(3)
+            .map(|(index, _)| Cell::String(format!("streamed_{index}"))),
+    );
+    streamed_cells.push(Cell::String("priority".to_owned()));
 
     write_events(
         &destination,
@@ -114,12 +171,7 @@ async fn flexible_column_names_work_for_copy_cdc_and_schema_changes() {
                 commit_lsn: PgLsn::from(300_u64),
                 tx_ordinal: 0,
                 replicated_table_schema: changed_schema,
-                table_row: TableRow::new(vec![
-                    Cell::I32(2),
-                    Cell::String("streamed".to_owned()),
-                    Cell::I32(95),
-                    Cell::String("priority".to_owned()),
-                ]),
+                table_row: TableRow::new(streamed_cells),
             }),
         ],
     )
@@ -127,7 +179,12 @@ async fn flexible_column_names_work_for_copy_cdc_and_schema_changes() {
     .unwrap();
 
     let table_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
-    table_schema.assert_columns(&["record id", "shipping label", "café rating", "service %"]);
+    let expected_names = std::iter::once(flexible_column_names[0])
+        .chain(std::iter::once("renamed label"))
+        .chain(flexible_column_names.into_iter().skip(3))
+        .chain(std::iter::once("service %"))
+        .collect::<Vec<_>>();
+    table_schema.assert_columns(&expected_names);
 
     let destination_metadata =
         store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
@@ -136,7 +193,7 @@ async fn flexible_column_names_work_for_copy_cdc_and_schema_changes() {
     assert_eq!(
         defaults
             .iter()
-            .find(|column| column.column_name == "shipping label")
+            .find(|column| column.column_name == "renamed label")
             .and_then(|column| column.column_default.as_deref()),
         None
     );
@@ -157,21 +214,25 @@ async fn flexible_column_names_work_for_copy_cdc_and_schema_changes() {
             let columns = row.columns.unwrap();
             (
                 parse_table_cell::<i64>(columns[0].clone()).unwrap(),
-                parse_table_cell::<String>(columns[1].clone()).unwrap(),
-                parse_table_cell::<i64>(columns[2].clone()).unwrap(),
-                parse_table_cell::<String>(columns[3].clone()),
+                columns[1..]
+                    .iter()
+                    .map(|column| parse_table_cell::<String>(column.clone()))
+                    .collect::<Vec<_>>(),
             )
         })
         .collect::<Vec<_>>();
     rows.sort();
 
-    assert_eq!(
-        rows,
-        [
-            (1, "copied".to_owned(), 80, None),
-            (2, "streamed".to_owned(), 95, Some("priority".to_owned())),
-        ]
-    );
+    let mut copied_values = vec![Some("copied_1".to_owned())];
+    copied_values
+        .extend((3..flexible_column_names.len()).map(|index| Some(format!("copied_{index}"))));
+    copied_values.push(None);
+    let mut streamed_values = vec![Some("streamed_1".to_owned())];
+    streamed_values
+        .extend((3..flexible_column_names.len()).map(|index| Some(format!("streamed_{index}"))));
+    streamed_values.push(Some("priority".to_owned()));
+
+    assert_eq!(rows, [(1, copied_values), (2, streamed_values)]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
