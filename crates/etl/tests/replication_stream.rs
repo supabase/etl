@@ -1500,6 +1500,85 @@ async fn logical_replication_orders_concurrent_ddl_transactions_by_commit_lsn() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_omits_relation_after_noop_alter_table_commands() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("noop_alter_table_relation_cache");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("name", "text not null"), ("age", "integer")])
+        .await
+        .unwrap();
+
+    let publication_name = "noop_alter_table_relation_cache_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) = start_replayable_stream(
+        &database,
+        publication_name,
+        "noop_alter_table_relation_cache_slot",
+    )
+    .await;
+
+    // Warm pgoutput's relation cache before issuing the no-op DDL commands.
+    database.insert_values(table_name.clone(), &["name", "age"], &[&"before", &1]).await.unwrap();
+
+    // These commands are collected by ddl_command_end, but their successful
+    // no-op paths do not invalidate the table's relcache entry.
+    let alter_table_commands = [
+        format!("alter table {quoted_table_name} owner to current_user"),
+        format!("alter table {quoted_table_name} alter column age drop not null"),
+        format!("alter table {quoted_table_name} disable trigger user"),
+        format!("alter table {quoted_table_name} replica identity default"),
+        format!("alter table {quoted_table_name} add column if not exists age integer"),
+        format!("alter table {quoted_table_name} drop column if exists missing_column"),
+        format!("alter table {quoted_table_name} drop constraint if exists missing_constraint"),
+        format!("alter table {quoted_table_name} alter column age drop identity if exists"),
+        format!("alter table {quoted_table_name} set logged"),
+        format!("alter table {quoted_table_name} set access method heap"),
+        format!("alter table {quoted_table_name} set tablespace pg_default"),
+        format!("alter table {quoted_table_name} set without cluster"),
+        format!("alter table {quoted_table_name} set without oids"),
+    ];
+    for command in &alter_table_commands {
+        database.run_sql(command).await.unwrap();
+    }
+    database.insert_values(table_name, &["name", "age"], &[&"after", &2]).await.unwrap();
+
+    let columns = vec!["id".to_owned(), "name".to_owned(), "age".to_owned()];
+    let mut expected = vec![
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ];
+    for _ in alter_table_commands {
+        expected.extend([
+            ExpectedStreamMarker::Begin,
+            ExpectedStreamMarker::DdlMessage(table_id.into_inner(), None, columns.clone()),
+            ExpectedStreamMarker::Commit,
+        ]);
+    }
+    expected.extend([
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Insert(table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+    ]);
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_replays_schema_changes_before_first_dml() {
     init_test_tracing();
     let database = spawn_source_database().await;
