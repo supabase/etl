@@ -7,24 +7,29 @@
 //! column filter for that snapshot, and the replica-identity semantics for
 //! that same snapshot.
 //!
-//! A table-sync worker seeds this state from its consistent initial-copy
-//! snapshot and updates it whenever PostgreSQL emits a new `RELATION` message.
-//! A DDL message records the exact snapshot that the next relation must
-//! materialize while retaining any previous relation masks. PostgreSQL emits a
-//! new relation before row data when its pgoutput relation state changed;
-//! otherwise ETL combines the retained masks with the new stored table schema
-//! and transitions back to `WithSchema`. Any complete decoder can be converted
-//! into the compact
-//! [`crate::replication::state::StoredTableDecodingState`] persisted in
-//! `SyncDone`. Reaching the ownership boundary while still pending fails closed
-//! because relation-less DML has not yet confirmed that the previous masks are
-//! still authoritative.
+//! The connection-local map has two states:
 //!
-//! The apply worker clears its entry before starting table synchronization.
-//! After `SyncDone`, an owned relation materializes a new entry, while
-//! relation-less DML restores the compact durable state on demand.
-//! Consequently, `WithSchema` also proves that the current apply connection can
-//! keep decoding after `SyncDone` is replaced by `Ready`.
+//! - [`TableDecodingState::WithSchema`] is a complete decoder and can decode a
+//!   row immediately.
+//! - [`TableDecodingState::PendingRelation`] records a DDL snapshot while ETL
+//!   waits to see whether pgoutput sends replacement relation metadata. When a
+//!   previous complete decoder exists, the pending state retains both of its
+//!   relation masks as a fallback. A new `RELATION` replaces those masks. If a
+//!   row arrives first, ETL combines the fallback masks with the stored schema
+//!   at the pending snapshot and transitions to `WithSchema`. Without fallback
+//!   masks, rows cannot be decoded until a `RELATION` arrives.
+//!
+//! An absent map entry is not another [`TableDecodingState`]: it means this
+//! connection has not established any state for the table. After table-sync
+//! handover, the apply worker may restore that missing state from the compact
+//! [`crate::replication::state::StoredTableDecodingState`] persisted in
+//! `SyncDone`.
+//!
+//! A table-sync worker seeds `WithSchema` from its consistent initial-copy
+//! snapshot. The apply worker clears its entry before starting table sync, then
+//! establishes `WithSchema` from an owned relation or durable `SyncDone` state
+//! after handover. Consequently, `WithSchema` also proves that the current
+//! apply connection can keep decoding after `SyncDone` becomes `Ready`.
 
 use std::sync::Arc;
 
@@ -59,22 +64,22 @@ impl PreviousRelationMasks {
 /// Per-table row-decoding state for one logical replication connection.
 #[derive(Debug, Clone)]
 pub(crate) enum TableDecodingState {
-    /// A DDL message was observed and the next relation belongs to its schema
-    /// snapshot.
+    /// A DDL message was observed, but pgoutput has not yet shown whether it
+    /// will send replacement relation metadata before the next row.
     PendingRelation {
-        /// Exact schema snapshot that the next relation must materialize.
+        /// Exact stored schema snapshot for the DDL message.
         snapshot_id: SnapshotId,
-        /// Complete masks from the previous pgoutput relation, if known.
+        /// Complete masks from the previous decoder, retained only as a
+        /// relation-less row fallback.
         previous_relation_masks: Option<PreviousRelationMasks>,
     },
-    /// Complete row-decoding state materialized from a relation or restored
-    /// `SyncDone` decoding state.
+    /// Complete row-decoding state ready for immediate use.
     WithSchema(ReplicatedTableSchema),
 }
 
 impl TableDecodingState {
     /// Records a pending relation while retaining masks from the previous
-    /// pgoutput relation.
+    /// complete decoder.
     pub(crate) fn pending_relation(snapshot_id: SnapshotId, previous: Option<Self>) -> Self {
         let previous_relation_masks = match previous {
             Some(Self::PendingRelation { previous_relation_masks, .. }) => previous_relation_masks,
