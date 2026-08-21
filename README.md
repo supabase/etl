@@ -62,14 +62,16 @@ flowchart LR
 
 Supabase ETL replicates each table in two phases:
 
-1. **Initial sync:** Copy the existing rows selected by the publication.
-2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and
-   truncates, then deliver those changes as ordered events.
+1. **Initial sync:** Copy the existing rows selected by the publication, then
+   catch up changes that occurred while the copy was running.
+2. **Ongoing replication:** Capture new inserts, updates, deletes, and truncates,
+   then deliver those changes as ordered events.
 
 Across both phases, a store persists checkpoints, schemas, destination
 metadata, and table state so replication can recover safely after a restart.
-Streaming is a transfer mode that may be used within either phase; it is not a
-separate replication phase.
+Copy and change data capture (CDC) are replication paths, not customer-visible
+phases. Initial sync uses the copy path followed by CDC catch-up; ongoing
+replication uses the CDC path after the table is ready.
 
 ## Start Here
 

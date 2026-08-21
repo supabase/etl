@@ -2,7 +2,7 @@ use etl_config::{
     Environment,
     shared::{
         DuckLakeMaintenanceMode, ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets,
-        TlsConfig,
+        TlsConfig, Validate, ValidationError,
     },
 };
 use etl_maintenance::{
@@ -40,6 +40,9 @@ pub enum K8sCoreError {
 
     #[error("Invalid destination config")]
     InvalidConfig(#[from] serde_json::Error),
+
+    #[error("Invalid replicator configuration")]
+    ConfigValidation(#[from] ValidationError),
 
     #[error("Could not load app environment")]
     MissingEnvironment,
@@ -159,7 +162,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         pipeline.config,
         supabase_config,
         tls_config,
-    );
+    )?;
 
     create_or_update_dynamic_replicator_secrets(k8s_client, &resource_prefix, &identity, secrets)
         .await?;
@@ -384,14 +387,17 @@ fn build_replicator_config_without_secrets(
     pipeline_config: StoredPipelineConfig,
     supabase_config: SupabaseConfigWithoutSecrets,
     tls_config: TlsConfig,
-) -> ReplicatorConfigWithoutSecrets {
+) -> Result<ReplicatorConfigWithoutSecrets, ValidationError> {
     let pg_connection_config = source_config.into_connection_config(tls_config);
 
-    ReplicatorConfigWithoutSecrets {
+    let config = ReplicatorConfigWithoutSecrets {
         destination: destination_config.into_etl_config().into(),
         pipeline: pipeline_config.into_etl_config(pipeline_id, pg_connection_config).into(),
         supabase: Some(supabase_config),
-    }
+    };
+    config.validate()?;
+
+    Ok(config)
 }
 
 /// Creates a consistent naming prefix for Kubernetes resources.
@@ -636,7 +642,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use etl_config::{SerializableSecretString, shared::ClickHouseEngine};
+    use etl_config::{
+        SerializableSecretString,
+        shared::{BigQueryTableOptions, BigQueryTableOptionsConfig, ClickHouseEngine},
+    };
 
     use super::*;
     use crate::{
@@ -713,6 +722,45 @@ mod tests {
             schema: "public".to_owned(),
             role: Some("etl_role".to_owned()),
         }
+    }
+
+    #[test]
+    fn replicator_config_builder_validates_the_final_without_secret_config() {
+        let destination_config = StoredDestinationConfig::BigQuery {
+            project_id: "example-project".to_owned(),
+            dataset_id: "example_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("placeholder-key".to_owned()),
+            max_staleness_mins: None,
+            connection_pool_size: 4,
+            table_options: BigQueryTableOptionsConfig {
+                tables: vec![BigQueryTableOptions {
+                    table_id: 16384,
+                    partition_by: None,
+                    cluster_by: Vec::new(),
+                }],
+            },
+        };
+        let pipeline_config = serde_json::from_value(serde_json::json!({
+            "publication_name": "example_publication"
+        }))
+        .unwrap();
+        let supabase_config = SupabaseConfigWithoutSecrets {
+            project_ref: "example-project-ref".to_owned(),
+            api_url: None,
+        };
+
+        let error = build_replicator_config_without_secrets(
+            1,
+            source_config_with_password(),
+            destination_config,
+            pipeline_config,
+            supabase_config,
+            TlsConfig::disabled(),
+        )
+        .unwrap_err();
+
+        let ValidationError::InvalidFieldValue { field, .. } = error;
+        assert_eq!(field, "table_options.tables[0]");
     }
 
     #[async_trait]

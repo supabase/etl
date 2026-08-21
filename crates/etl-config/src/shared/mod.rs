@@ -7,16 +7,17 @@ mod sentry;
 mod supabase;
 mod validators;
 
-pub use base::ValidationError;
+pub use base::{Validate, ValidationError};
 pub use connection::{
     IntoConnectOptions, PgConnectionConfig, PgConnectionConfigWithoutSecrets, PgConnectionOptions,
     PgConnectionOptionsBuilder, TcpKeepaliveConfig, TlsConfig,
 };
 pub use destination::{
-    ClickHouseEngine, DestinationConfig, DestinationConfigWithoutSecrets, DestinationKind,
-    DuckLakeMaintenanceMode, DuckLakeSortBy, DuckLakeSortColumn, DuckLakeSortDirection,
-    DuckLakeSortNulls, DuckLakeTableSortConfig, DuckLakeTableSortingConfig, IcebergConfig,
-    IcebergConfigWithoutSecrets,
+    BigQueryPartitionBy, BigQueryTableOptions, BigQueryTableOptionsConfig,
+    BigQueryTimePartitionGranularity, ClickHouseEngine, DestinationConfig,
+    DestinationConfigWithoutSecrets, DestinationKind, DuckLakeMaintenanceMode, DuckLakeSortBy,
+    DuckLakeSortColumn, DuckLakeSortDirection, DuckLakeSortNulls, DuckLakeTableSortConfig,
+    DuckLakeTableSortingConfig, IcebergConfig, IcebergConfigWithoutSecrets,
 };
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,

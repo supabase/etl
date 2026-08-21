@@ -15,6 +15,13 @@ use etl::schema::ColumnNameMapping;
 /// Table creation, row writes, schema planning, and recovery must use this same
 /// mapping. Changing it for existing tables requires compatibility handling or
 /// a resync.
+///
+/// BigQuery documents column names as case-insensitive but does not specify the
+/// Unicode case-folding algorithm used for identifier resolution. ASCII-only
+/// folding deliberately preserves flexible Unicode names instead of guessing
+/// those semantics. For example, `Name` and `name` collide locally, while `Ä`
+/// and `ä` remain distinct; if BigQuery considers the latter pair equivalent,
+/// table DDL rejects the schema instead of ETL silently merging two columns.
 const BIGQUERY_COLUMN_NAME_MAPPING: ColumnNameMapping = ColumnNameMapping::AsciiLowercase;
 
 pub use core::BigQueryDestination;

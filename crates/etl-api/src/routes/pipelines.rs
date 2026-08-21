@@ -178,6 +178,9 @@ impl From<crate::k8s::core::K8sCoreError> for PipelineError {
         match error {
             crate::k8s::core::K8sCoreError::K8s(error) => Self::K8s(error),
             crate::k8s::core::K8sCoreError::InvalidConfig(error) => Self::InvalidConfig(error),
+            crate::k8s::core::K8sCoreError::ConfigValidation(error) => {
+                Self::InvalidPipelineRequest(error.to_string())
+            }
             crate::k8s::core::K8sCoreError::MissingEnvironment => Self::MissingEnvironment,
             crate::k8s::core::K8sCoreError::MissingDucklakeS3Credentials => {
                 Self::InvalidPipelineRequest("DuckLake S3 credentials are required".to_owned())

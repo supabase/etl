@@ -27,7 +27,7 @@ use crate::{
         CLICKHOUSE_COLUMN_NAME_MAPPING,
         client::{ClickHouseClient, ClickHouseTableColumn, DdlKind},
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
-        metrics::register_metrics,
+        metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
             CDC_TX_ORDINAL_COLUMN_NAME, add_merge_tree_tx_ordinal_column_sql,
             create_current_view_sql, create_table_sql, drop_current_view_sql,
@@ -1102,7 +1102,7 @@ where
                 rows,
                 &nullable_flags,
                 self.inserter_config.max_bytes_per_insert,
-                "copy",
+                COPY_REPLICATION_PATH,
             )
             .await
     }
@@ -1620,7 +1620,7 @@ where
                         rows,
                         &nullable_flags,
                         max_bytes,
-                        "streaming",
+                        CDC_REPLICATION_PATH,
                     )
                     .await
             });

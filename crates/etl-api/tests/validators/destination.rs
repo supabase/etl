@@ -16,6 +16,7 @@ fn create_bigquery_config() -> ApiDestinationConfig {
         service_account_key: SerializableSecretString::from("service-account-key".to_owned()),
         max_staleness_mins: None,
         connection_pool_size: Some(1),
+        table_options: Default::default(),
     }
 }
 

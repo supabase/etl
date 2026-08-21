@@ -207,7 +207,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.ducklake_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
-        replication_lag_refresh_interval_ms: 10_000,
+        table_sync_monitor_refresh_interval_ms: 10_000,
         memory_backpressure: None,
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

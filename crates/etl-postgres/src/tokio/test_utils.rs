@@ -1,4 +1,7 @@
-use std::{num::NonZeroI32, time::Duration};
+use std::{
+    num::NonZeroI32,
+    time::{Duration, Instant},
+};
 
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use pg_escape::quote_identifier;
@@ -504,13 +507,18 @@ impl<G: GenericClient> PgDatabase<G> {
     /// This method temporarily sets `max_slot_wal_keep_size` to a small value
     /// (64kB), generates WAL until the slot becomes invalidated, and forces
     /// checkpoints to trigger WAL cleanup. The configuration is reset and
-    /// temporary tables are cleaned up after invalidation succeeds.
+    /// temporary tables are cleaned up before this method returns.
+    ///
+    /// Returns an error if PostgreSQL does not invalidate the slot before the
+    /// deadline.
     ///
     /// # Panics
     ///
     /// Panics if the ALTER SYSTEM command fails (requires superuser
     /// privileges).
-    pub async fn invalidate_slot(&self, slot_name: &str) {
+    pub async fn invalidate_slot(&self, slot_name: &str) -> Result<(), String> {
+        const INVALIDATION_TIMEOUT: Duration = Duration::from_secs(60);
+
         let client = self.client.as_ref().unwrap();
 
         // Try to set max_slot_wal_keep_size very low, this requires superuser
@@ -541,10 +549,12 @@ impl<G: GenericClient> PgDatabase<G> {
             let _ = client.execute("SELECT pg_reload_conf()", &[]).await;
         };
 
+        let mut invalidated = false;
+        let started_at = Instant::now();
         let mut iteration = 0;
 
-        // Loop until the slot is invalidated.
-        loop {
+        // Generate WAL until the slot is invalidated or the deadline expires.
+        while started_at.elapsed() < INVALIDATION_TIMEOUT {
             // Generate WAL.
             for _ in 0..20 {
                 let _ = client
@@ -571,6 +581,7 @@ impl<G: GenericClient> PgDatabase<G> {
                 .await
             {
                 info!(slot_name, iteration, "slot invalidated successfully");
+                invalidated = true;
                 break;
             }
         }
@@ -578,6 +589,12 @@ impl<G: GenericClient> PgDatabase<G> {
         // IMPORTANT: Reset config BEFORE returning to avoid invalidating new slots
         // when the pipeline restarts and creates table sync slots.
         cleanup().await;
+
+        if invalidated {
+            Ok(())
+        } else {
+            Err(format!("replication slot was not invalidated within {INVALIDATION_TIMEOUT:?}"))
+        }
     }
 }
 

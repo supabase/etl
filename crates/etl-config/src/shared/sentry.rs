@@ -1,6 +1,8 @@
 use secrecy::SecretString;
 use serde::Deserialize;
 
+use crate::shared::Validate;
+
 /// Sentry error tracking and monitoring configuration.
 ///
 /// Contains the DSN and other settings required to initialize Sentry for
@@ -10,3 +12,5 @@ pub struct SentryConfig {
     /// Sentry DSN (Data Source Name) for error reporting and monitoring.
     pub dsn: SecretString,
 }
+
+impl Validate for SentryConfig {}

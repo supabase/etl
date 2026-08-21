@@ -2943,6 +2943,7 @@ mod tests {
                 service_account_key: "sa-key".into(),
                 max_staleness_mins: None,
                 connection_pool_size: 4,
+                table_options: Default::default(),
             },
             pipeline: PipelineConfig {
                 id: 42,
@@ -2967,7 +2968,7 @@ mod tests {
                 table_error_retry_max_attempts: 3,
                 max_table_sync_workers: 4,
                 memory_refresh_interval_ms: 100,
-                replication_lag_refresh_interval_ms: 10000,
+                table_sync_monitor_refresh_interval_ms: 10000,
                 memory_backpressure: Some(MemoryBackpressureConfig {
                     activate_threshold: 1.0,
                     resume_threshold: 0.99,

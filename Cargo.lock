@@ -2514,7 +2514,7 @@ dependencies = [
 [[package]]
 name = "gcp-bigquery-client"
 version = "0.28.0"
-source = "git+https://github.com/iambriccardo/gcp-bigquery-client?rev=4407c2e325084713fa16219494251217054a98c8#4407c2e325084713fa16219494251217054a98c8"
+source = "git+https://github.com/iambriccardo/gcp-bigquery-client?rev=7da9cd7f140f4a5e6dff8c8593ba8fee4bc20904#7da9cd7f140f4a5e6dff8c8593ba8fee4bc20904"
 dependencies = [
  "async-stream",
  "async-trait",
