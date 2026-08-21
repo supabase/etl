@@ -1,7 +1,7 @@
 //! Table batches are the atomic per-table write units used by DuckLake writes.
 //! Copy, mutation, and truncate inputs are normalized into prepared batches so
 //! each attempt can replay the same SQL and replay bookkeeping. Copy batches
-//! receive opaque ids when prepared and retain them across destination-local
+//! receive opaque upstream ids and retain them across destination-local
 //! retries. Streaming mutation and truncate batches advance a per-table
 //! progress watermark.
 //! Bounded batch sizes preserve table-local ordering without letting one
@@ -23,6 +23,7 @@ use std::{
 
 use etl::{
     data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
+    destination::TableCopyBatchId,
     error::{ErrorKind, EtlResult},
     etl_error,
     event::EventSequenceKey,
@@ -764,16 +765,16 @@ pub(super) fn prepare_copy_table_batch(
     replicated_table_schema: &ReplicatedTableSchema,
     table_name: DuckLakeTableName,
     replay_epoch: String,
+    batch_id: TableCopyBatchId,
     table_rows: Vec<TableRow>,
 ) -> EtlResult<PreparedDuckLakeTableBatch> {
-    let identity = new_copy_batch_identity();
     Ok(PreparedDuckLakeTableBatch {
         table_name,
         replay_epoch,
-        batch_id: identity.batch_id,
+        batch_id: batch_id.to_string(),
         batch_kind: DuckLakeTableBatchKind::Copy,
-        first_start_lsn: identity.first_start_lsn,
-        last_commit_lsn: identity.last_commit_lsn,
+        first_start_lsn: None,
+        last_commit_lsn: None,
         first_sequence_key: None,
         last_sequence_key: None,
         insert_column_names: replicated_column_names(replicated_table_schema),
@@ -1447,19 +1448,6 @@ fn build_mutation_batch_identity(
         tracked_mutations.last().map(|tracked_mutation| tracked_mutation.sequence_key.commit_lsn),
         hasher.finish(),
     ))
-}
-
-/// Creates an opaque identity for one table-copy batch.
-///
-/// Distinct source chunks may contain identical rows, so their contents cannot
-/// identify one logical copy invocation. The prepared batch retains this id
-/// across destination-local retries.
-fn new_copy_batch_identity() -> DuckLakeBatchIdentity {
-    DuckLakeBatchIdentity {
-        batch_id: format!("copy:{:032x}", rand::rng().random::<u128>()),
-        first_start_lsn: None,
-        last_commit_lsn: None,
-    }
 }
 
 /// Builds the deterministic identity shared by retries of a copy barrier.
@@ -3235,27 +3223,18 @@ mod tests {
     }
 
     #[test]
-    fn prepare_copy_table_batch_assigns_distinct_ids_to_identical_batches() {
+    fn prepare_copy_table_batch_uses_propagated_id() {
         let replicated_table_schema = make_replicated_schema();
-        let make_rows =
-            || vec![TableRow::new(vec![Cell::I32(1), Cell::String("identical".to_owned())])];
-
-        let first = prepare_copy_table_batch(
+        let prepared = prepare_copy_table_batch(
             &replicated_table_schema,
             ducklake_table_name(),
             LEGACY_REPLAY_EPOCH.to_owned(),
-            make_rows(),
-        )
-        .unwrap();
-        let second = prepare_copy_table_batch(
-            &replicated_table_schema,
-            ducklake_table_name(),
-            LEGACY_REPLAY_EPOCH.to_owned(),
-            make_rows(),
+            TableCopyBatchId::new("copy-batch-id"),
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("identical".to_owned())])],
         )
         .unwrap();
 
-        assert_ne!(first.batch_id, second.batch_id);
+        assert_eq!(prepared.batch_id, "copy-batch-id");
     }
 
     #[test]

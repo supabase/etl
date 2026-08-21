@@ -179,9 +179,9 @@ where
                 async_result.send(Ok(DestinationWriteStatus::Accepted));
 
                 return Ok(());
-            } else {
-                state.accepted_batch.take()
             }
+
+            state.accepted_batch.take()
         };
 
         if let Some(accepted_batch) = accepted_batch {
