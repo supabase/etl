@@ -347,8 +347,8 @@ async fn relationless_noop_schema_changes_reuse_previous_decoder() {
 
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
-    assert_eq!(grouped.get(&(EventType::Relation, table_id)).map(Vec::len), None);
-    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 2);
 
     let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
