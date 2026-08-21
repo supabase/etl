@@ -5,12 +5,12 @@ use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
 static REGISTER_METRICS: Once = Once::new();
 
 pub(crate) const ETL_TABLES_TOTAL: &str = "etl_tables_total";
-pub(crate) const ETL_BATCH_ITEMS_SEND_DURATION_SECONDS: &str =
-    "etl_batch_items_send_duration_seconds";
-pub(crate) const ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS: &str =
-    "etl_batch_items_durable_duration_seconds";
-pub(crate) const ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS: &str =
-    "etl_batch_items_durable_wait_duration_seconds";
+pub(crate) const ETL_DESTINATION_BATCH_SEND_DURATION_SECONDS: &str =
+    "etl_destination_batch_send_duration_seconds";
+pub(crate) const ETL_DESTINATION_BATCH_DURABLE_DURATION_SECONDS: &str =
+    "etl_destination_batch_durable_duration_seconds";
+pub(crate) const ETL_DESTINATION_BATCH_DURABLE_WAIT_DURATION_SECONDS: &str =
+    "etl_destination_batch_durable_wait_duration_seconds";
 pub(crate) const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
 pub(crate) const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub(crate) const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
@@ -56,9 +56,12 @@ pub(crate) const ETL_APPLY_LOOP_END_TO_END_LAG_BYTES: &str = "etl_apply_loop_end
 pub(crate) const STATE_LABEL: &str = "state";
 /// Label key for the ETL worker type ("table_sync" or "apply").
 pub(crate) const WORKER_TYPE_LABEL: &str = "worker_type";
-/// Label key for the action performed by the worker ("table_copy" or
-/// "table_streaming").
-pub(crate) const ACTION_LABEL: &str = "action";
+/// Label key for the replication data path ("copy" or "cdc").
+pub(crate) const REPLICATION_PATH_LABEL: &str = "replication_path";
+/// Replication path that copies rows which existed when initial sync began.
+pub(crate) const COPY_REPLICATION_PATH: &str = "copy";
+/// Replication path that applies changes decoded from the PostgreSQL WAL.
+pub(crate) const CDC_REPLICATION_PATH: &str = "cdc";
 /// Label key for event type (copy, insert, update, delete).
 pub(crate) const EVENT_TYPE_LABEL: &str = "event_type";
 /// Label key for whether the status update was forced.
@@ -88,26 +91,27 @@ pub(crate) fn register_metrics() {
         );
 
         describe_histogram!(
-            ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+            ETL_DESTINATION_BATCH_SEND_DURATION_SECONDS,
             Unit::Seconds,
-            "Time taken in seconds to send a batch of items to the destination, labeled by \
-             worker_type and action"
+            "Time from dispatching a non-empty destination batch until the destination reports \
+             its write result, labeled by worker_type and replication_path"
         );
 
         describe_histogram!(
-            ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS,
+            ETL_DESTINATION_BATCH_DURABLE_DURATION_SECONDS,
             Unit::Seconds,
-            "Time taken in seconds from dispatching a batch of items to the destination until the \
-             destination confirms the batch durable, labeled by worker_type, action and \
-             confirmation; covers streaming writes only"
+            "Time from dispatching a non-empty CDC destination batch until the destination \
+             confirms it durable, labeled by worker_type, replication_path and confirmation; a \
+             deferred observation represents the first outstanding accepted batch in one \
+             durability interval"
         );
 
         describe_histogram!(
-            ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS,
+            ETL_DESTINATION_BATCH_DURABLE_WAIT_DURATION_SECONDS,
             Unit::Seconds,
-            "Time taken in seconds from the destination accepting a batch of items until a later \
-             durable result confirms the batch durable, labeled by worker_type and action; covers \
-             deferred streaming writes only"
+            "Time from the first outstanding non-empty CDC batch being accepted until the next \
+             durable result, labeled by worker_type and replication_path; one observation is \
+             emitted per deferred durability interval"
         );
 
         describe_counter!(
@@ -178,13 +182,15 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
             Unit::Count,
-            "Total number of events successfully processed, labeled by worker_type and action."
+            "Total number of events successfully processed, labeled by worker_type and \
+             replication_path."
         );
 
         describe_counter!(
             ETL_EVENTS_RECEIVED_TOTAL,
             Unit::Count,
-            "Total number of events received from the source, labeled by worker_type and action."
+            "Total number of events received from the source, labeled by worker_type and \
+             replication_path."
         );
 
         describe_counter!(

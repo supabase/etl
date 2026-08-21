@@ -233,6 +233,7 @@ impl<T, M> PendingAsyncResult<T, M> {
 /// Completed typed asynchronous result.
 #[derive(Debug)]
 pub(crate) struct CompletedAsyncResult<T, M> {
+    /// Metadata that was carried along when constructing the pending result.
     metadata: Option<M>,
     /// Instant at which the sender reported completion.
     completed_at: Instant,

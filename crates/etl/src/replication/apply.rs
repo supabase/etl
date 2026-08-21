@@ -8,7 +8,7 @@
 //! cycle.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     pin::Pin,
     str::FromStr,
@@ -49,16 +49,17 @@ use crate::{
     etl_error,
     event::{Event, RelationEvent},
     observability::{
-        ACTION_LABEL, COMMAND_TAG_LABEL, CONFIRMATION_LABEL,
+        CDC_REPLICATION_PATH, COMMAND_TAG_LABEL, CONFIRMATION_LABEL,
         ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
         ETL_APPLY_LOOP_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
-        ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS, ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS,
-        ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_DDL_SCHEMA_CHANGE_COLUMNS,
-        ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL,
-        ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+        ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL,
+        ETL_DESTINATION_BATCH_DURABLE_DURATION_SECONDS,
+        ETL_DESTINATION_BATCH_DURABLE_WAIT_DURATION_SECONDS,
+        ETL_DESTINATION_BATCH_SEND_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
+        ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
         ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL,
-        WORKER_TYPE_LABEL,
+        REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL,
     },
     pipeline::PipelineId,
     postgres::{
@@ -116,8 +117,6 @@ const KEEP_ALIVE_DEADLINE_FRACTION: f64 = 0.6;
 /// deadline at that scale would make the apply loop spin sending forced keep
 /// alives, which is not operationally useful. We clamp to `100ms`.
 const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
-/// Maximum accepted-but-not-durable streaming writes tracked per apply loop.
-const MAX_PENDING_DURABLE_DISPATCHES: usize = 1024;
 /// Maximum number of table schema cleanups buffered per apply loop.
 ///
 /// Each queue entry contains one table identifier and one frozen retention
@@ -764,12 +763,12 @@ enum RelationSchemaSelection {
     AtOrBefore(SnapshotId),
 }
 
-/// Timing anchors for one accepted-but-not-durable destination write.
+/// Timing anchors for one deferred durability interval.
 #[derive(Debug, Clone, Copy)]
-struct PendingDurableDispatch {
-    /// Instant at which the write was handed off to the destination.
+struct PendingDurabilityInterval {
+    /// Instant at which the first accepted write was handed to the destination.
     dispatched_at: Instant,
-    /// Instant at which the apply loop processed the accepted result.
+    /// Instant at which the apply loop observed the first accepted result.
     accepted_at: Instant,
 }
 
@@ -784,14 +783,13 @@ struct ApplyLoopState {
     /// commit end LSN is re-attached here so a later durable write can advance
     /// through it.
     last_commit_end_lsn: Option<PgLsn>,
-    /// Timing anchors of accepted-but-not-durable destination writes.
+    /// Timing anchors for the first accepted-but-not-durable destination write.
     ///
     /// A durable write result confirms all earlier accepted writes in the same
-    /// ordered apply-loop stream, so their durable durations are recorded once
-    /// the next durable result arrives. The queue is capped at
-    /// [`MAX_PENDING_DURABLE_DISPATCHES`]. Timing entries are metric-only
-    /// state, so overflow skips new entries instead of affecting replication.
-    pending_durable_dispatches: VecDeque<PendingDurableDispatch>,
+    /// ordered apply-loop stream. Keeping the earliest one measures the full
+    /// durability interval without emitting one sample for every intermediate
+    /// accepted result.
+    pending_durability_interval: Option<PendingDurabilityInterval>,
     /// Relation tables not yet covered by persisted commit-boundary progress.
     ///
     /// This includes relations from `Accepted` writes and from durable
@@ -859,7 +857,7 @@ impl ApplyLoopState {
     ) -> Self {
         Self {
             last_commit_end_lsn: None,
-            pending_durable_dispatches: VecDeque::new(),
+            pending_durability_interval: None,
             pending_relation_table_ids: HashSet::new(),
             remote_final_lsn: None,
             replication_progress,
@@ -1880,43 +1878,38 @@ where
             counter!(
                 ETL_EVENTS_PROCESSED_TOTAL,
                 WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                ACTION_LABEL => "table_streaming",
+                REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
             )
             .increment(metadata.event_count as u64);
 
-            histogram!(
-                ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                ACTION_LABEL => "table_streaming",
-            )
-            .record(metadata.dispatched_at.elapsed().as_secs_f64());
+            // Empty writes are durability barriers rather than data batches, so they must not
+            // contribute observations to destination batch latency.
+            if metadata.event_count > 0 {
+                histogram!(
+                    ETL_DESTINATION_BATCH_SEND_DURATION_SECONDS,
+                    WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                    REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
+                )
+                .record(
+                    completed_at.saturating_duration_since(metadata.dispatched_at).as_secs_f64(),
+                );
+            }
 
             metadata.streaming_payload_metadata.record_processed(D::name());
 
             match status {
                 DestinationWriteStatus::Accepted => {
-                    // Remember when this write was dispatched and accepted so
-                    // its durable durations can be recorded once a later
-                    // durable result covers it. The queue is metric-only
-                    // state, so overflow must never fail the apply loop; the
-                    // write's samples are skipped instead.
+                    // The first accepted write opens a durability interval.
+                    // Later accepted writes remain covered by that same
+                    // interval, so retain the earliest timing anchors until a
+                    // durable result closes it.
                     if metadata.event_count > 0 {
-                        if self.state.pending_durable_dispatches.len()
-                            < MAX_PENDING_DURABLE_DISPATCHES
-                        {
-                            self.state.pending_durable_dispatches.push_back(
-                                PendingDurableDispatch {
-                                    dispatched_at: metadata.dispatched_at,
-                                    accepted_at: completed_at,
-                                },
-                            );
-                        } else {
-                            warn!(
-                                pending_durable_dispatches = MAX_PENDING_DURABLE_DISPATCHES,
-                                "pending durable dispatch queue is full, skipping durable \
-                                 duration samples for this write",
-                            );
-                        }
+                        self.state.pending_durability_interval.get_or_insert(
+                            PendingDurabilityInterval {
+                                dispatched_at: metadata.dispatched_at,
+                                accepted_at: completed_at,
+                            },
+                        );
                     }
 
                     self.state.update_last_commit_end_lsn(metadata.commit_end_lsn);
@@ -1924,39 +1917,37 @@ where
                 DestinationWriteStatus::Durable => {
                     // A durable result also confirms every earlier accepted
                     // write in the same ordered apply-loop stream.
-                    if !self.state.pending_durable_dispatches.is_empty() {
-                        let deferred_durable_histogram = histogram!(
-                            ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS,
+                    if let Some(interval) = self.state.pending_durability_interval.take() {
+                        histogram!(
+                            ETL_DESTINATION_BATCH_DURABLE_DURATION_SECONDS,
                             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                            ACTION_LABEL => "table_streaming",
+                            REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
                             CONFIRMATION_LABEL => "deferred",
+                        )
+                        .record(
+                            completed_at
+                                .saturating_duration_since(interval.dispatched_at)
+                                .as_secs_f64(),
                         );
-                        let durable_wait_histogram = histogram!(
-                            ETL_BATCH_ITEMS_DURABLE_WAIT_DURATION_SECONDS,
+                        histogram!(
+                            ETL_DESTINATION_BATCH_DURABLE_WAIT_DURATION_SECONDS,
                             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                            ACTION_LABEL => "table_streaming",
+                            REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
+                        )
+                        .record(
+                            completed_at
+                                .saturating_duration_since(interval.accepted_at)
+                                .as_secs_f64(),
                         );
-                        for dispatch in self.state.pending_durable_dispatches.drain(..) {
-                            deferred_durable_histogram.record(
-                                completed_at
-                                    .saturating_duration_since(dispatch.dispatched_at)
-                                    .as_secs_f64(),
-                            );
-                            durable_wait_histogram.record(
-                                completed_at
-                                    .saturating_duration_since(dispatch.accepted_at)
-                                    .as_secs_f64(),
-                            );
-                        }
                     }
 
                     // Empty durability barriers carry no items, so only writes
                     // with items are recorded for the current result.
                     if metadata.event_count > 0 {
                         histogram!(
-                            ETL_BATCH_ITEMS_DURABLE_DURATION_SECONDS,
+                            ETL_DESTINATION_BATCH_DURABLE_DURATION_SECONDS,
                             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                            ACTION_LABEL => "table_streaming",
+                            REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
                             CONFIRMATION_LABEL => "direct",
                         )
                         .record(
@@ -2278,7 +2269,7 @@ where
         &mut self,
         message: LogicalReplicationMessage,
     ) -> EtlResult<HandleMessageResult> {
-        self.record_streaming_event_received();
+        self.record_cdc_event_received();
 
         match &message {
             LogicalReplicationMessage::Begin(begin_body) => self.handle_begin_message(begin_body),
@@ -2315,12 +2306,12 @@ where
         }
     }
 
-    /// Records a source event received by the table streaming path.
-    fn record_streaming_event_received(&self) {
+    /// Records a source event received through the CDC replication path.
+    fn record_cdc_event_received(&self) {
         counter!(
             ETL_EVENTS_RECEIVED_TOTAL,
             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-            ACTION_LABEL => "table_streaming",
+            REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
         )
         .increment(1);
     }
