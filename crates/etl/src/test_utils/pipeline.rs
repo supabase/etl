@@ -81,6 +81,8 @@ pub struct PipelineBuilder<S, D> {
     /// The time between periodic table sync monitor checks. Default:
     /// [`PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS`].
     table_sync_monitor_refresh_interval_ms: u64,
+    /// Create replication slots with the `FAILOVER` option. Default: false.
+    failover: bool,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -138,7 +140,14 @@ where
             },
             table_sync_monitor_refresh_interval_ms:
                 PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
+            failover: false,
         }
+    }
+
+    /// Sets whether replication slots are created with the `FAILOVER` option.
+    pub fn with_failover(mut self, failover: bool) -> Self {
+        self.failover = failover;
+        self
     }
 
     /// Sets custom batch configuration.
@@ -199,7 +208,7 @@ where
             publication_name: self.publication_name,
             pg_connection: self.pg_connection_config,
             store_pg_connection: None,
-            failover: false,
+            failover: self.failover,
             batch: self.batch,
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
