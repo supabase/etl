@@ -261,7 +261,8 @@ where
             self.config.pg_connection.clone(),
             self.pipeline_id,
         )
-        .await?;
+        .await?
+        .with_failover(self.config.failover);
 
         let start_lsn = get_start_lsn(
             self.pipeline_id,

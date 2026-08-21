@@ -196,6 +196,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         id: pipeline_id,
         publication_name: args.publication,
         run_source_migrations: true,
+        failover: false,
         pg_connection: pg_connection_config,
         store_pg_connection: None,
         batch: BatchConfig {

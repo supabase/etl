@@ -214,6 +214,10 @@ pub struct PgReplicationClient {
     connection_config: PgReplicationConnectionConfig,
     server_version: Option<NonZeroI32>,
     connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
+    /// Whether replication slots created by this client request the `FAILOVER`
+    /// option so they survive a primary failover (PostgreSQL 17+). Off by
+    /// default; enable via [`PgReplicationClient::with_failover`].
+    failover: bool,
 }
 
 impl fmt::Debug for PgReplicationClient {
@@ -271,6 +275,14 @@ impl PgReplicationClient {
         .await
     }
 
+    /// Configures whether replication slots created by this client request the
+    /// `FAILOVER` option (PostgreSQL 17+), so they synchronize to standbys and
+    /// survive a primary failover. Off by default.
+    pub fn with_failover(mut self, failover: bool) -> Self {
+        self.failover = failover;
+        self
+    }
+
     /// Establishes a replication connection with the supplied
     /// `application_name`.
     async fn connect_with_application_name(
@@ -312,7 +324,13 @@ impl PgReplicationClient {
 
         info!("connected to postgres without tls");
 
-        Ok(PgReplicationClient { client, connection_config, server_version, connection_updates_rx })
+        Ok(PgReplicationClient {
+            client,
+            connection_config,
+            server_version,
+            connection_updates_rx,
+            failover: false,
+        })
     }
 
     /// Establishes a TLS-encrypted connection to Postgres.
@@ -337,7 +355,13 @@ impl PgReplicationClient {
 
         info!("connected to postgres with tls");
 
-        Ok(PgReplicationClient { client, connection_config, server_version, connection_updates_rx })
+        Ok(PgReplicationClient {
+            client,
+            connection_config,
+            server_version,
+            connection_updates_rx,
+            failover: false,
+        })
     }
 
     /// Creates a non-replication child connection from connection settings.
@@ -423,10 +447,11 @@ impl PgReplicationClient {
         let connection_config = self.connection_config.clone();
         let server_version = self.server_version;
         let connection_updates_rx = self.connection_updates_rx();
+        let failover = self.failover;
 
         let transaction = self.begin_tx().await?;
         let slot = PgReplicationQueryTarget::Transaction(&transaction)
-            .create_slot(slot_name, SnapshotAction::Use)
+            .create_slot(slot_name, SnapshotAction::Use, failover)
             .await?;
 
         Ok((
@@ -678,7 +703,7 @@ impl PgReplicationClient {
         slot_name: &str,
         snapshot_action: SnapshotAction,
     ) -> EtlResult<CreateSlotResult> {
-        self.target().create_slot(slot_name, snapshot_action).await
+        self.target().create_slot(slot_name, snapshot_action, self.failover).await
     }
 
     /// Deletes a replication slot, optionally failing when the slot does not

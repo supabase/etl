@@ -27,20 +27,38 @@ impl PgReplicationQueryTarget<'_, '_> {
         self,
         slot_name: &str,
         snapshot_action: SnapshotAction,
+        failover: bool,
     ) -> EtlResult<CreateSlotResult> {
         // Do not convert the query or the options to lowercase, since the lexer for
         // replication commands (repl_scanner.l) in Postgres code expects the commands
         // in uppercase. This probably should be fixed in upstream, but for now we will
         // keep the commands in uppercase.
-        let snapshot_option = match snapshot_action {
-            SnapshotAction::Use => "USE_SNAPSHOT",
-            SnapshotAction::NoExport => "NOEXPORT_SNAPSHOT",
+        let query = if failover {
+            // The FAILOVER option makes the slot synchronize to standbys so it
+            // survives a primary failover (PostgreSQL 17+). It can only be
+            // combined with the snapshot action through the parenthesized
+            // option list, so use that form here; `USE_SNAPSHOT` maps to
+            // `SNAPSHOT 'use'` and `NOEXPORT_SNAPSHOT` to `SNAPSHOT 'nothing'`.
+            let snapshot_option = match snapshot_action {
+                SnapshotAction::Use => "'use'",
+                SnapshotAction::NoExport => "'nothing'",
+            };
+            format!(
+                r#"CREATE_REPLICATION_SLOT {} LOGICAL pgoutput (SNAPSHOT {}, FAILOVER)"#,
+                quote_identifier(slot_name),
+                snapshot_option
+            )
+        } else {
+            let snapshot_option = match snapshot_action {
+                SnapshotAction::Use => "USE_SNAPSHOT",
+                SnapshotAction::NoExport => "NOEXPORT_SNAPSHOT",
+            };
+            format!(
+                r#"CREATE_REPLICATION_SLOT {} LOGICAL pgoutput {}"#,
+                quote_identifier(slot_name),
+                snapshot_option
+            )
         };
-        let query = format!(
-            r#"CREATE_REPLICATION_SLOT {} LOGICAL pgoutput {}"#,
-            quote_identifier(slot_name),
-            snapshot_option
-        );
         match self.simple_query(&query).await {
             Ok(results) => {
                 for result in results {

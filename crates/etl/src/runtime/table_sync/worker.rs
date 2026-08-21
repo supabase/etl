@@ -696,7 +696,8 @@ where
             self.pipeline_id,
             self.table_id,
         )
-        .await?;
+        .await?
+        .with_failover(self.config.failover);
 
         let table_sync_result = start_table_sync(
             self.pipeline_id,

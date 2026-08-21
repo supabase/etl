@@ -296,6 +296,16 @@ pub struct PipelineConfig {
     /// store on a writable endpoint.
     #[serde(default)]
     pub store_pg_connection: Option<PgConnectionConfig>,
+    /// Create the pipeline's logical replication slots with the `FAILOVER`
+    /// option (PostgreSQL 17+) so they are synchronized to standbys and survive
+    /// a primary failover. Off by default.
+    ///
+    /// Required when replicating through a proxy that only admits failover
+    /// slots — e.g. the Multigres multigateway with slot-based replication
+    /// enabled, which rejects non-temporary slots that are not registered for
+    /// failover.
+    #[serde(default)]
+    pub failover: bool,
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
@@ -741,6 +751,7 @@ mod tests {
             publication_name: "publication".to_owned(),
             pg_connection,
             store_pg_connection: None,
+            failover: false,
             batch: BatchConfig::default(),
             table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
             table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
@@ -766,6 +777,7 @@ mod tests {
             publication_name: "publication".to_owned(),
             pg_connection: pg_connection("replica.local", 5432),
             store_pg_connection: Some(pg_connection("primary.local", 6432)),
+            failover: false,
             batch: BatchConfig::default(),
             table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
             table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,

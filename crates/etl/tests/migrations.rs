@@ -161,6 +161,7 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
         publication_name: "missing_publication".to_owned(),
         pg_connection,
         store_pg_connection: None,
+        failover: false,
         batch: BatchConfig {
             max_fill_ms: 5000,
             memory_budget_ratio: 0.2,
