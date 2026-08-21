@@ -2337,9 +2337,11 @@ where
     /// record the new schema cursor here so the next `Relation` rebuilds the
     /// masks against that exact snapshot. PostgreSQL omits the relation when
     /// the DDL did not invalidate pgoutput's cached relation state. In that
-    /// case the previous decoder remains valid and is retained for row data.
-    /// Without a previous decoder, a table-sync worker cannot hand over this
-    /// incomplete state until a relation provides both masks.
+    /// case the first row combines the stored new table schema with the
+    /// previous relation masks and materializes `WithSchema`. The retained
+    /// masks are only a fallback: a new relation replaces them before any row
+    /// is decoded. Without previous masks, a table-sync worker cannot hand over
+    /// this incomplete state until a relation provides both masks.
     async fn handle_message(
         &mut self,
         message: &protocol::MessageBody,
@@ -2422,7 +2424,7 @@ where
 
         // The `remote_final_lsn` is the `commit_lsn` of the current transaction.
         let snapshot_id = schema_snapshot_id_from_message(remote_final_lsn, message);
-        let table_schema = Arc::new(schema_change_message.into_table_schema(snapshot_id));
+        let table_schema = schema_change_message.into_table_schema(snapshot_id);
         let previous_state = self.table_decoding_states.remove(&table_id);
         self.table_decoding_states
             .insert(table_id, TableDecodingState::pending_relation(snapshot_id, previous_state));
@@ -2437,7 +2439,7 @@ where
         );
 
         // Store the new schema version in the store.
-        if let Err(err) = self.schema_store.store_table_schema((*table_schema).clone()).await {
+        if let Err(err) = self.schema_store.store_table_schema(table_schema).await {
             counter!(
                 ETL_DDL_SCHEMA_CHANGES_TOTAL,
                 WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
@@ -2821,9 +2823,10 @@ where
     /// owned the table.
     ///
     /// Existing local state is authoritative. A materialized schema needs no
-    /// recovery. [`TableDecodingState::PendingRelation`] uses its previous
-    /// decoder when PostgreSQL sends row data without a new relation. A pending
-    /// relation without a previous decoder remains incomplete.
+    /// recovery. [`TableDecodingState::PendingRelation`] combines its previous
+    /// masks with the stored new schema when PostgreSQL sends row data without
+    /// a new relation. A pending relation without previous masks remains
+    /// incomplete.
     ///
     /// `SyncDone` rows written before durable decoders were introduced
     /// deserialize without a stored snapshot or masks. ETL cannot safely infer
@@ -2835,10 +2838,10 @@ where
         current_lsn: PgLsn,
     ) -> EtlResult<()> {
         match self.table_decoding_states.get(&table_id) {
-            Some(
-                TableDecodingState::WithSchema(_)
-                | TableDecodingState::PendingRelation { previous_schema: Some(_), .. },
-            ) => {
+            Some(TableDecodingState::WithSchema(_)) => return Ok(()),
+            Some(TableDecodingState::PendingRelation {
+                previous_relation_masks: Some(_), ..
+            }) => {
                 return Ok(());
             }
             Some(TableDecodingState::PendingRelation { snapshot_id, .. }) => {
@@ -2905,6 +2908,11 @@ where
     /// local decoder. In that case the compact `SyncDone` state supplies the
     /// exact schema snapshot and both masks on demand.
     ///
+    /// A DDL instead leaves a pending relation at its exact schema snapshot. If
+    /// row data arrives before a new relation, the retained previous masks are
+    /// combined with that stored schema and immediately materialized as
+    /// [`TableDecodingState::WithSchema`].
+    ///
     /// A missing decoder without an applicable complete `SyncDone` state is an
     /// error: unlike a relation message, DML does not contain the column and
     /// identity metadata needed to reconstruct the masks from a bootstrap
@@ -2916,11 +2924,26 @@ where
     ) -> EtlResult<ReplicatedTableSchema> {
         self.install_sync_done_decoding_state_if_missing(table_id, remote_final_lsn).await?;
 
-        let replicated_table_schema = match self.table_decoding_states.get(&table_id) {
-            Some(
-                TableDecodingState::WithSchema(schema)
-                | TableDecodingState::PendingRelation { previous_schema: Some(schema), .. },
-            ) => schema.clone(),
+        let table_decoding_state = self.table_decoding_states.get(&table_id).cloned();
+        let replicated_table_schema = match table_decoding_state {
+            Some(TableDecodingState::WithSchema(replicated_table_schema)) => replicated_table_schema,
+            Some(TableDecodingState::PendingRelation {
+                snapshot_id,
+                previous_relation_masks: Some(previous_relation_masks),
+            }) => {
+                let table_schema = self
+                    .get_table_schema_for_relation(
+                        table_id,
+                        RelationSchemaSelection::Exact(snapshot_id),
+                    )
+                    .await?;
+
+                let replicated_table_schema = previous_relation_masks.materialize(table_schema);
+                self.table_decoding_states
+                    .insert(table_id, TableDecodingState::WithSchema(replicated_table_schema.clone()));
+
+                replicated_table_schema
+            }
             Some(TableDecodingState::PendingRelation { snapshot_id, .. }) => {
                 return Err(etl_error!(
                     ErrorKind::InvalidState,
@@ -3789,10 +3812,10 @@ mod apply_worker {
         if let Some(worker_state) = worker_state {
             let mut worker_state_guard = worker_state.lock().await;
             let state = worker_state_guard.table_state();
-            let has_materialized_decoding_state = table_decoding_states
-                .get(&table_id)
-                .and_then(TableDecodingState::schema_for_row)
-                .is_some();
+            let has_materialized_decoding_state = matches!(
+                table_decoding_states.get(&table_id),
+                Some(TableDecodingState::WithSchema(_))
+            );
 
             debug!(
                 worker_type = %WorkerType::Apply,
@@ -3832,10 +3855,10 @@ mod apply_worker {
                 }
             }
         } else {
-            let has_materialized_decoding_state = table_decoding_states
-                .get(&table_id)
-                .and_then(TableDecodingState::schema_for_row)
-                .is_some();
+            let has_materialized_decoding_state = matches!(
+                table_decoding_states.get(&table_id),
+                Some(TableDecodingState::WithSchema(_))
+            );
 
             debug!(
                 worker_type = %WorkerType::Apply,
@@ -3975,10 +3998,10 @@ mod apply_worker {
         if let Some(worker_state) = worker_state {
             let mut worker_state_guard = worker_state.lock().await;
             let state = worker_state_guard.table_state();
-            let has_materialized_decoding_state = table_decoding_states
-                .get(&table_id)
-                .and_then(TableDecodingState::schema_for_row)
-                .is_some();
+            let has_materialized_decoding_state = matches!(
+                table_decoding_states.get(&table_id),
+                Some(TableDecodingState::WithSchema(_))
+            );
 
             debug!(
                 worker_type = %WorkerType::Apply,
@@ -4079,10 +4102,10 @@ mod apply_worker {
                 }
             }
         } else {
-            let has_materialized_decoding_state = table_decoding_states
-                .get(&table_id)
-                .and_then(TableDecodingState::schema_for_row)
-                .is_some();
+            let has_materialized_decoding_state = matches!(
+                table_decoding_states.get(&table_id),
+                Some(TableDecodingState::WithSchema(_))
+            );
 
             debug!(
                 worker_type = %WorkerType::Apply,
@@ -4185,9 +4208,9 @@ mod apply_worker {
     /// connection whose decoder must be established before it stores `Ready`.
     ///
     /// A handled DDL records a pending relation while retaining any previous
-    /// decoder. PostgreSQL's following relation materializes the new exact
-    /// snapshot and masks; relation-less rows continue using the previous
-    /// decoder because pgoutput did not invalidate its relation state.
+    /// masks. PostgreSQL's following relation materializes the new exact
+    /// snapshot and masks. A relation-less row instead combines the retained
+    /// masks with the stored new table schema and transitions to `WithSchema`.
     ///
     /// A table which lacks local decoding state remains in `SyncDone`; this
     /// does not block owned changes at or after the boundary. Its first
@@ -4408,10 +4431,6 @@ mod table_sync_worker {
             Some(TableDecodingState::WithSchema(replicated_table_schema)) => {
                 Ok(TableState::sync_done(sync_done_lsn, replicated_table_schema))
             }
-            Some(TableDecodingState::PendingRelation {
-                previous_schema: Some(replicated_table_schema),
-                ..
-            }) => Ok(TableState::sync_done(sync_done_lsn, replicated_table_schema)),
             Some(TableDecodingState::PendingRelation { snapshot_id, .. }) => Err(etl_error!(
                 ErrorKind::InvalidState,
                 "Table-sync decoding state is incomplete",
@@ -4528,11 +4547,15 @@ mod tests {
     }
 
     #[test]
-    fn repeated_pending_relations_retain_the_previous_decoder() {
+    fn repeated_pending_relations_retain_previous_masks_for_the_latest_schema() {
         let previous_snapshot_id = test_snapshot_id(10, 10);
         let first_pending_snapshot_id = test_snapshot_id(20, 20);
         let second_pending_snapshot_id = test_snapshot_id(30, 30);
         let previous_schema = replicated_schema(previous_snapshot_id);
+        let previous_replication_mask = previous_schema.replication_mask().clone();
+        let previous_identity_mask = previous_schema.identity_mask().clone();
+        let second_table_schema =
+            Arc::new(replicated_schema(second_pending_snapshot_id).inner().clone());
 
         let first_pending = TableDecodingState::pending_relation(
             first_pending_snapshot_id,
@@ -4541,21 +4564,28 @@ mod tests {
         let second_pending =
             TableDecodingState::pending_relation(second_pending_snapshot_id, Some(first_pending));
 
-        let TableDecodingState::PendingRelation { snapshot_id, .. } = &second_pending else {
+        let TableDecodingState::PendingRelation {
+            snapshot_id,
+            previous_relation_masks: Some(previous_relation_masks),
+        } = second_pending
+        else {
             panic!("expected pending relation state");
         };
-        assert_eq!(*snapshot_id, second_pending_snapshot_id);
-        assert_eq!(
-            second_pending.schema_for_row().unwrap().inner().snapshot_id,
-            previous_snapshot_id
-        );
+        assert_eq!(snapshot_id, second_pending_snapshot_id);
+        let pending_schema = previous_relation_masks.materialize(second_table_schema);
+        assert_eq!(pending_schema.inner().snapshot_id, second_pending_snapshot_id);
+        assert_eq!(pending_schema.replication_mask(), &previous_replication_mask);
+        assert_eq!(pending_schema.identity_mask(), &previous_identity_mask);
     }
 
     #[test]
-    fn pending_relation_without_previous_decoder_has_no_row_schema() {
+    fn pending_relation_without_previous_masks_cannot_materialize_schema() {
         let snapshot_id = test_snapshot_id(20, 20);
         let pending = TableDecodingState::pending_relation(snapshot_id, None);
 
-        assert!(pending.schema_for_row().is_none());
+        assert!(matches!(
+            pending,
+            TableDecodingState::PendingRelation { previous_relation_masks: None, .. }
+        ));
     }
 }

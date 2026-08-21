@@ -297,7 +297,7 @@ async fn relation_message_updates_when_column_nullability_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn relationless_noop_schema_changes_reuse_previous_decoder() {
+async fn relationless_noop_schema_changes_reuse_previous_relation_masks() {
     init_test_tracing();
 
     let (database, table_name, table_id, store, destination, pipeline, _, _) =
@@ -353,8 +353,32 @@ async fn relationless_noop_schema_changes_reuse_previous_decoder() {
     let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
+    let Event::Relation(relation) = get_last_relation_event(&events, table_id) else {
+        panic!("expected relation event");
+    };
     assert_eq!(insert.table_row.values()[1], Cell::String("Alice".to_owned()));
     assert_eq!(insert.table_row.values()[2], Cell::I32(25));
+    assert_eq!(
+        insert.replicated_table_schema.replication_mask(),
+        relation.replicated_table_schema.replication_mask()
+    );
+    assert_eq!(
+        insert.replicated_table_schema.identity_mask(),
+        relation.replicated_table_schema.identity_mask()
+    );
+
+    let table_schemas = store.get_table_schemas().await;
+    let (_, newest_table_schema) = table_schemas
+        .get(&table_id)
+        .unwrap()
+        .iter()
+        .max_by_key(|(snapshot_id, _)| *snapshot_id)
+        .unwrap();
+    assert_eq!(insert.replicated_table_schema.inner(), newest_table_schema);
+    assert_ne!(
+        insert.replicated_table_schema.inner().snapshot_id,
+        relation.replicated_table_schema.inner().snapshot_id
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

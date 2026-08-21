@@ -10,14 +10,15 @@
 //! A table-sync worker seeds this state from its consistent initial-copy
 //! snapshot and updates it whenever PostgreSQL emits a new `RELATION` message.
 //! A DDL message records the exact snapshot that the next relation must
-//! materialize while retaining any previous decoder. PostgreSQL emits a new
-//! relation before row data when its pgoutput relation state changed; otherwise
-//! the previous decoder remains valid for relation-less rows. Any complete
-//! decoder can be converted into the compact
+//! materialize while retaining any previous relation masks. PostgreSQL emits a
+//! new relation before row data when its pgoutput relation state changed;
+//! otherwise ETL combines the retained masks with the new stored table schema
+//! and transitions back to `WithSchema`. Any complete decoder can be converted
+//! into the compact
 //! [`crate::replication::state::StoredTableDecodingState`] persisted in
-//! `SyncDone`. Reaching the ownership boundary without either a new relation or
-//! a previous decoder fails closed because the publication and replica-identity
-//! masks are not known.
+//! `SyncDone`. Reaching the ownership boundary while still pending fails closed
+//! because relation-less DML has not yet confirmed that the previous masks are
+//! still authoritative.
 //!
 //! The apply worker clears its entry before starting table synchronization.
 //! After `SyncDone`, an owned relation materializes a new entry, while
@@ -25,7 +26,35 @@
 //! Consequently, `WithSchema` also proves that the current apply connection can
 //! keep decoding after `SyncDone` is replaced by `Ready`.
 
-use crate::schema::{ReplicatedTableSchema, SnapshotId};
+use std::sync::Arc;
+
+use crate::schema::{
+    IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableSchema,
+};
+
+/// Complete relation masks retained across a DDL message.
+#[derive(Debug, Clone)]
+pub(crate) struct PreviousRelationMasks {
+    /// Publication-column membership from the previous relation.
+    replication_mask: ReplicationMask,
+    /// Replica-identity membership from the previous relation.
+    identity_mask: IdentityMask,
+}
+
+impl PreviousRelationMasks {
+    /// Captures both masks from a materialized decoder.
+    fn from_schema(schema: &ReplicatedTableSchema) -> Self {
+        Self {
+            replication_mask: schema.replication_mask().clone(),
+            identity_mask: schema.identity_mask().clone(),
+        }
+    }
+
+    /// Combines the retained masks with the actual new table schema.
+    pub(crate) fn materialize(self, table_schema: Arc<TableSchema>) -> ReplicatedTableSchema {
+        ReplicatedTableSchema::from_masks(table_schema, self.replication_mask, self.identity_mask)
+    }
+}
 
 /// Per-table row-decoding state for one logical replication connection.
 #[derive(Debug, Clone)]
@@ -35,9 +64,8 @@ pub(crate) enum TableDecodingState {
     PendingRelation {
         /// Exact schema snapshot that the next relation must materialize.
         snapshot_id: SnapshotId,
-        /// Previous complete decoder used when PostgreSQL emits row data
-        /// without a new relation.
-        previous_schema: Option<ReplicatedTableSchema>,
+        /// Complete masks from the previous pgoutput relation, if known.
+        previous_relation_masks: Option<PreviousRelationMasks>,
     },
     /// Complete row-decoding state materialized from a relation or restored
     /// `SyncDone` decoding state.
@@ -45,23 +73,15 @@ pub(crate) enum TableDecodingState {
 }
 
 impl TableDecodingState {
-    /// Records a pending relation while retaining any complete decoder from
-    /// the previous state.
+    /// Records a pending relation while retaining masks from the previous
+    /// pgoutput relation.
     pub(crate) fn pending_relation(snapshot_id: SnapshotId, previous: Option<Self>) -> Self {
-        let previous_schema = match previous {
-            Some(Self::PendingRelation { previous_schema, .. }) => previous_schema,
-            Some(Self::WithSchema(schema)) => Some(schema),
+        let previous_relation_masks = match previous {
+            Some(Self::PendingRelation { previous_relation_masks, .. }) => previous_relation_masks,
+            Some(Self::WithSchema(schema)) => Some(PreviousRelationMasks::from_schema(&schema)),
             None => None,
         };
 
-        Self::PendingRelation { snapshot_id, previous_schema }
-    }
-
-    /// Returns the complete decoder available for relation-less row data.
-    pub(crate) fn schema_for_row(&self) -> Option<&ReplicatedTableSchema> {
-        match self {
-            Self::PendingRelation { previous_schema, .. } => previous_schema.as_ref(),
-            Self::WithSchema(schema) => Some(schema),
-        }
+        Self::PendingRelation { snapshot_id, previous_relation_masks }
     }
 }
