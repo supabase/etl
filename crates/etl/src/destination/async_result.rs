@@ -66,6 +66,16 @@ pub enum DestinationWriteStatus {
     Durable,
 }
 
+impl DestinationWriteStatus {
+    /// Returns the stable metric label value for this write status.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Durable => "durable",
+        }
+    }
+}
+
 /// Async completion handle used for
 /// [`crate::destination::Destination::write_table_rows`].
 ///
@@ -247,12 +257,6 @@ impl<T, M> CompletedAsyncResult<T, M> {
         self.result
     }
 
-    /// Returns the metadata and final result.
-    #[cfg(test)]
-    pub(crate) fn into_parts(self) -> (Option<M>, EtlResult<T>) {
-        (self.metadata, self.result)
-    }
-
     /// Returns metadata, the completion instant, and the final result.
     pub(crate) fn into_parts_with_completion(self) -> (Option<M>, Instant, EtlResult<T>) {
         (self.metadata, self.completed_at, self.result)
@@ -279,7 +283,7 @@ mod tests {
         result_tx.send(Ok(7_u64));
 
         let completed = pending_result.await;
-        let (metadata, result) = completed.into_parts();
+        let (metadata, _, result) = completed.into_parts_with_completion();
 
         let metadata = metadata.expect("metadata should be present");
         assert_eq!(metadata.commit_end_lsn, Some(PgLsn::from(42)));
@@ -307,7 +311,7 @@ mod tests {
         result_tx.send((Instant::now(), Ok(7))).unwrap();
 
         let completed = std::future::poll_fn(|cx| Pin::new(&mut pending_result).poll(cx)).await;
-        let (metadata, result) = completed.into_parts();
+        let (metadata, _, result) = completed.into_parts_with_completion();
 
         assert!(metadata.is_none());
         assert_eq!(result.unwrap(), 7);

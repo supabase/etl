@@ -5,12 +5,12 @@ use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
 static REGISTER_METRICS: Once = Once::new();
 
 pub(crate) const ETL_TABLES_TOTAL: &str = "etl_tables_total";
-pub(crate) const ETL_DESTINATION_BATCH_SEND_DURATION_SECONDS: &str =
-    "etl_destination_batch_send_duration_seconds";
-pub(crate) const ETL_DESTINATION_BATCH_DURABLE_DURATION_SECONDS: &str =
-    "etl_destination_batch_durable_duration_seconds";
-pub(crate) const ETL_DESTINATION_BATCH_DURABLE_WAIT_DURATION_SECONDS: &str =
-    "etl_destination_batch_durable_wait_duration_seconds";
+pub(crate) const ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS: &str =
+    "etl_destination_batch_write_duration_seconds";
+pub(crate) const ETL_DESTINATION_DURABILITY_DURATION_SECONDS: &str =
+    "etl_destination_durability_duration_seconds";
+pub(crate) const ETL_DESTINATION_DURABILITY_WAIT_DURATION_SECONDS: &str =
+    "etl_destination_durability_wait_duration_seconds";
 pub(crate) const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
 pub(crate) const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub(crate) const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
@@ -78,6 +78,8 @@ pub(crate) const ERROR_TYPE_LABEL: &str = "error_type";
 pub(crate) const DIRECTION_LABEL: &str = "direction";
 /// Label key for how durability was confirmed ("direct" or "deferred").
 pub(crate) const CONFIRMATION_LABEL: &str = "confirmation";
+/// Label key for the destination write status ("accepted" or "durable").
+pub(crate) const WRITE_STATUS_LABEL: &str = "status";
 
 /// Register metrics emitted by etl. This should be called before starting a
 /// pipeline. It is safe to call this method multiple times. It is guaranteed to
@@ -91,23 +93,23 @@ pub(crate) fn register_metrics() {
         );
 
         describe_histogram!(
-            ETL_DESTINATION_BATCH_SEND_DURATION_SECONDS,
+            ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS,
             Unit::Seconds,
             "Time from dispatching a non-empty destination batch until the destination reports \
-             its write result, labeled by worker_type and replication_path"
+             its write status, labeled by worker_type, replication_path and status"
         );
 
         describe_histogram!(
-            ETL_DESTINATION_BATCH_DURABLE_DURATION_SECONDS,
+            ETL_DESTINATION_DURABILITY_DURATION_SECONDS,
             Unit::Seconds,
-            "Time from dispatching a non-empty CDC destination batch until the destination \
-             confirms it durable, labeled by worker_type, replication_path and confirmation; a \
-             deferred observation represents the first outstanding accepted batch in one \
-             durability interval"
+            "Time from dispatching the first non-empty CDC batch in a durability interval until \
+             the destination reports Durable, labeled by worker_type, replication_path and \
+             confirmation; direct intervals contain one batch while deferred intervals may cover \
+             multiple accepted batches"
         );
 
         describe_histogram!(
-            ETL_DESTINATION_BATCH_DURABLE_WAIT_DURATION_SECONDS,
+            ETL_DESTINATION_DURABILITY_WAIT_DURATION_SECONDS,
             Unit::Seconds,
             "Time from the first outstanding non-empty CDC batch being accepted until the next \
              durable result, labeled by worker_type and replication_path; one observation is \

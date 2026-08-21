@@ -53,13 +53,12 @@ use crate::{
         ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
         ETL_APPLY_LOOP_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
         ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL,
-        ETL_DESTINATION_BATCH_DURABLE_DURATION_SECONDS,
-        ETL_DESTINATION_BATCH_DURABLE_WAIT_DURATION_SECONDS,
-        ETL_DESTINATION_BATCH_SEND_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
+        ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS, ETL_DESTINATION_DURABILITY_DURATION_SECONDS,
+        ETL_DESTINATION_DURABILITY_WAIT_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
         ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
         ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL,
-        REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL,
+        REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL, WRITE_STATUS_LABEL,
     },
     pipeline::PipelineId,
     postgres::{
@@ -1882,13 +1881,14 @@ where
             )
             .increment(metadata.event_count as u64);
 
-            // Empty writes are durability barriers rather than data batches, so they must not
-            // contribute observations to destination batch latency.
+            // Empty writes are durability barriers rather than data batches, so they must
+            // not contribute observations to destination batch latency.
             if metadata.event_count > 0 {
                 histogram!(
-                    ETL_DESTINATION_BATCH_SEND_DURATION_SECONDS,
+                    ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS,
                     WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
                     REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
+                    WRITE_STATUS_LABEL => status.as_str(),
                 )
                 .record(
                     completed_at.saturating_duration_since(metadata.dispatched_at).as_secs_f64(),
@@ -1919,7 +1919,7 @@ where
                     // write in the same ordered apply-loop stream.
                     if let Some(interval) = self.state.pending_durability_interval.take() {
                         histogram!(
-                            ETL_DESTINATION_BATCH_DURABLE_DURATION_SECONDS,
+                            ETL_DESTINATION_DURABILITY_DURATION_SECONDS,
                             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
                             REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
                             CONFIRMATION_LABEL => "deferred",
@@ -1930,7 +1930,7 @@ where
                                 .as_secs_f64(),
                         );
                         histogram!(
-                            ETL_DESTINATION_BATCH_DURABLE_WAIT_DURATION_SECONDS,
+                            ETL_DESTINATION_DURABILITY_WAIT_DURATION_SECONDS,
                             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
                             REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
                         )
@@ -1945,7 +1945,7 @@ where
                     // with items are recorded for the current result.
                     if metadata.event_count > 0 {
                         histogram!(
-                            ETL_DESTINATION_BATCH_DURABLE_DURATION_SECONDS,
+                            ETL_DESTINATION_DURABILITY_DURATION_SECONDS,
                             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
                             REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
                             CONFIRMATION_LABEL => "direct",

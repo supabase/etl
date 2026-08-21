@@ -16,9 +16,10 @@ use crate::observability::{
     ETL_BYTES_PROCESSED_TOTAL, ETL_BYTES_RECEIVED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL,
 };
 
-// These values are part of the existing egress and billing contract. `table_copy` maps to the
-// copy replication path and `streaming` maps to the CDC replication path. Preserve the legacy
-// names for compatibility even though Prometheus metrics use the current vocabulary.
+// These values are part of the existing egress and billing contract.
+// `table_copy` maps to the copy replication path and `streaming` maps to the
+// CDC replication path. Preserve the legacy names for compatibility even though
+// Prometheus metrics use the current vocabulary.
 const LEGACY_EGRESS_COPY_PROCESSING_TYPE: &str = "table_copy";
 const LEGACY_EGRESS_CDC_PROCESSING_TYPE: &str = "streaming";
 

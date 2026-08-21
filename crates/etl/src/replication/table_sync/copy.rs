@@ -26,12 +26,12 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::{
-        COPY_REPLICATION_PATH, ETL_DESTINATION_BATCH_SEND_DURATION_SECONDS,
+        COPY_REPLICATION_PATH, ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS,
         ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL, ETL_TABLE_COPY_DURATION_SECONDS,
         ETL_TABLE_COPY_EFFECTIVE_PARTITIONS, ETL_TABLE_COPY_PARTITION_BLOCKS,
         ETL_TABLE_COPY_PARTITION_DURATION_SECONDS, ETL_TABLE_COPY_PARTITION_ROWS,
         ETL_TABLE_COPY_PARTITIONS_TOTAL, ETL_TABLE_COPY_PLANNED_PARTITIONS,
-        ETL_TABLE_COPY_ROWS_TOTAL, REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL,
+        ETL_TABLE_COPY_ROWS_TOTAL, REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL, WRITE_STATUS_LABEL,
     },
     postgres::{
         OutOfBandSourcePool, TableCopyRow, TableCopyStream,
@@ -766,9 +766,10 @@ where
                     .saturating_duration_since(dispatched_at)
                     .as_secs_f64();
                 histogram!(
-                    ETL_DESTINATION_BATCH_SEND_DURATION_SECONDS,
+                    ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS,
                     WORKER_TYPE_LABEL => "table_sync",
                     REPLICATION_PATH_LABEL => COPY_REPLICATION_PATH,
+                    WRITE_STATUS_LABEL => write_status.as_str(),
                 )
                 .record(send_duration_seconds);
 
