@@ -26,12 +26,12 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::{
-        ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
-        ETL_EVENTS_RECEIVED_TOTAL, ETL_TABLE_COPY_DURATION_SECONDS,
+        COPY_REPLICATION_PATH, ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS,
+        ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL, ETL_TABLE_COPY_DURATION_SECONDS,
         ETL_TABLE_COPY_EFFECTIVE_PARTITIONS, ETL_TABLE_COPY_PARTITION_BLOCKS,
         ETL_TABLE_COPY_PARTITION_DURATION_SECONDS, ETL_TABLE_COPY_PARTITION_ROWS,
         ETL_TABLE_COPY_PARTITIONS_TOTAL, ETL_TABLE_COPY_PLANNED_PARTITIONS,
-        ETL_TABLE_COPY_ROWS_TOTAL, WORKER_TYPE_LABEL,
+        ETL_TABLE_COPY_ROWS_TOTAL, REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL, WRITE_STATUS_LABEL,
     },
     postgres::{
         OutOfBandSourcePool, TableCopyRow, TableCopyStream,
@@ -734,11 +734,11 @@ where
                 counter!(
                     ETL_EVENTS_RECEIVED_TOTAL,
                     WORKER_TYPE_LABEL => "table_sync",
-                    ACTION_LABEL => "table_copy",
+                    REPLICATION_PATH_LABEL => COPY_REPLICATION_PATH,
                 )
                 .increment(row_count);
 
-                let before_sending = Instant::now();
+                let dispatched_at = Instant::now();
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
 
                 destination
@@ -750,22 +750,26 @@ where
                 else {
                     return Ok(ShutdownResult::Shutdown(progress));
                 };
-                let write_status = completed_flush_result.into_result()?;
+                let (_, completed_at, result) = completed_flush_result.into_parts_with_completion();
+                let write_status = result?;
 
                 table_copy_batch_metadata.record_processed(D::name());
                 counter!(
                     ETL_EVENTS_PROCESSED_TOTAL,
                     WORKER_TYPE_LABEL => "table_sync",
-                    ACTION_LABEL => "table_copy",
+                    REPLICATION_PATH_LABEL => COPY_REPLICATION_PATH,
                 )
                 .increment(row_count);
                 progress.record_batch(row_count, write_status);
 
-                let send_duration_seconds = before_sending.elapsed().as_secs_f64();
+                let send_duration_seconds = completed_at
+                    .saturating_duration_since(dispatched_at)
+                    .as_secs_f64();
                 histogram!(
-                    ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+                    ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS,
                     WORKER_TYPE_LABEL => "table_sync",
-                    ACTION_LABEL => "table_copy",
+                    REPLICATION_PATH_LABEL => COPY_REPLICATION_PATH,
+                    WRITE_STATUS_LABEL => write_status.as_str(),
                 )
                 .record(send_duration_seconds);
 

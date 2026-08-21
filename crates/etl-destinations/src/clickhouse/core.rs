@@ -27,7 +27,7 @@ use crate::{
         CLICKHOUSE_COLUMN_NAME_MAPPING,
         client::{ClickHouseClient, ClickHouseTableColumn, DdlKind},
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
-        metrics::register_metrics,
+        metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
             create_current_view_sql, create_table_sql, drop_current_view_sql,
             supports_column_default, trailing_cdc_column_names,
@@ -1066,7 +1066,7 @@ where
                 rows,
                 &nullable_flags,
                 self.inserter_config.max_bytes_per_insert,
-                "copy",
+                COPY_REPLICATION_PATH,
             )
             .await
     }
@@ -1573,7 +1573,7 @@ where
                         rows,
                         &nullable_flags,
                         max_bytes,
-                        "streaming",
+                        CDC_REPLICATION_PATH,
                     )
                     .await
             });

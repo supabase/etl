@@ -22,6 +22,7 @@ use crate::clickhouse::{
         ETL_CLICKHOUSE_INSERT_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
         ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_ROWS,
         ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS, ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
+        REPLICATION_PATH_LABEL,
     },
     schema::{clickhouse_column_type, clickhouse_default_clause, clickhouse_default_expression},
     sql::quote_identifier,
@@ -631,7 +632,7 @@ impl ClickHouseClient {
     /// a new one is opened, keeping peak memory usage bounded for large
     /// initial copies.
     ///
-    /// The `source` label (`"copy"` or `"streaming"`) is attached to the
+    /// The `replication_path` label (`"copy"` or `"cdc"`) is attached to the
     /// `etl_clickhouse_insert_duration_seconds` histogram recorded after each
     /// committed INSERT statement.
     pub(crate) async fn insert_rows(
@@ -640,7 +641,7 @@ impl ClickHouseClient {
         rows: Vec<Vec<ClickHouseValue>>,
         nullable_flags: &[bool],
         max_bytes_per_insert: u64,
-        source: &'static str,
+        replication_path: &'static str,
     ) -> EtlResult<()> {
         let sql = build_insert_rows_sql(table_name);
         let mut rows = rows.into_iter().peekable();
@@ -662,7 +663,7 @@ impl ClickHouseClient {
                 encode_to_row_binary(row, nullable_flags, &mut row_buf).inspect_err(|_| {
                     metrics::counter!(
                         ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
-                        "source" => source,
+                        REPLICATION_PATH_LABEL => replication_path,
                     )
                     .increment(1);
                 })?;
@@ -682,24 +683,24 @@ impl ClickHouseClient {
                 Ok(_) => {
                     metrics::histogram!(
                         ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
-                        "source" => source,
+                        REPLICATION_PATH_LABEL => replication_path,
                     )
                     .record(insert_start.elapsed().as_secs_f64());
                     metrics::histogram!(
                         ETL_CLICKHOUSE_INSERT_ROWS,
-                        "source" => source,
+                        REPLICATION_PATH_LABEL => replication_path,
                     )
                     .record(rows_in_statement as f64);
                     metrics::histogram!(
                         ETL_CLICKHOUSE_INSERT_BYTES,
-                        "source" => source,
+                        REPLICATION_PATH_LABEL => replication_path,
                     )
                     .record(bytes as f64);
                 }
                 Err(err) => {
                     metrics::counter!(
                         ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL,
-                        "source" => source,
+                        REPLICATION_PATH_LABEL => replication_path,
                         "outcome" => outcome_label(err),
                     )
                     .increment(1);
@@ -712,7 +713,7 @@ impl ClickHouseClient {
         if statements > 0 {
             metrics::histogram!(
                 ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
-                "source" => source,
+                REPLICATION_PATH_LABEL => replication_path,
             )
             .record(statements as f64);
         }
