@@ -5,7 +5,7 @@ use etl::{
     event::Event,
     pipeline::PipelineId,
     schema::{TableId, TableName},
-    store::{StateStore, TableStateType},
+    store::{PostgresStore, StateStore, TableStateType},
     test_utils::{
         database::{replication_slot_state, spawn_source_database},
         faults::FaultyOp,
@@ -129,6 +129,27 @@ async fn wait_for_notification(
     tokio::time::timeout(DIRTY_RESTART_TIMEOUT, notification.inner().notified())
         .await
         .map_err(|_| TestCaseError::fail(format!("timed out waiting for {description}")))
+}
+
+/// Waits until the persistent state store reports completed table sync.
+async fn wait_for_table_sync_complete(
+    store: &PostgresStore,
+    table_id: TableId,
+) -> Result<(), TestCaseError> {
+    tokio::time::timeout(DIRTY_RESTART_TIMEOUT, async {
+        loop {
+            let state = store.get_table_state(table_id).await.map_err(|error| {
+                TestCaseError::fail(format!("failed to read table state: {error}"))
+            })?;
+            if state.as_ref().is_some_and(|state| state.as_type().has_completed_table_sync()) {
+                return Ok(());
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| TestCaseError::fail("timed out waiting for table sync to complete"))?
 }
 
 /// Inserts one autocommit user transaction and waits for its acknowledgement.
@@ -340,10 +361,14 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
     let users_schema = database_schema.users_schema();
     let table_id = users_schema.id;
 
-    let store = NotifyingStore::new();
-    let memory_destination = MemoryDestination::new(store.clone());
+    let destination_store = NotifyingStore::new();
+    let memory_destination = MemoryDestination::new(destination_store);
     let first_destination = TestDestinationWrapper::wrap(memory_destination.clone());
-    let pipeline_id: PipelineId = random();
+    let pipeline_id: PipelineId = u64::from(random::<u32>());
+    let first_store =
+        PostgresStore::new(pipeline_id, database.config.clone()).await.map_err(|error| {
+            TestCaseError::fail(format!("failed to create the first Postgres store: {error}"))
+        })?;
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     let sync_slot_name: String =
@@ -352,16 +377,15 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        store.clone(),
+        first_store.clone(),
         first_destination.clone(),
     );
-    let users_sync_complete = store.notify_on_table_sync_complete(table_id).await;
 
     first_pipeline
         .start()
         .await
         .map_err(|error| TestCaseError::fail(format!("pipeline failed to start: {error}")))?;
-    wait_for_notification(&users_sync_complete, "users table synchronization to complete").await?;
+    wait_for_table_sync_complete(&first_store, table_id).await?;
 
     // Table sync completes before the worker deletes its progress row and
     // replication slot. Wait for slot removal so the crash below hits a state
@@ -416,13 +440,18 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
     wait_for_apply_disconnect(database.client.as_ref().unwrap(), &apply_slot_name).await?;
     drop(first_destination);
     drop(held_response);
+    drop(first_store);
 
+    let restarted_store =
+        PostgresStore::new(pipeline_id, database.config.clone()).await.map_err(|error| {
+            TestCaseError::fail(format!("failed to reopen the Postgres store: {error}"))
+        })?;
     let restarted_destination = TestDestinationWrapper::wrap(memory_destination.clone());
     let mut restarted_pipeline = create_pipeline(
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        store.clone(),
+        restarted_store.clone(),
         restarted_destination.clone(),
     );
     restarted_pipeline.start().await.map_err(|error| {
@@ -447,7 +476,7 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
             TestCaseError::fail(format!("restarted pipeline shutdown failed: {error}"))
         })?;
 
-    let table_state = store
+    let table_state = restarted_store
         .get_table_state(table_id)
         .await
         .map_err(|error| TestCaseError::fail(format!("failed to read table state: {error}")))?
@@ -475,11 +504,11 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn dirty_restart_at_randomized_positions_converges_without_recopy() {
+async fn postgres_store_dirty_restart_at_randomized_positions_converges_without_recopy() {
     init_test_tracing();
 
     let strategy = dirty_restart_cases();
-    run_expensive_property("dirty restart convergence", &strategy, |case| {
+    run_expensive_property("Postgres store dirty restart convergence", &strategy, |case| {
         block_on(run_dirty_restart_case(*case))
     });
 }
