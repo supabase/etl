@@ -31,6 +31,9 @@ use crate::support::ducklake::{
     catalog_attach_target, create_test_lake, ducklake_load_sql, open_verification_connection,
 };
 
+/// Row size that exceeds the pipeline's default 8 MiB batch limit.
+const OVERSIZED_COPY_ROW_BYTES: i32 = 9_000_000;
+
 /// Expected row shape after adding columns during replication.
 #[derive(Debug, Eq, PartialEq)]
 struct SchemaAddRow {
@@ -138,6 +141,16 @@ fn count_applied_batches(
         quote_literal(batch_kind),
     );
     conn.query_row(&sql, [], |row| row.get(0)).unwrap()
+}
+
+/// Summarizes copied payload rows without loading their contents into the test
+/// process.
+fn query_payload_summary(conn: &Connection, table_name: &DuckLakeTableName) -> (i64, i64, i64) {
+    let sql = format!(
+        "select count(*), count(distinct payload), min(length(payload)) from {}",
+        qualified_lake_table_name(table_name)
+    );
+    conn.query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
 }
 
 /// Queries replicated user rows using blocking DuckDB APIs.
@@ -516,6 +529,80 @@ async fn table_copy_and_streaming_with_restart() {
             (4, "description_4".to_owned()),
         ]
     );
+}
+
+/// Copy chunks with identical contents must not collapse to one applied
+/// marker. Each row exceeds the default 8 MiB batch limit, forcing the source
+/// copy stream to emit two separate batches.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_preserves_identical_oversized_rows_across_batches() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let source_table_name = test_table_name("ducklake_identical_copy_batches");
+    let table_id = database
+        .create_table(source_table_name.clone(), false, &[("payload", "text not null")])
+        .await
+        .unwrap();
+    let publication_name = "test_pub_ducklake_identical_copy_batches";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&source_table_name))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (payload) select repeat('a', {OVERSIZED_COPY_ROW_BYTES}) from \
+             generate_series(1, 2)",
+            source_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let source_summary: (i64, i64, i32) = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            &format!(
+                "select count(*), count(distinct payload), min(octet_length(payload)) from {}",
+                source_table_name.as_quoted_identifier()
+            ),
+            &[],
+        )
+        .await
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .unwrap();
+    assert_eq!(source_summary, (2, 1, OVERSIZED_COPY_ROW_BYTES));
+
+    let lake =
+        create_test_lake("table_copy_preserves_identical_oversized_rows_across_batches").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let ducklake_table_name = table_name_to_ducklake_table_name(&source_table_name).unwrap();
+    let store = NotifyingStore::new();
+    let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+    checkpoint_lake(&catalog_url, &data_url);
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(
+        query_payload_summary(&conn, &ducklake_table_name),
+        (2, 1, i64::from(OVERSIZED_COPY_ROW_BYTES))
+    );
+    assert_eq!(count_applied_batches(&conn, &ducklake_table_name, "copy"), 2);
+    assert_eq!(count_applied_batches(&conn, &ducklake_table_name, "copy_complete"), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

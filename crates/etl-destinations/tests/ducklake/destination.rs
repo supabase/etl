@@ -85,6 +85,15 @@ fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
     )
 }
 
+/// Builds a one-column table schema without a primary key.
+fn make_schema_without_primary_key(table_id: u32, schema: &str, table: &str) -> TableSchema {
+    TableSchema::new(
+        TableId::new(table_id),
+        TableName::new(schema.to_owned(), table.to_owned()),
+        vec![ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 1, false)],
+    )
+}
+
 fn make_schema_with_email(previous_schema: &TableSchema, snapshot_id: u64) -> TableSchema {
     TableSchema::with_snapshot_id(
         previous_schema.id,
@@ -718,6 +727,48 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
 
     reset_ducklake_test_hooks();
+}
+
+/// Identical rows in separate copy batches are distinct logical writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_table_rows_preserves_distinct_identical_batches() {
+    let lake = create_test_lake("write_table_rows_preserves_distinct_identical_batches").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schema = make_schema_without_primary_key(23, "public", "identical_copy_batches");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    for _ in 0..2 {
+        destination
+            .write_table_rows(
+                &replicated_table_schema,
+                vec![TableRow::new(vec![Cell::String("identical".to_owned())])],
+            )
+            .await
+            .unwrap();
+    }
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 2);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 2);
 }
 
 /// Concurrent same-table copy batches should serialize cleanly and remain

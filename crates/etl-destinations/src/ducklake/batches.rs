@@ -1,8 +1,9 @@
 //! Table batches are the atomic per-table write units used by DuckLake writes.
-//! Copy, mutation, and truncate inputs are normalized into deterministic
-//! batches so each attempt can replay the same SQL and replay bookkeeping.
-//! Copy batches persist ids in the applied-marker table, while streaming
-//! mutation and truncate batches advance a per-table progress watermark.
+//! Copy, mutation, and truncate inputs are normalized into prepared batches so
+//! each attempt can replay the same SQL and replay bookkeeping. Copy batches
+//! receive opaque ids when prepared and retain them across destination-local
+//! retries. Streaming mutation and truncate batches advance a per-table
+//! progress watermark.
 //! Bounded batch sizes preserve table-local ordering without letting one
 //! transaction grow unbounded.
 
@@ -306,7 +307,7 @@ impl DuckLakeTableBatchKind {
     }
 }
 
-/// Deterministic identity for one table batch.
+/// Identity and source progress for one table batch.
 struct DuckLakeBatchIdentity {
     batch_id: String,
     first_start_lsn: Option<PgLsn>,
@@ -765,7 +766,7 @@ pub(super) fn prepare_copy_table_batch(
     replay_epoch: String,
     table_rows: Vec<TableRow>,
 ) -> EtlResult<PreparedDuckLakeTableBatch> {
-    let identity = build_copy_batch_identity(&table_name, replicated_table_schema, &table_rows)?;
+    let identity = new_copy_batch_identity();
     Ok(PreparedDuckLakeTableBatch {
         table_name,
         replay_epoch,
@@ -1448,22 +1449,17 @@ fn build_mutation_batch_identity(
     ))
 }
 
-/// Builds a deterministic identity for one ordered table-copy batch.
-fn build_copy_batch_identity(
-    table_name: &DuckLakeTableName,
-    replicated_table_schema: &ReplicatedTableSchema,
-    table_rows: &[TableRow],
-) -> EtlResult<DuckLakeBatchIdentity> {
-    let mut hasher = BatchIdHasher::new();
-    "copy".hash(&mut hasher);
-    table_name.id().hash(&mut hasher);
-
-    for row in table_rows {
-        delete_predicate_from_copy_row(replicated_table_schema, row)?.hash(&mut hasher);
-        hash_table_row_ref(&mut hasher, row);
+/// Creates an opaque identity for one table-copy batch.
+///
+/// Distinct source chunks may contain identical rows, so their contents cannot
+/// identify one logical copy invocation. The prepared batch retains this id
+/// across destination-local retries.
+fn new_copy_batch_identity() -> DuckLakeBatchIdentity {
+    DuckLakeBatchIdentity {
+        batch_id: format!("copy:{:032x}", rand::rng().random::<u128>()),
+        first_start_lsn: None,
+        last_commit_lsn: None,
     }
-
-    Ok(build_batch_identity(DuckLakeTableBatchKind::Copy, None, None, hasher.finish()))
 }
 
 /// Builds the deterministic identity shared by retries of a copy barrier.
@@ -1473,44 +1469,6 @@ fn build_copy_complete_batch_identity(table_name: &DuckLakeTableName) -> DuckLak
     table_name.id().hash(&mut hasher);
 
     build_batch_identity(DuckLakeTableBatchKind::CopyComplete, None, None, hasher.finish())
-}
-
-/// Builds a delete predicate for a full copied row using the source primary
-/// key.
-fn delete_predicate_from_copy_row(
-    replicated_table_schema: &ReplicatedTableSchema,
-    row: &TableRow,
-) -> EtlResult<String> {
-    let replicated_column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
-    if row.values().len() != replicated_column_schemas.len() {
-        return Err(etl_error!(
-            ErrorKind::InvalidState,
-            "DuckLake copy row shape does not match schema",
-            format!(
-                "Expected {} values for table '{}', got {}",
-                replicated_column_schemas.len(),
-                replicated_table_schema.name(),
-                row.values().len()
-            )
-        ));
-    }
-
-    let mut predicates = Vec::new();
-    for (column_schema, value) in replicated_column_schemas.iter().zip(row.values()) {
-        if !column_schema.primary_key() {
-            continue;
-        }
-
-        let quoted_column =
-            quote_identifier(&DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column_schema.name));
-        let predicate = match value {
-            Cell::Null => format!("{quoted_column} IS NULL"),
-            _ => format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)),
-        };
-        predicates.push(predicate);
-    }
-
-    Ok(predicates.join(" AND "))
 }
 
 /// Builds a deterministic identity for one ordered truncate batch.
@@ -3274,6 +3232,30 @@ mod tests {
         assert_eq!(retained.len(), 2);
         assert_eq!(retained[0].sequence_key(), EventSequenceKey::new(PgLsn::from(200), 1));
         assert_eq!(retained[1].sequence_key(), EventSequenceKey::new(PgLsn::from(210), 0));
+    }
+
+    #[test]
+    fn prepare_copy_table_batch_assigns_distinct_ids_to_identical_batches() {
+        let replicated_table_schema = make_replicated_schema();
+        let make_rows =
+            || vec![TableRow::new(vec![Cell::I32(1), Cell::String("identical".to_owned())])];
+
+        let first = prepare_copy_table_batch(
+            &replicated_table_schema,
+            ducklake_table_name(),
+            LEGACY_REPLAY_EPOCH.to_owned(),
+            make_rows(),
+        )
+        .unwrap();
+        let second = prepare_copy_table_batch(
+            &replicated_table_schema,
+            ducklake_table_name(),
+            LEGACY_REPLAY_EPOCH.to_owned(),
+            make_rows(),
+        )
+        .unwrap();
+
+        assert_ne!(first.batch_id, second.batch_id);
     }
 
     #[test]
