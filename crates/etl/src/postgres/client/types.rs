@@ -129,6 +129,18 @@ pub enum CtidPartition {
     OpenEnd { start_tid: String },
 }
 
+impl fmt::Display for CtidPartition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OpenStart { end_tid } => write!(formatter, "open_start:{end_tid}"),
+            Self::Closed { start_tid, end_tid } => {
+                write!(formatter, "closed:{start_tid}:{end_tid}")
+            }
+            Self::OpenEnd { start_tid } => write!(formatter, "open_end:{start_tid}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tokio_postgres::types::PgLsn;

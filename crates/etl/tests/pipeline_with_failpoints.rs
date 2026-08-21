@@ -3,10 +3,10 @@
 use std::time::Duration;
 
 use etl::{
-    data::{Cell, TableRow},
+    data::Cell,
     destination::{
-        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        Destination, DestinationWriteStatus, DropTableForCopyResult, TableCopyWrite,
+        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     event::{Event, EventType, InsertEvent},
@@ -103,7 +103,7 @@ impl Destination for DeferredEventsDestination {
     async fn write_table_rows(
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
-        _table_rows: Vec<TableRow>,
+        _table_copy: TableCopyWrite,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         async_result.send(Ok(DestinationWriteStatus::Durable));

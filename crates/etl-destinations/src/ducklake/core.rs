@@ -10,7 +10,7 @@ use etl::{
     data::{OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TaskSet, WriteEventsDurability, WriteEventsResult,
+        DropTableForCopyResult, TableCopyWrite, TaskSet, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
@@ -580,11 +580,11 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
+        table_copy: TableCopyWrite,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let copy_complete = table_rows.is_empty();
-        let result = self.write_table_rows(replicated_table_schema, table_rows).await;
+        let copy_complete = matches!(table_copy, TableCopyWrite::Finish);
+        let result = self.write_table_rows(replicated_table_schema, table_copy.into_rows()).await;
         async_result.send(result.map(|_| {
             if copy_complete {
                 DestinationWriteStatus::Durable

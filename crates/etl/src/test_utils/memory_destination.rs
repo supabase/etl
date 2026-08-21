@@ -7,7 +7,7 @@ use crate::{
     data::TableRow,
     destination::{
         Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
-        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        TableCopyWrite, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -170,10 +170,11 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
+        table_copy: TableCopyWrite,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         let table_id = replicated_table_schema.id();
+        let table_rows = table_copy.into_rows();
 
         // Store destination table metadata on first write, like real destinations
         // (BigQuery, Iceberg) do.

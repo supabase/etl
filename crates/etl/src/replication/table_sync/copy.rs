@@ -22,7 +22,10 @@ use super::monitor::TableSyncMonitor;
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
 use crate::{
     bail,
-    destination::{Destination, DestinationWriteStatus, WriteTableRowsResult},
+    destination::{
+        Destination, DestinationWriteStatus, TableCopyBatch, TableCopyBatchId, TableCopyWrite,
+        WriteTableRowsResult,
+    },
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::{
@@ -108,6 +111,24 @@ struct TableCopyPartition {
     ctid_partition: CtidPartition,
     /// Estimated heap blocks covered by this range.
     planned_blocks: u64,
+}
+
+/// Builds the stable portion of IDs for batches from one copy partition.
+fn table_copy_batch_id_prefix(
+    consistent_point: PgLsn,
+    snapshot_id: &str,
+    table_id: TableId,
+    partition: &TableCopyPartition,
+) -> String {
+    format!(
+        "copy:v1:{consistent_point}:{snapshot_id}:{}:{}:{}",
+        table_id.0, partition.source_table_id.0, partition.ctid_partition
+    )
+}
+
+/// Builds the ID for one batch within a copy partition.
+fn table_copy_batch_id(prefix: &str, batch_ordinal: u64) -> TableCopyBatchId {
+    TableCopyBatchId::new(format!("{prefix}:{batch_ordinal}").into_boxed_str())
 }
 
 /// Outcome of one worker connection.
@@ -319,6 +340,7 @@ async fn run_table_copy<D: Destination + Clone + Send + 'static>(
                 worker_index,
                 child_replication_client,
                 snapshot_id,
+                consistent_point,
                 work_queue,
                 table_id,
                 replicated_table_schema,
@@ -521,6 +543,7 @@ async fn table_copy_worker<D>(
     worker_index: usize,
     mut child_replication_client: ChildPgReplicationClient,
     snapshot_id: String,
+    consistent_point: PgLsn,
     work_queue: Arc<Mutex<VecDeque<TableCopyPartition>>>,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
@@ -556,6 +579,8 @@ where
 
         match table_copy_partition_rows(
             &child_replication_transaction,
+            &snapshot_id,
+            consistent_point,
             table_id,
             replicated_table_schema.clone(),
             publication_name.clone(),
@@ -580,6 +605,8 @@ where
 #[expect(clippy::too_many_arguments)]
 async fn table_copy_partition_rows<D>(
     child_replication_transaction: &PgChildReplicationTransaction<'_>,
+    snapshot_id: &str,
+    consistent_point: PgLsn,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<String>,
@@ -631,11 +658,15 @@ where
     );
     pin!(table_copy_stream);
 
+    let batch_id_prefix =
+        table_copy_batch_id_prefix(consistent_point, snapshot_id, table_id, &partition);
+
     let progress = match table_copy_rows_from_stream(
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
         replicated_table_schema,
+        batch_id_prefix,
         destination,
     )
     .await?
@@ -669,6 +700,7 @@ async fn table_copy_rows_from_stream<D, S>(
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     replicated_table_schema: ReplicatedTableSchema,
+    batch_id_prefix: String,
     destination: D,
 ) -> EtlResult<ShutdownResult<TableCopyProgress, TableCopyProgress>>
 where
@@ -676,6 +708,7 @@ where
     S: Stream<Item = EtlResult<Vec<TableCopyRow>>>,
 {
     let mut progress = TableCopyProgress::default();
+    let mut next_batch_ordinal = 0_u64;
 
     loop {
         tokio::select! {
@@ -740,9 +773,18 @@ where
 
                 let dispatched_at = Instant::now();
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
+                let batch_id = table_copy_batch_id(&batch_id_prefix, next_batch_ordinal);
+                next_batch_ordinal = next_batch_ordinal.checked_add(1).ok_or_else(|| {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "Table copy batch ordinal overflowed"
+                    )
+                })?;
+                let table_copy =
+                    TableCopyWrite::Batch(TableCopyBatch::new(batch_id, table_rows));
 
                 destination
-                    .write_table_rows(&replicated_table_schema, table_rows, flush_result)
+                    .write_table_rows(&replicated_table_schema, table_copy, flush_result)
                     .await?;
                 let ShutdownResult::Ok(completed_flush_result) = pending_flush_result
                     .with_shutdown(&mut shutdown_rx)
@@ -782,9 +824,94 @@ where
 
 #[cfg(test)]
 mod tests {
+    use tokio_postgres::types::PgLsn;
+
     use super::{
-        MAX_CTID_COPY_PARTITIONS, partitions_for_table_weight, target_ctid_partition_count,
+        MAX_CTID_COPY_PARTITIONS, TableCopyPartition, partitions_for_table_weight,
+        table_copy_batch_id, table_copy_batch_id_prefix, target_ctid_partition_count,
     };
+    use crate::{postgres::client::CtidPartition, schema::TableId};
+
+    /// Creates one physical partition for table-copy ID tests.
+    fn copy_partition(source_table_id: u32, start_tid: &str, end_tid: &str) -> TableCopyPartition {
+        TableCopyPartition {
+            source_table_id: TableId(source_table_id),
+            filter_table_id: TableId(1),
+            ctid_partition: CtidPartition::Closed {
+                start_tid: start_tid.to_owned(),
+                end_tid: end_tid.to_owned(),
+            },
+            planned_blocks: 10,
+        }
+    }
+
+    #[test]
+    fn table_copy_batch_ids_are_stable_and_distinguish_copy_coordinates() {
+        let consistent_point = PgLsn::from(16_u64);
+        let partition = copy_partition(2, "(0,1)", "(10,1)");
+        let prefix = table_copy_batch_id_prefix(
+            consistent_point,
+            "00000001-00000001-1",
+            TableId(1),
+            &partition,
+        );
+
+        assert_eq!(
+            prefix,
+            table_copy_batch_id_prefix(
+                consistent_point,
+                "00000001-00000001-1",
+                TableId(1),
+                &partition,
+            )
+        );
+        assert_ne!(table_copy_batch_id(&prefix, 0), table_copy_batch_id(&prefix, 1));
+        assert_ne!(
+            prefix,
+            table_copy_batch_id_prefix(
+                PgLsn::from(17_u64),
+                "00000001-00000001-1",
+                TableId(1),
+                &partition,
+            )
+        );
+        assert_ne!(
+            prefix,
+            table_copy_batch_id_prefix(
+                consistent_point,
+                "00000001-00000002-1",
+                TableId(1),
+                &partition,
+            )
+        );
+        assert_ne!(
+            prefix,
+            table_copy_batch_id_prefix(
+                consistent_point,
+                "00000001-00000001-1",
+                TableId(2),
+                &partition,
+            )
+        );
+        assert_ne!(
+            prefix,
+            table_copy_batch_id_prefix(
+                consistent_point,
+                "00000001-00000001-1",
+                TableId(1),
+                &copy_partition(3, "(0,1)", "(10,1)"),
+            )
+        );
+        assert_ne!(
+            prefix,
+            table_copy_batch_id_prefix(
+                consistent_point,
+                "00000001-00000001-1",
+                TableId(1),
+                &copy_partition(2, "(10,1)", "(20,1)"),
+            )
+        );
+    }
 
     #[test]
     fn target_ctid_partition_count_matches_workers() {

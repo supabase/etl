@@ -1,10 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
 use etl::{
-    data::{Cell, TableRow},
+    data::Cell,
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
-        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        TableCopyBatch, TableCopyWrite, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -17,6 +18,7 @@ use etl::{
             replication_slot_state, spawn_source_database, terminate_walsender, test_table_name,
             wait_for_new_walsender,
         },
+        destination::write_table_copy,
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::{FaultAction, FaultyOp},
         memory_destination::MemoryDestination,
@@ -68,8 +70,8 @@ fn test_column(
 struct DeferredCopyDestinationState {
     /// Number of nonempty copy writes received.
     nonempty_writes: usize,
-    /// Rows retained after the first copy write is accepted.
-    accepted_rows: Vec<TableRow>,
+    /// Batch retained after the first copy write is accepted.
+    accepted_batch: Option<TableCopyBatch>,
     /// Held terminal durability barrier result.
     barrier_result: Option<WriteTableRowsResult>,
 }
@@ -145,10 +147,10 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        mut table_rows: Vec<TableRow>,
+        table_copy: TableCopyWrite,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        if table_rows.is_empty() {
+        if matches!(table_copy, TableCopyWrite::Finish) {
             // Hold the terminal empty write so the test can inspect table state
             // before durability is confirmed.
             let mut state = self.state.lock().await;
@@ -164,29 +166,42 @@ where
             return Ok(());
         }
 
-        let table_rows = {
+        let accepted_batch = {
             let mut state = self.state.lock().await;
             state.nonempty_writes += 1;
 
             if state.nonempty_writes == 1 {
                 // Take ownership of the first batch without making it durable.
-                state.accepted_rows = table_rows;
-                None
+                let TableCopyWrite::Batch(batch) = table_copy else {
+                    unreachable!("finish writes return before copy batch handling");
+                };
+                state.accepted_batch = Some(batch);
+                async_result.send(Ok(DestinationWriteStatus::Accepted));
+
+                return Ok(());
             } else {
-                // Make the accepted rows durable with a later batch. ETL must
-                // still remember that the terminal barrier is required.
-                state.accepted_rows.append(&mut table_rows);
-                Some(std::mem::take(&mut state.accepted_rows))
+                state.accepted_batch.take()
             }
         };
 
-        let Some(table_rows) = table_rows else {
-            async_result.send(Ok(DestinationWriteStatus::Accepted));
+        if let Some(accepted_batch) = accepted_batch {
+            // Make the accepted batch durable before the later batch. ETL must
+            // still remember that the terminal barrier is required.
+            let status = write_table_copy(
+                &self.inner,
+                replicated_table_schema,
+                TableCopyWrite::Batch(accepted_batch),
+            )
+            .await?;
+            if status != DestinationWriteStatus::Durable {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "Deferred copy test destination requires an immediate inner destination"
+                ));
+            }
+        }
 
-            return Ok(());
-        };
-
-        self.inner.write_table_rows(replicated_table_schema, table_rows, async_result).await
+        self.inner.write_table_rows(replicated_table_schema, table_copy, async_result).await
     }
 
     async fn write_events(
@@ -298,13 +313,13 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
+        table_copy: TableCopyWrite,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         if !matches!(self.target, StallTarget::WriteTableRows) {
             return self
                 .inner
-                .write_table_rows(replicated_table_schema, table_rows, async_result)
+                .write_table_rows(replicated_table_schema, table_copy, async_result)
                 .await;
         }
 

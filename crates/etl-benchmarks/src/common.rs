@@ -13,10 +13,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use etl::{
-    data::{SizeHint, TableRow},
+    data::SizeHint,
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
-        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        TableCopyWrite, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -389,12 +389,16 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
+        table_copy: TableCopyWrite,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
+        let table_rows = match &table_copy {
+            TableCopyWrite::Batch(batch) => batch.rows(),
+            TableCopyWrite::Finish => &[],
+        };
         let row_count = table_rows.len() as u64;
         let row_bytes = table_rows.iter().map(SizeHint::size_hint).sum::<usize>() as u64;
-        self.inner.write_table_rows(replicated_table_schema, table_rows, async_result).await?;
+        self.inner.write_table_rows(replicated_table_schema, table_copy, async_result).await?;
 
         self.stats.table_rows.fetch_add(row_count, Ordering::Relaxed);
         self.stats.table_row_bytes.fetch_add(row_bytes, Ordering::Relaxed);
@@ -445,7 +449,7 @@ impl Destination for NullDestination {
     async fn write_table_rows(
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
-        _table_rows: Vec<TableRow>,
+        _table_copy: TableCopyWrite,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         async_result.send(Ok(DestinationWriteStatus::Durable));
@@ -689,31 +693,31 @@ impl Destination for BenchDestination {
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
+        table_copy: TableCopyWrite,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         match self {
             Self::Null(destination) => {
                 destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .write_table_rows(replicated_table_schema, table_copy, async_result)
                     .await
             }
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => {
                 destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .write_table_rows(replicated_table_schema, table_copy, async_result)
                     .await
             }
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => {
                 destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .write_table_rows(replicated_table_schema, table_copy, async_result)
                     .await
             }
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => {
                 destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .write_table_rows(replicated_table_schema, table_copy, async_result)
                     .await
             }
         }

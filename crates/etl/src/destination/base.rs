@@ -1,9 +1,9 @@
 use std::future::Future;
 
 use crate::{
-    data::TableRow,
     destination::{
-        DropTableForCopyResult, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyWrite, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -77,13 +77,15 @@ pub trait Destination {
     /// Writes a batch of table rows to the destination.
     ///
     /// This method is used during initial table synchronization to bulk load
-    /// existing data. Rows are provided as [`TableRow`] instances with
-    /// typed cell values. ETL may call this method multiple times with
+    /// existing data. [`TableCopyWrite::Batch`] carries rows as
+    /// [`crate::data::TableRow`] instances with typed cell values and an opaque
+    /// idempotency key. ETL may call this method multiple times with
     /// different batches, including in parallel with other destination
     /// work.
     ///
-    /// This method is called even if the source table has no data, so the
-    /// destination can prepare its initial state before streaming begins.
+    /// This method is called with [`TableCopyWrite::Finish`] even if the source
+    /// table has no data, so the destination can prepare its initial state
+    /// before streaming begins.
     /// ETL does not impose a meaningful ordering requirement on these row
     /// batches; it just provides the data that should be written for the
     /// initial snapshot.
@@ -103,16 +105,16 @@ pub trait Destination {
     /// ownership of the batch to the destination and permits ETL to continue
     /// copying, but does not permit ETL to complete the table copy.
     ///
-    /// If any nonempty batch returns
+    /// If any row batch returns
     /// [`crate::destination::DestinationWriteStatus::Accepted`], ETL calls this
-    /// method once more with an empty batch after every copy worker has
-    /// finished and the source copy transaction has committed. That empty
-    /// write is a table-wide durability barrier: it must return
+    /// method once more with [`TableCopyWrite::Finish`] after every copy worker
+    /// has finished and the source copy transaction has committed. That call
+    /// is a table-wide durability barrier: it must return
     /// [`crate::destination::DestinationWriteStatus::Durable`] and cumulatively
     /// cover every accepted write for the table copy. Returning
     /// [`crate::destination::DestinationWriteStatus::Accepted`] from the
     /// barrier fails the copy without advancing its durable state. Empty
-    /// and skipped tables also receive an empty write so the destination
+    /// and skipped tables also receive a finish write so the destination
     /// can prepare their initial state.
     ///
     /// Awaiting each result before requesting the next batch bounds ETL-owned
@@ -123,7 +125,7 @@ pub trait Destination {
     fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
+        table_copy: TableCopyWrite,
         async_result: WriteTableRowsResult,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 

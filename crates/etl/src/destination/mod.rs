@@ -12,6 +12,7 @@ mod async_result;
 mod base;
 mod capabilities;
 mod metadata;
+mod table_copy;
 
 pub(crate) use async_result::{
     ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, PendingWriteEventsResult,
@@ -23,5 +24,6 @@ pub use async_result::{
 pub use base::Destination;
 pub use capabilities::PipelineDestination;
 pub use metadata::{DestinationTableMetadata, DestinationTableSchema};
+pub use table_copy::{TableCopyBatch, TableCopyBatchId, TableCopyWrite};
 
 pub use crate::runtime::concurrency::{TaskSet, TaskSetDrainGuard};

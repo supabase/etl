@@ -20,7 +20,7 @@ use crate::{
     bail,
     destination::{
         DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
-        PipelineDestination, WriteTableRowsResult,
+        PipelineDestination, TableCopyWrite, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -361,7 +361,11 @@ where
             if total_table_copy_rows == 0 || table_copy_barrier_required {
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
                 destination
-                    .write_table_rows(&replicated_table_schema, vec![], flush_result)
+                    .write_table_rows(
+                        &replicated_table_schema,
+                        TableCopyWrite::Finish,
+                        flush_result,
+                    )
                     .await?;
                 let ShutdownResult::Ok(completed_flush_result) =
                     pending_flush_result.with_shutdown(&mut shutdown_rx).await

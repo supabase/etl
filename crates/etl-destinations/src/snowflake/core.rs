@@ -9,7 +9,7 @@ use etl::{
     data::{OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TaskSet, WriteEventsDurability, WriteEventsResult,
+        DropTableForCopyResult, TableCopyWrite, TaskSet, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
@@ -782,9 +782,10 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
+        table_copy: TableCopyWrite,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
+        let table_rows = table_copy.into_rows();
         let result: EtlResult<DestinationWriteStatus> = async {
             // Table must exist even for empty snapshots, CDC events may arrive later.
             self.writer.initialize_table(replicated_table_schema).await?;

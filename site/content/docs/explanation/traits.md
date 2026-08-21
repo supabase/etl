@@ -17,7 +17,7 @@ pub trait Destination {
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
     fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
     fn drop_table_for_copy(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: DropTableForCopyResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, table_rows: Vec<TableRow>, async_result: WriteTableRowsResult) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, table_copy: TableCopyWrite, async_result: WriteTableRowsResult) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_events(&self, events: Vec<Event>, durability: WriteEventsDurability, async_result: WriteEventsResult) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
@@ -30,14 +30,15 @@ pub trait Destination {
 | `shutdown()` | Called when the pipeline shuts down. Default is a no-op. Override for cleanup or bookkeeping |
 | `startup()` | Called after store caches are loaded, removed-publication tables are purged, and before workers start. Default is a no-op. Override to recover pending operations or rebuild process-local state |
 | `drop_table_for_copy()` | Drops the existing destination object and destination-private replay state before restarting a table copy. Receives the previously stored replicated schema for locating the old object |
-| `write_table_rows()` | Writes rows during initial table copy. Receives the current replicated schema and may get an empty vector for an empty table or a deferred durability barrier |
+| `write_table_rows()` | Writes rows during initial table copy. Receives the current replicated schema and either an identified batch or a finish marker |
 | `write_events()` | Processes ongoing replication events (inserts, updates, deletes, truncates, relations, and transaction markers). Batches may span multiple tables, or be empty for a required durability barrier |
 
 ### Implementation Notes
 
 - `drop_table_for_copy()` should be **idempotent**. ETL calls it before clearing copy-scoped store state, so implementations can still use the supplied schema and existing destination metadata to locate the old object. Before returning success, it must also drain or invalidate writes accepted by an earlier copy attempt so stale work cannot mutate the recreated table.
 - `write_table_rows()` is called even for empty source tables so destinations can prepare initial destination state before ongoing replication begins.
-- An immediate `write_table_rows()` implementation returns `DestinationWriteStatus::Durable` after the batch is durable. A deferred implementation may return `Accepted` after taking ownership of a nonempty batch. It must bound its accepted-but-not-durable backlog and delay `Accepted` when no capacity is available. If any batch returns `Accepted`, ETL sends an empty batch after all copy workers finish; the destination must return `Durable` from that call only after all rows accepted during the current copy attempt are durable.
+- An immediate `write_table_rows()` implementation returns `DestinationWriteStatus::Durable` after the batch is durable. A deferred implementation may return `Accepted` after taking ownership of a batch. It must bound its accepted-but-not-durable backlog and delay `Accepted` when no capacity is available. If any batch returns `Accepted`, ETL sends `TableCopyWrite::Finish` after all copy workers finish; the destination must return `Durable` from that call only after all rows accepted during the current copy attempt are durable.
+- A redelivered table-copy batch retains its opaque `TableCopyBatchId`. Distinct batches have distinct IDs even when their rows are identical. The ID is an idempotency key, not an ordering or source-resume cursor.
 - `WriteEventsDurability::MayDefer` permits `write_events()` to return `Accepted` or `Durable`. ETL may issue `write_events(Vec::new(), WriteEventsDurability::RequireDurable, ...)` as a durability-only barrier, but never an empty `MayDefer` write. The empty vector carries no new replication events, but the call may flush or wait for earlier accepted work and must return `Durable` only after all writes covered by the destination's ordering state are durable. A destination may use a stronger barrier scope than the originating apply-loop stream.
 - `write_table_rows()` and `write_events()` must tolerate **duplicate delivery** because ETL may retry or replay after failure.
 - Handle **concurrent calls** safely, especially from parallel table sync workers.

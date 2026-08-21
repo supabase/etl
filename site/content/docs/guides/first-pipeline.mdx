@@ -75,10 +75,9 @@ use etl::{
         BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig,
         TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
-    data::TableRow,
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        TableCopyWrite, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -109,9 +108,10 @@ impl Destination for LoggingDestination {
     async fn write_table_rows(
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
-        rows: Vec<TableRow>,
+        table_copy: TableCopyWrite,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
+        let rows = table_copy.into_rows();
         println!("copied {} rows", rows.len());
         async_result.send(Ok(DestinationWriteStatus::Durable));
         Ok(())
