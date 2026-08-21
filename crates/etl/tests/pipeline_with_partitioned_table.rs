@@ -108,11 +108,6 @@ async fn assert_selective_partition_initial_copy_case(
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let mut sync_complete_notifies = Vec::new();
-    for (table_id, _) in &expected_copy_counts {
-        sync_complete_notifies.push(state_store.notify_on_table_sync_complete(*table_id).await);
-    }
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline_with_table_sync_copy_config(
         &database.config,
@@ -122,6 +117,11 @@ async fn assert_selective_partition_initial_copy_case(
         destination.clone(),
         TableSyncCopyConfig::IncludeTables { table_ids: vec![selected_table_id.into_inner()] },
     );
+
+    let mut sync_complete_notifies = Vec::new();
+    for (table_id, _) in &expected_copy_counts {
+        sync_complete_notifies.push(state_store.notify_on_table_sync_complete(*table_id).await);
+    }
 
     pipeline.start().await.unwrap();
 
@@ -223,11 +223,6 @@ async fn assert_nested_partition_pipeline_case(
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let mut sync_complete_notifies = Vec::new();
-    for (table_id, _) in &expected_copy_counts {
-        sync_complete_notifies.push(state_store.notify_on_table_sync_complete(*table_id).await);
-    }
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -236,6 +231,11 @@ async fn assert_nested_partition_pipeline_case(
         state_store.clone(),
         destination.clone(),
     );
+
+    let mut sync_complete_notifies = Vec::new();
+    for (table_id, _) in &expected_copy_counts {
+        sync_complete_notifies.push(state_store.notify_on_table_sync_complete(*table_id).await);
+    }
 
     pipeline.start().await.unwrap();
 
@@ -347,21 +347,21 @@ async fn assert_nested_partition_pipeline_row_filter_case(
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let mut sync_complete_notifies = Vec::new();
-    for (table_id, _) in &expected_copy_counts {
-        sync_complete_notifies.push(state_store.notify_on_table_sync_complete(*table_id).await);
-    }
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
         pipeline_id,
         publication_name,
-        state_store,
+        state_store.clone(),
         destination.clone(),
     )
     .with_max_copy_connections_per_table(table_copy_mode.max_copy_connections_per_table())
     .build();
+
+    let mut sync_complete_notifies = Vec::new();
+    for (table_id, _) in &expected_copy_counts {
+        sync_complete_notifies.push(state_store.notify_on_table_sync_complete(*table_id).await);
+    }
 
     pipeline.start().await.unwrap();
     for notify in &sync_complete_notifies {
@@ -406,10 +406,6 @@ async fn partitioned_table_copy_replicates_existing_data() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    // Register notification for initial copy completion.
-    let parent_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(parent_table_id).await;
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -418,6 +414,10 @@ async fn partitioned_table_copy_replicates_existing_data() {
         state_store.clone(),
         destination.clone(),
     );
+
+    // Register notification for initial copy completion.
+    let parent_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(parent_table_id).await;
 
     pipeline.start().await.unwrap();
 
@@ -518,10 +518,6 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    // Register notification for initial copy completion.
-    let parent_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(parent_table_id).await;
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -530,6 +526,10 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
         state_store.clone(),
         destination.clone(),
     );
+
+    // Register notification for initial copy completion.
+    let parent_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(parent_table_id).await;
 
     pipeline.start().await.unwrap();
 
@@ -579,6 +579,131 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     assert_eq!(parent_inserts.len(), 1);
 }
 
+/// Tests that a new leaf partition is discovered after restart when changes
+/// are published using leaf identities.
+#[tokio::test(flavor = "multi_thread")]
+async fn new_partition_with_leaf_identity_is_discovered_after_restart() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("partitioned_leaf_late");
+    let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
+    let (_parent_table_id, partition_table_ids) =
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
+    let [first_partition_table_id, second_partition_table_id] = partition_table_ids.as_slice()
+    else {
+        panic!("Test partition setup should create exactly two partitions");
+    };
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('initial_p1', 50), ('initial_p2', 150)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let publication_name = "test_partitioned_leaf_late_pub".to_owned();
+    database
+        .create_publication_with_config(&publication_name, std::slice::from_ref(&table_name), false)
+        .await
+        .unwrap();
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.clone(),
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    let first_sync_complete =
+        state_store.notify_on_table_sync_complete(*first_partition_table_id).await;
+    let second_sync_complete =
+        state_store.notify_on_table_sync_complete(*second_partition_table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    first_sync_complete.notified().await;
+    second_sync_complete.notified().await;
+
+    let new_partition_name = format!("{}_p3", table_name.name);
+    let new_partition_qualified_name =
+        quoted_qualified_table_name(&table_name.schema, &new_partition_name);
+    database
+        .run_sql(&format!(
+            "create table {new_partition_qualified_name} partition of {} for values from (200) to \
+             (300)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    let new_partition_row = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace
+             where n.nspname = $1 and c.relname = $2",
+            &[&table_name.schema, &new_partition_name],
+        )
+        .await
+        .unwrap();
+    let new_partition_table_id: TableId = new_partition_row.get(0);
+
+    // The known-leaf insert is a semantic barrier proving that apply processed
+    // the transaction containing the insert for the undiscovered leaf.
+    let known_leaf_insert = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Insert,
+            *first_partition_table_id,
+            1,
+        )])
+        .await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('new_p1', 50), ('new_p3', 250)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    known_leaf_insert.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert!(!state_store.get_table_states().await.contains_key(&new_partition_table_id));
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    assert!(!grouped.contains_key(&(EventType::Insert, new_partition_table_id)));
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    let new_partition_sync_complete =
+        state_store.notify_on_table_sync_complete(new_partition_table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    new_partition_sync_complete.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert!(state_store.get_table_states().await.contains_key(&new_partition_table_id));
+    let table_rows = destination.get_table_rows().await;
+    assert_eq!(table_rows.get(&new_partition_table_id).unwrap().len(), 1);
+}
+
 /// Tests that detaching and dropping a partition does not emit DELETE or
 /// TRUNCATE events. Partition management is a DDL operation, not DML, so no
 /// data events should be generated.
@@ -610,9 +735,6 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(parent_table_id).await;
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -621,6 +743,9 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
         state_store.clone(),
         destination.clone(),
     );
+
+    let parent_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(parent_table_id).await;
 
     pipeline.start().await.unwrap();
     parent_sync_complete_notify.notified().await;
@@ -705,9 +830,6 @@ async fn parent_table_truncate_does_emit_truncate_event() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(parent_table_id).await;
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -716,6 +838,9 @@ async fn parent_table_truncate_does_emit_truncate_event() {
         state_store.clone(),
         destination.clone(),
     );
+
+    let parent_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(parent_table_id).await;
 
     pipeline.start().await.unwrap();
 
@@ -774,9 +899,6 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(parent_table_id).await;
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -785,6 +907,9 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
         state_store.clone(),
         destination.clone(),
     );
+
+    let parent_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(parent_table_id).await;
 
     pipeline.start().await.unwrap();
 
@@ -858,9 +983,6 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(parent_table_id).await;
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -869,6 +991,9 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         state_store.clone(),
         destination.clone(),
     );
+
+    let parent_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(parent_table_id).await;
 
     pipeline.start().await.unwrap();
     parent_sync_complete_notify.notified().await;
@@ -968,9 +1093,6 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(parent_table_id).await;
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -979,6 +1101,9 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
         state_store.clone(),
         destination.clone(),
     );
+
+    let parent_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(parent_table_id).await;
 
     pipeline.start().await.unwrap();
     parent_sync_complete_notify.notified().await;
@@ -1089,10 +1214,6 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    // Start pipeline and wait for initial sync.
-    let parent_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(parent_table_id).await;
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1101,6 +1222,10 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
         state_store.clone(),
         destination.clone(),
     );
+
+    // Register notification for initial copy completion.
+    let parent_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(parent_table_id).await;
 
     pipeline.start().await.unwrap();
     parent_sync_complete_notify.notified().await;
@@ -1137,9 +1262,6 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
 
     // Restart the pipeline. It should now discover the detached partition as a new
     // table.
-    let detached_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(p1_table_id).await;
-
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1147,6 +1269,9 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
         state_store.clone(),
         destination.clone(),
     );
+
+    let detached_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(p1_table_id).await;
 
     pipeline.start().await.unwrap();
 
@@ -1206,9 +1331,6 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(parent_table_id).await;
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1217,6 +1339,9 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
         state_store.clone(),
         destination.clone(),
     );
+
+    let parent_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(parent_table_id).await;
 
     pipeline.start().await.unwrap();
     parent_sync_complete_notify.notified().await;
@@ -1340,10 +1465,6 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    // Start pipeline and wait for initial sync.
-    let parent_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(parent_table_id).await;
-
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1352,6 +1473,10 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
         state_store.clone(),
         destination.clone(),
     );
+
+    // Register notification for initial copy completion.
+    let parent_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(parent_table_id).await;
 
     pipeline.start().await.unwrap();
     parent_sync_complete_notify.notified().await;
@@ -1388,9 +1513,6 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
 
     // Restart the pipeline. It should now discover the detached partition as a new
     // table.
-    let detached_sync_complete_notify =
-        state_store.notify_on_table_sync_complete(p1_table_id).await;
-
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1398,6 +1520,9 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
         state_store.clone(),
         destination.clone(),
     );
+
+    let detached_sync_complete_notify =
+        state_store.notify_on_table_sync_complete(p1_table_id).await;
 
     pipeline.start().await.unwrap();
 

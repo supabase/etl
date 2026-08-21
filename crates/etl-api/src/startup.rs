@@ -38,7 +38,22 @@ use crate::{
     authentication::auth_validator,
     config::{ApiConfig, EncryptionKeyConfig, InternalTlsSettings},
     configs::encryption,
-    data::publications::Publication,
+    data::{
+        publications::Publication,
+        v2::{
+            publications::{
+                PublicationConfig as V2PublicationConfig,
+                PublicationDetails as V2PublicationDetails,
+                PublicationGeneratedColumns as V2PublicationGeneratedColumns,
+                PublicationOperation as V2PublicationOperation,
+                PublicationSummary as V2PublicationSummary,
+                PublicationTableConfig as V2PublicationTableConfig,
+                PublicationTableSelection as V2PublicationTableSelection,
+            },
+            schemas::SourceSchema as V2SourceSchema,
+            tables::{SourceTable as V2SourceTable, SourceTableKind as V2SourceTableKind},
+        },
+    },
     feature_flags::{FeatureFlagsClient, init_feature_flags},
     http_metrics::record_http_metrics,
     k8s::{K8sClient, K8sError, SourceTlsConfig, http::HttpK8sClient},
@@ -94,6 +109,20 @@ use crate::{
         },
         tenants_sources::{
             CreateTenantSourceRequest, CreateTenantSourceResponse, create_tenant_and_source,
+        },
+        v2::{
+            columns::{
+                ReadColumnsResponse as V2ReadColumnsResponse, read_columns as read_columns_v2,
+            },
+            publications::{
+                ReadPublicationsResponse as V2ReadPublicationsResponse,
+                delete_publication as delete_publication_v2, put_publication as put_publication_v2,
+                read_publication as read_publication_v2, read_publications as read_publications_v2,
+            },
+            schemas::{
+                ReadSchemasResponse as V2ReadSchemasResponse, read_schemas as read_schemas_v2,
+            },
+            tables::{ReadTablesResponse as V2ReadTablesResponse, read_tables as read_tables_v2},
         },
     },
     sentry_scrubbing::{capture_server_errors, mark_sensitive_sentry_scope},
@@ -521,9 +550,24 @@ pub fn run(
             ValidateDestinationResponse,
             ValidatePipelineRequest,
             ValidatePipelineResponse,
+            V2PublicationConfig,
+            V2PublicationDetails,
+            V2PublicationGeneratedColumns,
+            V2PublicationOperation,
+            V2PublicationSummary,
+            V2PublicationTableConfig,
+            V2PublicationTableSelection,
+            V2ReadColumnsResponse,
+            V2ReadPublicationsResponse,
+            V2ReadSchemasResponse,
+            V2ReadTablesResponse,
+            V2SourceSchema,
+            V2SourceTable,
+            V2SourceTableKind,
         )),
         nest(
-            (path = "/v1", api = ApiV1)
+            (path = "/v1", api = ApiV1),
+            (path = "/v2", api = ApiV2)
         )
     )]
     struct ApiDoc;
@@ -580,20 +624,30 @@ pub fn run(
     ))]
     struct ApiV1;
 
+    #[derive(OpenApi)]
+    #[openapi(paths(
+        crate::routes::v2::publications::read_publications,
+        crate::routes::v2::publications::read_publication,
+        crate::routes::v2::publications::put_publication,
+        crate::routes::v2::publications::delete_publication,
+        crate::routes::v2::schemas::read_schemas,
+        crate::routes::v2::tables::read_tables,
+        crate::routes::v2::columns::read_columns,
+    ))]
+    struct ApiV2;
+
     let openapi = ApiDoc::openapi();
 
+    // Routes in this scope can carry source/destination credentials,
+    // connection config, table/publication metadata, replication config, or
+    // source-derived data. Keep new routes here when their request, response,
+    // path/query values, validation errors, or Sentry extras may include secrets
+    // or customer data. Leave only low-sensitivity metadata routes outside.
     let sensitive_routes = Router::new()
-        // Routes in this scope can carry source/destination credentials,
-        // connection config, table/publication metadata, replication config, or
-        // source-derived data. Keep new routes here when their request, response,
-        // path/query values, validation errors, or Sentry extras may include secrets
-        // or customer data. Leave only low-sensitivity metadata routes outside.
-        // sources
         .route("/sources", post(create_source).get(read_all_sources))
         .route("/sources/validate", post(validate_source))
         .route("/sources/{source_id}", get(read_source).post(update_source).delete(delete_source))
         .route("/sources/{source_id}/tables", get(read_table_names))
-        // publications
         .route(
             "/sources/{source_id}/publications",
             post(create_publication).get(read_all_publications),
@@ -608,14 +662,12 @@ pub fn run(
                 .put(set_publication_tables)
                 .delete(drop_tables_from_publication),
         )
-        // destinations
         .route("/destinations", post(create_destination).get(read_all_destinations))
         .route("/destinations/validate", post(validate_destination))
         .route(
             "/destinations/{destination_id}",
             get(read_destination).post(update_destination).delete(delete_destination),
         )
-        // pipelines
         .route("/pipelines", post(create_pipeline).get(read_all_pipelines))
         .route("/pipelines/validate", post(validate_pipeline))
         .route("/pipelines/stop", post(stop_all_pipelines))
@@ -633,9 +685,7 @@ pub fn run(
         )
         .route("/pipelines/{pipeline_id}/replication-status", get(get_pipeline_replication_status))
         .route("/pipelines/{pipeline_id}/rollback-tables", post(rollback_tables))
-        // tenants_sources
         .route("/tenants-sources", post(create_tenant_and_source))
-        // destinations-pipelines
         .route("/destinations-pipelines", post(create_destination_and_pipeline))
         .route(
             "/destinations-pipelines/{destination_id}/{pipeline_id}",
@@ -644,16 +694,26 @@ pub fn run(
         .layer(middleware::from_fn(mark_sensitive_sentry_scope));
 
     let v1_routes = Router::new()
-        // tenants
         .route("/tenants", post(create_tenant).get(read_all_tenants))
         .route(
             "/tenants/{tenant_id}",
             put(create_or_update_tenant).get(read_tenant).post(update_tenant).delete(delete_tenant),
         )
-        // images
         .route("/images", post(create_image).get(read_all_images))
         .route("/images/{image_id}", get(read_image).post(update_image).delete(delete_image))
         .merge(sensitive_routes)
+        .layer(middleware::from_fn_with_state(Arc::clone(&config), auth_validator));
+
+    let v2_routes = Router::new()
+        .route("/sources/{source_id}/publications", get(read_publications_v2))
+        .route(
+            "/sources/{source_id}/publications/{publication_name}",
+            get(read_publication_v2).put(put_publication_v2).delete(delete_publication_v2),
+        )
+        .route("/sources/{source_id}/schemas", get(read_schemas_v2))
+        .route("/sources/{source_id}/tables", get(read_tables_v2))
+        .route("/sources/{source_id}/tables/{table_id}/columns", get(read_columns_v2))
+        .layer(middleware::from_fn(mark_sensitive_sentry_scope))
         .layer(middleware::from_fn_with_state(Arc::clone(&config), auth_validator));
 
     let internal_routes = Router::new()
@@ -683,6 +743,7 @@ pub fn run(
         .route("/metrics", get(metrics))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", openapi))
         .nest("/v1", v1_routes)
+        .nest("/v2", v2_routes)
         .layer(Extension(prometheus_handle.clone()))
         .layer(Extension(Arc::clone(&config)))
         .layer(Extension(connection_pool.clone()))
