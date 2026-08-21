@@ -57,158 +57,42 @@ mod tests {
     use crate::error::ErrorKind;
 
     #[test]
-    fn parse_bytea_hex_empty() {
-        let result = parse_bytea_hex_string("\\x").unwrap();
-        assert_eq!(result, Vec::<u8>::new());
-    }
+    fn parse_bytea_hex_accepts_valid_values() {
+        let cases: &[(&str, &[u8])] = &[
+            ("\\x", &[]),
+            ("\\x41", &[0x41]),
+            ("\\x48656c6c6f", b"Hello"),
+            ("\\x0000", &[0x00, 0x00]),
+            ("\\xffff", &[0xff, 0xff]),
+            ("\\xaBcD", &[0xab, 0xcd]),
+            ("\\x0123456789abcdef", &[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]),
+            ("\\x00010203040506070809", &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+        ];
 
-    #[test]
-    fn parse_bytea_hex_single_byte() {
-        let result = parse_bytea_hex_string("\\x41").unwrap();
-        assert_eq!(result, vec![0x41]);
-    }
-
-    #[test]
-    fn parse_bytea_hex_multiple_bytes() {
-        let result = parse_bytea_hex_string("\\x48656c6c6f").unwrap();
-        assert_eq!(result, b"Hello");
-    }
-
-    #[test]
-    fn parse_bytea_hex_all_zero() {
-        let result = parse_bytea_hex_string("\\x0000").unwrap();
-        assert_eq!(result, vec![0x00, 0x00]);
-    }
-
-    #[test]
-    fn parse_bytea_hex_all_ff() {
-        let result = parse_bytea_hex_string("\\xffff").unwrap();
-        assert_eq!(result, vec![0xff, 0xff]);
-    }
-
-    #[test]
-    fn parse_bytea_hex_mixed_case() {
-        let result = parse_bytea_hex_string("\\xaBcD").unwrap();
-        assert_eq!(result, vec![0xab, 0xcd]);
-    }
-
-    #[test]
-    fn parse_bytea_hex_long_sequence() {
-        let result = parse_bytea_hex_string("\\x0123456789abcdef").unwrap();
-        assert_eq!(result, vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
-    }
-
-    #[test]
-    fn parse_bytea_hex_missing_prefix() {
-        let result = parse_bytea_hex_string("41");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("Missing '\\x' prefix"));
-    }
-
-    #[test]
-    fn parse_bytea_hex_wrong_prefix() {
-        let result = parse_bytea_hex_string("0x41");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("Missing '\\x' prefix"));
-    }
-
-    #[test]
-    fn parse_bytea_hex_empty_string() {
-        let result = parse_bytea_hex_string("");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("Missing '\\x' prefix"));
-    }
-
-    #[test]
-    fn parse_bytea_hex_only_prefix() {
-        let result = parse_bytea_hex_string("\\");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("Missing '\\x' prefix"));
-    }
-
-    #[test]
-    fn parse_bytea_hex_odd_length() {
-        let result = parse_bytea_hex_string("\\x4");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("Odd number of hexadecimal digits"));
-    }
-
-    #[test]
-    fn parse_bytea_hex_odd_length_multiple() {
-        let result = parse_bytea_hex_string("\\x41424");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("Odd number of hexadecimal digits"));
-    }
-
-    #[test]
-    fn parse_bytea_hex_invalid_hex_char() {
-        let result = parse_bytea_hex_string("\\x4g");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Invalid hexadecimal digit"));
-    }
-
-    #[test]
-    fn parse_bytea_hex_invalid_hex_chars() {
-        assert!(parse_bytea_hex_string("\\xgg").is_err());
-        assert!(parse_bytea_hex_string("\\x4z").is_err());
-        assert!(parse_bytea_hex_string("\\xZZ").is_err());
-    }
-
-    #[test]
-    fn parse_bytea_hex_non_ascii() {
-        let result = parse_bytea_hex_string("\\x4🤔");
-        assert!(result.is_err());
-
-        let result = parse_bytea_hex_string("\\xaéa");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_bytea_hex_rejects_utf8_boundary_inputs() {
-        for value in ["aé", "\\é", "\\x🤔🤔"] {
-            let result = parse_bytea_hex_string(value);
-            assert!(result.is_err());
+        for (value, expected) in cases {
+            assert_eq!(parse_bytea_hex_string(value).unwrap(), *expected, "value: {value:?}");
         }
     }
 
     #[test]
-    fn parse_bytea_hex_whitespace() {
-        let result = parse_bytea_hex_string("\\x4 1");
-        assert!(result.is_err());
-    }
+    fn parse_bytea_hex_rejects_malformed_values() {
+        let cases = [
+            ("", "Missing '\\x' prefix"),
+            ("0x41", "Missing '\\x' prefix"),
+            ("\\", "Missing '\\x' prefix"),
+            ("aé", "Missing '\\x' prefix"),
+            ("\\x4", "Odd number of hexadecimal digits"),
+            ("\\x4g", "Invalid hexadecimal digit"),
+            ("\\x 1", "Invalid hexadecimal digit"),
+            ("\\xaéa", "Invalid hexadecimal digit"),
+            ("\\x🤔🤔", "Invalid hexadecimal digit"),
+        ];
 
-    #[test]
-    fn parse_bytea_hex_with_separator() {
-        let result = parse_bytea_hex_string("\\x41-42");
-        assert!(result.is_err());
-    }
+        for (value, expected_detail) in cases {
+            let err = parse_bytea_hex_string(value).unwrap_err();
 
-    #[test]
-    fn parse_bytea_hex_binary_data() {
-        // Test conversion of various binary data patterns
-        let result = parse_bytea_hex_string("\\x00010203040506070809").unwrap();
-        assert_eq!(result, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    }
-
-    #[test]
-    fn parse_bytea_hex_capacity_optimization() {
-        // Test that the Vec capacity is set correctly
-        let result = parse_bytea_hex_string("\\x414243444546").unwrap();
-        assert_eq!(result, b"ABCDEF");
-        // Vector should be exactly the right size
-        assert_eq!(result.len(), 6);
+            assert_eq!(err.kind(), ErrorKind::ConversionError, "value: {value:?}");
+            assert_eq!(err.detail(), Some(expected_detail), "value: {value:?}");
+        }
     }
 }
