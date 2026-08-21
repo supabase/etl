@@ -127,7 +127,8 @@ fn create_table_options_sql(
         let cluster_columns = options
             .cluster_by
             .iter()
-            .map(|column| quote_identifier(column, "BigQuery clustering column"))
+            .map(|column| BIGQUERY_COLUMN_NAME_MAPPING.map_name(column))
+            .map(|column| quote_identifier(&column, "BigQuery clustering column"))
             .collect::<EtlResult<Vec<_>>>()?
             .join(", ");
         clauses.push(format!("cluster by {cluster_columns}"));
@@ -144,16 +145,24 @@ fn partition_expression(
     match partition_by {
         BigQueryPartitionBy::TimeColumn { column, granularity } => {
             let typ = require_replicated_column(schema, column)?;
-            let column = quote_identifier(column, "BigQuery partitioning column")?;
+            let destination_column = BIGQUERY_COLUMN_NAME_MAPPING.map_name(column);
+            let destination_column =
+                quote_identifier(&destination_column, "BigQuery partitioning column")?;
             let granularity_sql = granularity_sql(*granularity);
 
             match *typ {
-                Type::DATE if *granularity == BigQueryTimePartitionGranularity::Day => Ok(column),
-                Type::DATE if *granularity != BigQueryTimePartitionGranularity::Hour => {
-                    Ok(format!("date_trunc({column}, {granularity_sql})"))
+                Type::DATE if *granularity == BigQueryTimePartitionGranularity::Day => {
+                    Ok(destination_column)
                 }
-                Type::TIMESTAMP => Ok(format!("datetime_trunc({column}, {granularity_sql})")),
-                Type::TIMESTAMPTZ => Ok(format!("timestamp_trunc({column}, {granularity_sql})")),
+                Type::DATE if *granularity != BigQueryTimePartitionGranularity::Hour => {
+                    Ok(format!("date_trunc({destination_column}, {granularity_sql})"))
+                }
+                Type::TIMESTAMP => {
+                    Ok(format!("datetime_trunc({destination_column}, {granularity_sql})"))
+                }
+                Type::TIMESTAMPTZ => {
+                    Ok(format!("timestamp_trunc({destination_column}, {granularity_sql})"))
+                }
                 _ => Err(etl_error!(
                     ErrorKind::ConfigError,
                     "BigQuery table options configuration is invalid",
@@ -167,8 +176,12 @@ fn partition_expression(
             }
         }
         BigQueryPartitionBy::IntegerRange { column, start, end, interval } => {
-            let column = quote_identifier(column, "BigQuery partitioning column")?;
-            Ok(format!("range_bucket({column}, generate_array({start}, {end}, {interval}))"))
+            let destination_column = BIGQUERY_COLUMN_NAME_MAPPING.map_name(column);
+            let destination_column =
+                quote_identifier(&destination_column, "BigQuery partitioning column")?;
+            Ok(format!(
+                "range_bucket({destination_column}, generate_array({start}, {end}, {interval}))"
+            ))
         }
         BigQueryPartitionBy::IngestionTime { granularity } => match granularity {
             BigQueryTimePartitionGranularity::Day => Ok("_partitiondate".to_owned()),
@@ -1702,6 +1715,35 @@ mod tests {
         assert_eq!(
             sql,
             "partition by timestamp_trunc(`created_at`, MONTH) cluster by `tenant_id`, `id`"
+        );
+    }
+
+    #[test]
+    fn table_option_columns_use_destination_mapping() {
+        let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![
+                ColumnSchema::new("Record ID".to_owned(), Type::INT8, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("Occurred At".to_owned(), Type::TIMESTAMPTZ, -1, 2, false),
+                ColumnSchema::new("Tenant Group".to_owned(), Type::TEXT, -1, 3, false),
+            ],
+        )));
+        let options = table_options(
+            Some(BigQueryPartitionBy::TimeColumn {
+                column: "Occurred At".to_owned(),
+                granularity: BigQueryTimePartitionGranularity::Month,
+            }),
+            vec!["Tenant Group", "Record ID"],
+        );
+
+        let sql = create_table_options_sql(Some(&options), &schema).unwrap();
+
+        assert_eq!(
+            sql,
+            "partition by timestamp_trunc(`occurred at`, MONTH) cluster by `tenant group`, \
+             `record id`"
         );
     }
 

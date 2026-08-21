@@ -2,15 +2,21 @@ use std::sync::Arc;
 
 use etl::{
     data::{Cell, TableRow},
-    schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
+    destination::WriteEventsDurability,
+    event::{Event, InsertEvent, RelationEvent},
+    schema::{
+        ColumnSchema, PgLsn, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
+        Type,
+    },
     store::{MemoryStore, SchemaStore, StateStore, TableStateLifecycleStore},
+    test_utils::destination::write_events,
 };
 use etl_config::shared::{
     BigQueryPartitionBy, BigQueryTableOptions, BigQueryTableOptionsConfig,
     BigQueryTimePartitionGranularity,
 };
 use etl_destinations::bigquery::test_utils::{
-    setup_bigquery_database, skip_if_missing_bigquery_env_vars,
+    parse_table_cell, setup_bigquery_database, skip_if_missing_bigquery_env_vars,
 };
 use etl_telemetry::tracing::init_test_tracing;
 
@@ -33,6 +39,219 @@ fn make_users_schema_with_id(table_id: u32, table_name: &str) -> TableSchema {
             ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, true),
         ],
     )
+}
+
+/// Creates a synthetic schema snapshot identifier for destination tests.
+fn test_snapshot_id(value: u64) -> SnapshotId {
+    let lsn = PgLsn::from(value);
+    SnapshotId::new(lsn, lsn)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn flexible_column_names_work_for_copy_cdc_and_schema_changes() {
+    install_crypto_provider();
+    init_test_tracing();
+
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    let bigquery_database = setup_bigquery_database().await;
+    let store = MemoryStore::new();
+    let table_id = TableId::new(1);
+    let flexible_column_names = [
+        "1st_value",
+        "café",
+        "metric١",
+        "link‿value",
+        "dash-value",
+        "accent\u{301}mark",
+        "value&unit",
+        "value%unit",
+        "value=unit",
+        "value+unit",
+        "value:unit",
+        "value'unit",
+        "value<unit",
+        "value>unit",
+        "value#unit",
+        "value|unit",
+        "display label",
+    ];
+    let table_name = TableName::new(
+        "public".to_owned(),
+        format!("destination_flexible_names_{}", uuid::Uuid::new_v4().simple()),
+    );
+    let initial_column_schemas = flexible_column_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let column_schema = ColumnSchema::new(
+                (*name).to_owned(),
+                if index == 0 { Type::INT4 } else { Type::TEXT },
+                -1,
+                i32::try_from(index).unwrap() + 1,
+                false,
+            );
+
+            match index {
+                0 => column_schema.with_primary_key(1),
+                1 => column_schema.with_default_expression("'copy-default'::text".to_owned()),
+                _ => column_schema,
+            }
+        })
+        .collect();
+    let initial_table_schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            table_id,
+            table_name.clone(),
+            initial_column_schemas,
+            test_snapshot_id(100),
+        ))
+        .await
+        .unwrap();
+    let initial_schema = ReplicatedTableSchema::all(initial_table_schema);
+    let options = table_options(
+        table_id,
+        Some(BigQueryPartitionBy::IntegerRange {
+            column: flexible_column_names[0].to_owned(),
+            start: 0,
+            end: 100,
+            interval: 10,
+        }),
+        &[flexible_column_names[4]],
+    );
+    let destination =
+        bigquery_database.build_destination_with_table_options(1_u64, store.clone(), options).await;
+    let mut cells = vec![Cell::I32(1)];
+    cells.extend(
+        flexible_column_names
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(index, _)| Cell::String(format!("copied_{index}"))),
+    );
+
+    destination
+        .write_table_rows_for_tests(&initial_schema, vec![TableRow::new(cells)])
+        .await
+        .unwrap();
+
+    let mut changed_column_schemas = flexible_column_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            if index == 2 {
+                return None;
+            }
+
+            let name = if index == 1 { "renamed label" } else { name };
+            let column_schema = ColumnSchema::new(
+                name.to_owned(),
+                if index == 0 { Type::INT4 } else { Type::TEXT },
+                -1,
+                i32::try_from(index).unwrap() + 1,
+                index == 1,
+            );
+
+            Some(if index == 0 { column_schema.with_primary_key(1) } else { column_schema })
+        })
+        .collect::<Vec<_>>();
+    changed_column_schemas.push(
+        ColumnSchema::new("service %".to_owned(), Type::TEXT, -1, 18, true)
+            .with_default_expression("'standard'::text".to_owned()),
+    );
+    let changed_table_schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            table_id,
+            table_name.clone(),
+            changed_column_schemas,
+            test_snapshot_id(200),
+        ))
+        .await
+        .unwrap();
+    let changed_schema = ReplicatedTableSchema::all(changed_table_schema);
+    let mut streamed_cells = vec![Cell::I32(2), Cell::String("streamed_1".to_owned())];
+    streamed_cells.extend(
+        flexible_column_names
+            .iter()
+            .enumerate()
+            .skip(3)
+            .map(|(index, _)| Cell::String(format!("streamed_{index}"))),
+    );
+    streamed_cells.push(Cell::String("priority".to_owned()));
+
+    write_events(
+        &destination,
+        WriteEventsDurability::RequireDurable,
+        vec![
+            Event::Relation(RelationEvent { replicated_table_schema: changed_schema.clone() }),
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(300_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: changed_schema,
+                table_row: TableRow::new(streamed_cells),
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let table_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
+    let expected_names = std::iter::once(flexible_column_names[0])
+        .chain(std::iter::once("renamed label"))
+        .chain(flexible_column_names.into_iter().skip(3))
+        .chain(std::iter::once("service %"))
+        .collect::<Vec<_>>();
+    table_schema.assert_columns(&expected_names);
+
+    let destination_metadata =
+        store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    let defaults =
+        bigquery_database.query_column_defaults_by_id(destination_metadata.table_id()).await;
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "renamed label")
+            .and_then(|column| column.column_default.as_deref()),
+        None
+    );
+    assert_eq!(
+        defaults
+            .iter()
+            .find(|column| column.column_name == "service %")
+            .and_then(|column| column.column_default.as_deref()),
+        Some("'standard'")
+    );
+
+    let mut rows = bigquery_database
+        .query_table(table_name)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            let columns = row.columns.unwrap();
+            (
+                parse_table_cell::<i64>(columns[0].clone()).unwrap(),
+                columns[1..]
+                    .iter()
+                    .map(|column| parse_table_cell::<String>(column.clone()))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+
+    let mut copied_values = vec![Some("copied_1".to_owned())];
+    copied_values
+        .extend((3..flexible_column_names.len()).map(|index| Some(format!("copied_{index}"))));
+    copied_values.push(None);
+    let mut streamed_values = vec![Some("streamed_1".to_owned())];
+    streamed_values
+        .extend((3..flexible_column_names.len()).map(|index| Some(format!("streamed_{index}"))));
+    streamed_values.push(Some("priority".to_owned()));
+
+    assert_eq!(rows, [(1, copied_values), (2, streamed_values)]);
 }
 
 fn make_events_schema_with_id(table_id: u32, table_name: &str) -> TableSchema {
@@ -350,6 +569,49 @@ async fn table_options_support_time_column_and_ingestion_time_partitioning() {
         .expect("time partitioning should exist");
     assert!(ingestion_time_partitioning.field.is_none());
     assert_eq!(ingestion_time_partitioning.r#type, "HOUR");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nullable_array_is_stored_as_empty_array() {
+    install_crypto_provider();
+    init_test_tracing();
+
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    let bigquery_database = setup_bigquery_database().await;
+    let store = MemoryStore::new();
+    let table_name = TableName::new(
+        "public".to_owned(),
+        format!("destination_nullable_array_{}", uuid::Uuid::new_v4().simple()),
+    );
+    let table_schema = store
+        .store_table_schema(TableSchema::new(
+            TableId::new(1),
+            table_name.clone(),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("values".to_owned(), Type::INT4_ARRAY, -1, 2, true),
+            ],
+        ))
+        .await
+        .unwrap();
+    let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
+    let destination = bigquery_database.build_destination(1_u64, store).await;
+
+    destination
+        .write_table_rows_for_tests(
+            &replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::Null])],
+        )
+        .await
+        .unwrap();
+
+    let table_rows = bigquery_database.query_table(table_name).await.unwrap();
+    assert_eq!(table_rows.len(), 1);
+    let columns = table_rows[0].columns.as_ref().unwrap();
+    assert!(columns[1].value.as_ref().unwrap().as_array().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
