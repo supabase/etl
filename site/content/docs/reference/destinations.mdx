@@ -9,13 +9,13 @@ Supabase ETL ships official destination implementations in the
 embedding ETL or building the standalone replicator. **BigQuery is the stable,
 recommended default.**
 
-| Feature | Destination | Status | Guidance |
-| --- | --- | --- | --- |
-| `bigquery` | Google BigQuery | Stable | Recommended default |
-| `clickhouse` | ClickHouse | In progress | Evaluate for your workload |
-| `ducklake` | DuckLake | In progress | Evaluate for your workload |
-| `snowflake` | Snowflake | In progress | Evaluate for your workload |
-| `iceberg` | Apache Iceberg | Deprecated | Do not use for new deployments |
+| Feature      | Destination     | Status      | Guidance                       |
+| ------------ | --------------- | ----------- | ------------------------------ |
+| `bigquery`   | Google BigQuery | Stable      | Recommended default            |
+| `clickhouse` | ClickHouse      | In progress | Evaluate for your workload     |
+| `ducklake`   | DuckLake        | In progress | Evaluate for your workload     |
+| `snowflake`  | Snowflake       | In progress | Evaluate for your workload     |
+| `iceberg`    | Apache Iceberg  | Deprecated  | Do not use for new deployments |
 
 ## Status definitions
 
@@ -129,8 +129,33 @@ and `timestamptz` columns with `hour`, `day`, `month`, or `year` granularity;
 Clustering accepts one to four ordered, distinct replicated column names.
 BigQuery validates whether clustering column types are supported.
 
+`partition_by.column` and each `cluster_by` entry use the source PostgreSQL
+column name; ETL applies the same [flexible column
+names](#flexible-column-names) mapping to them as it does to the column
+itself, so a partitioning or clustering column does not need to be quoted or
+otherwise adjusted for the destination.
+
 See the BigQuery documentation for [partition expressions](https://cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#partition_expression)
 and [clustering column requirements](https://cloud.google.com/bigquery/docs/creating-clustered-tables#clustered_column_requirements).
+
+### Flexible column names
+
+BigQuery's [flexible column
+names](https://cloud.google.com/bigquery/docs/schemas#flexible-column-names)
+accept spaces, most punctuation, and non-ASCII Unicode characters. ETL passes
+any replicated PostgreSQL column name through to BigQuery for table creation,
+schema changes, and row writes; a column name is no longer required to be an
+ASCII identifier.
+
+BigQuery documents column names as case-insensitive but does not specify the
+Unicode case-folding algorithm it uses for identifier resolution. ETL folds
+only ASCII letters when mapping a source column name to its destination name,
+matching the [destination-name
+collision](/explanation/schema-changes/#ordered-schema-plans) behavior used
+elsewhere for BigQuery. `Name` and `name` therefore collide locally and are
+treated as one destination column, while `Ä` and `ä` remain distinct. If
+BigQuery's own case-insensitivity considers such a non-ASCII pair equivalent,
+the table DDL is rejected instead of ETL silently merging the two columns.
 
 ### Limitations
 
