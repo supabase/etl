@@ -1116,9 +1116,9 @@ pub(crate) async fn stop_pipeline(
         data::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+    txn.commit().await?;
 
     delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
-    txn.commit().await?;
 
     Ok(StatusCode::OK)
 }
@@ -1147,10 +1147,11 @@ pub(crate) async fn stop_all_pipelines(
 
     let mut txn = pool.begin().await?;
     let replicators = data::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
+    txn.commit().await?;
+
     for replicator in replicators {
         delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     }
-    txn.commit().await?;
 
     Ok(StatusCode::OK)
 }

@@ -253,6 +253,12 @@ the same relation again after a reconnect even when the source schema did not
 change. A `RelationEvent` therefore has no durable event sequence key and does
 not consume a transaction ordinal.
 
+The carried `SnapshotId` identifies the underlying stored table schema, not the
+complete `ReplicatedTableSchema`. A relation for the same physical schema can
+carry different replication or identity masks. Destinations must process those
+mask changes as ordered schema barriers for following row events, rather than
+using relation delivery itself as a checkpoint or deduplication key.
+
 PostgreSQL pgoutput builds relation messages by walking the table descriptor in
 `pg_attribute.attnum` order and skipping columns that are not published. It
 sends tuple data in the same order as the relation message.
@@ -288,12 +294,42 @@ are connection-local protocol metadata.
 | Field | Meaning | Use Case |
 |-------|---------|----------|
 | `commit_lsn` | Position where the transaction will commit | Transaction grouping, recovery checkpoints |
-| `tx_ordinal` | Zero-based order of the event within its transaction | Ordering and idempotency within a transaction |
+| `tx_ordinal` | Zero-based order among sequence-key-bearing events in its transaction | Ordering and idempotency within a transaction |
 
-Events in one transaction share a `commit_lsn`; `tx_ordinal` distinguishes
-their order. Use the pair as a sequence key for ordered writes and replay
-detection. See [Logical Replication](/explanation/concepts/#lsn-log-sequence-number)
-for LSN background.
+**Key insight:** Multiple events share the same `commit_lsn` when they belong
+to the same transaction. ETL uses `commit_lsn` plus `tx_ordinal` as the stable
+sequence key for ordered CDC writes.
+
+### Example
+
+Consider a transaction that inserts two rows:
+
+```sql
+BEGIN;                    -- Transaction starts
+INSERT INTO users ...;    -- commit_lsn: 0/16B3800, tx_ordinal: 1
+INSERT INTO users ...;    -- commit_lsn: 0/16B3800, tx_ordinal: 2
+COMMIT;                   -- Transaction commits at 0/16B3800
+```
+
+Both inserts have the same `commit_lsn` because they commit together. Their
+`tx_ordinal` values distinguish their order among the transaction events that
+carry sequence keys. Session-generated relation messages do not consume an
+ordinal.
+
+### Using LSNs
+
+**For ordering:** For events that expose a sequence key, use `commit_lsn` to
+order transactions and `tx_ordinal` to order events within the same
+transaction. Preserve `RelationEvent` ordering directly as a schema barrier.
+
+**For idempotency:** For events that expose one, use the event sequence key,
+equivalent to `(commit_lsn, tx_ordinal)`, together with the destination's table
+or row key when detecting replays. Do not use relation events as replay keys.
+
+**For checkpointing:** Store the highest `commit_lsn` you've processed. On
+restart, you can resume from that point. See
+[Logical Replication](/explanation/concepts/#lsn-log-sequence-number) for LSN
+background.
 
 ## Event Batching
 

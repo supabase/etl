@@ -22,8 +22,6 @@ pub use async_result::{
 };
 pub use base::Destination;
 pub use capabilities::PipelineDestination;
-pub use metadata::{
-    AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
-};
+pub use metadata::{DestinationTableMetadata, DestinationTableSchema};
 
 pub use crate::runtime::concurrency::{TaskSet, TaskSetDrainGuard};

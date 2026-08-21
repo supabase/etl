@@ -8,13 +8,27 @@ use etl::{
 use gcp_bigquery_client::storage::{ColumnMode, ColumnType, FieldDescriptor, TableDescriptor};
 use tracing::warn;
 
-use crate::bigquery::sql::quote_identifier;
+use crate::bigquery::{BIGQUERY_COLUMN_NAME_MAPPING, sql::quote_identifier};
 
 /// Special column name for Change Data Capture operations in BigQuery.
 const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 
 /// Special column name for Change Data Capture sequence ordering in BigQuery.
 const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
+
+/// Returns the BigQuery default for a complete source column, if supported.
+///
+/// This applies both expression-and-type compatibility and column-level
+/// restrictions, including BigQuery's prohibition on primary-key defaults.
+pub(super) fn column_default_sql(column_schema: &ColumnSchema) -> Option<String> {
+    if column_schema.primary_key() {
+        return None;
+    }
+
+    column_schema.default_expression.as_deref().and_then(|default_expression| {
+        default_expression_sql(default_expression, &column_schema.typ)
+    })
+}
 
 /// Generates SQL column specification for CREATE TABLE statements.
 pub(super) fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
@@ -23,12 +37,8 @@ pub(super) fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
     let mut column_spec =
         format!("{} {}", column_name, postgres_to_bigquery_type(&column_schema.typ));
 
-    if let Some(rendered_default_expression) =
-        column_schema.default_expression.as_deref().and_then(|default_expression| {
-            default_expression_sql(default_expression, &column_schema.typ)
-        })
-    {
-        column_spec.push_str(&format!(" default {rendered_default_expression}"));
+    if let Some(default_expression) = column_default_sql(column_schema) {
+        column_spec.push_str(&format!(" default {default_expression}"));
     } else if column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
@@ -43,13 +53,8 @@ pub(super) fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
     Ok(column_spec)
 }
 
-/// Returns whether a column default can be represented in BigQuery SQL.
-pub(crate) fn supports_column_default(default_expression: &str, typ: &Type) -> bool {
-    default_expression_sql(default_expression, typ).is_some()
-}
-
 /// Returns a rendered default expression for BigQuery, if supported.
-pub(super) fn default_expression_sql(default_expression: &str, typ: &Type) -> Option<String> {
+fn default_expression_sql(default_expression: &str, typ: &Type) -> Option<String> {
     parse_default_expression(default_expression, typ)
         .and_then(|expression| render_default_expression(&expression, typ))
 }
@@ -152,8 +157,10 @@ fn quote_numeric_literal_as_string(expression: &str) -> String {
 pub(super) fn add_primary_key_clause(
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<Option<String>> {
-    let mut primary_key_columns: Vec<_> =
-        replicated_table_schema.primary_key_column_schemas().collect();
+    let mut primary_key_columns: Vec<_> = replicated_table_schema
+        .primary_key_column_schemas()
+        .map(|column| BIGQUERY_COLUMN_NAME_MAPPING.map_column_schema(column))
+        .collect();
 
     if primary_key_columns.is_empty() {
         return Ok(None);
@@ -162,11 +169,11 @@ pub(super) fn add_primary_key_clause(
     // Sort by primary_key_ordinal_position to ensure correct composite key
     // ordering. This is needed since the order of column schema returned above
     // is ordered by columns ordering, not primary key ordering.
-    primary_key_columns.sort_by_key(|c| c.primary_key_ordinal_position);
+    primary_key_columns.sort_by_key(|column| column.primary_key_ordinal_position);
 
     let primary_key_columns: Vec<String> = primary_key_columns
         .into_iter()
-        .map(|c| quote_identifier(&c.name, "BigQuery primary key column"))
+        .map(|column| quote_identifier(&column.name, "BigQuery primary key column"))
         .collect::<EtlResult<Vec<_>>>()?;
 
     let primary_key_clause =
@@ -180,8 +187,8 @@ pub(super) fn create_columns_spec(
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<String> {
     let mut column_spec = replicated_table_schema
-        .column_schemas()
-        .map(column_spec)
+        .destination_column_schemas(BIGQUERY_COLUMN_NAME_MAPPING)
+        .map(|column| column_spec(&column))
         .collect::<EtlResult<Vec<_>>>()?
         .join(",");
 
@@ -279,7 +286,7 @@ pub(crate) fn column_schemas_to_table_descriptor(
 
         field_descriptors.push(FieldDescriptor {
             number,
-            name: column_schema.name.clone(),
+            name: BIGQUERY_COLUMN_NAME_MAPPING.map_name(&column_schema.name),
             typ,
             mode,
         });
@@ -408,7 +415,7 @@ mod tests {
     #[test]
     fn column_spec_generates_sql_column_definition() {
         let column_schema = test_column("test_col", Type::TEXT, 1, true, None);
-        let spec = column_spec(&column_schema).expect("column spec generation");
+        let spec = column_spec(&column_schema).unwrap();
         assert_eq!(spec, "`test_col` string");
 
         let not_null_column = test_column("id", Type::INT4, 1, false, Some(1));
@@ -425,9 +432,37 @@ mod tests {
         let column_schema = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 1, true)
             .with_default_expression("'pending'::text".to_owned());
 
-        let spec = column_spec(&column_schema).expect("column spec generation");
+        let spec = column_spec(&column_schema).unwrap();
 
         assert_eq!(spec, "`status` string default 'pending'");
+    }
+
+    #[test]
+    fn column_spec_skips_primary_key_default() {
+        let column_schema = ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+            .with_primary_key(1)
+            .with_default_expression("1".to_owned());
+
+        let spec = column_spec(&column_schema).unwrap();
+
+        assert_eq!(spec, "`id` int64 not null");
+    }
+
+    #[test]
+    fn column_default_sql_uses_complete_column_schema() {
+        let without_default = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 1, true);
+        let supported_default =
+            without_default.clone().with_default_expression("'pending'::text".to_owned());
+        let unsupported_default =
+            without_default.clone().with_default_expression("lower('PENDING')".to_owned());
+        let primary_key_default = ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+            .with_primary_key(1)
+            .with_default_expression("1".to_owned());
+
+        assert_eq!(column_default_sql(&without_default), None);
+        assert_eq!(column_default_sql(&supported_default).as_deref(), Some("'pending'"));
+        assert_eq!(column_default_sql(&unsupported_default), None);
+        assert_eq!(column_default_sql(&primary_key_default), None);
     }
 
     #[test]
@@ -470,7 +505,6 @@ mod tests {
 
         for (typ, expression) in cases {
             assert_eq!(default_expression_sql(expression, &typ), None);
-            assert!(!supports_column_default(expression, &typ));
         }
     }
 
@@ -580,6 +614,33 @@ mod tests {
         let field_numbers: Vec<u32> =
             descriptor.field_descriptors.iter().map(|field| field.number).collect();
         assert_eq!(field_numbers, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn bigquery_schema_boundaries_use_canonical_column_names() {
+        let schema = test_replicated_schema(vec![
+            test_column("ID", Type::INT4, 1, false, Some(1)),
+            test_column("Display_Name", Type::TEXT, 2, true, None),
+        ]);
+
+        let columns = create_columns_spec(&schema).unwrap();
+        let primary_key = add_primary_key_clause(&schema).unwrap();
+        let descriptor = column_schemas_to_table_descriptor(&schema, false);
+
+        assert_eq!(
+            columns,
+            "(`id` int64 not null,`display_name` string, primary key (`id`) not enforced)"
+        );
+        assert_eq!(primary_key.as_deref(), Some(", primary key (`id`) not enforced"));
+        assert_eq!(
+            descriptor
+                .field_descriptors
+                .iter()
+                .take(2)
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["id", "display_name"]
+        );
     }
 
     #[test]

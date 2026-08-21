@@ -35,6 +35,16 @@ pub(super) fn rows_to_record_batch(
     rows: &[TableRow],
     schema: Schema,
 ) -> Result<RecordBatch, ArrowError> {
+    if let Some((row_index, row)) =
+        rows.iter().enumerate().find(|(_, row)| row.values().len() != schema.fields().len())
+    {
+        return Err(ArrowError::SchemaError(format!(
+            "row {row_index} has {} values, but the Iceberg schema has {} fields",
+            row.values().len(),
+            schema.fields().len(),
+        )));
+    }
+
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
     for (field_idx, field) in schema.fields().iter().enumerate() {
@@ -1629,20 +1639,9 @@ mod tests {
             // Missing third field for the boolean
         ]);
 
-        // This should either handle gracefully or return an error
         let result = rows_to_record_batch(&rows, schema);
 
-        // The function should handle this case - either by succeeding with partial data
-        // or by returning an appropriate error
-        match result {
-            Ok(batch) => {
-                assert_eq!(batch.num_rows(), 1);
-                assert_eq!(batch.num_columns(), 2); // Only schema columns
-            }
-            Err(_) => {
-                // Error is also acceptable for schema mismatch
-            }
-        }
+        assert!(matches!(result, Err(ArrowError::SchemaError(_))));
     }
 
     #[test]

@@ -41,8 +41,9 @@ use crate::{
     bail,
     data::SizeHint,
     destination::{
-        ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DestinationWriteStatus,
-        PendingWriteEventsResult, PipelineDestination, WriteEventsDurability, WriteEventsResult,
+        ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DestinationTableSchema,
+        DestinationWriteStatus, PendingWriteEventsResult, PipelineDestination,
+        WriteEventsDurability, WriteEventsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -56,8 +57,8 @@ use crate::{
         ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL,
         ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
-        ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
-        ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
+        ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL,
+        WORKER_TYPE_LABEL,
     },
     pipeline::PipelineId,
     postgres::{
@@ -808,12 +809,11 @@ struct ApplyLoopState {
     replication_lag_metrics: ReplicationLagMetrics,
     /// Events and associated batching information waiting for dispatch.
     event_batch: EventBatch,
-    /// Instant from when a transaction began.
-    current_tx_begin_ts: Option<Instant>,
-    /// Number of events observed in the current transaction (excluding
-    /// BEGIN/COMMIT).
+    /// Number of row-change and truncate messages observed since the most
+    /// recent `BEGIN`.
     current_tx_events: u64,
-    /// Next zero-based ordinal to assign to transaction-scoped events.
+    /// Next zero-based ordinal to assign to transaction events with sequence
+    /// keys.
     next_tx_ordinal: u64,
     /// Whether the loop is draining buffered destination work for shutdown.
     draining_for_shutdown: bool,
@@ -865,7 +865,6 @@ impl ApplyLoopState {
             replication_progress,
             replication_lag_metrics,
             event_batch: EventBatch::default(),
-            current_tx_begin_ts: None,
             current_tx_events: 0,
             next_tx_ordinal: 0,
             draining_for_shutdown: false,
@@ -1811,10 +1810,15 @@ where
 
             // An applying schema change may still need both endpoints for recovery, so
             // retain from the earlier destination snapshot.
-            let destination_retention_snapshot_id = destination_table_metadata
-                .previous_snapshot_id
-                .unwrap_or(destination_table_metadata.snapshot_id)
-                .min(destination_table_metadata.snapshot_id);
+            let destination_snapshot_id = destination_table_metadata.snapshot_id();
+            let destination_retention_snapshot_id = match destination_table_metadata.table_schema()
+            {
+                DestinationTableSchema::Applying { previous_snapshot_id, .. } => {
+                    (*previous_snapshot_id).min(destination_snapshot_id)
+                }
+                DestinationTableSchema::Creating { .. }
+                | DestinationTableSchema::Applied { .. } => destination_snapshot_id,
+            };
 
             let retention_snapshot_id = schema_cleanup_retention_snapshot_id(
                 persisted_checkpoint_lsn,
@@ -2285,19 +2289,15 @@ where
                 self.handle_relation_message(relation_body).await
             }
             LogicalReplicationMessage::Insert(insert_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_insert_message(insert_body).await
             }
             LogicalReplicationMessage::Update(update_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_update_message(update_body).await
             }
             LogicalReplicationMessage::Delete(delete_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_delete_message(delete_body).await
             }
             LogicalReplicationMessage::Truncate(truncate_body) => {
-                self.state.current_tx_events += 1;
                 self.handle_truncate_message(truncate_body).await
             }
             LogicalReplicationMessage::Origin(_) => {
@@ -2491,7 +2491,7 @@ where
         let final_lsn = PgLsn::from(message.final_lsn());
         self.state.remote_final_lsn = Some(final_lsn);
 
-        self.state.current_tx_begin_ts = Some(Instant::now());
+        // When a new transaction begins, we want to reset the accumulating state.
         self.state.current_tx_events = 0;
         self.state.reset_tx_ordinal();
 
@@ -2526,16 +2526,9 @@ where
             );
         }
 
-        if let Some(begin_ts) = self.state.current_tx_begin_ts.take() {
-            let now = Instant::now();
-            let duration_seconds = (now - begin_ts).as_secs_f64();
-
-            histogram!(ETL_TRANSACTION_DURATION_SECONDS).record(duration_seconds);
-            counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
-            histogram!(ETL_TRANSACTION_SIZE).record(self.state.current_tx_events as f64);
-
-            self.state.current_tx_events = 0;
-        }
+        // Emit the transaction metrics.
+        counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
+        histogram!(ETL_TRANSACTION_SIZE).record(self.state.current_tx_events as f64);
 
         let end_lsn = PgLsn::from(message.end_lsn());
 
@@ -2964,8 +2957,10 @@ where
             );
         };
 
-        let table_id = TableId::new(message.rel_id());
+        self.state.current_tx_events += 1;
+
         let tx_ordinal = self.state.next_tx_ordinal();
+        let table_id = TableId::new(message.rel_id());
 
         // Capture the source payload metadata and emit the initial metrics.
         let streaming_payload_metadata =
@@ -3006,8 +3001,10 @@ where
             );
         };
 
-        let table_id = TableId::new(message.rel_id());
+        self.state.current_tx_events += 1;
+
         let tx_ordinal = self.state.next_tx_ordinal();
+        let table_id = TableId::new(message.rel_id());
 
         // Capture the source payload metadata and emit the initial metrics.
         let streaming_payload_metadata =
@@ -3048,8 +3045,10 @@ where
             );
         };
 
-        let table_id = TableId::new(message.rel_id());
+        self.state.current_tx_events += 1;
+
         let tx_ordinal = self.state.next_tx_ordinal();
+        let table_id = TableId::new(message.rel_id());
 
         // Capture the source payload metadata and emit the initial metrics.
         let streaming_payload_metadata =
@@ -3089,6 +3088,9 @@ where
                 "Transaction must be active before processing TRUNCATE message"
             );
         };
+
+        self.state.current_tx_events += 1;
+
         let tx_ordinal = self.state.next_tx_ordinal();
 
         // Collect the replicated schemas for tables this worker currently owns.

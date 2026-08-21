@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use etl::{
-    destination::DestinationTableMetadata,
+    destination::{DestinationTableMetadata, DestinationTableSchema},
     error::ErrorKind,
     etl_error,
     schema::{ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema},
@@ -807,18 +807,18 @@ async fn multiple_pipelines_isolation() {
 
     assert_eq!(
         store1
-            .get_applied_destination_table_metadata(table_id)
+            .get_destination_table_metadata(table_id)
             .await
             .unwrap()
-            .map(|m| m.destination_table_id),
+            .map(|m| m.table_id().to_owned()),
         Some("pipeline1_table".to_owned())
     );
     assert_eq!(
         store2
-            .get_applied_destination_table_metadata(table_id)
+            .get_destination_table_metadata(table_id)
             .await
             .unwrap()
-            .map(|m| m.destination_table_id),
+            .map(|m| m.table_id().to_owned()),
         Some("pipeline2_table".to_owned())
     );
 
@@ -827,10 +827,10 @@ async fn multiple_pipelines_isolation() {
     new_store1.load_destination_tables_metadata().await.unwrap();
     assert_eq!(
         new_store1
-            .get_applied_destination_table_metadata(table_id)
+            .get_destination_table_metadata(table_id)
             .await
             .unwrap()
-            .map(|m| m.destination_table_id),
+            .map(|m| m.table_id().to_owned()),
         Some("pipeline1_table".to_owned())
     );
 }
@@ -977,7 +977,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     // Sanity check before deleting state.
     assert!(store.get_table_state(table_1_id).await.unwrap().is_some());
     assert!(store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_some());
-    assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_some());
+    assert!(store.get_destination_table_metadata(table_1_id).await.unwrap().is_some());
     assert!(
         store
             .get_replication_checkpoint(WorkerType::TableSync { table_id: table_1_id })
@@ -992,7 +992,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     // Verify in-memory cache for table 1 has been deleted.
     assert!(store.get_table_state(table_1_id).await.unwrap().is_none());
     assert!(store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_none());
-    assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_none());
+    assert!(store.get_destination_table_metadata(table_1_id).await.unwrap().is_none());
     assert!(
         store
             .get_replication_checkpoint(WorkerType::TableSync { table_id: table_1_id })
@@ -1004,7 +1004,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     // Verify other table is unaffected.
     assert!(store.get_table_state(table_2_id).await.unwrap().is_some());
     assert!(store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
-    assert!(store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
+    assert!(store.get_destination_table_metadata(table_2_id).await.unwrap().is_some());
     assert!(
         store
             .get_replication_checkpoint(WorkerType::TableSync { table_id: table_2_id })
@@ -1022,7 +1022,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     // Table 1 should not be present after reload.
     assert!(new_store.get_table_state(table_1_id).await.unwrap().is_none());
     assert!(new_store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_none());
-    assert!(new_store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_none());
+    assert!(new_store.get_destination_table_metadata(table_1_id).await.unwrap().is_none());
     assert!(
         new_store
             .get_replication_checkpoint(WorkerType::TableSync { table_id: table_1_id })
@@ -1034,7 +1034,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     // Table 2 should still be present.
     assert!(new_store.get_table_state(table_2_id).await.unwrap().is_some());
     assert!(new_store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
-    assert!(new_store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
+    assert!(new_store.get_destination_table_metadata(table_2_id).await.unwrap().is_some());
     assert!(
         new_store
             .get_replication_checkpoint(WorkerType::TableSync { table_id: table_2_id })
@@ -1093,7 +1093,7 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
 
     assert_eq!(store.get_table_state(table_id).await.unwrap(), Some(TableState::DataSync));
     assert!(store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().is_none());
-    assert!(store.get_applied_destination_table_metadata(table_id).await.unwrap().is_none());
+    assert!(store.get_destination_table_metadata(table_id).await.unwrap().is_none());
     assert!(
         store
             .get_replication_checkpoint(WorkerType::TableSync { table_id })
@@ -1103,7 +1103,7 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
     );
 
     assert!(store.get_table_schema(&other_table_id, SnapshotId::max()).await.unwrap().is_some());
-    assert!(store.get_applied_destination_table_metadata(other_table_id).await.unwrap().is_some());
+    assert!(store.get_destination_table_metadata(other_table_id).await.unwrap().is_some());
 
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     new_store.load_table_states().await.unwrap();
@@ -1112,7 +1112,7 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
 
     assert_eq!(new_store.get_table_state(table_id).await.unwrap(), Some(TableState::DataSync));
     assert!(new_store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().is_none());
-    assert!(new_store.get_applied_destination_table_metadata(table_id).await.unwrap().is_none());
+    assert!(new_store.get_destination_table_metadata(table_id).await.unwrap().is_none());
     assert!(
         new_store
             .get_replication_checkpoint(WorkerType::TableSync { table_id })
@@ -1123,9 +1123,7 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
     assert!(
         new_store.get_table_schema(&other_table_id, SnapshotId::max()).await.unwrap().is_some()
     );
-    assert!(
-        new_store.get_applied_destination_table_metadata(other_table_id).await.unwrap().is_some()
-    );
+    assert!(new_store.get_destination_table_metadata(other_table_id).await.unwrap().is_some());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1182,8 +1180,8 @@ async fn reset_table_states_for_resync_resets_states_and_apply_checkpoint_only()
     assert_eq!(store.get_table_state(table_2_id).await.unwrap(), Some(TableState::Init));
     assert!(store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_some());
     assert!(store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
-    assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_some());
-    assert!(store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
+    assert!(store.get_destination_table_metadata(table_1_id).await.unwrap().is_some());
+    assert!(store.get_destination_table_metadata(table_2_id).await.unwrap().is_some());
     assert!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap().is_none());
     assert!(
         store
@@ -1209,8 +1207,8 @@ async fn reset_table_states_for_resync_resets_states_and_apply_checkpoint_only()
     assert_eq!(new_store.get_table_state(table_2_id).await.unwrap(), Some(TableState::Init));
     assert!(new_store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_some());
     assert!(new_store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
-    assert!(new_store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_some());
-    assert!(new_store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
+    assert!(new_store.get_destination_table_metadata(table_1_id).await.unwrap().is_some());
+    assert!(new_store.get_destination_table_metadata(table_2_id).await.unwrap().is_some());
     assert!(new_store.get_replication_checkpoint(WorkerType::Apply).await.unwrap().is_none());
     assert!(
         new_store
@@ -1272,17 +1270,88 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
 
     // Verify the loaded replication mask matches what was inserted
     let metadata = store
-        .get_applied_destination_table_metadata(table_id)
+        .get_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("Metadata should exist");
 
     assert_eq!(
-        metadata.replication_mask.as_slice(),
+        metadata.replication_mask().as_slice(),
         &expected_mask_bytes,
         "Loaded replication mask should match inserted bytea"
     );
-    assert_eq!(metadata.destination_table_id, "test_dest_table");
+    assert_eq!(metadata.table_id(), "test_dest_table");
+
+    // Rows written before the previous-mask migration load with no recovery
+    // endpoint, then gain one automatically on their next schema transition.
+    let legacy_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(matches!(legacy_metadata.table_schema(), DestinationTableSchema::Applied { .. }));
+    let target_mask = ReplicationMask::from_bytes(vec![1, 1, 1, 1, 0]);
+    let applying_metadata =
+        legacy_metadata.with_schema_change(test_snapshot_id(10, 11), target_mask.clone()).unwrap();
+    store.store_destination_table_metadata(table_id, applying_metadata).await.unwrap();
+
+    let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    reloaded_store.load_destination_tables_metadata().await.unwrap();
+    let upgraded_metadata =
+        reloaded_store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(matches!(
+        upgraded_metadata.table_schema(),
+        DestinationTableSchema::Applying { previous_replication_mask, .. }
+            if previous_replication_mask.as_slice() == expected_mask_bytes
+    ));
+    assert_eq!(upgraded_metadata.replication_mask(), &target_mask);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_metadata_loads_creating_and_rejects_incomplete_applying() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let table_id = TableId::new(12346);
+    // Initialize the store to run the migrations.
+    PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
+
+    sqlx::query(
+        r#"
+        insert into etl.destination_tables_metadata
+            (pipeline_id, table_id, destination_table_id, snapshot_id,
+             schema_status, replication_mask)
+        values ($1, $2, 'test_dest_table', '20:21', 'creating', $3::bytea)
+        "#,
+    )
+    .bind(i64::try_from(pipeline_id).unwrap())
+    .bind(SqlxTableId(table_id.into_inner()))
+    .bind(vec![1_u8, 1])
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    reloaded_store.load_destination_tables_metadata().await.unwrap();
+    let metadata = reloaded_store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(metadata.is_creating());
+    assert!(matches!(metadata.table_schema(), DestinationTableSchema::Creating { .. }));
+
+    sqlx::query(
+        r#"
+        update etl.destination_tables_metadata
+        set schema_status = 'applying', previous_snapshot_id = '10:11'
+        where pipeline_id = $1 and table_id = $2
+        "#,
+    )
+    .bind(i64::try_from(pipeline_id).unwrap())
+    .bind(SqlxTableId(table_id.into_inner()))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let incomplete_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let error = incomplete_store.load_destination_tables_metadata().await.unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::InvalidState);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1348,20 +1417,20 @@ async fn replication_mask_various_patterns() {
     // Verify each test case
     for (table_id, dest_name, expected_mask) in &test_cases {
         let metadata = store
-            .get_applied_destination_table_metadata(*table_id)
+            .get_destination_table_metadata(*table_id)
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("Metadata for {dest_name} should exist"));
 
         assert_eq!(
-            metadata.replication_mask.as_slice(),
+            metadata.replication_mask().as_slice(),
             expected_mask.as_slice(),
             "Mask mismatch for {}: expected {:?}, got {:?}",
             dest_name,
             expected_mask,
-            metadata.replication_mask.as_slice()
+            metadata.replication_mask().as_slice()
         );
-        assert_eq!(metadata.destination_table_id, *dest_name, "Destination table ID mismatch");
+        assert_eq!(metadata.table_id(), *dest_name, "Destination table ID mismatch");
     }
 }
 
@@ -1391,15 +1460,55 @@ async fn destination_metadata_roundtrip_preserves_composite_snapshot_and_replica
 
     // The loaded metadata preserves both the mask and composite snapshot ID.
     let loaded_metadata = new_store
-        .get_applied_destination_table_metadata(table_id)
+        .get_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("Metadata should exist after loading");
 
     assert_eq!(
-        loaded_metadata.replication_mask.as_slice(),
+        loaded_metadata.replication_mask().as_slice(),
         original_mask.as_slice(),
         "Roundtrip should preserve replication mask exactly"
     );
-    assert_eq!(loaded_metadata.snapshot_id, snapshot_id);
+    assert_eq!(loaded_metadata.snapshot_id(), snapshot_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_metadata_roundtrip_preserves_previous_logical_endpoint() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let table_id = TableId::new(54322);
+    let target_snapshot_id = SnapshotId::new(PgLsn::from(300), PgLsn::from(150));
+    let target_mask = ReplicationMask::from_bytes(vec![1, 1, 1]);
+    let previous_snapshot_id = SnapshotId::new(PgLsn::from(200), PgLsn::from(100));
+    let previous_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
+    let metadata = DestinationTableMetadata::new_applied(
+        "roundtrip_table".to_owned(),
+        previous_snapshot_id,
+        previous_mask.clone(),
+    )
+    .with_schema_change(target_snapshot_id, target_mask.clone())
+    .unwrap();
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    store.store_destination_table_metadata(table_id, metadata).await.unwrap();
+
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    new_store.load_destination_tables_metadata().await.unwrap();
+    let loaded_metadata =
+        new_store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+
+    assert_eq!(loaded_metadata.snapshot_id(), target_snapshot_id);
+    assert_eq!(loaded_metadata.replication_mask(), &target_mask);
+    assert!(matches!(
+        loaded_metadata.table_schema(),
+        DestinationTableSchema::Applying {
+            previous_snapshot_id: loaded_previous_snapshot_id,
+            previous_replication_mask,
+            ..
+        } if *loaded_previous_snapshot_id == previous_snapshot_id
+            && previous_replication_mask == &previous_mask
+    ));
 }

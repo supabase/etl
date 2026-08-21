@@ -69,8 +69,8 @@ fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
 /// Returns the full ClickHouse type string for a column, with Nullable
 /// wrapping.
 ///
-/// When `force_nullable` is true (ALTER TABLE ADD), all scalar columns become
-/// Nullable since ClickHouse cannot backfill existing rows.
+/// When `force_nullable` is true, added scalar columns use the destination's
+/// permissive historical-row fallback instead of preserving source `NOT NULL`.
 pub(super) fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -> String {
     clickhouse_type(&col.typ, col.nullable, force_nullable)
 }

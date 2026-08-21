@@ -29,7 +29,11 @@ pub(super) const ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_FAILURES_TOTAL: &str =
 
 pub(super) fn register_metrics() {
     REGISTER_METRICS.call_once(|| {
-        describe_histogram!(ETL_SNOWFLAKE_BATCH_SIZE, Unit::Count, "Rows per insert_rows request");
+        describe_histogram!(
+            ETL_SNOWFLAKE_BATCH_SIZE,
+            Unit::Count,
+            "Rows per Snowpipe Streaming append request"
+        );
 
         describe_histogram!(
             ETL_SNOWFLAKE_BATCH_BYTES,

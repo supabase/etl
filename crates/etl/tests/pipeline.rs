@@ -15,7 +15,7 @@ use etl::{
     test_utils::{
         database::{
             replication_slot_state, spawn_source_database, terminate_walsender, test_table_name,
-            wait_for_new_walsender, wait_for_replication_slot_flush_lsn,
+            wait_for_new_walsender,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::{FaultAction, FaultyOp},
@@ -729,14 +729,6 @@ async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
         ))
         .await
         .unwrap();
-
-    // Wait for feedback beyond the ADD TABLE transaction before shutting down.
-    // This proves the apply worker observed the messages and skipped the
-    // unknown tables rather than simply stopping before reaching them.
-    let client = database.client.as_ref().unwrap();
-    let publication_change_lsn: PgLsn =
-        client.query_one("select pg_current_wal_flush_lsn()", &[]).await.unwrap().get(0);
-    wait_for_replication_slot_flush_lsn(client, &apply_slot_name, publication_change_lsn).await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 

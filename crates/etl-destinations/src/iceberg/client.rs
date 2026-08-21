@@ -177,15 +177,37 @@ impl IcebergClient {
         debug!(%table_name, %namespace, "creating table if missing");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         let table_ident = TableIdent::new(namespace_ident.clone(), table_name.clone());
+        let expected_schema = postgres_to_iceberg_schema(column_schemas)?;
 
         if !self.catalog.table_exists(&table_ident).await? {
-            let iceberg_schema = postgres_to_iceberg_schema(column_schemas)?;
             let creation = TableCreation::builder()
                 .name(table_name)
-                .schema(iceberg_schema)
+                .schema(expected_schema)
                 .properties(Self::get_table_properties())
                 .build();
             self.catalog.create_table(&namespace_ident, creation).await?;
+        } else {
+            self.validate_table_schema(&table_ident, &expected_schema).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Loads an existing table and compares its current schema.
+    async fn validate_table_schema(
+        &self,
+        table_ident: &TableIdent,
+        expected_schema: &iceberg::spec::Schema,
+    ) -> Result<(), iceberg::Error> {
+        let table = self.catalog.load_table(table_ident).await?;
+        if table.metadata().current_schema().as_ref() != expected_schema {
+            return Err(iceberg::Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "existing Iceberg table '{table_ident}' does not have the exact schema \
+                     expected by ETL"
+                ),
+            ));
         }
 
         Ok(())

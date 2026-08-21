@@ -31,7 +31,7 @@ use std::sync::{
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use etl::{
     data::{ArrayCell, Cell, PgNumeric, TableRow},
-    destination::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    destination::DestinationTableMetadata,
     error::{ErrorKind, EtlError, EtlResult},
     event::{Event, RelationEvent},
     schema::{
@@ -618,11 +618,11 @@ async fn array_values_roundtrip_through_destination() {
     let table = PropertyTable::create(
         "proparrays",
         &[
-            ("ai", Type::INT8_ARRAY, true),
-            ("at", Type::TEXT_ARRAY, true),
-            ("af", Type::FLOAT8_ARRAY, true),
-            ("ab", Type::BYTEA_ARRAY, true),
-            ("ad", Type::DATE_ARRAY, true),
+            ("ai", Type::INT8_ARRAY, false),
+            ("at", Type::TEXT_ARRAY, false),
+            ("af", Type::FLOAT8_ARRAY, false),
+            ("ab", Type::BYTEA_ARRAY, false),
+            ("ad", Type::DATE_ARRAY, false),
         ],
     )
     .await;
@@ -675,6 +675,17 @@ async fn array_values_roundtrip_through_destination() {
     });
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn nullable_array_columns_fail_only_for_top_level_null_values() {
+    let table = PropertyTable::create("nullablearray", &[("values", Type::INT8_ARRAY, true)]).await;
+
+    table.write(vec![Cell::Array(ArrayCell::I64(vec![]))]).await.unwrap();
+    let error = table.write(vec![Cell::Null]).await.unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::ConversionError);
+    assert_eq!(error.description(), Some("NULL value for non-nullable ClickHouse column"));
+}
+
 /// Dates legal in Postgres but outside ClickHouse `Date32`'s
 /// `1900-01-01..=2299-12-31` range.
 fn out_of_range_date() -> impl Strategy<Value = NaiveDate> {
@@ -688,17 +699,6 @@ fn out_of_range_date() -> impl Strategy<Value = NaiveDate> {
 
     prop_oneof![low_min..=low_max, high_min..=high_max]
         .prop_map(move |days| epoch + chrono::Duration::days(days))
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn out_of_range_dates_are_rejected_loudly() {
-    let table = PropertyTable::create("propdatereject", &[("vd", Type::DATE, true)]).await;
-
-    run_property("clickhouse date rejection", &out_of_range_date(), |date| {
-        let result = block_on(table.write(vec![Cell::Date(*date)]));
-        prop_assert!(result.is_err(), "date {} is outside Date32 but the write succeeded", date);
-        Ok(())
-    });
 }
 
 #[derive(clickhouse::Row, serde::Deserialize)]
@@ -803,6 +803,132 @@ fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
     SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
 }
 
+/// Stores one schema version whose `status` column has the supplied default.
+async fn store_status_default_schema(
+    store: &NotifyingStore,
+    table_id: TableId,
+    table_name: &TableName,
+    snapshot_id: SnapshotId,
+    default_expression: Option<&str>,
+) -> ReplicatedTableSchema {
+    let schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            table_id,
+            table_name.clone(),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, true)
+                    .with_default_expression_option(default_expression.map(ToOwned::to_owned)),
+            ],
+            snapshot_id,
+        ))
+        .await
+        .unwrap();
+
+    ReplicatedTableSchema::all(schema)
+}
+
+/// Returns ClickHouse's stored `DEFAULT` expression for `column_name`.
+async fn clickhouse_column_default_expression(
+    database: &ClickHouseTestDatabase,
+    table_name: &str,
+    column_name: &str,
+) -> Option<String> {
+    database
+        .db_client()
+        .query(
+            "select default_expression from system.columns where database = currentDatabase() and \
+             table = ? and name = ? and default_kind = 'DEFAULT'",
+        )
+        .bind(table_name)
+        .bind(column_name)
+        .fetch_optional::<String>()
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_column_default_changes_drop_before_setting_supported_replacement() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let table_id = TableId::new(4245);
+    let table_name = TableName::new("public".to_owned(), "default_changes".to_owned());
+    let initial_schema = store_status_default_schema(
+        &store,
+        table_id,
+        &table_name,
+        test_snapshot_id(100, 100),
+        Some("lower('unsupported')"),
+    )
+    .await;
+    let supported_schema = store_status_default_schema(
+        &store,
+        table_id,
+        &table_name,
+        test_snapshot_id(200, 200),
+        Some("'queued'::text"),
+    )
+    .await;
+    let unsupported_schema = store_status_default_schema(
+        &store,
+        table_id,
+        &table_name,
+        test_snapshot_id(300, 300),
+        Some("lower('unsupported')"),
+    )
+    .await;
+    let supported_again_schema = store_status_default_schema(
+        &store,
+        table_id,
+        &table_name,
+        test_snapshot_id(400, 400),
+        Some("'done'::text"),
+    )
+    .await;
+    let dropped_schema = store_status_default_schema(
+        &store,
+        table_id,
+        &table_name,
+        test_snapshot_id(500, 500),
+        None,
+    )
+    .await;
+    let destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+
+    destination.write_table_rows(&initial_schema, vec![]).await.unwrap();
+    let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(metadata.is_applied());
+    let destination_table_name = metadata.table_id().to_owned();
+    assert_eq!(
+        clickhouse_column_default_expression(&clickhouse_db, &destination_table_name, "status")
+            .await,
+        None
+    );
+
+    for (schema, expected_default) in [
+        (supported_schema, Some("'queued'")),
+        (unsupported_schema, None),
+        (supported_again_schema, Some("'done'")),
+        (dropped_schema, None),
+    ] {
+        destination
+            .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: schema })])
+            .await
+            .unwrap();
+        assert_eq!(
+            clickhouse_column_default_expression(&clickhouse_db, &destination_table_name, "status")
+                .await
+                .as_deref(),
+            expected_default,
+        );
+    }
+}
+
 /// Retained row shape for interrupted publication-mask recovery.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
 struct RecoveryMaskRow {
@@ -856,11 +982,8 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
         test_snapshot_id(100_u64, 100_u64),
         replication_mask.clone(),
     )
-    .with_schema_change(
-        test_snapshot_id(200_u64, 200_u64),
-        replication_mask,
-        DestinationTableSchemaStatus::Applying,
-    );
+    .with_schema_change(test_snapshot_id(200_u64, 200_u64), replication_mask)
+    .unwrap();
     store.store_destination_table_metadata(table_id, metadata).await.unwrap();
 
     let destination = clickhouse_db
@@ -904,11 +1027,8 @@ async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
         test_snapshot_id(100_u64, 100_u64),
         target_mask.clone(),
     )
-    .with_schema_change(
-        test_snapshot_id(200_u64, 200_u64),
-        target_mask,
-        DestinationTableSchemaStatus::Applying,
-    );
+    .with_schema_change(test_snapshot_id(200_u64, 200_u64), target_mask)
+    .unwrap();
     store.store_destination_table_metadata(table_id, metadata).await.unwrap();
 
     let destination =
@@ -992,25 +1112,23 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     // Simulate a crash after the change was recorded as `Applying` but before
     // the DDL completed.
     let applied_metadata = store
-        .get_applied_destination_table_metadata(table_id)
+        .get_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("metadata should exist after table creation");
-    let clickhouse_table_name = applied_metadata.destination_table_id.clone();
+    assert!(applied_metadata.is_applied());
+    let clickhouse_table_name = applied_metadata.table_id().to_owned();
     let interrupted_metadata = DestinationTableMetadata::new_applied(
         clickhouse_table_name.clone(),
         test_snapshot_id(100_u64, 100_u64),
         old_mask,
     )
-    .with_schema_change(
-        test_snapshot_id(200_u64, 200_u64),
-        new_mask,
-        DestinationTableSchemaStatus::Applying,
-    );
+    .with_schema_change(test_snapshot_id(200_u64, 200_u64), new_mask)
+    .unwrap();
     store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
 
-    // A restarted destination (empty table cache, so metadata is consulted)
-    // receiving the target snapshot must replay the interrupted diff.
+    // A restarted destination has an empty process-local cache and must replay
+    // the interrupted diff from durable metadata.
     let restarted_destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;
@@ -1023,12 +1141,13 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     assert_eq!(columns, vec!["id", "name", "email"], "recovery must add the interrupted column");
 
     let recovered_metadata = store
-        .get_applied_destination_table_metadata(table_id)
+        .get_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("metadata should be applied after recovery");
+    assert!(recovered_metadata.is_applied());
     assert_eq!(
-        recovered_metadata.snapshot_id,
+        recovered_metadata.snapshot_id(),
         test_snapshot_id(200_u64, 200_u64),
         "recovery must mark the target snapshot applied"
     );
@@ -1089,21 +1208,19 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
         ReplicatedTableSchema::from_mask(Arc::clone(&target_table_schema), target_mask.clone());
 
     let applied_metadata = store
-        .get_applied_destination_table_metadata(table_id)
+        .get_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("metadata should exist after table creation");
-    let clickhouse_table_name = applied_metadata.destination_table_id.clone();
+    assert!(applied_metadata.is_applied());
+    let clickhouse_table_name = applied_metadata.table_id().to_owned();
     let interrupted_metadata = DestinationTableMetadata::new_applied(
         clickhouse_table_name.clone(),
         test_snapshot_id(100_u64, 100_u64),
         old_mask,
     )
-    .with_schema_change(
-        target_table_schema.snapshot_id,
-        target_mask.clone(),
-        DestinationTableSchemaStatus::Applying,
-    );
+    .with_schema_change(target_table_schema.snapshot_id, target_mask.clone())
+    .unwrap();
     store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
 
     let restarted_destination = clickhouse_db
@@ -1118,12 +1235,13 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
 
     assert_eq!(clickhouse_db.column_names(&clickhouse_table_name).await, vec!["id", "name"]);
     let recovered_metadata = store
-        .get_applied_destination_table_metadata(table_id)
+        .get_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("metadata should be applied after recovery");
-    assert_eq!(recovered_metadata.snapshot_id, target_table_schema.snapshot_id);
-    assert_eq!(recovered_metadata.replication_mask, target_mask);
+    assert!(recovered_metadata.is_applied());
+    assert_eq!(recovered_metadata.snapshot_id(), target_table_schema.snapshot_id);
+    assert_eq!(recovered_metadata.replication_mask(), &target_mask);
 
     let rows: Vec<RecoveryMaskRow> = clickhouse_db
         .query(&format!("SELECT id, name FROM \"{clickhouse_table_name}\" ORDER BY id"))

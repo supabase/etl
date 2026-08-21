@@ -27,6 +27,50 @@ recommended default.**
 - **Deprecated:** Retained for compatibility but no longer recommended for new
   deployments. Plan to move away from it.
 
+## Row value handling
+
+ETL validates structural prerequisites such as primary keys, replica identity,
+column mappings, and schema transitions. It does not pre-validate each row value
+against destination-specific domains. When ETL can represent a value in the
+destination request or wire format, it sends that value and relies on the
+destination's native coercion, rounding, canonicalization, and rejection
+behavior. These semantics apply consistently to initial copy, inserts, and
+updates.
+
+ETL returns a local error only when it cannot construct a faithful wire
+representation. The ETL API may also emit non-blocking preflight warnings for
+known destination differences, but those warnings do not add per-cell runtime
+validation. Test destination-specific value semantics that matter to your
+workload.
+
+## Publication column additions
+
+An existing column newly exposed by a publication is added as nullable so old
+destination rows remain `NULL`; future row events carry the real PostgreSQL
+value. Defaults are installed only when they cannot affect old rows. BigQuery
+supports that future-only behavior, while ClickHouse, DuckLake, and Snowflake
+omit the default. BigQuery and ClickHouse reject publication-added arrays
+because they cannot represent the unknown historical value as `NULL`.
+
+See [Publication column changes](/explanation/schema-changes/#publication-column-changes)
+for the complete policy.
+
+## Destination ownership
+
+ETL assumes exclusive ownership of every data-bearing table it creates.
+Destination metadata is the authority for whether initial setup or a schema
+change completed; process-local caches do not replace that state. Once metadata
+is `Applied`, ETL does not recreate a missing table or repair external schema
+changes during ordinary writes or restart. Such changes are unsupported and
+typically cause the destination operation to fail. Use the table
+resynchronization lifecycle when a destination table must be rebuilt.
+
+ETL may rebuild ephemeral client state and derived non-data-bearing objects,
+such as Snowflake streaming channels or BigQuery views. Direct destination
+truncation is also outside ETL's lifecycle: later behavior depends on the
+destination's offset and write semantics, and previously replicated rows are
+not restored automatically.
+
 ## BigQuery
 
 <DestinationStatus status="stable" />
@@ -40,9 +84,18 @@ as its default example.
 - Every replicated source table needs a primary key, and all primary-key
   columns must be included in the publication.
 - PostgreSQL arrays containing `NULL` elements are not supported.
+- BigQuery stores a top-level PostgreSQL `NULL` array as an empty array, so the
+  two source values are indistinguishable in the destination.
+- Numeric and JSON values follow BigQuery's native domain, rounding, and
+  canonicalization behavior. BigQuery may transform or reject values that do
+  not map exactly to its types.
 - Supported schema changes are applied automatically, but PostgreSQL default
   expressions and backfill behavior are only supported where they map safely
   to BigQuery. See [Schema Changes](/explanation/schema-changes/).
+- BigQuery column renames are subject to BigQuery's row-access-policy and
+  metadata limitations. Review [BigQuery schema change
+  behavior](https://cloud.google.com/bigquery/docs/managing-table-schemas)
+  before renaming columns with tags, aspects, or policies.
 
 ## ClickHouse
 
@@ -58,6 +111,16 @@ append-only event-log layout with `MergeTree`.
   ClickHouse 23.5 or newer.
 - `MergeTree` preserves an append-only event log; it does not expose a
   current-state replica by itself.
+- Source type changes are warned about, but physical type DDL is not currently
+  applied or validated. Later RowBinary writes may fail or behave unpredictably;
+  resynchronize the table after a source type change.
+- ClickHouse `Array` columns are non-nullable. A top-level PostgreSQL `NULL`
+  array cannot be encoded in RowBinary and fails the write; empty arrays and
+  `NULL` array elements remain supported.
+- Values that RowBinary can represent are sent without local ClickHouse domain
+  checks and follow ClickHouse's native conversion or rejection behavior.
+- Dotted nested subcolumns can be renamed only within the same parent, matching
+  ClickHouse's documented `RENAME COLUMN` limitation.
 - Tombstone cleanup and `OPTIMIZE ... FINAL CLEANUP` are operator-managed.
 
 ## DuckLake
@@ -74,6 +137,9 @@ object storage.
   storage, and maintenance services they configure.
 - Primary-key sorting requires source tables to have a primary key; other
   sorting modes do not add that requirement.
+- DuckLake adds streaming columns as nullable. Supported literal defaults are
+  stored as metadata; ETL does not emit `DEFAULT(NULL)` when no source default
+  exists, although a catalog client may display an omitted default as `NULL`.
 
 ## Snowflake
 
@@ -85,9 +151,14 @@ Snowflake uses direct Snowpipe Streaming and key-pair authentication.
 
 - Setup requires a Snowflake user and role with the documented warehouse,
   database, and schema privileges.
+- The effective `QUOTED_IDENTIFIERS_IGNORE_CASE` parameter must be `FALSE`.
+  Connectivity validation rejects other settings because ETL preserves quoted
+  source column names exactly. See [Snowflake identifier
+  resolution](https://docs.snowflake.com/en/sql-reference/identifiers-syntax#controlling-case-using-the-quoted-identifiers-ignore-case-parameter).
 - Schema evolution support is still in progress. Only defaults that ETL can
-  translate safely are applied; unsupported expressions are skipped with a
-  warning.
+  translate safely at table creation or column addition are applied. Later
+  existing-column default changes are skipped because Snowflake default
+  provenance cannot be inferred safely.
 - Validate channel recovery, committed offsets, and account-specific resource
   limits before production use.
 
@@ -100,7 +171,11 @@ recommended for new deployments.
 
 ### Limitations
 
-- Schema-change DDL is not supported. A newer relation schema is rejected.
+- Schema-change DDL is not supported. A newer relation schema is rejected even
+  when only a default, nullability, mapped-equivalent type, or publication mask
+  changed. Existing tables must match the exact generated Iceberg schema.
+- Apache Iceberg supports native schema evolution, but this deprecated ETL
+  adapter does not implement it and does not translate PostgreSQL defaults.
 - The destination is deprecated and is not receiving the same product
   investment as the active destination implementations.
 

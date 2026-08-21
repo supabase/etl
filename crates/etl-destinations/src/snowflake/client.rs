@@ -2,31 +2,38 @@ use std::{collections::HashMap, sync::Arc};
 
 use etl::{
     pipeline::PipelineId,
-    schema::{ColumnChange, ColumnModification, ColumnSchema, SchemaDiff, TableId},
+    schema::{
+        ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, SchemaOperation,
+        SchemaPlan, TableId,
+    },
 };
 use metrics::{counter, gauge, histogram};
 use tokio::{
     sync::{Mutex, RwLock},
     time::{Instant, sleep},
 };
-use tracing::warn;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::snowflake::{
-    Config, Error, Result, SnowpipeError,
-    auth::{AuthManager, HttpExchanger, TokenProvider},
-    config::{HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT},
-    metrics::{
-        ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_FAILURES_TOTAL,
-        ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_SECONDS, ETL_SNOWFLAKE_STREAMING_PENDING_BYTES,
-        ETL_SNOWFLAKE_STREAMING_PENDING_CHANNELS, ETL_SNOWFLAKE_STREAMING_PENDING_ROW_BATCHES,
-    },
-    schema,
-    sql::{quote_identifier, quote_string_literal},
-    sql_client::SqlClient,
-    streaming::{
-        AcceptedRowBatch, ChannelHandle, DEFAULT_COMMIT_POLL_INTERVAL, DEFAULT_COMMIT_WAIT_TIMEOUT,
-        OffsetToken, PendingDurabilityTarget, RestStreamClient, RowBatch, StreamClient,
+use crate::{
+    recovery::warn_unsupported_column_type_change,
+    snowflake::{
+        Config, Error, Result, SnowpipeError,
+        auth::{AuthManager, HttpExchanger, TokenProvider},
+        config::{HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT},
+        metrics::{
+            ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_FAILURES_TOTAL,
+            ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_SECONDS, ETL_SNOWFLAKE_STREAMING_PENDING_BYTES,
+            ETL_SNOWFLAKE_STREAMING_PENDING_CHANNELS, ETL_SNOWFLAKE_STREAMING_PENDING_ROW_BATCHES,
+        },
+        schema,
+        sql::{quote_identifier, quote_string_literal},
+        sql_client::SqlClient,
+        streaming::{
+            AcceptedRowBatch, ChannelHandle, DEFAULT_COMMIT_POLL_INTERVAL,
+            DEFAULT_COMMIT_WAIT_TIMEOUT, OffsetToken, PendingDurabilityTarget, RestStreamClient,
+            RowBatch, StreamClient,
+        },
     },
 };
 
@@ -317,6 +324,34 @@ impl Client<AuthManager<HttpExchanger>> {
             return Err(Error::SchemaNotFound { database, schema });
         }
 
+        let resp = sql
+            .execute_statement("SHOW PARAMETERS LIKE 'QUOTED_IDENTIFIERS_IGNORE_CASE' IN SESSION")
+            .await?;
+        let ignore_quoted_identifier_case = resp.data.as_deref().and_then(|rows| {
+            rows.iter().find_map(|row| {
+                let name = row.first()?.as_str()?;
+                name.eq_ignore_ascii_case("QUOTED_IDENTIFIERS_IGNORE_CASE")
+                    .then(|| row.get(1)?.as_str())
+                    .flatten()
+            })
+        });
+        match ignore_quoted_identifier_case {
+            Some(value) if value.eq_ignore_ascii_case("false") => {}
+            Some(_) => {
+                return Err(Error::Config(
+                    "QUOTED_IDENTIFIERS_IGNORE_CASE must be FALSE so quoted source column names \
+                     retain their exact case"
+                        .to_owned(),
+                ));
+            }
+            None => {
+                return Err(Error::Config(
+                    "Could not determine the effective QUOTED_IDENTIFIERS_IGNORE_CASE setting"
+                        .to_owned(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -430,98 +465,122 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.sql_client.validate_table_schema(table_name, &expected_column_names).await
     }
 
-    /// Apply column additions, renames, updates, and removals from a schema
-    /// diff.
-    pub async fn apply_schema_diff(&self, table_name: &str, diff: &SchemaDiff) -> Result<()> {
-        if diff.is_empty() {
+    /// Translates a validated schema plan into Snowflake DDL in the supplied
+    /// order.
+    pub async fn apply_schema_plan(&self, table_name: &str, plan: &SchemaPlan) -> Result<()> {
+        if plan.is_empty() {
             return Ok(());
         }
 
-        for col in &diff.columns_to_add {
-            let add_column_default_clause = schema::add_column_default_clause(col);
-            self.sql_client
-                .add_column(
-                    table_name,
-                    &col.name,
-                    schema::type_name(&col.typ),
-                    add_column_default_clause.as_deref(),
-                )
-                .await?;
-        }
-
-        for change in &diff.columns_to_change {
-            for modification in &change.modifications {
-                let ColumnModification::Rename { old_name, new_name } = modification else {
-                    continue;
-                };
-
-                self.sql_client.rename_column(table_name, old_name, new_name).await?;
-            }
-        }
-
-        for change in &diff.columns_to_change {
-            for modification in &change.modifications {
-                match modification {
-                    ColumnModification::Rename { .. } => {}
-                    ColumnModification::Nullability { old_nullable, new_nullable } => {
+        // Translate the shared plan without revalidating names or regrouping
+        // operations.
+        for operation in plan.ordered_operations() {
+            match operation {
+                SchemaOperation::DropColumn { before_column_schema, reason: _ } => {
+                    self.sql_client.drop_column(table_name, &before_column_schema.name).await?;
+                }
+                SchemaOperation::AddColumn { after_column_schema, reason } => {
+                    if !after_column_schema.nullable {
                         warn!(
                             table_name,
-                            column_name = %change.new_column.name,
-                            old_nullable,
-                            new_nullable,
-                            "skipping source column nullability change for snowflake"
+                            column_name = %after_column_schema.name,
+                            "adding a source not null column as nullable in snowflake; the \
+                             destination schema will be more permissive"
                         );
                     }
-                    ColumnModification::Default { old_expression, new_expression } => {
-                        if new_expression.is_some() {
-                            Self::warn_skipping_column_default_change(table_name, change);
+
+                    let add_column_default_clause =
+                        if *reason == ColumnPresenceChangeReason::ReplicationMask {
+                            if after_column_schema.default_expression.is_some() {
+                                warn!(
+                                    table_name,
+                                    column_name = %after_column_schema.name,
+                                    "not applying the source default to a publication-added \
+                                     snowflake column because snowflake would populate historical \
+                                     destination rows; adding the column as nullable without a \
+                                     default"
+                                );
+                            }
+                            None
                         } else {
-                            Self::warn_skipping_column_default_drop(
+                            schema::add_column_default_clause(after_column_schema)
+                        };
+                    self.sql_client
+                        .add_column(
+                            table_name,
+                            &after_column_schema.name,
+                            schema::type_name(&after_column_schema.typ),
+                            add_column_default_clause.as_deref(),
+                        )
+                        .await?;
+                }
+                SchemaOperation::AlterColumn { alteration } => {
+                    let before = alteration.before_column_schema();
+                    let after = alteration.after_column_schema();
+                    match alteration.kind() {
+                        ColumnAlterationKind::Rename => {
+                            self.sql_client
+                                .rename_column(table_name, &before.name, &after.name)
+                                .await?;
+                        }
+                        ColumnAlterationKind::Type => {
+                            warn_unsupported_column_type_change(
+                                "snowflake",
                                 table_name,
-                                change,
-                                old_expression.as_deref(),
+                                alteration,
                             );
                         }
+                        ColumnAlterationKind::Nullability => {
+                            if after.nullable {
+                                debug!(
+                                    table_name,
+                                    column_name = %before.name,
+                                    "snowflake destination column is already nullable"
+                                );
+                            } else {
+                                warn!(
+                                    table_name,
+                                    column_name = %before.name,
+                                    "snowflake keeps source columns nullable so key-only delete \
+                                     records remain writable"
+                                );
+                            }
+                        }
+                        ColumnAlterationKind::Default => match (
+                            before.default_expression.as_deref(),
+                            after.default_expression.as_deref(),
+                        ) {
+                            (Some(_), None) => warn!(
+                                table_name,
+                                column_name = %before.name,
+                                "skipping source column default removal for snowflake because \
+                                 defaults introduced by alter table add column cannot be dropped \
+                                 safely"
+                            ),
+                            (None, Some(_)) => warn!(
+                                table_name,
+                                column_name = %before.name,
+                                "skipping source column default addition for snowflake because \
+                                 alter column set default is only supported for existing sequence \
+                                 defaults"
+                            ),
+                            (Some(_), Some(_)) => warn!(
+                                table_name,
+                                column_name = %before.name,
+                                "skipping source column default replacement for snowflake because \
+                                 existing defaults cannot be changed safely"
+                            ),
+                            (None, None) => {
+                                unreachable!("default alteration should change the default");
+                            }
+                        },
                     }
                 }
             }
         }
 
-        for col in &diff.columns_to_remove {
-            self.sql_client.drop_column(table_name, &col.name).await?;
-        }
-
         Ok(())
     }
-
-    /// Logs that Snowflake default-change DDL is being skipped.
-    fn warn_skipping_column_default_change(table_name: &str, change: &ColumnChange) {
-        warn!(
-            table_name,
-            column_name = %change.new_column.name,
-            "skipping source column default change for snowflake because alter column set default \
-             is only supported for existing sequence defaults"
-        );
-    }
-
-    /// Logs that Snowflake default-drop DDL is being skipped.
-    fn warn_skipping_column_default_drop(
-        table_name: &str,
-        change: &ColumnChange,
-        old_expression: Option<&str>,
-    ) {
-        if old_expression.is_some_and(|default_expression| {
-            schema::supports_column_default(default_expression, &change.old_column.typ)
-        }) {
-            warn!(
-                table_name,
-                column_name = %change.new_column.name,
-                "skipping source column default removal for snowflake because defaults introduced \
-                 by alter table add column cannot be dropped safely"
-            );
-        }
-    }
-
     /// Applies a source truncate to Snowflake and positions the table's
     /// Snowpipe channel at `truncate_offset`.
     ///

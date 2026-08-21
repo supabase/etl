@@ -1,11 +1,14 @@
-use std::fmt;
+use std::{
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use etl::{
     data::Cell,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     pipeline::PipelineId,
-    schema::{ColumnSchema, ReplicatedTableSchema, Type, is_array_type},
+    schema::{ColumnSchema, ReplicatedTableSchema, is_array_type},
 };
 use gcp_bigquery_client::{
     Client,
@@ -34,11 +37,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     bigquery::{
+        BIGQUERY_COLUMN_NAME_MAPPING,
         encoding::BigQueryTableRow,
         metrics::{
             ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
         },
-        schema::{create_columns_spec, default_expression_sql, postgres_to_bigquery_type},
+        schema::{create_columns_spec, postgres_to_bigquery_type},
         sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
     },
     retry::{RetryDecision, RetryPolicy, retry_with_backoff},
@@ -75,8 +79,17 @@ const QUERY_RETRY_POLICY: RetryPolicy = RetryPolicy {
 };
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
 /// status code.
-const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] =
-    &["backendError", "jobBackendError", "jobRateLimitExceeded", "rateLimitExceeded"];
+const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] = &[
+    "backendError",
+    "jobBackendError",
+    "jobInternalError",
+    "jobRateLimitExceeded",
+    "rateLimitExceeded",
+];
+/// BigQuery response reasons documented as identifying a created, failed query
+/// job that should be retried as a new job.
+const FAILED_BIGQUERY_QUERY_JOB_REASONS: &[&str] =
+    &["jobBackendError", "jobInternalError", "jobRateLimitExceeded"];
 /// Protobuf type name for BigQuery storage errors embedded in gRPC status
 /// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
@@ -195,7 +208,7 @@ fn compute_max_inflight_requests(connection_pool_size: usize) -> usize {
 }
 
 /// Adds equal jitter to a retry delay.
-fn storage_write_retry_delay_with_jitter(delay: Duration) -> Duration {
+fn retry_delay_with_jitter(delay: Duration) -> Duration {
     if delay.is_zero() {
         return delay;
     }
@@ -285,6 +298,34 @@ fn is_transient_query_error(error: &BQError) -> RetryDecision {
         }
         _ => RetryDecision::Stop,
     }
+}
+
+/// Returns whether retrying a query error requires creating a new query job.
+fn query_retry_requires_new_request_id(error: &BQError) -> bool {
+    let BQError::ResponseError { error } = error else {
+        return false;
+    };
+
+    error.error.errors.iter().any(|nested_error| {
+        nested_error
+            .get("reason")
+            .is_some_and(|reason| FAILED_BIGQUERY_QUERY_JOB_REASONS.contains(&reason.as_str()))
+    })
+}
+
+/// Generates an idempotency key accepted by BigQuery request-ID fields.
+fn generate_bigquery_request_id() -> String {
+    format!("{:032x}", random::<u128>())
+}
+
+/// Ensures local retries of one BigQuery query job share an idempotency key.
+///
+/// BigQuery retains `jobs.query` request IDs for 15 minutes. The bounded retry
+/// policy below is shorter than that window, so one generated ID safely covers
+/// every in-process attempt while preserving an ID supplied by a caller.
+fn with_query_request_id(mut request: QueryRequest) -> QueryRequest {
+    request.request_id.get_or_insert_with(generate_bigquery_request_id);
+    request
 }
 
 /// Returns whether BigQuery rejected `DROP DEFAULT` because no default exists.
@@ -1073,26 +1114,14 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Sets a supported default expression on a BigQuery column.
-    pub async fn set_column_default(
+    /// Sets a rendered default expression on a BigQuery column.
+    pub(super) async fn set_column_default(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         column_name: &str,
-        typ: &Type,
         default_expression: &str,
     ) -> EtlResult<()> {
-        let Some(rendered_default_expression) = default_expression_sql(default_expression, typ)
-        else {
-            warn!(
-                dataset_id = %dataset_id,
-                table_id = %table_id,
-                column_name = %column_name,
-                "skipping unsupported source column default for bigquery"
-            );
-            return Ok(());
-        };
-
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
         let column_name = quote_identifier(column_name, "BigQuery column name")?;
 
@@ -1100,7 +1129,7 @@ impl BigQueryClient {
 
         let query = format!(
             "alter table {full_table_name} alter column {column_name} set default \
-             {rendered_default_expression}"
+             {default_expression}"
         );
 
         let _ = self.query(QueryRequest::new(query)).await?;
@@ -1109,7 +1138,7 @@ impl BigQueryClient {
     }
 
     /// Clears a default expression from a BigQuery column when present.
-    pub async fn clear_column_default(
+    pub(super) async fn clear_column_default(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
@@ -1156,7 +1185,7 @@ impl BigQueryClient {
             .fields
             .unwrap_or_default()
             .into_iter()
-            .find(|field| field.name == column_name)
+            .find(|field| BIGQUERY_COLUMN_NAME_MAPPING.equivalent(&field.name, column_name))
             .ok_or_else(|| {
                 etl_error!(
                     ErrorKind::DestinationError,
@@ -1262,8 +1291,7 @@ impl BigQueryClient {
                         return Err(storage_write_retry_timeout_error(&retry_summary));
                     }
 
-                    let sleep_delay =
-                        storage_write_retry_delay_with_jitter(retry_delay.min(remaining_timeout));
+                    let sleep_delay = retry_delay_with_jitter(retry_delay.min(remaining_timeout));
 
                     if sleep_delay.is_zero() {
                         return Err(storage_write_retry_timeout_error(&retry_summary));
@@ -1454,12 +1482,24 @@ impl BigQueryClient {
 
     /// Executes a BigQuery SQL query while preserving the provider error.
     async fn query_with_bigquery_error(&self, request: QueryRequest) -> Result<ResultSet, BQError> {
+        let mut request = with_query_request_id(request);
+        let requires_new_request_id = AtomicBool::new(false);
         let query_response = retry_with_backoff(
             QUERY_RETRY_POLICY,
-            is_transient_query_error,
-            |delay| delay,
+            |error| {
+                let decision = is_transient_query_error(error);
+                requires_new_request_id.store(
+                    decision == RetryDecision::Retry && query_retry_requires_new_request_id(error),
+                    Ordering::Relaxed,
+                );
+                decision
+            },
+            retry_delay_with_jitter,
             log_query_retry,
             || {
+                if requires_new_request_id.swap(false, Ordering::Relaxed) {
+                    request.request_id = Some(generate_bigquery_request_id());
+                }
                 let request = request.clone();
                 async move { self.client.job().query(&self.project_id, request).await }
             },
@@ -1522,24 +1562,66 @@ mod tests {
         assert!(!error.to_string().contains("customer@example.com"));
     }
 
-    #[test]
-    fn query_retry_classifies_bigquery_table_update_rate_limit_as_transient() {
-        let error = BQError::ResponseError {
+    fn query_response_error(code: i64, reason: &str) -> BQError {
+        BQError::ResponseError {
             error: ResponseError {
                 error: NestedResponseError {
-                    code: 400,
-                    errors: vec![
-                        [("reason".to_owned(), "jobRateLimitExceeded".to_owned())]
-                            .into_iter()
-                            .collect(),
-                    ],
-                    message: "Job exceeded rate limits".to_owned(),
-                    status: "INVALID_ARGUMENT".to_owned(),
+                    code,
+                    errors: vec![[("reason".to_owned(), reason.to_owned())].into_iter().collect()],
+                    message: "Placeholder BigQuery error".to_owned(),
+                    status: "PLACEHOLDER_STATUS".to_owned(),
                 },
             },
-        };
+        }
+    }
 
-        assert_eq!(is_transient_query_error(&error), RetryDecision::Retry);
+    #[test]
+    fn query_retry_classification_matches_bigquery_job_lifecycle() {
+        let cases = [
+            ("jobBackendError", 400, RetryDecision::Retry, true),
+            ("jobInternalError", 400, RetryDecision::Retry, true),
+            ("jobRateLimitExceeded", 400, RetryDecision::Retry, true),
+            ("backendError", 500, RetryDecision::Retry, false),
+            ("internalError", 500, RetryDecision::Retry, false),
+            ("rateLimitExceeded", 403, RetryDecision::Retry, false),
+            ("unknownServerError", 503, RetryDecision::Retry, false),
+            ("invalidQuery", 400, RetryDecision::Stop, false),
+            ("resourcesExceeded", 400, RetryDecision::Stop, false),
+            ("timeout", 400, RetryDecision::Stop, false),
+        ];
+
+        for (reason, code, expected_decision, expected_new_request_id) in cases {
+            let error = query_response_error(code, reason);
+
+            assert_eq!(is_transient_query_error(&error), expected_decision, "{reason}");
+            assert_eq!(
+                query_retry_requires_new_request_id(&error),
+                expected_new_request_id,
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn query_request_id_is_generated_once_and_survives_cloning() {
+        let request = with_query_request_id(QueryRequest::new("select 1"));
+        let request_id = request.request_id.clone().unwrap();
+        let cloned_request = request.clone();
+
+        assert_eq!(request_id.len(), 32);
+        assert!(request_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(cloned_request.request_id, Some(request_id.clone()));
+        assert_eq!(request.request_id, Some(request_id));
+    }
+
+    #[test]
+    fn query_request_id_preserves_caller_value() {
+        let mut request = QueryRequest::new("select 1");
+        request.request_id = Some("caller-request-id".to_owned());
+
+        let request = with_query_request_id(request);
+
+        assert_eq!(request.request_id.as_deref(), Some("caller-request-id"));
     }
 
     #[test]
@@ -1636,11 +1718,11 @@ mod tests {
     }
 
     #[test]
-    fn storage_write_retry_jitter_stays_within_delay_bounds() {
+    fn retry_jitter_stays_within_delay_bounds() {
         let delay = Duration::from_secs(10);
 
         for _ in 0..100 {
-            let jittered_delay = storage_write_retry_delay_with_jitter(delay);
+            let jittered_delay = retry_delay_with_jitter(delay);
 
             assert!(jittered_delay >= Duration::from_secs(5));
             assert!(jittered_delay <= delay);
