@@ -1526,7 +1526,7 @@ async fn logical_replication_omits_relation_after_noop_alter_table_commands() {
 
     // These commands are collected by ddl_command_end, but their successful
     // no-op paths do not invalidate the table's relcache entry.
-    let alter_table_commands = [
+    let mut alter_table_commands = vec![
         format!("alter table {quoted_table_name} owner to current_user"),
         format!("alter table {quoted_table_name} alter column age drop not null"),
         format!("alter table {quoted_table_name} disable trigger user"),
@@ -1536,11 +1536,14 @@ async fn logical_replication_omits_relation_after_noop_alter_table_commands() {
         format!("alter table {quoted_table_name} drop constraint if exists missing_constraint"),
         format!("alter table {quoted_table_name} alter column age drop identity if exists"),
         format!("alter table {quoted_table_name} set logged"),
-        format!("alter table {quoted_table_name} set access method heap"),
         format!("alter table {quoted_table_name} set tablespace pg_default"),
         format!("alter table {quoted_table_name} set without cluster"),
         format!("alter table {quoted_table_name} set without oids"),
     ];
+    if !below_version!(database.server_version(), POSTGRES_15) {
+        alter_table_commands
+            .push(format!("alter table {quoted_table_name} set access method heap"));
+    }
     for command in &alter_table_commands {
         database.run_sql(command).await.unwrap();
     }
