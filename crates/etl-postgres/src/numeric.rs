@@ -564,38 +564,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_simple_integer() {
-        let result = PgNumeric::from_str("123").unwrap();
-        if let PgNumeric::Value { sign, weight: _, scale, digits } = result {
-            assert_eq!(sign, Sign::Positive);
-            assert_eq!(scale, 0);
-            assert_eq!(digits, vec![123]);
-        } else {
-            panic!("Invalid PgNumeric value");
-        }
-    }
+    fn parses_finite_values_into_base_10000_digits() {
+        for (input, expected_sign, expected_scale, expected_digits) in [
+            ("123", Sign::Positive, 0, vec![123]),
+            ("-456", Sign::Negative, 0, vec![456]),
+            ("123.45", Sign::Positive, 2, vec![123, 4500]),
+        ] {
+            let PgNumeric::Value { sign, scale, digits, .. } = PgNumeric::from_str(input).unwrap()
+            else {
+                panic!("Expected Value variant");
+            };
 
-    #[test]
-    fn parse_negative() {
-        let result = PgNumeric::from_str("-456").unwrap();
-        if let PgNumeric::Value { sign, weight: _, scale, digits } = result {
-            assert_eq!(sign, Sign::Negative);
-            assert_eq!(scale, 0);
-            assert_eq!(digits, vec![456]);
-        } else {
-            panic!("Invalid PgNumeric value");
-        }
-    }
-
-    #[test]
-    fn parse_decimal() {
-        let result = PgNumeric::from_str("123.45").unwrap();
-        if let PgNumeric::Value { sign, weight: _, scale, digits } = result {
-            assert_eq!(sign, Sign::Positive);
-            assert_eq!(scale, 2);
-            assert_eq!(digits, vec![123, 4500]);
-        } else {
-            panic!("Invalid PgNumeric value");
+            assert_eq!(sign, expected_sign);
+            assert_eq!(scale, expected_scale);
+            assert_eq!(digits, expected_digits);
         }
     }
 
@@ -724,55 +706,67 @@ mod tests {
     }
 
     #[test]
-    fn display_simple_integers() {
-        let num = PgNumeric::Value { sign: Sign::Positive, weight: 0, scale: 0, digits: vec![123] };
-        assert_eq!(format!("{num}"), "123");
-
-        let num = PgNumeric::Value { sign: Sign::Negative, weight: 0, scale: 0, digits: vec![456] };
-        assert_eq!(format!("{num}"), "-456");
-    }
-
-    #[test]
-    fn display_decimals() {
-        let num = PgNumeric::Value {
-            sign: Sign::Positive,
-            weight: 0,
-            scale: 2,
-            digits: vec![1234, 5000],
-        };
-        assert_eq!(format!("{num}"), "1234.50");
-    }
-
-    #[test]
-    fn display_zero() {
-        let num = PgNumeric::Value { sign: Sign::Positive, weight: 0, scale: 0, digits: vec![] };
-        assert_eq!(format!("{num}"), "0");
-    }
-
-    #[test]
-    fn zero_canonicalization_basic() {
-        for (s, expected) in [("0", "0"), ("0.0", "0.0"), ("000", "0"), ("000.000", "0.000")] {
-            let num = PgNumeric::from_str(s).unwrap();
+    fn displays_finite_values() {
+        for (num, expected) in [
+            (
+                PgNumeric::Value { sign: Sign::Positive, weight: 0, scale: 0, digits: vec![123] },
+                "123",
+            ),
+            (
+                PgNumeric::Value { sign: Sign::Negative, weight: 0, scale: 0, digits: vec![456] },
+                "-456",
+            ),
+            (
+                PgNumeric::Value {
+                    sign: Sign::Positive,
+                    weight: 0,
+                    scale: 2,
+                    digits: vec![1234, 5000],
+                },
+                "1234.50",
+            ),
+            (PgNumeric::Value { sign: Sign::Positive, weight: 0, scale: 0, digits: vec![] }, "0"),
+            (
+                PgNumeric::Value {
+                    sign: Sign::Positive,
+                    weight: 1,
+                    scale: 0,
+                    digits: vec![1234, 5678],
+                },
+                "12345678",
+            ),
+            (
+                PgNumeric::Value { sign: Sign::Positive, weight: -1, scale: 4, digits: vec![1234] },
+                "0.1234",
+            ),
+            (
+                PgNumeric::Value {
+                    sign: Sign::Positive,
+                    weight: 0,
+                    scale: 4,
+                    digits: vec![1200, 0],
+                },
+                "1200.0000",
+            ),
+        ] {
             assert_eq!(num.to_string(), expected);
-
-            if let PgNumeric::Value { sign, weight, scale: _, digits } = num {
-                assert_eq!(sign, Sign::Positive);
-                assert_eq!(weight, 0);
-                assert!(digits.is_empty());
-            } else {
-                panic!("Expected Value variant");
-            }
         }
     }
 
     #[test]
-    fn zero_canonicalization_negative_zero() {
-        for (s, expected) in [("-0", "0"), ("-0.00", "0.00")] {
+    fn zero_canonicalization_normalizes_sign_and_preserves_scale() {
+        for (s, expected) in [
+            ("0", "0"),
+            ("0.0", "0.0"),
+            ("000", "0"),
+            ("000.000", "0.000"),
+            ("-0", "0"),
+            ("-0.00", "0.00"),
+        ] {
             let num = PgNumeric::from_str(s).unwrap();
             assert_eq!(num.to_string(), expected);
 
             if let PgNumeric::Value { sign, weight, scale: _, digits } = num {
-                // Normalize to positive zero.
                 assert_eq!(sign, Sign::Positive);
                 assert_eq!(weight, 0);
                 assert!(digits.is_empty());
@@ -810,51 +804,6 @@ mod tests {
                 panic!("Expected Value variant");
             }
         }
-    }
-
-    #[test]
-    fn display_large_numbers() {
-        let num = PgNumeric::Value {
-            sign: Sign::Positive,
-            weight: 1,
-            scale: 0,
-            digits: vec![1234, 5678],
-        };
-        assert_eq!(format!("{num}"), "12345678");
-    }
-
-    #[test]
-    fn display_small_decimals() {
-        let num =
-            PgNumeric::Value { sign: Sign::Positive, weight: -1, scale: 4, digits: vec![1234] };
-        assert_eq!(format!("{num}"), "0.1234");
-    }
-
-    #[test]
-    fn leading_zero_suppression() {
-        let num = PgNumeric::Value {
-            sign: Sign::Positive,
-            weight: 0,
-            scale: 0,
-            // The first digit has leading zeros when formatted as 4 digits.
-            digits: vec![123],
-        };
-        // Formatting should suppress those leading zeros.
-        assert_eq!(format!("{num}"), "123");
-    }
-
-    #[test]
-    fn trailing_decimal_zeros() {
-        let num = PgNumeric::Value {
-            sign: Sign::Positive,
-            weight: 0,
-            scale: 4,
-            // This represents 120.0000.
-            digits: vec![1200, 0],
-        };
-        let output = format!("{num}");
-        // Display should preserve trailing zeros according to scale.
-        assert!(output.ends_with("0000"));
     }
 
     #[test]
