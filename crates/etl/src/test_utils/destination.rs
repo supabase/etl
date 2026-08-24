@@ -46,8 +46,7 @@ pub async fn write_table_rows<D: Destination>(
         None
     } else {
         let ordinal = NEXT_TABLE_COPY_BATCH_ID.fetch_add(1, Ordering::Relaxed);
-        let id = TableCopyBatchId::new(TEST_TABLE_COPY_ATTEMPT_ID, ordinal);
-        Some(id)
+        Some(TableCopyBatchId::new(TEST_TABLE_COPY_ATTEMPT_ID, ordinal))
     };
 
     write_table_rows_inner(destination, schema, batch_id, rows).await

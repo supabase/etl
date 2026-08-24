@@ -4403,7 +4403,7 @@ mod tests {
                     .await
                     .expect("failed to create destination");
             destination
-                .write_table_rows_inner(
+                .write_table_rows(
                     &replicated_table_schema,
                     Some(test_table_copy_batch_id()),
                     vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())])],
@@ -4483,7 +4483,7 @@ mod tests {
             .expect("failed to create destination");
 
             destination
-                .write_table_rows_inner(
+                .write_table_rows(
                     &replicated_table_schema,
                     Some(test_table_copy_batch_id()),
                     vec![
@@ -4550,7 +4550,7 @@ mod tests {
             .expect("failed to create destination");
 
             destination
-                .write_table_rows_inner(
+                .write_table_rows(
                     &replicated_table_schema,
                     Some(test_table_copy_batch_id()),
                     vec![
@@ -4614,7 +4614,7 @@ mod tests {
             .expect("failed to create destination");
 
             destination
-                .write_table_rows_inner(
+                .write_table_rows(
                     &replicated_table_schema,
                     Some(test_table_copy_batch_id()),
                     vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())])],
