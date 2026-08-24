@@ -25,6 +25,8 @@ use std::sync::LazyLock;
 use std::{f64::consts::PI, path::Path, sync::Arc, time::Duration};
 
 use chrono::NaiveDate;
+#[cfg(feature = "test-utils")]
+use chrono::{TimeDelta, Utc};
 use duckdb::Connection;
 use etl::{
     data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
@@ -44,10 +46,19 @@ use etl_destinations::ducklake::{
 use etl_destinations::ducklake::{
     arm_fail_after_atomic_batch_commit_once_for_tests,
     arm_fail_after_copy_batch_commit_once_for_tests, ducklake_staging_table_creations_for_tests,
-    reset_ducklake_test_hooks,
+    reset_ducklake_test_hooks, run_external_maintenance_watcher,
+};
+#[cfg(feature = "test-utils")]
+use etl_maintenance::{
+    ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
+    ExternalMaintenanceOperationRun, ExternalMaintenanceOperations, ExternalMaintenancePause,
+    ExternalMaintenancePausePolicy, ExternalMaintenanceReplicatorState, ExternalMaintenanceRun,
+    ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig, PostgresExternalMaintenanceStore,
 };
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
+#[cfg(feature = "test-utils")]
+use sqlx::{postgres::PgPoolOptions, types::Json};
 #[cfg(feature = "test-utils")]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::Url;
@@ -175,6 +186,26 @@ async fn open_lake_conn_when_tables_visible(
             "timed out waiting for DuckLake tables to become visible: {table_names:?}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(feature = "test-utils")]
+async fn wait_for_replicator_maintenance_state(
+    store: &PostgresExternalMaintenanceStore,
+    expected: ExternalMaintenanceReplicatorState,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = store.load_state().await.unwrap();
+        if state.replicator.as_ref().is_some_and(|status| status.state == expected) {
+            return;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for replicator maintenance state {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -3050,6 +3081,176 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
     assert_eq!(names.len(), 16);
     assert_eq!(names[0], "name-1");
     assert_eq!(names[15], "name-16");
+}
+
+/// Successful inline-flush maintenance must recreate every DuckDB connection
+/// before streaming replication resumes.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn external_inline_flush_recreates_pools_before_replication_resumes() {
+    use etl::event::InsertEvent;
+
+    let lake = create_test_lake("external_inline_flush_recreates_pools").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let pipeline_id = 1047_i64;
+    let run_id = "pipe-1047-inline-flush";
+
+    let schema = make_schema(1047, "public", "inline_flush_pool_replacement");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_events(
+            (0..8)
+                .map(|idx| {
+                    Event::Insert(InsertEvent {
+                        commit_lsn: PgLsn::from(1_047_000_u64 + idx as u64),
+                        tx_ordinal: 0,
+                        replicated_table_schema: replicated_table_schema.clone(),
+                        table_row: TableRow::new(vec![
+                            Cell::I32(idx + 1),
+                            Cell::String(format!("before-{}", idx + 1)),
+                        ]),
+                    })
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(destination.streaming_connection_open_count_for_tests(), 1);
+    assert_eq!(destination.copy_connection_open_count_for_tests(), 1);
+
+    let coordination_pool =
+        PgPoolOptions::new().max_connections(2).connect(catalog_url.as_str()).await.unwrap();
+    let coordination_store =
+        PostgresExternalMaintenanceStore::new(pipeline_id, coordination_pool.clone());
+    coordination_store.ensure_schema().await.unwrap();
+    coordination_store
+        .ensure_pipeline_state(
+            ExternalMaintenancePausePolicy::default(),
+            ExternalMaintenanceOperationPolicy::default(),
+        )
+        .await
+        .unwrap();
+
+    let watcher = tokio::spawn(run_external_maintenance_watcher(
+        destination.clone(),
+        coordination_store.clone(),
+        ExternalMaintenanceWatcherConfig {
+            poll_interval: Duration::from_millis(10),
+            request_cooldown: Duration::ZERO,
+            store_timeout: Duration::from_secs(1),
+            inline_flush_min_inlined_bytes: u64::MAX,
+            rewrite_data_files_min_active_data_files: i64::MAX,
+        },
+    ));
+
+    let now = Utc::now();
+    let operations = ExternalMaintenanceOperations {
+        inline_flush: true,
+        ..ExternalMaintenanceOperations::default()
+    };
+    sqlx::query(
+        "update etl.external_maintenance_state set active_run = $2, pause_request = $3, \
+         operation_request = null, updated_at = now() where pipeline_id = $1",
+    )
+    .bind(pipeline_id)
+    .bind(Json(ExternalMaintenanceRun {
+        run_id: run_id.to_owned(),
+        started_at: Some(now),
+        operations,
+    }))
+    .bind(Json(ExternalMaintenancePause {
+        run_id: run_id.to_owned(),
+        requested_at: Some(now),
+        expires_at: now + TimeDelta::minutes(5),
+    }))
+    .execute(&coordination_pool)
+    .await
+    .unwrap();
+
+    wait_for_replicator_maintenance_state(
+        &coordination_store,
+        ExternalMaintenanceReplicatorState::Quiesced,
+    )
+    .await;
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(flush_inlined_rows(&conn, &table_name), 8);
+    drop(conn);
+
+    let completed_at = Utc::now();
+    let successful_operations = ExternalMaintenanceOperationHistory {
+        inline_flush: Some(ExternalMaintenanceOperationRun {
+            run_id: Some(run_id.to_owned()),
+            completed_at,
+        }),
+        ..ExternalMaintenanceOperationHistory::default()
+    };
+    sqlx::query(
+        "update etl.external_maintenance_state set active_run = null, pause_request = null, \
+         last_successful_operations = $2, last_completed_at = $3, updated_at = now() where \
+         pipeline_id = $1",
+    )
+    .bind(pipeline_id)
+    .bind(Json(successful_operations))
+    .bind(completed_at)
+    .execute(&coordination_pool)
+    .await
+    .unwrap();
+
+    wait_for_replicator_maintenance_state(
+        &coordination_store,
+        ExternalMaintenanceReplicatorState::Running,
+    )
+    .await;
+
+    destination
+        .write_events(
+            (8..16)
+                .map(|idx| {
+                    Event::Insert(InsertEvent {
+                        commit_lsn: PgLsn::from(1_047_000_u64 + idx as u64),
+                        tx_ordinal: 0,
+                        replicated_table_schema: replicated_table_schema.clone(),
+                        table_row: TableRow::new(vec![
+                            Cell::I32(idx + 1),
+                            Cell::String(format!("after-{}", idx + 1)),
+                        ]),
+                    })
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(destination.streaming_connection_open_count_for_tests(), 2);
+    assert_eq!(destination.copy_connection_open_count_for_tests(), 2);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 16);
+    assert_eq!(read_streaming_progress(&conn, &table_name), Some((1_047_015, 0)));
+
+    watcher.abort();
+    assert!(watcher.await.unwrap_err().is_cancelled());
+    destination.shutdown().await.unwrap();
 }
 
 /// A mixed mutation batch should reuse one temp staging table for multiple

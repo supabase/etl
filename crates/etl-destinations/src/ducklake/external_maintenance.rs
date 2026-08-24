@@ -135,7 +135,7 @@ where
                 }
 
                 expire_snapshots_gate.initialize_from_state_once(&state);
-                reconcile_pause(&store, &config, &destination, &mut held_pause, &state).await;
+                reconcile_pause(&store, &config, &destination, &mut held_pause, &state).await?;
                 maybe_request_operations(
                     &store,
                     &destination,
@@ -191,12 +191,23 @@ async fn reconcile_pause<S, M>(
     destination: &DuckLakeDestination<S>,
     held_pause: &mut Option<HeldPause>,
     state: &ExternalMaintenanceState,
-) where
+) -> EtlResult<()>
+where
     S: DestinationStore,
     M: ExternalMaintenanceStore,
 {
     let active_pause = bounded_active_pause_request(state, Utc::now());
     let Some(pause) = active_pause else {
+        if let Some(held) = held_pause.as_ref()
+            && successful_maintenance_run(state, &held.run_id, held.operations, held.quiesced_at)
+        {
+            info!(
+                run_id = %held.run_id,
+                "ducklake external maintenance completed, recreating connection pools before \
+                 resuming foreground mutations"
+            );
+            destination.recreate_pools_after_external_maintenance().await?;
+        }
         if let Some(held) = held_pause.take() {
             info!(
                 run_id = %held.run_id,
@@ -205,7 +216,7 @@ async fn reconcile_pause<S, M>(
             release_held_pause(held, "cleared");
             report_running(store, config.store_timeout).await;
         }
-        return;
+        return Ok(());
     };
 
     if let Some(held) = held_pause.as_mut()
@@ -222,7 +233,7 @@ async fn reconcile_pause<S, M>(
         {
             held.quiesced_reported = true;
         }
-        return;
+        return Ok(());
     }
 
     if let Some(held) = held_pause.take() {
@@ -264,7 +275,7 @@ async fn reconcile_pause<S, M>(
             "expired",
         );
         report_running(store, config.store_timeout).await;
-        return;
+        return Ok(());
     }
 
     let quiesced_at = Utc::now();
@@ -294,6 +305,8 @@ async fn reconcile_pause<S, M>(
         quiesced_reported,
         _pause: external_pause,
     });
+
+    Ok(())
 }
 
 async fn release_expired_pause_if_needed<M>(
@@ -349,6 +362,33 @@ fn active_pause_operations(
         .operation_request
         .as_ref()
         .map_or(ExternalMaintenanceOperations::default(), |request| request.operations)
+}
+
+/// Returns whether one paused run successfully completed any selected operation.
+fn successful_maintenance_run(
+    state: &ExternalMaintenanceState,
+    held_run_id: &str,
+    held_operations: ExternalMaintenanceOperations,
+    quiesced_at: DateTime<Utc>,
+) -> bool {
+    let completed_for_held_run = |run: Option<&ExternalMaintenanceOperationRun>| {
+        run.is_some_and(|run| {
+            run.run_id
+                .as_deref()
+                .map_or(run.completed_at >= quiesced_at, |run_id| run_id == held_run_id)
+        })
+    };
+    let successful = &state.last_successful_operations;
+
+    (held_operations.inline_flush && completed_for_held_run(successful.inline_flush.as_ref()))
+        || (held_operations.merge_adjacent_files
+            && completed_for_held_run(successful.merge_adjacent_files.as_ref()))
+        || (held_operations.rewrite_data_files
+            && completed_for_held_run(successful.rewrite_data_files.as_ref()))
+        || (held_operations.expire_snapshots
+            && completed_for_held_run(successful.expire_snapshots.as_ref()))
+        || (held_operations.cleanup_old_files
+            && completed_for_held_run(successful.cleanup_old_files.as_ref()))
 }
 
 /// Returns a pause request whose expiry is bounded by trusted policy.
@@ -728,7 +768,7 @@ mod tests {
         ExternalMaintenancePausePolicy, ExternalMaintenanceRun, ExternalMaintenanceState,
         OPERATION_EXPIRE_SNAPSHOTS, OPERATION_INLINE_FLUSH, OPERATION_REWRITE_DATA_FILES,
         OPERATION_UNKNOWN, active_pause_operations, bounded_active_pause_request,
-        record_external_maintenance_pause_active,
+        record_external_maintenance_pause_active, successful_maintenance_run,
     };
     use crate::ducklake::metrics::{
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE, register_metrics,
@@ -871,6 +911,72 @@ mod tests {
         };
 
         assert_eq!(active_pause_operations(&state, &pause), request_operations);
+    }
+
+    #[test]
+    fn successful_maintenance_run_accepts_each_matching_selected_operation() {
+        let quiesced_at = Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap();
+        let successful_run = ExternalMaintenanceOperationRun {
+            run_id: Some("run-1".to_owned()),
+            completed_at: quiesced_at + chrono::Duration::minutes(1),
+        };
+        let mut state = ExternalMaintenanceState::present();
+        state.last_successful_operations.inline_flush = Some(successful_run.clone());
+        state.last_successful_operations.merge_adjacent_files = Some(successful_run.clone());
+        state.last_successful_operations.rewrite_data_files = Some(successful_run.clone());
+        state.last_successful_operations.expire_snapshots = Some(successful_run.clone());
+        state.last_successful_operations.cleanup_old_files = Some(successful_run);
+
+        let operation_cases = [
+            ExternalMaintenanceOperations {
+                inline_flush: true,
+                ..ExternalMaintenanceOperations::default()
+            },
+            ExternalMaintenanceOperations {
+                merge_adjacent_files: true,
+                ..ExternalMaintenanceOperations::default()
+            },
+            ExternalMaintenanceOperations {
+                rewrite_data_files: true,
+                ..ExternalMaintenanceOperations::default()
+            },
+            ExternalMaintenanceOperations {
+                expire_snapshots: true,
+                ..ExternalMaintenanceOperations::default()
+            },
+            ExternalMaintenanceOperations {
+                cleanup_old_files: true,
+                ..ExternalMaintenanceOperations::default()
+            },
+        ];
+
+        for operations in operation_cases {
+            assert!(successful_maintenance_run(&state, "run-1", operations, quiesced_at));
+            assert!(!successful_maintenance_run(&state, "run-2", operations, quiesced_at));
+        }
+        assert!(!successful_maintenance_run(
+            &state,
+            "run-1",
+            ExternalMaintenanceOperations::default(),
+            quiesced_at,
+        ));
+    }
+
+    #[test]
+    fn successful_maintenance_run_ignores_unselected_operation_success() {
+        let quiesced_at = Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap();
+        let operations = ExternalMaintenanceOperations {
+            rewrite_data_files: true,
+            ..ExternalMaintenanceOperations::default()
+        };
+        let mut state = ExternalMaintenanceState::present();
+        state.last_successful_operations.cleanup_old_files =
+            Some(ExternalMaintenanceOperationRun {
+                run_id: Some("run-1".to_owned()),
+                completed_at: quiesced_at + chrono::Duration::minutes(1),
+            });
+
+        assert!(!successful_maintenance_run(&state, "run-1", operations, quiesced_at));
     }
 
     #[test]
