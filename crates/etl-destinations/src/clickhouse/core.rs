@@ -2414,15 +2414,16 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
-    /// Builds a primary-key identity schema with two key columns.
+    /// Builds a primary-key identity schema with two key columns whose physical
+    /// order differs from primary-key ordinal order.
     fn replicated_composite_primary_key_schema() -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, false)
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(2),
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 2, false)
                     .with_primary_key(1),
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, false).with_primary_key(2),
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, true),
             ],
         ));
@@ -2501,18 +2502,18 @@ mod tests {
     #[test]
     fn clickhouse_rows_for_update_projects_composite_old_key_in_schema_order() {
         let update_row =
-            TableRow::new(vec![Cell::I32(10), Cell::I32(2), Cell::String("updated".to_owned())]);
+            TableRow::new(vec![Cell::I32(2), Cell::I32(10), Cell::String("updated".to_owned())]);
 
         let rows = clickhouse_rows_for_update(
             &replicated_composite_primary_key_schema(),
             UpdatedTableRow::Full(update_row.clone()),
-            Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(10), Cell::I32(1)]))),
+            Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1), Cell::I32(10)]))),
         )
         .unwrap();
 
         assert_eq!(
             rows.destination_old_key_tombstone,
-            Some(TableRow::new(vec![Cell::I32(10), Cell::I32(1), Cell::Null]))
+            Some(TableRow::new(vec![Cell::I32(1), Cell::I32(10), Cell::Null]))
         );
         assert_eq!(rows.destination_updated_row, update_row);
     }
