@@ -123,7 +123,8 @@ impl SourceInspectionError {
             | SourceInspectionError::TableNotFound(_) => StatusCode::NOT_FOUND,
             SourceInspectionError::TenantId(_)
             | SourceInspectionError::PublicationsDb(
-                PublicationsV2DbError::InvalidTableReference { .. },
+                PublicationsV2DbError::InvalidTableReference { .. }
+                | PublicationsV2DbError::InvalidRowFilter { .. },
             ) => StatusCode::BAD_REQUEST,
             SourceInspectionError::PublicationsDb(
                 PublicationsV2DbError::OpenEndedPublicationCannotBeUpdated

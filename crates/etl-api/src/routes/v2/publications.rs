@@ -39,6 +39,7 @@ pub struct ReadPublicationsResponse {
     responses(
         (status = 200, description = "Publications listed successfully", body = ReadPublicationsResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 401, description = "Authentication required", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
         (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
@@ -81,6 +82,7 @@ pub(crate) async fn read_publications(
     responses(
         (status = 200, description = "Publication retrieved successfully", body = PublicationDetails),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 401, description = "Authentication required", body = ErrorMessage),
         (status = 404, description = "Source or publication not found", body = ErrorMessage),
         (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
         (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
@@ -126,10 +128,14 @@ pub(crate) async fn read_publication(
     responses(
         (status = 201, description = "Publication created successfully", body = PublicationDetails),
         (status = 200, description = "Publication updated successfully", body = PublicationDetails),
-        (status = 400, description = "Invalid publication configuration", body = ErrorMessage),
+        (status = 400, description = "Invalid publication configuration or malformed JSON"),
+        (status = 401, description = "Authentication required", body = ErrorMessage),
         (status = 403, description = "The source database user cannot create or update the publication", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 409, description = "The existing publication cannot be updated as requested", body = ErrorMessage),
+        (status = 413, description = "The request body is too large", body = String),
+        (status = 415, description = "The request content type is not JSON", body = String),
+        (status = 422, description = "The request body does not match the publication configuration", body = String),
         (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
         (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
         (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
@@ -175,6 +181,7 @@ pub(crate) async fn put_publication(
     responses(
         (status = 204, description = "Publication absent after the request"),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 401, description = "Authentication required", body = ErrorMessage),
         (status = 403, description = "The source database user cannot delete the publication", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),

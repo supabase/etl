@@ -47,6 +47,7 @@ pub struct ReadTablesResponse {
     responses(
         (status = 200, description = "Tables listed successfully", body = ReadTablesResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 401, description = "Authentication required", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
         (status = 503, description = "Your source database is unavailable", body = ErrorMessage),

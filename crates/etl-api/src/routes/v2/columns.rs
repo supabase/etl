@@ -35,6 +35,7 @@ pub struct ReadColumnsResponse {
     responses(
         (status = 200, description = "Columns listed successfully", body = ReadColumnsResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 401, description = "Authentication required", body = ErrorMessage),
         (status = 404, description = "Source or table not found", body = ErrorMessage),
         (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
         (status = 503, description = "Your source database is unavailable", body = ErrorMessage),

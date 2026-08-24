@@ -19,9 +19,13 @@ pub enum PublicationsV2DbError {
     #[error("Error while interacting with Postgres for publications")]
     Database(#[from] sqlx::Error),
 
-    /// A table ID did not resolve to the supplied schema-qualified table.
-    #[error("Table reference with id {table_id} is stale or invalid")]
+    /// A table ID did not resolve to a publication-eligible table.
+    #[error("Table reference with id {table_id} is invalid")]
     InvalidTableReference { table_id: u32 },
+
+    /// A row filter could escape its enclosing SQL expression.
+    #[error("Row filter for table with id {table_id} is not a single SQL expression")]
+    InvalidRowFilter { table_id: u32 },
 
     /// PostgreSQL returned an unknown generated-column publication mode.
     #[error("Postgres returned an unsupported generated-column publication mode")]
@@ -127,14 +131,27 @@ impl PublicationOperation {
 pub struct PublicationTableConfig {
     /// The table's Postgres OID in the source database.
     pub id: u32,
-    /// The schema containing the table.
+    /// The current schema containing the table.
+    ///
+    /// This is response display metadata. Publication writes resolve the
+    /// current schema from [`PublicationTableConfig::id`].
+    #[serde(default)]
+    #[schema(read_only)]
     pub schema: String,
-    /// The unqualified table name.
+    /// The current unqualified table name.
+    ///
+    /// This is response display metadata. Publication writes resolve the
+    /// current name from [`PublicationTableConfig::id`].
+    #[serde(default)]
+    #[schema(read_only)]
     pub name: String,
     /// Columns to publish, or `null` to use PostgreSQL's default column set.
     #[serde(default)]
     pub columns: Option<Vec<String>>,
-    /// A PostgreSQL row-filter expression, or `null` for no row filter.
+    /// A self-contained PostgreSQL row-filter expression, or `null` for none.
+    ///
+    /// SQL comments are not accepted. PostgreSQL validates the expression's
+    /// syntax, referenced columns, and publication restrictions.
     #[serde(default)]
     pub row_filter: Option<String>,
 }
@@ -270,7 +287,10 @@ pub(crate) async fn put_publication(
         PublicationTableSelection::Tables { tables } => tables,
     };
 
+    validate_row_filters(table_configs)?;
+
     let mut transaction = pool.begin().await?;
+    sqlx::query("set local standard_conforming_strings = on").execute(&mut *transaction).await?;
 
     let existing = read_publication_catalog_row(&mut transaction, publication_name).await?;
     let created = existing.is_none();
@@ -596,7 +616,7 @@ async fn read_generated_columns(
     })
 }
 
-/// Resolves request table IDs and verifies their display metadata is current.
+/// Resolves request table IDs to their current PostgreSQL names.
 async fn resolve_table_references(
     connection: &mut PgConnection,
     tables: &[PublicationTableConfig],
@@ -626,15 +646,201 @@ async fn resolve_table_references(
     }
 
     for table in tables {
-        let Some(resolved_table) = resolved.get(&table.id) else {
-            return Err(PublicationsV2DbError::InvalidTableReference { table_id: table.id });
-        };
-        if table.schema != resolved_table.schema || table.name != resolved_table.name {
+        if !resolved.contains_key(&table.id) {
             return Err(PublicationsV2DbError::InvalidTableReference { table_id: table.id });
         }
     }
 
     Ok(resolved)
+}
+
+/// Validates that row filters cannot escape their enclosing SQL expression.
+fn validate_row_filters(tables: &[PublicationTableConfig]) -> Result<(), PublicationsV2DbError> {
+    for table in tables {
+        if let Some(row_filter) = &table.row_filter
+            && !is_contained_sql_expression(row_filter)
+        {
+            return Err(PublicationsV2DbError::InvalidRowFilter { table_id: table.id });
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns whether SQL text stays inside one surrounding parenthesized
+/// expression.
+///
+/// PostgreSQL remains responsible for parsing and validating the expression.
+/// This scanner only prevents the text from closing the parenthesis supplied
+/// by ETL or commenting out the trusted suffix of the DDL statement.
+fn is_contained_sql_expression(expression: &str) -> bool {
+    /// The quoted construct currently being scanned.
+    enum Quote<'a> {
+        /// No quoted construct is open.
+        None,
+        /// A single-quoted string is open.
+        Single {
+            /// Whether backslashes escape the following character.
+            backslash_escapes: bool,
+        },
+        /// A double-quoted identifier is open.
+        Double,
+        /// A dollar-quoted string is open.
+        Dollar(&'a [u8]),
+    }
+
+    let bytes = expression.as_bytes();
+    let mut quote = Quote::None;
+    let mut parenthesis_depth = 0_u32;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match &quote {
+            Quote::None => match bytes[index] {
+                b'\'' => {
+                    quote = Quote::Single {
+                        backslash_escapes: single_quote_uses_backslash_escapes(bytes, index),
+                    };
+                    index += 1;
+                }
+                b'"' => {
+                    quote = Quote::Double;
+                    index += 1;
+                }
+                b'$' => {
+                    if let Some(delimiter) = dollar_quote_delimiter(bytes, index) {
+                        index += delimiter.len();
+                        quote = Quote::Dollar(delimiter);
+                    } else {
+                        index += 1;
+                    }
+                }
+                b'(' => {
+                    parenthesis_depth += 1;
+                    index += 1;
+                }
+                b')' => {
+                    let Some(depth) = parenthesis_depth.checked_sub(1) else {
+                        return false;
+                    };
+                    parenthesis_depth = depth;
+                    index += 1;
+                }
+                b';' => return false,
+                b'-' if bytes.get(index + 1) == Some(&b'-') => return false,
+                b'/' if bytes.get(index + 1) == Some(&b'*') => return false,
+                _ => index += 1,
+            },
+            Quote::Single { backslash_escapes } => match bytes[index] {
+                b'\\' if *backslash_escapes => {
+                    if bytes.get(index + 1).is_none() {
+                        return false;
+                    }
+                    index += 2;
+                }
+                b'\'' if bytes.get(index + 1) == Some(&b'\'') => index += 2,
+                b'\'' => {
+                    if let Some(continuation_index) = continued_single_quote_index(bytes, index) {
+                        index = continuation_index;
+                    } else {
+                        quote = Quote::None;
+                        index += 1;
+                    }
+                }
+                _ => index += 1,
+            },
+            Quote::Double => match bytes[index] {
+                b'"' if bytes.get(index + 1) == Some(&b'"') => index += 2,
+                b'"' => {
+                    quote = Quote::None;
+                    index += 1;
+                }
+                _ => index += 1,
+            },
+            Quote::Dollar(delimiter) => {
+                if bytes[index..].starts_with(delimiter) {
+                    index += delimiter.len();
+                    quote = Quote::None;
+                } else {
+                    index += 1;
+                }
+            }
+        }
+    }
+
+    matches!(quote, Quote::None) && parenthesis_depth == 0
+}
+
+/// Returns whether a quote starts PostgreSQL's `E'...'` string syntax.
+fn single_quote_uses_backslash_escapes(bytes: &[u8], quote_index: usize) -> bool {
+    let Some(prefix_index) = quote_index.checked_sub(1) else {
+        return false;
+    };
+    if !matches!(bytes[prefix_index], b'e' | b'E') {
+        return false;
+    }
+
+    prefix_index == 0
+        || !matches!(
+            bytes[prefix_index - 1],
+            byte if could_continue_identifier(byte)
+        )
+}
+
+/// Returns the index after a continued single-quoted string's opening quote.
+fn continued_single_quote_index(bytes: &[u8], quote_index: usize) -> Option<usize> {
+    let mut index = quote_index.checked_add(1)?;
+    let mut saw_newline = false;
+
+    while let Some(byte) = bytes.get(index)
+        && matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b)
+    {
+        saw_newline |= matches!(byte, b'\n' | b'\r');
+        index += 1;
+    }
+
+    (saw_newline && bytes.get(index) == Some(&b'\'')).then_some(index + 1)
+}
+
+/// Returns a PostgreSQL dollar-quote delimiter at `index`.
+fn dollar_quote_delimiter(bytes: &[u8], index: usize) -> Option<&[u8]> {
+    if bytes.get(index) != Some(&b'$')
+        || index
+            .checked_sub(1)
+            .and_then(|index| bytes.get(index))
+            .is_some_and(|byte| could_continue_identifier(*byte))
+    {
+        return None;
+    }
+    let candidate = &bytes[index..];
+    if candidate.get(1) == Some(&b'$') {
+        return Some(&candidate[..2]);
+    }
+
+    let first = *candidate.get(1)?;
+    if !could_start_identifier(first) {
+        return None;
+    }
+
+    let mut delimiter_end = 2;
+    while let Some(byte) = candidate.get(delimiter_end)
+        && could_continue_identifier(*byte)
+        && *byte != b'$'
+    {
+        delimiter_end += 1;
+    }
+
+    (candidate.get(delimiter_end) == Some(&b'$')).then(|| &candidate[..=delimiter_end])
+}
+
+/// Returns whether a byte could start an unquoted PostgreSQL identifier.
+fn could_start_identifier(byte: u8) -> bool {
+    matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'_' | 0x80..=0xff)
+}
+
+/// Returns whether a byte could continue an unquoted PostgreSQL identifier.
+fn could_continue_identifier(byte: u8) -> bool {
+    could_start_identifier(byte) || matches!(byte, b'0'..=b'9' | b'$')
 }
 
 /// Appends the publication's table-selection clause.
@@ -774,5 +980,57 @@ fn publication_table_from_row(row: PublicationTableRow) -> PublicationTableConfi
         name: table.name,
         columns: row.columns,
         row_filter: row.row_filter,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_filter_containment_accepts_quoted_delimiters_and_balanced_parentheses() {
+        for expression in [
+            "",
+            "id > 0",
+            "(id > 0 and payload = '); --') or payload = 'it''s safe'",
+            "payload = $$); /* still a string */$$",
+            "payload = $tag$); -- still a string$tag$",
+            "payload = $é$); -- still a string$é$",
+            "payload = U&'d\\0061t\\+000061'",
+            "payload = 'backslash\\value'",
+            "payload = E'backslash\\\\value'",
+            "payload = E'quote: \\''",
+            "payload = E'continued'\n'quote: \\''",
+            "flags = B'1010' and code = X'1f'",
+            "payload$value is not null",
+            "payload$é$ = 'value'",
+            "payload = $1",
+            "\"strange)column\" is not null",
+            "\"strange\"\";column\" is not null",
+        ] {
+            assert!(is_contained_sql_expression(expression), "{expression}");
+        }
+    }
+
+    #[test]
+    fn row_filter_containment_rejects_statement_escape_sequences() {
+        for expression in [
+            "true), public.other_table where (true",
+            "true) with (publish = 'truncate') --",
+            "true /* comment */",
+            "true -- line comment\n",
+            "true; select true",
+            "(true",
+            "true)",
+            "payload = E'escaped\\') with (publish = 'truncate') --",
+            "payload = E'continued'\n'escaped\\') with (publish = 'truncate') --",
+            "payload = E'unterminated\\",
+            "payload = 'unterminated",
+            "payload = $tag$unterminated",
+            "payload = $TAG$case-sensitive$tag$",
+            "payload$tag$), public.other_table where (visible$tag$",
+        ] {
+            assert!(!is_contained_sql_expression(expression), "{expression}");
+        }
     }
 }

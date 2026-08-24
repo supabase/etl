@@ -6,7 +6,7 @@ use etl_api::{
         },
         tables::SourceTableKind,
     },
-    routes::v2::publications::ReadPublicationsResponse,
+    routes::{ErrorMessage, v2::publications::ReadPublicationsResponse},
 };
 use etl_postgres::{
     sqlx::test_utils::drop_pg_database,
@@ -31,7 +31,15 @@ async fn publication_v2_create_is_readable_and_rejects_an_open_ended_replacement
 
     source_pool
         .execute(
-            "create table public.publication_orders (id bigint primary key, payload text not null)",
+            "create table public.publication_orders (id bigint primary key, payload text not \
+             null, \"payload$tag$\" boolean not null default true)",
+        )
+        .await
+        .unwrap();
+    source_pool
+        .execute(
+            "create table public.publication_hidden (id bigint primary key, \"visible$tag$\" \
+             boolean not null default true)",
         )
         .await
         .unwrap();
@@ -54,7 +62,7 @@ async fn publication_v2_create_is_readable_and_rejects_an_open_ended_replacement
     });
     if server_version_num >= POSTGRES_15 {
         table["columns"] = json!(["id", "payload"]);
-        table["row_filter"] = json!("id > 0");
+        table["row_filter"] = json!("id > 0 and payload <> '); --'");
     }
     let config = json!({
         "type": "tables",
@@ -87,7 +95,9 @@ async fn publication_v2_create_is_readable_and_rejects_an_open_ended_replacement
             tables[0].columns.as_ref().unwrap().iter().map(String::as_str).collect::<Vec<_>>(),
             vec!["id", "payload"]
         );
-        assert_eq!(tables[0].row_filter.as_deref(), Some("(id > 0)"));
+        let row_filter = tables[0].row_filter.as_deref().unwrap();
+        assert!(row_filter.contains("payload"));
+        assert!(row_filter.contains("); --"));
     }
 
     let publication_oid: i64 =
@@ -133,30 +143,41 @@ async fn publication_v2_create_is_readable_and_rejects_an_open_ended_replacement
             .unwrap();
     assert_eq!(oid_after_conflict, publication_oid);
 
-    let unsafe_filter = json!({
-        "type": "tables",
-        "tables": [{
-            "id": table_id,
-            "schema": "public",
-            "name": "publication_orders",
-            "row_filter": "true); drop publication publication_orders_v2; --"
-        }],
-        "operations": ["insert"]
-    });
-    let response = app
-        .create_source_publication_v2(tenant_id, source_id, "unsafe_filter_v2", &unsafe_filter)
-        .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(!response.text().await.unwrap().contains("drop publication"));
+    for (publication_name, row_filter) in [
+        ("extra_table_filter_v2", "true), public.publication_hidden where (true"),
+        ("option_override_filter_v2", "true) with (publish = 'truncate') --"),
+        (
+            "attached_dollar_quote_filter_v2",
+            "payload$tag$), public.publication_hidden where (visible$tag$",
+        ),
+    ] {
+        let unsafe_filter = json!({
+            "type": "tables",
+            "tables": [{
+                "id": table_id,
+                "row_filter": row_filter
+            }],
+            "operations": ["insert"]
+        });
+        let response = app
+            .create_source_publication_v2(tenant_id, source_id, publication_name, &unsafe_filter)
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error: ErrorMessage = response.json().await.unwrap();
+        assert_eq!(
+            error.message,
+            format!("Row filter for table with id {table_id} is not a single SQL expression")
+        );
 
-    let unsafe_publication_exists: bool = sqlx::query_scalar(
-        "select exists(select 1 from pg_catalog.pg_publication where pubname = $1)",
-    )
-    .bind("unsafe_filter_v2")
-    .fetch_one(&source_pool)
-    .await
-    .unwrap();
-    assert!(!unsafe_publication_exists);
+        let unsafe_publication_exists: bool = sqlx::query_scalar(
+            "select exists(select 1 from pg_catalog.pg_publication where pubname = $1)",
+        )
+        .bind(publication_name)
+        .fetch_one(&source_pool)
+        .await
+        .unwrap();
+        assert!(!unsafe_publication_exists);
+    }
 
     let postgres_invalid_filter = json!({
         "type": "tables",
@@ -239,6 +260,63 @@ async fn publication_v2_create_is_readable_and_rejects_an_open_ended_replacement
     let response =
         app.read_source_publication_v2(tenant_id, source_id, "publication_orders_v2").await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_v2_resolves_table_names_from_ids_after_renames() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+
+    source_pool
+        .execute("create table public.id_only_before_rename (id bigint primary key)")
+        .await
+        .unwrap();
+    let table_id: i64 =
+        sqlx::query_scalar("select 'public.id_only_before_rename'::regclass::oid::bigint")
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+    let table_id = u32::try_from(table_id).unwrap();
+    let config = json!({
+        "type": "tables",
+        "tables": [{ "id": table_id }],
+        "operations": ["insert"]
+    });
+
+    let response =
+        app.create_source_publication_v2(tenant_id, source_id, "id_only_v2", &config).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: PublicationDetails = response.json().await.unwrap();
+    let PublicationTableSelection::Tables { tables } = &created.config.table_selection else {
+        panic!("expected an explicit-table publication");
+    };
+    assert_eq!(tables[0].id, table_id);
+    assert_eq!(tables[0].schema, "public");
+    assert_eq!(tables[0].name, "id_only_before_rename");
+
+    source_pool
+        .execute("alter table public.id_only_before_rename rename to id_only_after_rename")
+        .await
+        .unwrap();
+
+    // The response still carries the old display name, but the table OID is
+    // the request identity and resolves to the renamed table.
+    let response =
+        app.create_source_publication_v2(tenant_id, source_id, "id_only_v2", &created.config).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated: PublicationDetails = response.json().await.unwrap();
+    let PublicationTableSelection::Tables { tables } = updated.config.table_selection else {
+        panic!("expected an explicit-table publication");
+    };
+    assert_eq!(tables[0].id, table_id);
+    assert_eq!(tables[0].schema, "public");
+    assert_eq!(tables[0].name, "id_only_after_rename");
 
     drop(source_pool);
     drop_pg_database(&source_db_config).await;
