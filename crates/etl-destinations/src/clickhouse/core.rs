@@ -85,15 +85,16 @@ struct PendingRow {
 
 /// Destination rows derived from one source update.
 ///
-/// Every update yields [`Self::updated_row`]. A primary-key change also yields
-/// [`Self::old_key_tombstone`], which callers must write first.
+/// Every update yields [`Self::destination_updated_row`]. A primary-key change
+/// also yields [`Self::destination_old_key_tombstone`], which callers must
+/// write first.
 #[derive(Debug)]
 struct ClickHouseRowsForUpdate {
     /// Tombstone for the old key when the update changed the primary key.
-    old_key_tombstone: Option<TableRow>,
+    destination_old_key_tombstone: Option<TableRow>,
 
     /// Full row after the update.
-    updated_row: TableRow,
+    destination_updated_row: TableRow,
 }
 
 /// Converts a Postgres LSN into the ClickHouse CDC LSN value.
@@ -1490,10 +1491,12 @@ where
                     }
                     Event::Update(update) => {
                         let sequence_key = update.event_sequence_key();
+                        let source_updated_row = update.updated_table_row;
+                        let source_old_row = update.old_table_row;
                         let rows_for_update = clickhouse_rows_for_update(
                             &update.replicated_table_schema,
-                            update.updated_table_row,
-                            update.old_table_row,
+                            source_updated_row,
+                            source_old_row,
                         )?;
                         let table_id = update.replicated_table_schema.id();
                         let entry = pending
@@ -1502,30 +1505,32 @@ where
 
                         // A primary-key change produces two destination rows. Queue the old-key
                         // tombstone before the updated row under its new key.
-                        if let Some(old_key_tombstone) = rows_for_update.old_key_tombstone {
+                        if let Some(destination_old_key_tombstone) =
+                            rows_for_update.destination_old_key_tombstone
+                        {
                             entry.1.push(PendingRow {
                                 operation: CdcOperation::Delete,
                                 sequence_key,
-                                cells: old_key_tombstone.into_values(),
+                                cells: destination_old_key_tombstone.into_values(),
                             });
                         }
 
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Update,
                             sequence_key,
-                            cells: rows_for_update.updated_row.into_values(),
+                            cells: rows_for_update.destination_updated_row.into_values(),
                         });
                     }
                     Event::Delete(delete) => {
                         let sequence_key = delete.event_sequence_key();
-                        let old_table_row = clickhouse_delete_old_row(
+                        let source_old_row = clickhouse_delete_old_row(
                             &delete.replicated_table_schema,
                             delete.old_table_row,
                         )?;
-                        let old_row = match old_table_row {
-                            OldTableRow::Full(row) => row,
-                            OldTableRow::Key(key_row) => {
-                                expand_key_row(key_row, &delete.replicated_table_schema)?
+                        let destination_old_row = match source_old_row {
+                            OldTableRow::Full(source_old_row) => source_old_row,
+                            OldTableRow::Key(source_old_key_row) => {
+                                expand_key_row(source_old_key_row, &delete.replicated_table_schema)?
                             }
                         };
                         let table_id = delete.replicated_table_schema.id();
@@ -1535,7 +1540,7 @@ where
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Delete,
                             sequence_key,
-                            cells: old_row.into_values(),
+                            cells: destination_old_row.into_values(),
                         });
                     }
                     event => {
@@ -1866,9 +1871,9 @@ fn validate_clickhouse_pk_width(
 /// Extracts and validates the complete new row required for an update.
 fn clickhouse_full_update_row(
     replicated_table_schema: &ReplicatedTableSchema,
-    updated_table_row: UpdatedTableRow,
+    source_updated_row: UpdatedTableRow,
 ) -> EtlResult<TableRow> {
-    let UpdatedTableRow::Full(row) = updated_table_row else {
+    let UpdatedTableRow::Full(destination_updated_row) = source_updated_row else {
         return Err(etl_error!(
             ErrorKind::SourceReplicaIdentityError,
             "ClickHouse update requires a full new row image",
@@ -1881,9 +1886,9 @@ fn clickhouse_full_update_row(
         ));
     };
 
-    validate_clickhouse_full_row_width(replicated_table_schema, &row)?;
+    validate_clickhouse_full_row_width(replicated_table_schema, &destination_updated_row)?;
 
-    Ok(row)
+    Ok(destination_updated_row)
 }
 
 /// Derives the destination rows needed to represent one source update.
@@ -1893,19 +1898,23 @@ fn clickhouse_full_update_row(
 /// former key.
 fn clickhouse_rows_for_update(
     replicated_table_schema: &ReplicatedTableSchema,
-    updated_table_row: UpdatedTableRow,
-    old_table_row: Option<OldTableRow>,
+    source_updated_row: UpdatedTableRow,
+    source_old_row: Option<OldTableRow>,
 ) -> EtlResult<ClickHouseRowsForUpdate> {
-    let updated_row = clickhouse_full_update_row(replicated_table_schema, updated_table_row)?;
+    let destination_updated_row =
+        clickhouse_full_update_row(replicated_table_schema, source_updated_row)?;
     if replicated_table_schema.primary_key_column_schemas().next().is_none() {
-        return Ok(ClickHouseRowsForUpdate { old_key_tombstone: None, updated_row });
+        return Ok(ClickHouseRowsForUpdate {
+            destination_old_key_tombstone: None,
+            destination_updated_row,
+        });
     }
 
-    let primary_key_was_changed = match old_table_row.as_ref() {
-        Some(old_table_row) => clickhouse_primary_key_was_changed(
+    let primary_key_was_changed = match source_old_row.as_ref() {
+        Some(source_old_row) => clickhouse_primary_key_was_changed(
             replicated_table_schema,
-            old_table_row,
-            &updated_row,
+            source_old_row,
+            &destination_updated_row,
         )?,
         None => {
             validate_clickhouse_update_without_old_row(replicated_table_schema)?;
@@ -1913,9 +1922,11 @@ fn clickhouse_rows_for_update(
         }
     };
 
-    let old_key_tombstone = match (primary_key_was_changed, old_table_row) {
-        (true, Some(OldTableRow::Full(row))) => Some(row),
-        (true, Some(OldTableRow::Key(row))) => Some(expand_key_row(row, replicated_table_schema)?),
+    let destination_old_key_tombstone = match (primary_key_was_changed, source_old_row) {
+        (true, Some(OldTableRow::Full(source_old_row))) => Some(source_old_row),
+        (true, Some(OldTableRow::Key(source_old_key_row))) => {
+            Some(expand_key_row(source_old_key_row, replicated_table_schema)?)
+        }
         (true, None) => {
             return Err(etl_error!(
                 ErrorKind::InvalidState,
@@ -1929,7 +1940,7 @@ fn clickhouse_rows_for_update(
         (false, _) => None,
     };
 
-    Ok(ClickHouseRowsForUpdate { old_key_tombstone, updated_row })
+    Ok(ClickHouseRowsForUpdate { destination_old_key_tombstone, destination_updated_row })
 }
 
 /// Validates an update that omitted its old row image.
@@ -2009,32 +2020,32 @@ fn postgres_key_cell_equal(old_value: &Cell, new_value: &Cell) -> bool {
 /// can legitimately contain a different number of columns.
 fn clickhouse_primary_key_was_changed(
     replicated_table_schema: &ReplicatedTableSchema,
-    old_table_row: &OldTableRow,
-    new_table_row: &TableRow,
+    source_old_row: &OldTableRow,
+    destination_updated_row: &TableRow,
 ) -> EtlResult<bool> {
-    match old_table_row {
-        OldTableRow::Full(row) => {
-            validate_clickhouse_full_row_width(replicated_table_schema, row)?;
+    match source_old_row {
+        OldTableRow::Full(source_old_row) => {
+            validate_clickhouse_full_row_width(replicated_table_schema, source_old_row)?;
 
             Ok(replicated_table_schema
                 .column_schemas()
-                .zip(row.values())
-                .zip(new_table_row.values())
+                .zip(source_old_row.values())
+                .zip(destination_updated_row.values())
                 .any(|((column_schema, old_value), new_value)| {
                     column_schema.primary_key() && !postgres_key_cell_equal(old_value, new_value)
                 }))
         }
-        OldTableRow::Key(row) => {
+        OldTableRow::Key(source_old_key_row) => {
             validate_clickhouse_key_image_identity(replicated_table_schema)?;
-            validate_clickhouse_pk_width(replicated_table_schema, row)?;
+            validate_clickhouse_pk_width(replicated_table_schema, source_old_key_row)?;
 
-            Ok(row
+            Ok(source_old_key_row
                 .values()
                 .iter()
                 .zip(
                     replicated_table_schema
                         .column_schemas()
-                        .zip(new_table_row.values())
+                        .zip(destination_updated_row.values())
                         .filter(|(column_schema, _)| column_schema.primary_key())
                         .map(|(_, value)| value),
                 )
@@ -2046,9 +2057,9 @@ fn clickhouse_primary_key_was_changed(
 /// Returns the old row image required for a ClickHouse delete tombstone.
 fn clickhouse_delete_old_row(
     replicated_table_schema: &ReplicatedTableSchema,
-    old_table_row: Option<OldTableRow>,
+    source_old_row: Option<OldTableRow>,
 ) -> EtlResult<OldTableRow> {
-    old_table_row.ok_or_else(|| {
+    source_old_row.ok_or_else(|| {
         etl_error!(
             ErrorKind::SourceReplicaIdentityError,
             "ClickHouse delete requires an old row image",
@@ -2098,11 +2109,14 @@ fn validate_clickhouse_key_image_identity(
 ///
 /// Key-image identity is checked before width because an alternative identity
 /// can legitimately contain a different number of columns.
-fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> EtlResult<TableRow> {
+fn expand_key_row(
+    source_old_key_row: TableRow,
+    schema: &ReplicatedTableSchema,
+) -> EtlResult<TableRow> {
     validate_clickhouse_key_image_identity(schema)?;
-    validate_clickhouse_pk_width(schema, &key_row)?;
+    validate_clickhouse_pk_width(schema, &source_old_key_row)?;
 
-    let key_cells = key_row.into_values();
+    let key_cells = source_old_key_row.into_values();
     let mut key_iter = key_cells.into_iter();
     let cells: Vec<Cell> = schema
         .column_schemas()
@@ -2472,8 +2486,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rows.old_key_tombstone, Some(TableRow::new(vec![Cell::I32(1), Cell::Null])));
-        assert_eq!(rows.updated_row, update_row);
+        assert_eq!(
+            rows.destination_old_key_tombstone,
+            Some(TableRow::new(vec![Cell::I32(1), Cell::Null]))
+        );
+        assert_eq!(rows.destination_updated_row, update_row);
     }
 
     #[test]
@@ -2489,10 +2506,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            rows.old_key_tombstone,
+            rows.destination_old_key_tombstone,
             Some(TableRow::new(vec![Cell::I32(10), Cell::I32(1), Cell::Null]))
         );
-        assert_eq!(rows.updated_row, update_row);
+        assert_eq!(rows.destination_updated_row, update_row);
     }
 
     #[test]
@@ -2509,8 +2526,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rows.old_key_tombstone, None);
-        assert_eq!(rows.updated_row, update_row);
+        assert_eq!(rows.destination_old_key_tombstone, None);
+        assert_eq!(rows.destination_updated_row, update_row);
     }
 
     #[test]
@@ -2524,8 +2541,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rows.old_key_tombstone, None);
-        assert_eq!(rows.updated_row, update_row);
+        assert_eq!(rows.destination_old_key_tombstone, None);
+        assert_eq!(rows.destination_updated_row, update_row);
     }
 
     #[test]
@@ -2551,7 +2568,7 @@ mod tests {
             )
             .unwrap();
 
-            assert!(rows.old_key_tombstone.is_none());
+            assert!(rows.destination_old_key_tombstone.is_none());
         }
 
         let rows = clickhouse_rows_for_update(
@@ -2567,7 +2584,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(rows.old_key_tombstone.is_some());
+        assert!(rows.destination_old_key_tombstone.is_some());
     }
 
     #[test]
@@ -2582,7 +2599,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(rows.old_key_tombstone.is_none());
+        assert!(rows.destination_old_key_tombstone.is_none());
     }
 
     #[test]
@@ -2597,8 +2614,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rows.old_key_tombstone, Some(old_row));
-        assert_eq!(rows.updated_row, update_row);
+        assert_eq!(rows.destination_old_key_tombstone, Some(old_row));
+        assert_eq!(rows.destination_updated_row, update_row);
     }
 
     #[test]
