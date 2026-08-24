@@ -353,7 +353,16 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     // a crash window where a later restart could pair the new slot with old
     // persisted checkpoint.
     let slot = match replication_client.get_slot(&slot_name).await {
-        Ok(slot) => GetOrCreateSlotResult::GetSlot(slot),
+        Ok(slot) => {
+            // create_slot only applies FAILOVER at creation, so an existing slot
+            // provisioned before failover was enabled is reused unchanged. Reconcile
+            // it here so turning on `failover` also protects an already-provisioned
+            // pipeline instead of silently leaving its slot non-failover.
+            if replication_client.failover_enabled() {
+                replication_client.enable_slot_failover(&slot_name).await?;
+            }
+            GetOrCreateSlotResult::GetSlot(slot)
+        }
         Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
             warn_if_tables_may_have_missed_changes(store).await?;
             store.delete_replication_checkpoint(worker_type).await?;

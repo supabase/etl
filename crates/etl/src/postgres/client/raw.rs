@@ -283,6 +283,12 @@ impl PgReplicationClient {
         self
     }
 
+    /// Reports whether this client requests the `FAILOVER` option for its
+    /// slots.
+    pub fn failover_enabled(&self) -> bool {
+        self.failover
+    }
+
     /// Establishes a replication connection with the supplied
     /// `application_name`.
     async fn connect_with_application_name(
@@ -533,6 +539,25 @@ impl PgReplicationClient {
             "Replication slot not found",
             format!("Replication slot '{}' not found in database", slot_name)
         );
+    }
+
+    /// Enables the `FAILOVER` option on an existing replication slot so it
+    /// synchronizes to standbys and survives a primary failover.
+    ///
+    /// [`PgReplicationClient::create_slot`] only applies `FAILOVER` at creation
+    /// time, so a slot provisioned before failover was turned on is otherwise
+    /// reused as-is. Callers reconcile such a slot by invoking this before
+    /// starting replication on it (the slot must be inactive).
+    ///
+    /// `ALTER_REPLICATION_SLOT` is a PostgreSQL 17+ replication command, but
+    /// this is only ever called when `FAILOVER` is requested, which already
+    /// requires a 17+ primary — `CREATE_REPLICATION_SLOT ... FAILOVER`
+    /// would have failed otherwise — so the version gate is implicit.
+    pub async fn enable_slot_failover(&self, slot_name: &str) -> EtlResult<()> {
+        // Uppercase per the replication-command lexer (see create_slot).
+        let query = format!(r#"ALTER_REPLICATION_SLOT {} (FAILOVER)"#, quote_identifier(slot_name));
+        self.client.simple_query(&query).await?;
+        Ok(())
     }
 
     /// Deletes a replication slot with the specified name.
