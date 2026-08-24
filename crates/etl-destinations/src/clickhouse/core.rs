@@ -1838,11 +1838,11 @@ fn validate_clickhouse_full_row_width(
     Ok(())
 }
 
-/// Validates a positional key row against the source primary-key width.
+/// Validates a positional primary-key row against the source primary-key width.
 ///
 /// Returns [`ErrorKind::InvalidState`] when the width differs. Continuing could
 /// compare or encode values under the wrong primary-key columns.
-fn validate_clickhouse_key_row_width(
+fn validate_clickhouse_pk_width(
     replicated_table_schema: &ReplicatedTableSchema,
     row: &TableRow,
 ) -> EtlResult<()> {
@@ -2026,7 +2026,7 @@ fn clickhouse_primary_key_was_changed(
         }
         OldTableRow::Key(row) => {
             validate_clickhouse_key_image_identity(replicated_table_schema)?;
-            validate_clickhouse_key_row_width(replicated_table_schema, row)?;
+            validate_clickhouse_pk_width(replicated_table_schema, row)?;
 
             Ok(row
                 .values()
@@ -2100,7 +2100,7 @@ fn validate_clickhouse_key_image_identity(
 /// can legitimately contain a different number of columns.
 fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> EtlResult<TableRow> {
     validate_clickhouse_key_image_identity(schema)?;
-    validate_clickhouse_key_row_width(schema, &key_row)?;
+    validate_clickhouse_pk_width(schema, &key_row)?;
 
     let key_cells = key_row.into_values();
     let mut key_iter = key_cells.into_iter();
