@@ -16,8 +16,10 @@
 //!   previous complete decoder exists, the pending state retains both of its
 //!   relation masks as a fallback. A new `RELATION` replaces those masks. If a
 //!   row arrives first, ETL combines the fallback masks with the stored schema
-//!   at the pending snapshot and transitions to `WithSchema`. Without fallback
-//!   masks, rows cannot be decoded until a `RELATION` arrives.
+//!   at the pending snapshot and transitions to `WithSchema`. Without locally
+//!   retained fallback masks, the apply worker can still resolve them from an
+//!   applicable complete `SyncDone` decoder; otherwise rows cannot be decoded
+//!   until a `RELATION` arrives.
 //!
 //! An absent map entry is not another [`TableDecodingState`]: it means this
 //! connection has not established any state for the table. After table-sync
@@ -48,7 +50,7 @@ pub(crate) struct PreviousRelationMasks {
 
 impl PreviousRelationMasks {
     /// Captures both masks from a materialized decoder.
-    fn from_schema(schema: &ReplicatedTableSchema) -> Self {
+    pub(super) fn from_schema(schema: &ReplicatedTableSchema) -> Self {
         Self {
             replication_mask: schema.replication_mask().clone(),
             identity_mask: schema.identity_mask().clone(),

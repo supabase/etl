@@ -2814,23 +2814,24 @@ where
         Ok(table_schema)
     }
 
-    /// Restores row-decoding state from an applicable durable `SyncDone` state.
+    /// Resolves row-decoding state from an applicable durable `SyncDone` state.
     ///
     /// Before the ownership boundary, rows remain owned by table sync and no
     /// apply decoding state is needed. At or after the boundary, the first
-    /// relation-less DML can use the stored snapshot and masks because
-    /// PostgreSQL may have sent the relevant relation while table sync still
-    /// owned the table.
+    /// relation-less DML can use the stored snapshot and masks directly or as
+    /// fallback masks for a preceding DDL snapshot. PostgreSQL may have sent
+    /// the relevant relation while table sync still owned the table and need
+    /// not send it again on the same connection.
     ///
     /// `SyncDone` rows written before durable decoders were introduced
     /// deserialize without a stored snapshot or masks. ETL cannot safely infer
     /// that historical decoder from the physical schema, so it waits for a
     /// later relation and rejects relation-less DML.
     ///
-    /// This method is called only when no connection-local decoding state
-    /// exists.
-    async fn restore_sync_done_replicated_table_schema(
-        &mut self,
+    /// This method is called only when connection-local state cannot provide a
+    /// complete decoder.
+    async fn resolve_sync_done_replicated_table_schema(
+        &self,
         table_id: TableId,
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ReplicatedTableSchema>> {
@@ -2861,15 +2862,13 @@ where
             .await?;
         let replicated_table_schema =
             table_decoding_state.materialize(table_schema, sync_done_lsn)?;
-        self.table_decoding_states
-            .insert(table_id, TableDecodingState::WithSchema(replicated_table_schema.clone()));
 
         info!(
             worker_type = %WorkerType::Apply,
             table_id = table_id.0,
             %sync_done_lsn,
             %current_lsn,
-            "installed missing sync_done table decoding state",
+            "resolved sync_done table decoding state",
         );
 
         Ok(Some(replicated_table_schema))
@@ -2911,10 +2910,10 @@ where
     /// - `WithSchema` is returned immediately.
     /// - `PendingRelation` with fallback masks combines them with the stored
     ///   schema at its DDL snapshot and installs `WithSchema`.
-    /// - `PendingRelation` without fallback masks fails because DML cannot
-    ///   reconstruct relation metadata.
-    /// - No local state attempts restoration from an applicable durable
-    ///   `SyncDone` decoder. If none exists, row decoding fails.
+    /// - `PendingRelation` without local fallback masks attempts to recover
+    ///   them from an applicable durable `SyncDone` decoder.
+    /// - No local state attempts to resolve an applicable durable `SyncDone`
+    ///   decoder directly. If neither path finds one, row decoding fails.
     ///
     /// The last case covers a same-connection table-sync handover where apply
     /// skipped the relation while table sync still owned the table. PostgreSQL
@@ -2929,10 +2928,30 @@ where
             Some(TableDecodingState::WithSchema(replicated_table_schema)) => {
                 Ok(replicated_table_schema)
             }
-            Some(TableDecodingState::PendingRelation {
-                snapshot_id,
-                previous_relation_masks: Some(previous_relation_masks),
-            }) => {
+            Some(TableDecodingState::PendingRelation { snapshot_id, previous_relation_masks }) => {
+                let previous_relation_masks = match previous_relation_masks {
+                    Some(previous_relation_masks) => previous_relation_masks,
+                    None => {
+                        let previous_schema = self
+                            .resolve_sync_done_replicated_table_schema(table_id, remote_final_lsn)
+                            .await?
+                            .ok_or_else(|| {
+                                etl_error!(
+                                    ErrorKind::InvalidState,
+                                    "Relation message missing after schema change",
+                                    format!(
+                                        "Table {} received a row event while waiting for relation \
+                                         snapshot {}, and no complete SyncDone decoder was \
+                                         available",
+                                        table_id, snapshot_id
+                                    )
+                                )
+                            })?;
+
+                        PreviousRelationMasks::from_schema(&previous_schema)
+                    }
+                };
+
                 self.materialize_pending_replicated_table_schema(
                     table_id,
                     snapshot_id,
@@ -2940,27 +2959,26 @@ where
                 )
                 .await
             }
-            Some(TableDecodingState::PendingRelation {
-                snapshot_id,
-                previous_relation_masks: None,
-            }) => Err(etl_error!(
-                ErrorKind::InvalidState,
-                "Relation message missing after schema change",
-                format!(
-                    "Table {} received a row event while waiting for relation snapshot {}",
-                    table_id, snapshot_id
-                )
-            )),
-            None => self
-                .restore_sync_done_replicated_table_schema(table_id, remote_final_lsn)
-                .await?
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::InvalidState,
-                        "Relation state missing for row event",
-                        format!("Table {table_id} has no relation or complete SyncDone decoder")
-                    )
-                }),
+            None => {
+                let replicated_table_schema = self
+                    .resolve_sync_done_replicated_table_schema(table_id, remote_final_lsn)
+                    .await?
+                    .ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "Relation state missing for row event",
+                            format!(
+                                "Table {table_id} has no relation or complete SyncDone decoder"
+                            )
+                        )
+                    })?;
+                self.table_decoding_states.insert(
+                    table_id,
+                    TableDecodingState::WithSchema(replicated_table_schema.clone()),
+                );
+
+                Ok(replicated_table_schema)
+            }
         }
     }
 
@@ -4574,7 +4592,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_relation_without_previous_masks_cannot_materialize_schema() {
+    fn pending_relation_without_previous_state_has_no_local_fallback_masks() {
         let snapshot_id = test_snapshot_id(20, 20);
         let pending = TableDecodingState::pending_relation(snapshot_id, None);
 

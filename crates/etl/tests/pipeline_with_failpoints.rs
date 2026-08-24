@@ -595,7 +595,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
+async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
 
@@ -637,16 +637,18 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
         .await;
 
     // Rows inserted while the worker is paused after copy must be replayed by
-    // table-sync streaming. The apply worker skips those row events while
-    // table sync owns the table, but still writes each transaction's commit.
-    // Acknowledging the commits proves that apply already consumed the
-    // preceding relation and row messages before handoff.
+    // table-sync streaming. Both replication connections receive these WAL
+    // records: table sync processes its Relation and rows, while apply skips
+    // the table-owned messages but still writes each transaction's commit.
+    // Acknowledging the apply commits proves that its pgoutput connection has
+    // already sent and cached the table's Relation before handoff.
     insert_users_data(
         &mut database,
         &users_schema.name,
         copied_rows + 1..=copied_rows + catchup_rows,
     )
     .await;
+
     apply_commits_notify.notified().await;
 
     let all_rows_notify = destination
@@ -666,10 +668,26 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
     all_rows_notify.notified().await;
     sync_done_notify.notified().await;
 
-    // The apply connection already saw and skipped the relation used by the
-    // table-sync worker. PostgreSQL does not resend it merely because ETL
-    // handed ownership over, so this row can only be decoded from the
-    // complete decoding state stored in SyncDone.
+    // Make the first apply-owned table event a no-op DDL. ETL stores a new
+    // snapshot for its transactional DDL message, but PostgreSQL keeps the
+    // warmed pgoutput relation cache and therefore emits no new Relation.
+    let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
+
+    database
+        .run_sql(&format!(
+            "alter table {} owner to current_user",
+            users_schema.name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    schema_stored_notify.notified().await;
+
+    // The apply connection already saw and skipped its copy of the relation
+    // used by table sync. Because the no-op DDL does not invalidate that
+    // connection's pgoutput cache, this row arrives without another Relation.
+    // It can only be decoded by carrying the masks stored in SyncDone into the
+    // pending DDL snapshot.
     let post_handover_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(
             EventType::Insert,
@@ -677,12 +695,14 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
             (copied_rows + catchup_rows + 1) as u64,
         )])
         .await;
+
     insert_users_data(
         &mut database,
         &users_schema.name,
         copied_rows + catchup_rows + 1..=copied_rows + catchup_rows + 1,
     )
     .await;
+
     post_handover_notify.notified().await;
     ready_notify.notified().await;
 
@@ -694,6 +714,13 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
 
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
+
+    // The only destination-visible Relation came from table-sync streaming.
+    // Apply consumed its pre-handoff copy only to advance WAL, and pgoutput did
+    // not send another one after the no-op DDL.
+    let relation_events = grouped_events.get(&(EventType::Relation, table_id)).unwrap();
+    assert_eq!(relation_events.len(), 1);
+
     let catchup_events = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
     let expected_catchup_events = build_expected_users_inserts(
         (copied_rows + 1) as i64,
@@ -701,6 +728,38 @@ async fn table_sync_handover_preserves_decoder_for_post_handoff_dml() {
         vec![("user_4", 4), ("user_5", 5), ("user_6", 6)],
     );
     assert_events_equal(catchup_events, &expected_catchup_events);
+
+    let Event::Relation(relation) = &relation_events[0] else {
+        unreachable!("grouped relation event should be a relation");
+    };
+    let Event::Insert(post_handoff_insert) = catchup_events.last().unwrap() else {
+        unreachable!("grouped insert event should be an insert");
+    };
+
+    // The relation-less row must use the new schema snapshot stored for the
+    // no-op DDL, rather than the older snapshot attached to the table-sync
+    // Relation event.
+    let latest_table_schemas = store.get_latest_table_schemas().await;
+    assert_eq!(
+        post_handoff_insert.replicated_table_schema.inner(),
+        latest_table_schemas.get(&table_id).unwrap()
+    );
+    assert_ne!(
+        post_handoff_insert.replicated_table_schema.inner().snapshot_id,
+        relation.replicated_table_schema.inner().snapshot_id
+    );
+
+    // Only the snapshot changed. Since PostgreSQL sent no replacement
+    // Relation, both positional masks must come from the decoder persisted in
+    // SyncDone, which was built from the table-sync Relation above.
+    assert_eq!(
+        post_handoff_insert.replicated_table_schema.replication_mask(),
+        relation.replicated_table_schema.replication_mask()
+    );
+    assert_eq!(
+        post_handoff_insert.replicated_table_schema.identity_mask(),
+        relation.replicated_table_schema.identity_mask()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
