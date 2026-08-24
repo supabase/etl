@@ -1827,6 +1827,7 @@ fn validate_clickhouse_full_row_width(
     row: &TableRow,
 ) -> EtlResult<()> {
     let column_count = replicated_table_schema.column_schemas().len();
+
     if row.values().len() != column_count {
         return Err(etl_error!(
             ErrorKind::InvalidState,
@@ -1852,6 +1853,7 @@ fn validate_clickhouse_pk_width(
     row: &TableRow,
 ) -> EtlResult<()> {
     let primary_key_column_count = replicated_table_schema.primary_key_column_schemas().len();
+
     if row.values().len() != primary_key_column_count {
         return Err(etl_error!(
             ErrorKind::InvalidState,
