@@ -35,6 +35,8 @@ use tokio_postgres::{Client, NoTls};
 const TABLE: &str = "etl_failover";
 const PUBLICATION: &str = "etl_failover_pub";
 const PIPELINE_ID: u64 = 987_654;
+/// Distinct id (and therefore slot name) for the repeated-failover test.
+const PIPELINE_ID_TEN: u64 = 987_655;
 const SEED_ROWS: i64 = 10;
 
 fn env_or(key: &str, default: &str) -> String {
@@ -230,6 +232,129 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
     println!("FINAL: source={src}, destination copied={copied} + inserts={inserts} = {}", copied + inserts);
     assert_eq!(copied + inserts, src, "every committed source row reached the destination");
 
+    pipeline.shutdown();
+    let _ = client
+        .batch_execute(&format!(
+            "DROP PUBLICATION IF EXISTS {PUBLICATION}; DROP TABLE IF EXISTS {TABLE} CASCADE;"
+        ))
+        .await;
+}
+
+/// A continuous writer that inserts a row roughly every 100ms, reconnecting
+/// across failover windows. Stops when `stop` is set.
+fn spawn_writer(stop: Arc<AtomicBool>, next_id: Arc<AtomicI64>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while !stop.load(Ordering::Relaxed) {
+            let Some(client) = try_connect().await else {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            };
+            while !stop.load(Ordering::Relaxed) {
+                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                let note = format!("w-{id}");
+                if client
+                    .execute(&format!("INSERT INTO {TABLE}(id, note) VALUES ($1, $2)"), &[&id, &note])
+                    .await
+                    .is_err()
+                {
+                    break; // connection broke (failover) — reconnect
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    })
+}
+
+/// Runs a continuous writer (started BEFORE the slot is created and killed
+/// AFTER, so the slot's setup and teardown both happen under load), then kills
+/// the primary 10 times and verifies no committed row is lost.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a running Multigres cluster reachable via the multigateway"]
+async fn pipeline_survives_ten_failovers_with_continuous_writes() {
+    const FAILOVERS: usize = 10;
+    let failover_cmd =
+        std::env::var("MULTIGRES_FAILOVER_CMD").expect("MULTIGRES_FAILOVER_CMD is required");
+
+    // Fresh, empty source table + publication.
+    let setup = connect().await;
+    setup
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {TABLE} CASCADE;
+             CREATE TABLE {TABLE} (id bigint PRIMARY KEY, note text NOT NULL);
+             DROP PUBLICATION IF EXISTS {PUBLICATION};
+             CREATE PUBLICATION {PUBLICATION} FOR TABLE {TABLE};"
+        ))
+        .await
+        .expect("source setup");
+
+    // Start the client BEFORE the slot exists, so slot creation (and the initial
+    // copy) happen against a non-empty, actively-growing table.
+    let stop = Arc::new(AtomicBool::new(false));
+    let next_id = Arc::new(AtomicI64::new(1));
+    let writer = spawn_writer(stop.clone(), next_id.clone());
+    wait_until("client warmup before slot", Duration::from_secs(30), || async {
+        source_count(&setup).await >= 50
+    })
+    .await;
+    println!("client running; {} rows committed before the slot is created", source_count(&setup).await);
+
+    // Create the slot / start the pipeline while the client keeps writing.
+    let store = MemoryStore::new();
+    let destination = MemoryDestination::new(store.clone());
+    let mut pipeline = PipelineBuilder::new(
+        gw_config(),
+        PIPELINE_ID_TEN,
+        PUBLICATION.to_owned(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_failover(true)
+    .with_retry_config(2000, 120)
+    .build();
+    pipeline.start().await.expect("pipeline start (slot created under concurrent writes)");
+    wait_until("initial copy + streaming", Duration::from_secs(120), || async {
+        insert_events(&destination).await >= 30
+    })
+    .await;
+    println!("pipeline streaming after slot setup under load");
+
+    // Kill the primary FAILOVERS times; the pipeline must resume each time.
+    for i in 1..=FAILOVERS {
+        let before = insert_events(&destination).await;
+        println!("=== failover {i}/{FAILOVERS} (insert_events={before}) ===");
+        let cmd = failover_cmd.clone();
+        let status = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("sh").arg("-c").arg(&cmd).status()
+        })
+        .await
+        .unwrap()
+        .expect("run MULTIGRES_FAILOVER_CMD");
+        assert!(status.success(), "failover {i} command failed");
+        wait_until(&format!("resume after failover {i}"), Duration::from_secs(240), || async {
+            insert_events(&destination).await >= before + 30
+        })
+        .await;
+        println!("failover {i}/{FAILOVERS} OK: resumed, insert_events={}", insert_events(&destination).await);
+    }
+
+    // Kill the client, drain, and verify no committed row was lost.
+    stop.store(true, Ordering::Relaxed);
+    let _ = writer.await;
+    let client = connect().await;
+    let src = source_count(&client).await as usize;
+    wait_until("consumer drains to source", Duration::from_secs(240), || async {
+        copied_rows(&destination).await + insert_events(&destination).await >= src
+    })
+    .await;
+    let copied = copied_rows(&destination).await;
+    let inserts = insert_events(&destination).await;
+    println!(
+        "FINAL after {FAILOVERS} failovers: source={src}, destination copied={copied} + inserts={inserts} = {}",
+        copied + inserts
+    );
+    assert_eq!(copied + inserts, src, "no committed row lost across {FAILOVERS} failovers");
+
+    // Teardown while verifying it is clean.
     pipeline.shutdown();
     let _ = client
         .batch_execute(&format!(
