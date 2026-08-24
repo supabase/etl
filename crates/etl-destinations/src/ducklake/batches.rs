@@ -308,7 +308,7 @@ impl DuckLakeTableBatchKind {
     }
 }
 
-/// Identity and source progress for one table batch.
+/// Deterministic identity for one table batch.
 struct DuckLakeBatchIdentity {
     batch_id: String,
     first_start_lsn: Option<PgLsn>,

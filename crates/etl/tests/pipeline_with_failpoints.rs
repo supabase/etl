@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use etl::{
-    data::Cell,
+    data::{Cell, TableRow},
     destination::{
-        Destination, DestinationWriteStatus, DropTableForCopyResult, TableCopyWrite,
+        Destination, DestinationWriteStatus, DropTableForCopyResult, TableCopyBatchId,
         WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
@@ -103,7 +103,8 @@ impl Destination for DeferredEventsDestination {
     async fn write_table_rows(
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
-        _table_copy: TableCopyWrite,
+        _batch_id: Option<TableCopyBatchId>,
+        _table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         async_result.send(Ok(DestinationWriteStatus::Durable));

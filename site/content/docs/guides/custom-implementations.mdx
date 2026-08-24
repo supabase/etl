@@ -17,7 +17,7 @@ ETL delivers data to destinations in **two phases**:
 
 | Phase | Method | When | Data Type |
 |-------|--------|------|-----------|
-| Initial sync | `write_table_rows()` | Startup | `TableCopyWrite` |
+| Initial sync | `write_table_rows()` | Startup | `Option<TableCopyBatchId>` and `Vec<TableRow>` |
 | Ongoing replication | `write_events()` | During catch-up and ongoing replication | `Vec<Event>` including `Relation` schema events |
 
 <Callout className="etl-callout" type="info" title="Note">
@@ -370,7 +370,7 @@ There are also optional `startup()` and `shutdown()` methods with default no-op 
 
 ETL clears its own schema versions, destination metadata, and table-sync progress **only after `drop_table_for_copy()` succeeds**. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. Before returning success, also drain or invalidate writes accepted by an earlier copy attempt so stale work cannot mutate the recreated object. If the object is already gone and no stale write can recreate or mutate it, return success.
 
-All write-like methods must complete their async result handle. Treat the method return value as the place for immediate dispatch or setup failures, and send the final write result through `async_result`. Immediate destinations should send `DestinationWriteStatus::Durable` after successful `write_table_rows()` and `write_events()` calls. A copy destination that returns `DestinationWriteStatus::Accepted` must take ownership of the batch, bound its accepted-but-not-durable backlog, and delay `Accepted` until it has capacity. It must later treat `TableCopyWrite::Finish` as a same-table durability barrier: return `Durable` only when every batch accepted during that copy attempt is durable. One copy attempt reads one source snapshot; ETL restarts interrupted copies from a new snapshot instead of resuming their batches. A `TableCopyBatchId` combines a fresh attempt ID with an attempt-local `u64` sequence shared by all parallel copy workers. A redelivered batch retains its complete ID, while distinct batches and attempts receive distinct IDs even when their rows are identical. The sequence does not define source order or resumable progress. For ongoing-replication writes, `WriteEventsDurability::MayDefer` permits either `Accepted` or `Durable`. ETL may issue an empty `RequireDurable` write as a durability-only barrier for earlier accepted work, but never sends an empty `MayDefer` write. The empty vector carries no new replication events, but the call may flush or wait for earlier accepted work. It cannot return `Accepted` and must not return `Durable` until every earlier `Accepted` write in the originating ordered apply-loop stream is durable; a stronger barrier scope is valid. ETL is **at least once**, so make row and event writes idempotent. `write_events()` preserves per-table ordering, but batches can include multiple tables and transaction markers are not a complete all-tables boundary during initial sync and catch-up.
+All write-like methods must complete their async result handle. Treat the method return value as the place for immediate dispatch or setup failures, and send the final write result through `async_result`. Immediate destinations should send `DestinationWriteStatus::Durable` after successful `write_table_rows()` and `write_events()` calls. Nonempty copy writes carry `Some(batch_id)`; the empty terminal write carries `None`. A copy destination that returns `DestinationWriteStatus::Accepted` must take ownership of the batch, bound its accepted-but-not-durable backlog, and delay `Accepted` until it has capacity. It must later treat the empty terminal write as a same-table durability barrier: return `Durable` only when every batch accepted during that copy attempt is durable. One copy attempt reads one source snapshot; ETL restarts interrupted copies from a new snapshot instead of resuming their batches. A `TableCopyBatchId` combines a fresh attempt ID with an attempt-local `u64` sequence shared by all parallel copy workers. A redelivered batch retains its complete ID, while distinct batches and attempts receive distinct IDs even when their rows are identical. The sequence does not define source order or resumable progress. For ongoing-replication writes, `WriteEventsDurability::MayDefer` permits either `Accepted` or `Durable`. ETL may issue an empty `RequireDurable` write as a durability-only barrier for earlier accepted work, but never sends an empty `MayDefer` write. The empty vector carries no new replication events, but the call may flush or wait for earlier accepted work. It cannot return `Accepted` and must not return `Durable` until every earlier `Accepted` write in the originating ordered apply-loop stream is durable; a stronger barrier scope is valid. ETL is **at least once**, so make row and event writes idempotent. `write_events()` preserves per-table ordering, but batches can include multiple tables and transaction markers are not a complete all-tables boundary during initial sync and catch-up.
 
 ```rust title="src/http_destination.rs" lineNumbers
 use reqwest::Client;
@@ -380,10 +380,10 @@ use tracing::{info, warn};
 
 use etl::destination::{
     Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
-    TableCopyWrite, WriteEventsResult, WriteTableRowsResult,
+    TableCopyBatchId, WriteEventsResult, WriteTableRowsResult,
 };
 use etl::error::{ErrorKind, EtlResult};
-use etl::{event::Event, schema::ReplicatedTableSchema};
+use etl::{data::TableRow, event::Event, schema::ReplicatedTableSchema};
 use etl::{bail, etl_error};
 
 #[derive(Debug, Clone)]
@@ -443,14 +443,17 @@ impl Destination for HttpDestination {
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_copy: TableCopyWrite,
+        batch_id: Option<TableCopyBatchId>,
+        rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let TableCopyWrite::Batch(batch) = table_copy else {
+        if rows.is_empty() {
             async_result.send(Ok(DestinationWriteStatus::Durable));
             return Ok(());
-        };
-        let (batch_id, rows) = batch.into_parts();
+        }
+        let batch_id = batch_id.ok_or_else(|| {
+            etl_error!(ErrorKind::InvalidState, "Table copy row batch is missing its ID")
+        })?;
         let table_name = replicated_table_schema.name().to_string();
         info!("writing {} rows to table {}", rows.len(), table_name);
 

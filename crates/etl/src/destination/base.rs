@@ -1,8 +1,9 @@
 use std::future::Future;
 
 use crate::{
+    data::TableRow,
     destination::{
-        DropTableForCopyResult, TableCopyWrite, WriteEventsDurability, WriteEventsResult,
+        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
     error::EtlResult,
@@ -77,15 +78,14 @@ pub trait Destination {
     /// Writes a batch of table rows to the destination.
     ///
     /// This method is used during initial table synchronization to bulk load
-    /// existing data. [`TableCopyWrite::Batch`] carries rows as
-    /// [`crate::data::TableRow`] instances with typed cell values and an opaque
-    /// idempotency key. ETL may call this method multiple times with
-    /// different batches, including in parallel with other destination
-    /// work.
+    /// existing data. Nonempty row batches carry a [`TableCopyBatchId`] as an
+    /// opaque idempotency key. ETL may call this method multiple times with
+    /// different batches, including in parallel with other destination work.
     ///
-    /// This method is called with [`TableCopyWrite::Finish`] even if the source
-    /// table has no data, so the destination can prepare its initial state
-    /// before streaming begins.
+    /// This method is called with an empty row vector and no batch ID even if
+    /// the source table has no data, so the destination can prepare its initial
+    /// state before streaming begins. A nonempty row vector always has a batch
+    /// ID, and an empty row vector never has one.
     /// ETL does not impose a meaningful ordering requirement on these row
     /// batches; it just provides the data that should be written for the
     /// initial snapshot.
@@ -107,9 +107,9 @@ pub trait Destination {
     ///
     /// If any row batch returns
     /// [`crate::destination::DestinationWriteStatus::Accepted`], ETL calls this
-    /// method once more with [`TableCopyWrite::Finish`] after every copy worker
-    /// has finished and the source copy transaction has committed. That call
-    /// is a table-wide durability barrier: it must return
+    /// method once more with an empty row vector and no batch ID after every
+    /// copy worker has finished and the source copy transaction has committed.
+    /// That call is a table-wide durability barrier: it must return
     /// [`crate::destination::DestinationWriteStatus::Durable`] and cumulatively
     /// cover every accepted write for the table copy. Returning
     /// [`crate::destination::DestinationWriteStatus::Accepted`] from the
@@ -125,7 +125,8 @@ pub trait Destination {
     fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_copy: TableCopyWrite,
+        batch_id: Option<TableCopyBatchId>,
+        table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 

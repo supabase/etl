@@ -14,7 +14,7 @@ use crate::{
     data::TableRow,
     destination::{
         ApplyLoopAsyncResultMetadata, Destination, DropTableForCopyResult, PipelineDestination,
-        TableCopyWrite, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -324,7 +324,8 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_copy: TableCopyWrite,
+        batch_id: Option<TableCopyBatchId>,
+        table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         let fault = self.take_fault(FaultyOp::WriteTableRows).await?;
@@ -335,14 +336,14 @@ where
             inner.wrapped_destination.clone()
         };
 
-        let table_rows = match &table_copy {
-            TableCopyWrite::Batch(batch) => batch.rows().to_vec(),
-            TableCopyWrite::Finish => Vec::new(),
-        };
-
         let (wrapped_flush_result, pending_flush_result) = WriteTableRowsResult::new(());
         destination
-            .write_table_rows(replicated_table_schema, table_copy, wrapped_flush_result)
+            .write_table_rows(
+                replicated_table_schema,
+                batch_id,
+                table_rows.clone(),
+                wrapped_flush_result,
+            )
             .await?;
 
         // We send the result back before doing the internal checks for this utility, to

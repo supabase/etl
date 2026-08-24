@@ -8,8 +8,8 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyWrite, TaskSet, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, TaskSet, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -649,15 +649,12 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_copy: TableCopyWrite,
+        _batch_id: Option<TableCopyBatchId>,
+        table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let result = IcebergDestination::write_table_rows(
-            self,
-            replicated_table_schema,
-            table_copy.into_rows(),
-        )
-        .await;
+        let result =
+            IcebergDestination::write_table_rows(self, replicated_table_schema, table_rows).await;
         async_result.send(result.map(|_| DestinationWriteStatus::Durable));
 
         Ok(())

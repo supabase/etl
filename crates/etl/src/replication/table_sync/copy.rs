@@ -26,8 +26,8 @@ use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
 use crate::{
     bail,
     destination::{
-        Destination, DestinationWriteStatus, TableCopyAttemptId, TableCopyBatch, TableCopyBatchId,
-        TableCopyWrite, WriteTableRowsResult,
+        Destination, DestinationWriteStatus, TableCopyAttemptId, TableCopyBatchId,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -783,11 +783,14 @@ where
                 let dispatched_at = Instant::now();
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
                 let batch_id = batch_id_generator.next_batch_id()?;
-                let table_copy =
-                    TableCopyWrite::Batch(TableCopyBatch::new(batch_id, table_rows));
 
                 destination
-                    .write_table_rows(&replicated_table_schema, table_copy, flush_result)
+                    .write_table_rows(
+                        &replicated_table_schema,
+                        Some(batch_id),
+                        table_rows,
+                        flush_result,
+                    )
                     .await?;
                 let ShutdownResult::Ok(completed_flush_result) = pending_flush_result
                     .with_shutdown(&mut shutdown_rx)

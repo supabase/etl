@@ -2,8 +2,6 @@ use std::fmt;
 
 use uuid::Uuid;
 
-use crate::data::TableRow;
-
 /// Identifies one execution of an initial table copy against one source
 /// snapshot.
 ///
@@ -56,62 +54,5 @@ impl TableCopyBatchId {
 impl fmt::Display for TableCopyBatchId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}:{}", self.attempt_id, self.sequence)
-    }
-}
-
-/// One nonempty batch emitted during an initial table copy.
-#[derive(Debug)]
-pub struct TableCopyBatch {
-    /// The batch's idempotency key.
-    id: TableCopyBatchId,
-    /// The copied source rows.
-    rows: Vec<TableRow>,
-}
-
-impl TableCopyBatch {
-    /// Creates a table-copy batch.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `rows` is empty. Terminal copy coordination uses
-    /// [`TableCopyWrite::Finish`] instead.
-    pub fn new(id: TableCopyBatchId, rows: Vec<TableRow>) -> Self {
-        assert!(!rows.is_empty(), "table-copy batches must contain rows");
-
-        Self { id, rows }
-    }
-
-    /// Returns the batch's idempotency key.
-    pub fn id(&self) -> &TableCopyBatchId {
-        &self.id
-    }
-
-    /// Returns the copied source rows.
-    pub fn rows(&self) -> &[TableRow] {
-        &self.rows
-    }
-
-    /// Splits the batch into its idempotency key and rows.
-    pub fn into_parts(self) -> (TableCopyBatchId, Vec<TableRow>) {
-        (self.id, self.rows)
-    }
-}
-
-/// Data or terminal coordination sent during an initial table copy.
-#[derive(Debug)]
-pub enum TableCopyWrite {
-    /// A nonempty batch of copied rows.
-    Batch(TableCopyBatch),
-    /// The terminal call for an empty copy or a deferred-durability barrier.
-    Finish,
-}
-
-impl TableCopyWrite {
-    /// Returns the copied rows, or an empty vector for [`Self::Finish`].
-    pub fn into_rows(self) -> Vec<TableRow> {
-        match self {
-            Self::Batch(batch) => batch.into_parts().1,
-            Self::Finish => Vec::new(),
-        }
     }
 }

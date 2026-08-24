@@ -30,7 +30,7 @@ use etl::{
     data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, TableCopyAttemptId,
-        TableCopyBatch, TableCopyBatchId, TableCopyWrite,
+        TableCopyBatchId,
     },
     error::{ErrorKind, EtlResult},
     event::{DeleteEvent, Event},
@@ -39,7 +39,9 @@ use etl::{
         TableId, TableName, TableSchema, Type as PgType,
     },
     store::{DestinationStore, MemoryStore, SchemaStore, StateStore},
-    test_utils::destination::{write_table_copy, write_table_rows as invoke_write_table_rows},
+    test_utils::destination::{
+        write_table_rows as invoke_write_table_rows, write_table_rows_with_batch_id,
+    },
 };
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
@@ -829,11 +831,14 @@ async fn write_table_rows_deduplicates_redelivered_batch_id() {
     let batch_id = TableCopyBatchId::new(TableCopyAttemptId::from_u128(1), 0);
 
     for _ in 0..2 {
-        let table_copy = TableCopyWrite::Batch(TableCopyBatch::new(
+        write_table_rows_with_batch_id(
+            &destination,
+            &replicated_table_schema,
             batch_id,
             vec![TableRow::new(vec![Cell::String("identical".to_owned())])],
-        ));
-        write_table_copy(&destination, &replicated_table_schema, table_copy).await.unwrap();
+        )
+        .await
+        .unwrap();
     }
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;

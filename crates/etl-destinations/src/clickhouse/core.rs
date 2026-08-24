@@ -4,7 +4,7 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyWrite, WriteEventsDurability, WriteEventsResult,
+        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
@@ -1958,11 +1958,11 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_copy: TableCopyWrite,
+        _batch_id: Option<TableCopyBatchId>,
+        table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let result =
-            self.write_table_rows_inner(replicated_table_schema, table_copy.into_rows()).await;
+        let result = self.write_table_rows_inner(replicated_table_schema, table_rows).await;
         async_result.send(result.map(|_| DestinationWriteStatus::Durable));
         Ok(())
     }

@@ -1,11 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
 use etl::{
-    data::Cell,
+    data::{Cell, TableRow},
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
-        TableCopyBatch, TableCopyWrite, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -18,7 +17,7 @@ use etl::{
             replication_slot_state, spawn_source_database, terminate_walsender, test_table_name,
             wait_for_new_walsender,
         },
-        destination::write_table_copy,
+        destination::write_table_rows_with_batch_id,
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::{FaultAction, FaultyOp},
         memory_destination::MemoryDestination,
@@ -71,7 +70,7 @@ struct DeferredCopyDestinationState {
     /// Number of nonempty copy writes received.
     nonempty_writes: usize,
     /// Batch retained after the first copy write is accepted.
-    accepted_batch: Option<TableCopyBatch>,
+    accepted_batch: Option<(TableCopyBatchId, Vec<TableRow>)>,
     /// Held terminal durability barrier result.
     barrier_result: Option<WriteTableRowsResult>,
 }
@@ -147,10 +146,12 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_copy: TableCopyWrite,
+        batch_id: Option<TableCopyBatchId>,
+        table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        if matches!(table_copy, TableCopyWrite::Finish) {
+        if table_rows.is_empty() {
+            debug_assert!(batch_id.is_none());
             // Hold the terminal empty write so the test can inspect table state
             // before durability is confirmed.
             let mut state = self.state.lock().await;
@@ -172,10 +173,8 @@ where
 
             if state.nonempty_writes == 1 {
                 // Take ownership of the first batch without making it durable.
-                let TableCopyWrite::Batch(batch) = table_copy else {
-                    unreachable!("finish writes return before copy batch handling");
-                };
-                state.accepted_batch = Some(batch);
+                let batch_id = batch_id.expect("nonempty copy batches should have an ID");
+                state.accepted_batch = Some((batch_id, table_rows));
                 async_result.send(Ok(DestinationWriteStatus::Accepted));
 
                 return Ok(());
@@ -184,13 +183,14 @@ where
             state.accepted_batch.take()
         };
 
-        if let Some(accepted_batch) = accepted_batch {
+        if let Some((accepted_batch_id, accepted_table_rows)) = accepted_batch {
             // Make the accepted batch durable before the later batch. ETL must
             // still remember that the terminal barrier is required.
-            let status = write_table_copy(
+            let status = write_table_rows_with_batch_id(
                 &self.inner,
                 replicated_table_schema,
-                TableCopyWrite::Batch(accepted_batch),
+                accepted_batch_id,
+                accepted_table_rows,
             )
             .await?;
             if status != DestinationWriteStatus::Durable {
@@ -201,7 +201,9 @@ where
             }
         }
 
-        self.inner.write_table_rows(replicated_table_schema, table_copy, async_result).await
+        self.inner
+            .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
+            .await
     }
 
     async fn write_events(
@@ -313,13 +315,14 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        table_copy: TableCopyWrite,
+        batch_id: Option<TableCopyBatchId>,
+        table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         if !matches!(self.target, StallTarget::WriteTableRows) {
             return self
                 .inner
-                .write_table_rows(replicated_table_schema, table_copy, async_result)
+                .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
                 .await;
         }
 
