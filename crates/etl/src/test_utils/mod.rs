@@ -20,5 +20,6 @@ pub mod pipeline;
 pub mod property;
 pub mod replication_stream;
 pub mod schema;
+pub mod store;
 pub mod test_destination_wrapper;
 pub mod test_schema;

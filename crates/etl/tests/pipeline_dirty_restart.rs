@@ -15,6 +15,7 @@ use etl::{
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         property::{block_on, run_expensive_property},
+        store::wait_for_table_sync_complete,
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_users_data, setup_test_database_schema},
     },
@@ -129,27 +130,6 @@ async fn wait_for_notification(
     tokio::time::timeout(DIRTY_RESTART_TIMEOUT, notification.inner().notified())
         .await
         .map_err(|_| TestCaseError::fail(format!("timed out waiting for {description}")))
-}
-
-/// Waits until the persistent state store reports completed table sync.
-async fn wait_for_table_sync_complete(
-    store: &PostgresStore,
-    table_id: TableId,
-) -> Result<(), TestCaseError> {
-    tokio::time::timeout(DIRTY_RESTART_TIMEOUT, async {
-        loop {
-            let state = store.get_table_state(table_id).await.map_err(|error| {
-                TestCaseError::fail(format!("failed to read table state: {error}"))
-            })?;
-            if state.as_ref().is_some_and(|state| state.as_type().has_completed_table_sync()) {
-                return Ok(());
-            }
-
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .map_err(|_| TestCaseError::fail("timed out waiting for table sync to complete"))?
 }
 
 /// Inserts one autocommit user transaction and waits for its acknowledgement.
@@ -385,7 +365,9 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
         .start()
         .await
         .map_err(|error| TestCaseError::fail(format!("pipeline failed to start: {error}")))?;
-    wait_for_table_sync_complete(&first_store, table_id).await?;
+    wait_for_table_sync_complete(&first_store, table_id, DIRTY_RESTART_TIMEOUT).await.map_err(
+        |error| TestCaseError::fail(format!("failed to wait for table sync completion: {error}")),
+    )?;
 
     // Table sync completes before the worker deletes its progress row and
     // replication slot. Wait for slot removal so the crash below hits a state
