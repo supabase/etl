@@ -15,7 +15,7 @@ use etl::{
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         property::{block_on, run_expensive_property},
-        store::wait_for_table_sync_complete,
+        store::{wait_for_table_state_type, wait_for_table_sync_complete},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_users_data, setup_test_database_schema},
     },
@@ -450,6 +450,20 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
         )
         .await?;
     }
+
+    // Destination event recording does not guarantee that apply-side response
+    // processing has finished. Wait for the quiescent pass to promote the table
+    // before requesting shutdown.
+    wait_for_table_state_type(
+        &restarted_store,
+        table_id,
+        TableStateType::Ready,
+        DIRTY_RESTART_TIMEOUT,
+    )
+    .await
+    .map_err(|error| {
+        TestCaseError::fail(format!("failed to wait for users table readiness: {error}"))
+    })?;
 
     tokio::time::timeout(DIRTY_RESTART_TIMEOUT, restarted_pipeline.shutdown_and_wait())
         .await
