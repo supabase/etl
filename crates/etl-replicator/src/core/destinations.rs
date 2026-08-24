@@ -110,6 +110,7 @@ mod bigquery {
             service_account_key,
             max_staleness_mins,
             connection_pool_size,
+            table_options,
         } = &replicator_config.destination
         else {
             unreachable!("Destination kind should match BigQuery config");
@@ -124,7 +125,8 @@ mod bigquery {
             pipeline_id,
             store.clone(),
         )
-        .await?;
+        .await?
+        .with_table_options(table_options.clone());
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
         pipeline::start(pipeline).await

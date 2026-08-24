@@ -72,13 +72,15 @@ pub struct GetSlotResult {
 
 /// The current state of a replication slot.
 ///
-/// Represents whether a slot is valid and can be used for replication, or has
-/// been invalidated by PostgreSQL (e.g., due to exceeding
-/// `max_slot_wal_keep_size`).
+/// Represents whether PostgreSQL has reported the slot as invalidated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotState {
-    /// The slot is valid and can be used for replication.
-    Valid,
+    /// The slot has not been reported as invalidated.
+    ///
+    /// This does not guarantee that the slot is usable. In particular,
+    /// PostgreSQL may report a `NULL` `wal_status` when it cannot determine WAL
+    /// availability from the slot's restart LSN.
+    NotInvalidated,
     /// The slot has been invalidated and cannot be used for replication.
     ///
     /// This typically occurs when the slot falls too far behind the current WAL

@@ -9,13 +9,13 @@ Supabase ETL ships official destination implementations in the
 embedding ETL or building the standalone replicator. **BigQuery is the stable,
 recommended default.**
 
-| Feature | Destination | Status | Guidance |
-| --- | --- | --- | --- |
-| `bigquery` | Google BigQuery | Stable | Recommended default |
-| `clickhouse` | ClickHouse | In progress | Evaluate for your workload |
-| `ducklake` | DuckLake | In progress | Evaluate for your workload |
-| `snowflake` | Snowflake | In progress | Evaluate for your workload |
-| `iceberg` | Apache Iceberg | Deprecated | Do not use for new deployments |
+| Feature      | Destination     | Status      | Guidance                       |
+| ------------ | --------------- | ----------- | ------------------------------ |
+| `bigquery`   | Google BigQuery | Stable      | Recommended default            |
+| `clickhouse` | ClickHouse      | In progress | Evaluate for your workload     |
+| `ducklake`   | DuckLake        | In progress | Evaluate for your workload     |
+| `snowflake`  | Snowflake       | In progress | Evaluate for your workload     |
+| `iceberg`    | Apache Iceberg  | Deprecated  | Do not use for new deployments |
 
 ## Status definitions
 
@@ -79,6 +79,84 @@ BigQuery uses the BigQuery Storage Write API and BigQuery change data capture
 to maintain destination tables. The standalone replicator guide uses BigQuery
 as its default example.
 
+### Table partitioning and clustering
+
+Use `table_options` to select the physical layout for individual source
+tables. `table_options`, along with `max_staleness_mins`, is applied only
+when a table is created or recreated, never to a table that already exists.
+Restarting a pipeline does not modify an existing table, and changing either
+setting has no effect until the table is created again. A table is created,
+and so picks up the current settings, when it is replicated for the first
+time, when its replication state is reset (for example from the dashboard
+or the pipeline resync API), or when a source truncate makes ETL create a
+new physical table.
+
+```yaml
+destination:
+  big_query:
+    # Project, dataset, and authentication fields omitted.
+    table_options:
+      tables:
+        - table_id: 16384
+          partition_by:
+            kind: time_column
+            column: created_at
+            granularity: day
+          cluster_by:
+            - tenant_id
+            - event_type
+```
+
+`table_id` is the source PostgreSQL table OID, matching the identifiers used by
+`table_sync_copy`; use the table IDs returned in the source publication
+response. Because the configuration follows the source table id rather than
+its name, renaming the source table does not detach its physical-layout
+settings, and destination metadata can continue pointing it at a different
+physical table. If a table is dropped and recreated, PostgreSQL assigns it a
+new OID, so its configuration must use the new `table_id`.
+
+`partition_by` and `cluster_by` are independent. Set either one or both in a
+table entry: omit `cluster_by` for a partitioned-only table, or omit
+`partition_by` for a clustered-only table. To use BigQuery's default
+unpartitioned and unclustered layout, omit that table from `tables`. An entry
+with neither option is rejected because it has no effect.
+
+Time-column partitioning supports replicated PostgreSQL `date`, `timestamp`,
+and `timestamptz` columns with `hour`, `day`, `month`, or `year` granularity;
+`date` columns do not support `hour`. Use `kind: integer_range` with `column`,
+`start`, `end`, and `interval` for an integer column, or
+`kind: ingestion_time` with `granularity` for ingestion-time partitioning.
+Clustering accepts one to four ordered, distinct replicated column names.
+BigQuery validates whether clustering column types are supported.
+
+`partition_by.column` and each `cluster_by` entry use the source PostgreSQL
+column name; ETL applies the same [flexible column
+names](#flexible-column-names) mapping to them as it does to the column
+itself, so a partitioning or clustering column does not need to be quoted or
+otherwise adjusted for the destination.
+
+See the BigQuery documentation for [partition expressions](https://cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#partition_expression)
+and [clustering column requirements](https://cloud.google.com/bigquery/docs/creating-clustered-tables#clustered_column_requirements).
+
+### Flexible column names
+
+BigQuery's [flexible column
+names](https://cloud.google.com/bigquery/docs/schemas#flexible-column-names)
+accept spaces, most punctuation, and non-ASCII Unicode characters. ETL passes
+any replicated PostgreSQL column name through to BigQuery for table creation,
+schema changes, and row writes; a column name is no longer required to be an
+ASCII identifier.
+
+BigQuery documents column names as case-insensitive but does not specify the
+Unicode case-folding algorithm it uses for identifier resolution. ETL folds
+only ASCII letters when mapping a source column name to its destination name,
+matching the [destination-name
+collision](/explanation/schema-changes/#ordered-schema-plans) behavior used
+elsewhere for BigQuery. `Name` and `name` therefore collide locally and are
+treated as one destination column, while `Ä` and `ä` remain distinct. If
+BigQuery's own case-insensitivity considers such a non-ASCII pair equivalent,
+the table DDL is rejected instead of ETL silently merging the two columns.
+
 ### Limitations
 
 - Every replicated source table needs a primary key, and all primary-key
@@ -103,6 +181,13 @@ as its default example.
 
 ClickHouse supports a current-state layout with `ReplacingMergeTree` and an
 append-only event-log layout with `MergeTree`.
+
+`engine` is applied only when a table is created or recreated; restarting a
+pipeline or changing `engine` does not modify an existing table. ClickHouse
+has no way to alter a table's engine, so if `engine` no longer matches a
+table that already exists, ETL returns an error on write instead of silently
+applying the new setting. Drop and resynchronize the table, or revert
+`engine` to match it.
 
 ### Limitations
 

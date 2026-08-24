@@ -131,6 +131,9 @@ impl From<DestinationPipelinesDbError> for DestinationPipelineError {
 impl DestinationPipelineError {
     fn to_message(&self) -> String {
         match self {
+            DestinationPipelineError::Pipeline(PipelineError::InvalidPipelineRequest(message)) => {
+                format!("Invalid pipeline request: {message}")
+            }
             // Do not expose internal details in error messages.
             DestinationPipelineError::DestinationPipelinesDb(
                 DestinationPipelinesDbError::Database(_),
@@ -159,6 +162,9 @@ impl DestinationPipelineError {
 impl IntoResponse for DestinationPipelineError {
     fn into_response(self) -> Response {
         let status_code = match &self {
+            DestinationPipelineError::Pipeline(PipelineError::InvalidPipelineRequest(_)) => {
+                StatusCode::BAD_REQUEST
+            }
             DestinationPipelineError::DestinationPipelinesDb(
                 DestinationPipelinesDbError::DestinationsDb(
                     DestinationsDbError::DestinationConfigUpdate(_),

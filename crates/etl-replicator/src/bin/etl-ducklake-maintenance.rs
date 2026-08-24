@@ -5,7 +5,7 @@ use std::{env, error::Error, process::ExitCode};
 use etl_config::{
     default_ducklake_s3_url_style, default_ducklake_s3_use_ssl, load_config,
     parse_ducklake_s3_data_path, parse_ducklake_url,
-    shared::{DestinationConfig, ReplicatorConfig},
+    shared::{DestinationConfig, ReplicatorConfig, Validate},
 };
 use etl_maintenance::ducklake::{
     CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, ExpireSnapshotsMaintenanceConfig,

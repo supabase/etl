@@ -1,4 +1,7 @@
-use etl_config::{load_config, shared::ReplicatorConfig};
+use etl_config::{
+    load_config,
+    shared::{ReplicatorConfig, Validate},
+};
 
 use crate::error::{ReplicatorError, ReplicatorResult};
 

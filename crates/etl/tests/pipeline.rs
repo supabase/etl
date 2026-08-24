@@ -660,6 +660,58 @@ async fn reset_during_active_copy_is_overwritten_by_active_worker() {
     assert!(!destination.was_table_dropped_for_copy(table_id).await);
 }
 
+/// Verifies that invalidating a table-sync slot during an active copy aborts
+/// the copy and persists a manually retryable table error.
+// Serialized via nextest test-group "shared-pg" (mutates cluster-wide WAL settings).
+#[tokio::test(flavor = "multi_thread")]
+async fn exclusive_table_copy_fails_when_slot_invalidated() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
+    insert_users_data(&mut database, &users_schema.name, 1..=3).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let held_write = destination.hold_next(FaultyOp::WriteTableRows).await;
+
+    let pipeline_id: PipelineId = random();
+    let slot_name: String =
+        EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_id).try_into().unwrap();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    )
+    .with_table_sync_monitor_refresh_interval_ms(100)
+    .build();
+
+    let errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+
+    pipeline.start().await.unwrap();
+
+    held_write.wait_reached().await;
+
+    database.invalidate_slot(&slot_name).await.unwrap();
+
+    errored.notified().await;
+
+    held_write.release_ok();
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let state = store.get_table_state(table_id).await.unwrap().unwrap();
+    let TableState::Errored { retry_policy, source_err, .. } = state else {
+        panic!("table copy should be marked errored after its slot is invalidated");
+    };
+    assert!(matches!(retry_policy, TableRetryPolicy::ManualRetry));
+    assert_eq!(source_err.kind(), ErrorKind::ReplicationSlotInvalidated);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
     init_test_tracing();
@@ -883,7 +935,7 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     database.wait_for_slot_inactive(&apply_slot_name).await;
 
     // Invalidate the slot.
-    database.invalidate_slot(&apply_slot_name).await;
+    database.invalidate_slot(&apply_slot_name).await.unwrap();
 
     // Restart the pipeline, it should fail because the slot is invalidated
     // and error behavior is configured.
@@ -956,7 +1008,7 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
     database.wait_for_slot_inactive(&apply_slot_name).await;
 
     // Invalidate the slot.
-    database.invalidate_slot(&apply_slot_name).await;
+    database.invalidate_slot(&apply_slot_name).await.unwrap();
 
     // Verify the slot is invalidated.
     let slot_state = database.get_replication_slot_state(&apply_slot_name).await.unwrap();

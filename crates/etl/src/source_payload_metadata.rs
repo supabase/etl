@@ -16,6 +16,13 @@ use crate::observability::{
     ETL_BYTES_PROCESSED_TOTAL, ETL_BYTES_RECEIVED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL,
 };
 
+// These values are part of the existing egress and billing contract.
+// `table_copy` maps to the copy replication path and `streaming` maps to the
+// CDC replication path. Preserve the legacy names for compatibility even though
+// Prometheus metrics use the current vocabulary.
+const LEGACY_EGRESS_COPY_PROCESSING_TYPE: &str = "table_copy";
+const LEGACY_EGRESS_CDC_PROCESSING_TYPE: &str = "streaming";
+
 /// Metadata for PostgreSQL COPY row-body bytes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TableCopyPayloadMetadata {
@@ -47,7 +54,7 @@ impl TableCopyPayloadMetadata {
         record_processed_metrics(
             [("copy", self.copy_bytes)],
             destination_type,
-            "table_copy",
+            LEGACY_EGRESS_COPY_PROCESSING_TYPE,
             self.copy_bytes,
         );
     }
@@ -122,7 +129,7 @@ impl StreamingPayloadMetadata {
         record_processed_metrics(
             self.by_event_type(),
             destination_type,
-            "streaming",
+            LEGACY_EGRESS_CDC_PROCESSING_TYPE,
             self.total_bytes(),
         );
     }

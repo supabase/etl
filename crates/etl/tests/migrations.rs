@@ -171,7 +171,7 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
         max_table_sync_workers: 4,
         max_copy_connections_per_table: 2,
         memory_refresh_interval_ms: 100,
-        replication_lag_refresh_interval_ms: 10000,
+        table_sync_monitor_refresh_interval_ms: 10000,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

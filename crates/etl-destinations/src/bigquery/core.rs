@@ -23,6 +23,7 @@ use etl::{
     },
     store::DestinationStore,
 };
+use etl_config::shared::{BigQueryTableOptions, BigQueryTableOptionsConfig};
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
 use metrics::histogram;
 use prost::Message;
@@ -252,6 +253,7 @@ pub struct BigQueryDestination<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
+    table_options: Arc<HashMap<TableId, BigQueryTableOptions>>,
     pipeline_id: PipelineId,
     state_store: S,
     inner: Arc<Mutex<Inner>>,
@@ -281,6 +283,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            table_options: Arc::new(HashMap::new()),
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -314,6 +317,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            table_options: Arc::new(HashMap::new()),
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -345,6 +349,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            table_options: Arc::new(HashMap::new()),
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -375,6 +380,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            table_options: Arc::new(HashMap::new()),
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
@@ -419,11 +425,26 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            table_options: Arc::new(HashMap::new()),
             pipeline_id,
             state_store: store,
             inner: Arc::new(Mutex::new(Inner::new())),
             tasks: TaskSet::new(),
         })
+    }
+
+    /// Configures per-table partitioning and clustering for physical tables
+    /// created by this destination.
+    pub fn with_table_options(mut self, table_options: BigQueryTableOptionsConfig) -> Self {
+        self.table_options = Arc::new(
+            table_options
+                .tables
+                .into_iter()
+                .map(|table| (TableId::new(table.table_id), table))
+                .collect(),
+        );
+
+        self
     }
 
     /// Resolves or creates the sequenced BigQuery table for a schema endpoint.
@@ -479,6 +500,7 @@ where
                             &sequenced_bigquery_table_id_string,
                             replicated_table_schema,
                             self.max_staleness_mins,
+                            self.table_options.get(&table_id),
                         )
                         .await?;
                     self.state_store
@@ -507,6 +529,7 @@ where
                         &sequenced_bigquery_table_id_string,
                         replicated_table_schema,
                         self.max_staleness_mins,
+                        self.table_options.get(&table_id),
                     )
                     .await?;
                 self.state_store
@@ -1197,9 +1220,22 @@ where
             let sequenced_bigquery_table_id =
                 metadata_sequenced_table_id_for_base(&metadata, &bigquery_table_id)?;
 
-            // We compute the new sequence table ID since we want a new table for each
-            // truncate event.
-            let next_sequenced_bigquery_table_id = sequenced_bigquery_table_id.next();
+            // Find a new sequence table ID for this truncate event. An earlier attempt may
+            // have created the next version before failing to update the view or metadata.
+            // We must not replace that table because its creation-only layout may differ
+            // from the pipeline's current table options.
+            let mut obsolete_sequenced_bigquery_table_ids =
+                vec![sequenced_bigquery_table_id.clone()];
+            let mut next_sequenced_bigquery_table_id = sequenced_bigquery_table_id.next();
+            while self
+                .client
+                .table_exists(&self.dataset_id, &next_sequenced_bigquery_table_id.to_string())
+                .await?
+            {
+                obsolete_sequenced_bigquery_table_ids
+                    .push(next_sequenced_bigquery_table_id.clone());
+                next_sequenced_bigquery_table_id = next_sequenced_bigquery_table_id.next();
+            }
 
             info!(
                 table_id = table_id.0,
@@ -1207,16 +1243,14 @@ where
                 "processing truncate, creating new version"
             );
 
-            // Create or replace the new table.
-            //
-            // We unconditionally replace the table if it's there because here we know that
-            // we need the table to be empty given the truncation.
+            // Create the fresh table for this truncate generation.
             self.client
                 .create_or_replace_table(
                     &self.dataset_id,
                     &next_sequenced_bigquery_table_id.to_string(),
                     &replicated_table_schema,
                     self.max_staleness_mins,
+                    self.table_options.get(&table_id),
                 )
                 .await?;
 
@@ -1236,13 +1270,12 @@ where
             );
             self.state_store.store_destination_table_metadata(table_id, metadata).await?;
 
-            // Please note that the three statements above are not transactional, so if one
-            // fails, there might be combinations of failures that require
-            // manual intervention. For example,
+            // The three statements above are not transactional. Retries use metadata as
+            // the durable authority and create another fresh table generation. For example,
             // - Table created, but view update failed -> in this case the system will still
             //   point to table 'n', so the restart will reprocess events on table 'n', the
-            //   table 'n + 1' will be recreated and the view will be updated to point to
-            //   the new table. No destination table metadata is changed.
+            //   already-created table 'n + 1' will be left unchanged, and a later fresh
+            //   generation will be created. No destination table metadata is changed.
             // - Table created, view updated, but destination table metadata update failed
             //   -> in this case the system will still point to table 'n' but the customer
             //   will see the empty state of table 'n + 1' until the system heals. Healing
@@ -1257,26 +1290,29 @@ where
                 "successfully processed truncate, view updated"
             );
 
-            // Schedule tracked cleanup of the previous table. The task handles cleanup
-            // errors internally because the view already points to the new data.
+            // Schedule tracked cleanup of the previous table and any abandoned generations.
+            // The task handles cleanup errors internally because the view already points to
+            // the new data.
             let client = self.client.clone();
             let dataset_id = self.dataset_id.clone();
             self.tasks
                 .spawn_with(move || async move {
-                    if let Err(err) = client
-                        .drop_table_if_exists(&dataset_id, &sequenced_bigquery_table_id.to_string())
-                        .await
-                    {
-                        warn!(
-                            %sequenced_bigquery_table_id,
-                            error = %err,
-                            "failed to drop previous table"
-                        );
-                    } else {
-                        info!(
-                            %sequenced_bigquery_table_id,
-                            "successfully cleaned up previous table"
-                        );
+                    for obsolete_table_id in obsolete_sequenced_bigquery_table_ids {
+                        if let Err(err) = client
+                            .drop_table_if_exists(&dataset_id, &obsolete_table_id.to_string())
+                            .await
+                        {
+                            warn!(
+                                %obsolete_table_id,
+                                error = %err,
+                                "failed to drop obsolete table"
+                            );
+                        } else {
+                            info!(
+                                %obsolete_table_id,
+                                "successfully cleaned up obsolete table"
+                            );
+                        }
                     }
                 })
                 .await;
@@ -1349,20 +1385,6 @@ where
     }
 }
 
-/// Returns whether a column name can be used directly as a protobuf field.
-///
-/// ETL supplies source column names directly in the protobuf descriptor used by
-/// the BigQuery Storage Write API. Flexible BigQuery column names require a
-/// separate `column_name` annotation, which the current writer does not emit.
-fn is_bigquery_storage_write_column_name(column_name: &str) -> bool {
-    let Some((&first, rest)) = column_name.as_bytes().split_first() else {
-        return false;
-    };
-
-    (first.is_ascii_alphabetic() || first == b'_')
-        && rest.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-}
-
 /// Returns the reserved BigQuery prefix matched by a source column name.
 fn bigquery_reserved_column_prefix(column_name: &str) -> Option<&'static str> {
     BIGQUERY_RESERVED_COLUMN_PREFIXES.into_iter().find(|prefix| {
@@ -1372,7 +1394,10 @@ fn bigquery_reserved_column_prefix(column_name: &str) -> Option<&'static str> {
     })
 }
 
-/// Validates that a source column name is writable through BigQuery CDC.
+/// Validates a source column name against BigQuery's reserved prefixes.
+///
+/// The Storage Write client maps flexible BigQuery column names to
+/// protobuf-safe placeholders using BigQuery's `column_name` field option.
 fn validate_bigquery_column_name(
     replicated_table_schema: &ReplicatedTableSchema,
     column_name: &str,
@@ -1390,27 +1415,14 @@ fn validate_bigquery_column_name(
         );
     }
 
-    if !is_bigquery_storage_write_column_name(column_name) {
-        bail!(
-            ErrorKind::SourceSchemaError,
-            "BigQuery source column name is unsupported",
-            format!(
-                "Table '{}' column '{}' is not an ASCII protobuf identifier. BigQuery flexible \
-                 column names are not supported by the current Storage Write encoder.",
-                replicated_table_schema.name(),
-                column_name
-            )
-        );
-    }
-
     Ok(())
 }
 
 /// Validates BigQuery-specific schema capabilities.
 ///
 /// Shared planning owns destination name-equivalence validation during schema
-/// changes. This check owns protobuf syntax, reserved names, and the source
-/// primary-key requirements used by BigQuery CDC.
+/// changes. This check owns reserved names and the source primary-key
+/// requirements used by BigQuery CDC.
 fn validate_bigquery_table_capabilities(
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
@@ -2405,14 +2417,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_bigquery_table_shape_rejects_flexible_column_names() {
+    fn validate_bigquery_table_shape_accepts_flexible_column_names() {
         for column_name in ["2fa", "user-name", "naïve"] {
             let replicated_table_schema = replicated_schema_with_column_name(column_name);
 
-            let error = validate_bigquery_table_shape(&replicated_table_schema).unwrap_err();
-
-            assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
-            assert_eq!(error.description(), Some("BigQuery source column name is unsupported"));
+            validate_bigquery_table_shape(&replicated_table_schema).unwrap();
         }
     }
 

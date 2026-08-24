@@ -1,6 +1,8 @@
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
+use crate::shared::Validate;
+
 /// Supabase integration configuration.
 ///
 /// Contains Supabase-specific settings for ETL applications that
@@ -27,6 +29,8 @@ pub struct SupabaseConfig {
     pub configcat_sdk_key: Option<String>,
 }
 
+impl Validate for SupabaseConfig {}
+
 /// Supabase integration configuration without secrets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupabaseConfigWithoutSecrets {
@@ -39,6 +43,8 @@ pub struct SupabaseConfigWithoutSecrets {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_url: Option<String>,
 }
+
+impl Validate for SupabaseConfigWithoutSecrets {}
 
 impl From<SupabaseConfig> for SupabaseConfigWithoutSecrets {
     fn from(value: SupabaseConfig) -> Self {

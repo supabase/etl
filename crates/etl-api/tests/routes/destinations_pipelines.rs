@@ -363,6 +363,7 @@ async fn destination_pipeline_update_accepts_partial_config_updates() {
             service_account_key: UpdateField::Preserve,
             max_staleness_mins: UpdateField::Preserve,
             connection_pool_size: UpdateField::Preserve,
+            table_options: UpdateField::Preserve,
         },
         source_id,
         pipeline_config: UpdateApiPipelineConfig {

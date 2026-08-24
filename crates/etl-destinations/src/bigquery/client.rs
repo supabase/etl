@@ -8,7 +8,10 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     pipeline::PipelineId,
-    schema::{ColumnSchema, ReplicatedTableSchema, is_array_type},
+    schema::{ColumnSchema, ReplicatedTableSchema, Type, is_array_type},
+};
+use etl_config::shared::{
+    BigQueryPartitionBy, BigQueryTableOptions, BigQueryTimePartitionGranularity,
 };
 use gcp_bigquery_client::{
     Client,
@@ -100,6 +103,125 @@ pub type BigQueryProjectId = String;
 pub type BigQueryDatasetId = String;
 /// BigQuery table identifier.
 pub type BigQueryTableId = String;
+
+/// Renders creation-only partitioning and clustering clauses for a table.
+///
+/// Configuration-controlled column names must remain quoted through
+/// [`quote_identifier`]. All other interpolated values are typed integers or
+/// keywords selected from enums in this module.
+fn create_table_options_sql(
+    options: Option<&BigQueryTableOptions>,
+    schema: &ReplicatedTableSchema,
+) -> EtlResult<String> {
+    let Some(options) = options else {
+        return Ok(String::new());
+    };
+
+    let mut clauses = Vec::new();
+
+    if let Some(partition_by) = &options.partition_by {
+        clauses.push(format!("partition by {}", partition_expression(partition_by, schema)?));
+    }
+
+    if !options.cluster_by.is_empty() {
+        let cluster_columns = options
+            .cluster_by
+            .iter()
+            .map(|column| BIGQUERY_COLUMN_NAME_MAPPING.map_name(column))
+            .map(|column| quote_identifier(&column, "BigQuery clustering column"))
+            .collect::<EtlResult<Vec<_>>>()?
+            .join(", ");
+        clauses.push(format!("cluster by {cluster_columns}"));
+    }
+
+    Ok(clauses.join(" "))
+}
+
+/// Renders one supported BigQuery partition expression.
+fn partition_expression(
+    partition_by: &BigQueryPartitionBy,
+    schema: &ReplicatedTableSchema,
+) -> EtlResult<String> {
+    match partition_by {
+        BigQueryPartitionBy::TimeColumn { column, granularity } => {
+            let typ = require_replicated_column(schema, column)?;
+            let destination_column = BIGQUERY_COLUMN_NAME_MAPPING.map_name(column);
+            let destination_column =
+                quote_identifier(&destination_column, "BigQuery partitioning column")?;
+            let granularity_sql = granularity_sql(*granularity);
+
+            match *typ {
+                Type::DATE if *granularity == BigQueryTimePartitionGranularity::Day => {
+                    Ok(destination_column)
+                }
+                Type::DATE if *granularity != BigQueryTimePartitionGranularity::Hour => {
+                    Ok(format!("date_trunc({destination_column}, {granularity_sql})"))
+                }
+                Type::TIMESTAMP => {
+                    Ok(format!("datetime_trunc({destination_column}, {granularity_sql})"))
+                }
+                Type::TIMESTAMPTZ => {
+                    Ok(format!("timestamp_trunc({destination_column}, {granularity_sql})"))
+                }
+                _ => Err(etl_error!(
+                    ErrorKind::ConfigError,
+                    "BigQuery table options configuration is invalid",
+                    format!(
+                        "Column `{}` on table `{}` does not support {} time partitioning",
+                        column,
+                        schema.name(),
+                        granularity_sql.to_ascii_lowercase()
+                    )
+                )),
+            }
+        }
+        BigQueryPartitionBy::IntegerRange { column, start, end, interval } => {
+            let destination_column = BIGQUERY_COLUMN_NAME_MAPPING.map_name(column);
+            let destination_column =
+                quote_identifier(&destination_column, "BigQuery partitioning column")?;
+            Ok(format!(
+                "range_bucket({destination_column}, generate_array({start}, {end}, {interval}))"
+            ))
+        }
+        BigQueryPartitionBy::IngestionTime { granularity } => match granularity {
+            BigQueryTimePartitionGranularity::Day => Ok("_partitiondate".to_owned()),
+            granularity => {
+                Ok(format!("timestamp_trunc(_partitiontime, {})", granularity_sql(*granularity)))
+            }
+        },
+    }
+}
+
+/// Returns one replicated source column type or a configuration error.
+fn require_replicated_column<'a>(
+    schema: &'a ReplicatedTableSchema,
+    column: &str,
+) -> EtlResult<&'a Type> {
+    schema
+        .column_schemas()
+        .find(|column_schema| column_schema.name == column)
+        .map(|column_schema| &column_schema.typ)
+        .ok_or_else(|| {
+            etl_error!(
+                ErrorKind::ConfigError,
+                "BigQuery table options configuration is invalid",
+                format!(
+                    "Table `{}` does not replicate configured column `{column}`",
+                    schema.name()
+                )
+            )
+        })
+}
+
+/// Returns the GoogleSQL keyword for one partition granularity.
+fn granularity_sql(granularity: BigQueryTimePartitionGranularity) -> &'static str {
+    match granularity {
+        BigQueryTimePartitionGranularity::Hour => "HOUR",
+        BigQueryTimePartitionGranularity::Day => "DAY",
+        BigQueryTimePartitionGranularity::Month => "MONTH",
+        BigQueryTimePartitionGranularity::Year => "YEAR",
+    }
+}
 
 /// Change Data Capture operation types for BigQuery streaming.
 #[derive(Debug)]
@@ -814,18 +936,20 @@ impl BigQueryClient {
     ///
     /// Returns `true` if the table was created fresh, `false` if it already
     /// existed and was replaced.
-    pub async fn create_or_replace_table(
+    pub(super) async fn create_or_replace_table(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
+        table_options: Option<&BigQueryTableOptions>,
     ) -> EtlResult<bool> {
         let table_exists = self.table_exists(dataset_id, table_id).await?;
 
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
         let columns_spec = create_columns_spec(replicated_table_schema)?;
+        let table_options_sql = create_table_options_sql(table_options, replicated_table_schema)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -839,7 +963,8 @@ impl BigQueryClient {
         );
 
         let query = format!(
-            "create or replace table {full_table_name} {columns_spec} {max_staleness_option}"
+            "create or replace table {full_table_name} {columns_spec} {table_options_sql} \
+             {max_staleness_option}"
         );
 
         let _ = self.query(QueryRequest::new(query)).await?;
@@ -851,19 +976,26 @@ impl BigQueryClient {
     /// Creates a table in BigQuery if it doesn't already exist.
     ///
     /// Returns `true` if the table was created, `false` if it already existed.
-    pub async fn create_table_if_missing(
+    pub(super) async fn create_table_if_missing(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
+        table_options: Option<&BigQueryTableOptions>,
     ) -> EtlResult<bool> {
         if self.table_exists(dataset_id, table_id).await? {
             return Ok(false);
         }
 
-        self.create_table(dataset_id, table_id, replicated_table_schema, max_staleness_mins)
-            .await?;
+        self.create_table(
+            dataset_id,
+            table_id,
+            replicated_table_schema,
+            max_staleness_mins,
+            table_options,
+        )
+        .await?;
 
         Ok(true)
     }
@@ -872,16 +1004,18 @@ impl BigQueryClient {
     ///
     /// Builds and executes a CREATE TABLE statement with the provided column
     /// schemas and optional staleness configuration for CDC operations.
-    pub async fn create_table(
+    async fn create_table(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
+        table_options: Option<&BigQueryTableOptions>,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
         let columns_spec = create_columns_spec(replicated_table_schema)?;
+        let table_options_sql = create_table_options_sql(table_options, replicated_table_schema)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -890,7 +1024,10 @@ impl BigQueryClient {
 
         info!(%full_table_name, "creating table in bigquery");
 
-        let query = format!("create table {full_table_name} {columns_spec} {max_staleness_option}");
+        let query = format!(
+            "create table {full_table_name} {columns_spec} {table_options_sql} \
+             {max_staleness_option}"
+        );
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -1525,12 +1662,207 @@ impl fmt::Debug for BigQueryClient {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use etl::schema::{TableId, TableName, TableSchema};
     use gcp_bigquery_client::{
         error::{NestedResponseError, ResponseError},
         google::cloud::bigquery::storage::v1::{AppendRowsResponse, append_rows_response},
     };
 
     use super::*;
+
+    fn replicated_schema_with_identity(table_id: u32, table_name: &str) -> ReplicatedTableSchema {
+        ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(table_id),
+            TableName::new("public".to_owned(), table_name.to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("tenant_id".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("created_at".to_owned(), Type::TIMESTAMPTZ, -1, 3, false),
+            ],
+        )))
+    }
+
+    fn replicated_schema() -> ReplicatedTableSchema {
+        replicated_schema_with_identity(1, "events")
+    }
+
+    fn table_options(
+        partition_by: Option<BigQueryPartitionBy>,
+        cluster_by: Vec<&str>,
+    ) -> BigQueryTableOptions {
+        BigQueryTableOptions {
+            table_id: 1,
+            partition_by,
+            cluster_by: cluster_by.into_iter().map(str::to_owned).collect(),
+        }
+    }
+
+    #[test]
+    fn renders_time_partitioning_and_ordered_clustering() {
+        let options = table_options(
+            Some(BigQueryPartitionBy::TimeColumn {
+                column: "created_at".to_owned(),
+                granularity: BigQueryTimePartitionGranularity::Month,
+            }),
+            vec!["tenant_id", "id"],
+        );
+        let schema = replicated_schema();
+
+        let sql = create_table_options_sql(Some(&options), &schema).unwrap();
+
+        assert_eq!(
+            sql,
+            "partition by timestamp_trunc(`created_at`, MONTH) cluster by `tenant_id`, `id`"
+        );
+    }
+
+    #[test]
+    fn table_option_columns_use_destination_mapping() {
+        let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![
+                ColumnSchema::new("Record ID".to_owned(), Type::INT8, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("Occurred At".to_owned(), Type::TIMESTAMPTZ, -1, 2, false),
+                ColumnSchema::new("Tenant Group".to_owned(), Type::TEXT, -1, 3, false),
+            ],
+        )));
+        let options = table_options(
+            Some(BigQueryPartitionBy::TimeColumn {
+                column: "Occurred At".to_owned(),
+                granularity: BigQueryTimePartitionGranularity::Month,
+            }),
+            vec!["Tenant Group", "Record ID"],
+        );
+
+        let sql = create_table_options_sql(Some(&options), &schema).unwrap();
+
+        assert_eq!(
+            sql,
+            "partition by timestamp_trunc(`occurred at`, MONTH) cluster by `tenant group`, \
+             `record id`"
+        );
+    }
+
+    #[test]
+    fn rejects_hour_partitioning_for_date_columns() {
+        let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![ColumnSchema::new("created_on".to_owned(), Type::DATE, -1, 1, false)],
+        )));
+        let options = table_options(
+            Some(BigQueryPartitionBy::TimeColumn {
+                column: "created_on".to_owned(),
+                granularity: BigQueryTimePartitionGranularity::Hour,
+            }),
+            vec![],
+        );
+
+        let error = create_table_options_sql(Some(&options), &schema).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
+        assert!(error.to_string().contains("does not support hour time partitioning"));
+    }
+
+    #[test]
+    fn renders_integer_range_and_ingestion_time_partitioning() {
+        let range = table_options(
+            Some(BigQueryPartitionBy::IntegerRange {
+                column: "id".to_owned(),
+                start: 0,
+                end: 100,
+                interval: 10,
+            }),
+            vec![],
+        );
+        let schema = replicated_schema();
+        assert_eq!(
+            create_table_options_sql(Some(&range), &schema).unwrap(),
+            "partition by range_bucket(`id`, generate_array(0, 100, 10))"
+        );
+
+        let ingestion = table_options(
+            Some(BigQueryPartitionBy::IngestionTime {
+                granularity: BigQueryTimePartitionGranularity::Hour,
+            }),
+            vec![],
+        );
+        assert_eq!(
+            create_table_options_sql(Some(&ingestion), &schema).unwrap(),
+            "partition by timestamp_trunc(_partitiontime, HOUR)"
+        );
+    }
+
+    #[test]
+    fn renders_partitioning_and_clustering_independently() {
+        let schema = replicated_schema();
+
+        let partition_only = table_options(
+            Some(BigQueryPartitionBy::IntegerRange {
+                column: "id".to_owned(),
+                start: 0,
+                end: 100,
+                interval: 10,
+            }),
+            vec![],
+        );
+        assert_eq!(
+            create_table_options_sql(Some(&partition_only), &schema).unwrap(),
+            "partition by range_bucket(`id`, generate_array(0, 100, 10))"
+        );
+
+        let clustering_only = table_options(None, vec!["tenant_id", "id"]);
+        assert_eq!(
+            create_table_options_sql(Some(&clustering_only), &schema).unwrap(),
+            "cluster by `tenant_id`, `id`"
+        );
+
+        assert_eq!(create_table_options_sql(None, &schema).unwrap(), "");
+    }
+
+    #[test]
+    fn table_option_identifiers_cannot_inject_sql() {
+        let partition_column = r#"id` ) options(description="injected") --"#;
+        let cluster_column = "tenant` cluster by injected --";
+        let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![
+                ColumnSchema::new(partition_column.to_owned(), Type::INT8, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new(cluster_column.to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        )));
+        let options = table_options(
+            Some(BigQueryPartitionBy::IntegerRange {
+                column: partition_column.to_owned(),
+                start: 0,
+                end: 100,
+                interval: 10,
+            }),
+            vec![cluster_column],
+        );
+
+        assert_eq!(
+            create_table_options_sql(Some(&options), &schema).unwrap(),
+            r#"partition by range_bucket(`id\` ) options(description="injected") --`, generate_array(0, 100, 10)) cluster by `tenant\` cluster by injected --`"#
+        );
+    }
+
+    #[test]
+    fn leaves_clustering_column_validation_to_bigquery() {
+        let missing_column = table_options(None, vec!["missing"]);
+        let schema = replicated_schema();
+
+        assert_eq!(
+            create_table_options_sql(Some(&missing_column), &schema).unwrap(),
+            "cluster by `missing`"
+        );
+    }
 
     fn successful_append_response() -> AppendRowsResponse {
         AppendRowsResponse {
