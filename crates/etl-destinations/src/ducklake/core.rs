@@ -3082,6 +3082,16 @@ where
     /// old pools are removed so later replication cannot reuse stale
     /// connections after the pause guard is released.
     pub(super) async fn recreate_pools_after_external_maintenance(&self) -> EtlResult<()> {
+        #[cfg(feature = "test-utils")]
+        if FAIL_POOL_REFRESH_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            drop(self.pools.invalidate());
+            return Err(etl_error!(
+                ErrorKind::DestinationConnectionFailed,
+                "Failed to recreate DuckLake connection pools",
+                "Injected pool recreation failure"
+            ));
+        }
+
         let streaming =
             match build_warm_ducklake_pool(self.manager.as_ref().clone(), self.pool_size, "write")
                 .await
@@ -3358,6 +3368,26 @@ static PAUSED_STREAMING_WRITE_HOOK: std::sync::LazyLock<Mutex<Option<PausedStrea
 #[cfg(feature = "test-utils")]
 static PAUSED_STREAMING_WRITE_RESUME_TX: std::sync::LazyLock<Mutex<Option<oneshot::Sender<()>>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
+#[cfg(feature = "test-utils")]
+static FAIL_POOL_REFRESH_ONCE: AtomicBool = AtomicBool::new(false);
+
+/// Injects one pool-refresh failure for tests.
+#[cfg(feature = "test-utils")]
+pub fn arm_fail_pool_refresh_once_for_tests() {
+    FAIL_POOL_REFRESH_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Returns whether the one-shot pool-refresh failure remains armed for tests.
+#[cfg(feature = "test-utils")]
+pub fn pool_refresh_failure_armed_for_tests() -> bool {
+    FAIL_POOL_REFRESH_ONCE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Clears the one-shot pool-refresh failure for tests.
+#[cfg(feature = "test-utils")]
+pub fn reset_pool_refresh_failure_for_tests() {
+    FAIL_POOL_REFRESH_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Arms a one-shot hook that pauses the next streaming write before DuckLake
 /// starts applying it.

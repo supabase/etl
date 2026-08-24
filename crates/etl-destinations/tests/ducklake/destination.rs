@@ -21,7 +21,10 @@
 //! ```
 
 #[cfg(feature = "test-utils")]
-use std::sync::LazyLock;
+use std::sync::{
+    LazyLock,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{f64::consts::PI, path::Path, sync::Arc, time::Duration};
 
 use chrono::NaiveDate;
@@ -31,7 +34,7 @@ use duckdb::Connection;
 use etl::{
     data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     destination::{Destination, DestinationTableMetadata, DestinationTableSchema},
-    error::ErrorKind,
+    error::{ErrorKind, EtlResult},
     event::{DeleteEvent, Event},
     schema::{
         ColumnSchema, IdentityMask, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId,
@@ -44,15 +47,18 @@ use etl_destinations::ducklake::{
 };
 #[cfg(feature = "test-utils")]
 use etl_destinations::ducklake::{
-    arm_fail_after_atomic_batch_commit_once_for_tests,
+    arm_fail_after_atomic_batch_commit_once_for_tests, arm_fail_pool_refresh_once_for_tests,
     arm_fail_after_copy_batch_commit_once_for_tests, ducklake_staging_table_creations_for_tests,
-    reset_ducklake_test_hooks, run_external_maintenance_watcher,
+    pool_refresh_failure_armed_for_tests, reset_ducklake_test_hooks,
+    reset_pool_refresh_failure_for_tests, run_external_maintenance_watcher,
 };
 #[cfg(feature = "test-utils")]
 use etl_maintenance::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
-    ExternalMaintenanceOperationRun, ExternalMaintenanceOperations, ExternalMaintenancePause,
-    ExternalMaintenancePausePolicy, ExternalMaintenanceReplicatorState, ExternalMaintenanceRun,
+    ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
+    ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenancePausePolicy,
+    ExternalMaintenanceReplicatorState, ExternalMaintenanceReplicatorStatus,
+    ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun, ExternalMaintenanceState,
     ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig, PostgresExternalMaintenanceStore,
 };
 use etl_telemetry::tracing::init_test_tracing;
@@ -74,6 +80,57 @@ use crate::support::ducklake::{
 #[cfg(feature = "test-utils")]
 static DUCKLAKE_TEST_HOOKS_GUARD: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(1)));
+
+/// Maintenance store wrapper that can suspend watcher state reads.
+#[cfg(feature = "test-utils")]
+#[derive(Clone)]
+struct LoadBlockingExternalMaintenanceStore {
+    inner: PostgresExternalMaintenanceStore,
+    load_blocked: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "test-utils")]
+impl LoadBlockingExternalMaintenanceStore {
+    /// Creates a wrapper with state reads initially enabled.
+    fn new(inner: PostgresExternalMaintenanceStore) -> Self {
+        Self { inner, load_blocked: Arc::new(AtomicBool::new(false)) }
+    }
+
+    /// Controls whether watcher state reads remain pending until timeout.
+    fn set_load_blocked(&self, blocked: bool) {
+        self.load_blocked.store(blocked, Ordering::Relaxed);
+    }
+}
+
+#[cfg(feature = "test-utils")]
+#[async_trait::async_trait]
+impl ExternalMaintenanceStore for LoadBlockingExternalMaintenanceStore {
+    async fn load_state(&self) -> EtlResult<ExternalMaintenanceState> {
+        if self.load_blocked.load(Ordering::Relaxed) {
+            return std::future::pending().await;
+        }
+
+        self.inner.load_state().await
+    }
+
+    async fn request_operations(
+        &self,
+        request: ExternalMaintenanceOperationRequest,
+    ) -> EtlResult<ExternalMaintenanceRequestOutcome> {
+        self.inner.request_operations(request).await
+    }
+
+    async fn report_replicator_status(
+        &self,
+        status: ExternalMaintenanceReplicatorStatus,
+    ) -> EtlResult<()> {
+        self.inner.report_replicator_status(status).await
+    }
+
+    async fn clear_replicator_status(&self) -> EtlResult<()> {
+        self.inner.clear_replicator_status().await
+    }
+}
 
 /// Creates a synthetic composite snapshot ID for tests.
 fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
@@ -3083,14 +3140,17 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
     assert_eq!(names[15], "name-16");
 }
 
-/// Successful inline-flush maintenance must recreate every DuckDB connection
-/// before streaming replication resumes.
+/// Pool refresh must survive a transient failure and an unreadable maintenance
+/// store without resuming streaming on stale connections.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
-async fn external_inline_flush_recreates_pools_before_replication_resumes() {
+async fn external_inline_flush_retries_pool_refresh_before_replication_resumes() {
     use etl::event::InsertEvent;
 
-    let lake = create_test_lake("external_inline_flush_recreates_pools").await;
+    let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
+    reset_ducklake_test_hooks();
+    reset_pool_refresh_failure_for_tests();
+    let lake = create_test_lake("external_inline_flush_retries_pool_refresh").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
     let pipeline_id = 1047_i64;
@@ -3149,14 +3209,15 @@ async fn external_inline_flush_recreates_pools_before_replication_resumes() {
         )
         .await
         .unwrap();
+    let watcher_store = LoadBlockingExternalMaintenanceStore::new(coordination_store.clone());
 
     let watcher = tokio::spawn(run_external_maintenance_watcher(
         destination.clone(),
-        coordination_store.clone(),
+        watcher_store.clone(),
         ExternalMaintenanceWatcherConfig {
             poll_interval: Duration::from_millis(10),
             request_cooldown: Duration::ZERO,
-            store_timeout: Duration::from_secs(1),
+            store_timeout: Duration::from_millis(100),
             inline_flush_min_inlined_bytes: u64::MAX,
             rewrite_data_files_min_active_data_files: i64::MAX,
         },
@@ -3204,6 +3265,7 @@ async fn external_inline_flush_recreates_pools_before_replication_resumes() {
         }),
         ..ExternalMaintenanceOperationHistory::default()
     };
+    arm_fail_pool_refresh_once_for_tests();
     sqlx::query(
         "update etl.external_maintenance_state set active_run = null, pause_request = null, \
          last_successful_operations = $2, last_completed_at = $3, updated_at = now() where \
@@ -3221,6 +3283,8 @@ async fn external_inline_flush_recreates_pools_before_replication_resumes() {
         ExternalMaintenanceReplicatorState::Running,
     )
     .await;
+
+    assert!(!pool_refresh_failure_armed_for_tests());
 
     destination
         .write_events(
@@ -3243,6 +3307,69 @@ async fn external_inline_flush_recreates_pools_before_replication_resumes() {
 
     assert_eq!(destination.streaming_connection_open_count_for_tests(), 2);
     assert_eq!(destination.copy_connection_open_count_for_tests(), 2);
+
+    let second_run_id = "pipe-1047-inline-flush-store-timeout";
+    let second_requested_at = Utc::now();
+    sqlx::query(
+        "update etl.external_maintenance_state set active_run = $2, pause_request = $3, \
+         operation_request = null, updated_at = now() where pipeline_id = $1",
+    )
+    .bind(pipeline_id)
+    .bind(Json(ExternalMaintenanceRun {
+        run_id: second_run_id.to_owned(),
+        started_at: Some(second_requested_at),
+        operations,
+    }))
+    .bind(Json(ExternalMaintenancePause {
+        run_id: second_run_id.to_owned(),
+        requested_at: Some(second_requested_at),
+        expires_at: second_requested_at + TimeDelta::seconds(1),
+    }))
+    .execute(&coordination_pool)
+    .await
+    .unwrap();
+
+    wait_for_replicator_maintenance_state(
+        &coordination_store,
+        ExternalMaintenanceReplicatorState::Quiesced,
+    )
+    .await;
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(flush_inlined_rows(&conn, &table_name), 8);
+    drop(conn);
+
+    // Hide the completed run from the watcher until its local pause expires.
+    watcher_store.set_load_blocked(true);
+    let second_completed_at = Utc::now();
+    let second_successful_operations = ExternalMaintenanceOperationHistory {
+        inline_flush: Some(ExternalMaintenanceOperationRun {
+            run_id: Some(second_run_id.to_owned()),
+            completed_at: second_completed_at,
+        }),
+        ..ExternalMaintenanceOperationHistory::default()
+    };
+    sqlx::query(
+        "update etl.external_maintenance_state set active_run = null, pause_request = null, \
+         last_successful_operations = $2, last_completed_at = $3, updated_at = now() where \
+         pipeline_id = $1",
+    )
+    .bind(pipeline_id)
+    .bind(Json(second_successful_operations))
+    .bind(second_completed_at)
+    .execute(&coordination_pool)
+    .await
+    .unwrap();
+
+    wait_for_replicator_maintenance_state(
+        &coordination_store,
+        ExternalMaintenanceReplicatorState::Running,
+    )
+    .await;
+    watcher_store.set_load_blocked(false);
+
+    assert_eq!(destination.streaming_connection_open_count_for_tests(), 3);
+    assert_eq!(destination.copy_connection_open_count_for_tests(), 3);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 16);
