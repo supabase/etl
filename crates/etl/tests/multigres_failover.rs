@@ -21,15 +21,20 @@
 //!   cargo test -p etl --test multigres_failover --features test-utils \
 //!     -- --ignored --nocapture
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicI64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
-use etl::config::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
-use etl::event::Event;
-use etl::store::MemoryStore;
-use etl::test_utils::memory_destination::MemoryDestination;
-use etl::test_utils::pipeline::PipelineBuilder;
+use etl::{
+    config::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
+    event::Event,
+    store::MemoryStore,
+    test_utils::{memory_destination::MemoryDestination, pipeline::PipelineBuilder},
+};
 use tokio_postgres::{Client, NoTls};
 
 const TABLE: &str = "etl_failover";
@@ -91,7 +96,7 @@ async fn insert_events(dest: &MemoryDestination<MemoryStore>) -> usize {
 }
 
 async fn copied_rows(dest: &MemoryDestination<MemoryStore>) -> usize {
-    dest.table_rows().await.values().map(|v| v.len()).sum()
+    dest.table_rows().await.values().map(Vec::len).sum()
 }
 
 async fn source_count(client: &Client) -> i64 {
@@ -126,9 +131,9 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
         .await
         .expect("source setup");
 
-    // 2. Build and start a real pipeline with failover slots. `start` is where
-    //    the FAILOVER slot is created THROUGH the gateway — without the FAILOVER
-    //    option the gateway would reject it.
+    // 2. Build and start a real pipeline with failover slots. `start` is where the
+    //    FAILOVER slot is created THROUGH the gateway — without the FAILOVER option
+    //    the gateway would reject it.
     let store = MemoryStore::new();
     let destination = MemoryDestination::new(store.clone());
     let mut pipeline = PipelineBuilder::new(
@@ -158,8 +163,8 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
     let stop = Arc::new(AtomicBool::new(false));
     let next_id = Arc::new(AtomicI64::new(SEED_ROWS + 1));
     let writer = tokio::spawn({
-        let stop = stop.clone();
-        let next_id = next_id.clone();
+        let stop = Arc::clone(&stop);
+        let next_id = Arc::clone(&next_id);
         async move {
             while !stop.load(Ordering::Relaxed) {
                 let Some(client) = try_connect().await else {
@@ -193,8 +198,8 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
     let before = insert_events(&destination).await;
     println!("streaming before failover: {before} insert events");
 
-    // 6. Trigger the failover (the command waits for the slot to be
-    //    failover_ready on the standbys, then kills the primary).
+    // 6. Trigger the failover (the command waits for the slot to be failover_ready
+    //    on the standbys, then kills the primary).
     if let Ok(cmd) = std::env::var("MULTIGRES_FAILOVER_CMD") {
         println!("triggering failover: {cmd}");
         let status = tokio::task::spawn_blocking(move || {
@@ -208,16 +213,19 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
         println!("MULTIGRES_FAILOVER_CMD not set — verifying streaming only");
     }
 
-    // 7. The consumer must RESUME after the failover: more inserts arrive with
-    //    no re-seed.
+    // 7. The consumer must RESUME after the failover: more inserts arrive with no
+    //    re-seed.
     wait_until("streaming resumes after failover", Duration::from_secs(180), || async {
         insert_events(&destination).await >= before + 30
     })
     .await;
-    println!("streaming resumed after failover: {} insert events", insert_events(&destination).await);
+    println!(
+        "streaming resumed after failover: {} insert events",
+        insert_events(&destination).await
+    );
 
-    // 8. Stop the writer and let the pipeline drain, then verify no committed
-    //    row was lost: source rows == rows the destination saw (copy + inserts).
+    // 8. Stop the writer and let the pipeline drain, then verify no committed row
+    //    was lost: source rows == rows the destination saw (copy + inserts).
     stop.store(true, Ordering::Relaxed);
     let _ = writer.await;
     let client = connect().await;
@@ -229,7 +237,10 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
 
     let copied = copied_rows(&destination).await;
     let inserts = insert_events(&destination).await;
-    println!("FINAL: source={src}, destination copied={copied} + inserts={inserts} = {}", copied + inserts);
+    println!(
+        "FINAL: source={src}, destination copied={copied} + inserts={inserts} = {}",
+        copied + inserts
+    );
     assert_eq!(copied + inserts, src, "every committed source row reached the destination");
 
     pipeline.shutdown();
@@ -253,7 +264,10 @@ fn spawn_writer(stop: Arc<AtomicBool>, next_id: Arc<AtomicI64>) -> tokio::task::
                 let id = next_id.fetch_add(1, Ordering::Relaxed);
                 let note = format!("w-{id}");
                 if client
-                    .execute(&format!("INSERT INTO {TABLE}(id, note) VALUES ($1, $2)"), &[&id, &note])
+                    .execute(
+                        &format!("INSERT INTO {TABLE}(id, note) VALUES ($1, $2)"),
+                        &[&id, &note],
+                    )
                     .await
                     .is_err()
                 {
@@ -291,12 +305,15 @@ async fn pipeline_survives_ten_failovers_with_continuous_writes() {
     // copy) happen against a non-empty, actively-growing table.
     let stop = Arc::new(AtomicBool::new(false));
     let next_id = Arc::new(AtomicI64::new(1));
-    let writer = spawn_writer(stop.clone(), next_id.clone());
+    let writer = spawn_writer(Arc::clone(&stop), Arc::clone(&next_id));
     wait_until("client warmup before slot", Duration::from_secs(30), || async {
         source_count(&setup).await >= 50
     })
     .await;
-    println!("client running; {} rows committed before the slot is created", source_count(&setup).await);
+    println!(
+        "client running; {} rows committed before the slot is created",
+        source_count(&setup).await
+    );
 
     // Create the slot / start the pipeline while the client keeps writing.
     let store = MemoryStore::new();
@@ -334,7 +351,10 @@ async fn pipeline_survives_ten_failovers_with_continuous_writes() {
             insert_events(&destination).await >= before + 30
         })
         .await;
-        println!("failover {i}/{FAILOVERS} OK: resumed, insert_events={}", insert_events(&destination).await);
+        println!(
+            "failover {i}/{FAILOVERS} OK: resumed, insert_events={}",
+            insert_events(&destination).await
+        );
     }
 
     // Kill the client, drain, and verify no committed row was lost.
@@ -349,7 +369,8 @@ async fn pipeline_survives_ten_failovers_with_continuous_writes() {
     let copied = copied_rows(&destination).await;
     let inserts = insert_events(&destination).await;
     println!(
-        "FINAL after {FAILOVERS} failovers: source={src}, destination copied={copied} + inserts={inserts} = {}",
+        "FINAL after {FAILOVERS} failovers: source={src}, destination copied={copied} + \
+         inserts={inserts} = {}",
         copied + inserts
     );
     assert_eq!(copied + inserts, src, "no committed row lost across {FAILOVERS} failovers");
