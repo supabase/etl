@@ -117,6 +117,7 @@ struct TableCopyPartition {
 }
 
 /// Allocates unique batch IDs across the workers in one table-copy attempt.
+#[derive(Debug)]
 struct TableCopyBatchIdGenerator {
     /// The table-copy execution shared by every generated batch ID.
     attempt_id: TableCopyAttemptId,
