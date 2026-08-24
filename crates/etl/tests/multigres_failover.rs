@@ -37,12 +37,22 @@ use etl::{
 };
 use tokio_postgres::{Client, NoTls};
 
-const TABLE: &str = "etl_failover";
-const PUBLICATION: &str = "etl_failover_pub";
 const PIPELINE_ID: u64 = 987_654;
 /// Distinct id (and therefore slot name) for the repeated-failover test.
 const PIPELINE_ID_TEN: u64 = 987_655;
 const SEED_ROWS: i64 = 10;
+
+/// Per-test source table name, derived from the pipeline id so the two
+/// `#[ignore]`d tests never collide if run together in the same binary (the
+/// default harness runs tests concurrently on separate threads).
+fn table_name(pipeline_id: u64) -> String {
+    format!("etl_failover_{pipeline_id}")
+}
+
+/// Per-test publication name, derived from the pipeline id (see `table_name`).
+fn publication_name(pipeline_id: u64) -> String {
+    format!("etl_failover_pub_{pipeline_id}")
+}
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
@@ -52,7 +62,7 @@ fn gw_config() -> PgConnectionConfig {
     PgConnectionConfig {
         host: env_or("MULTIGRES_GW_HOST", "127.0.0.1"),
         hostaddr: None,
-        port: env_or("MULTIGRES_GW_PORT", "15432").parse().expect("port"),
+        port: env_or("MULTIGRES_GW_PORT", "15432").parse().unwrap(),
         name: env_or("MULTIGRES_GW_DBNAME", "postgres"),
         username: env_or("MULTIGRES_GW_USER", "postgres"),
         password: Some(env_or("MULTIGRES_GW_PASSWORD", "postgres").into()),
@@ -67,7 +77,7 @@ async fn try_connect() -> Option<Client> {
     let user = env_or("MULTIGRES_GW_USER", "postgres");
     let password = env_or("MULTIGRES_GW_PASSWORD", "postgres");
     let dbname = env_or("MULTIGRES_GW_DBNAME", "postgres");
-    let port: u16 = env_or("MULTIGRES_GW_PORT", "15432").parse().expect("port");
+    let port: u16 = env_or("MULTIGRES_GW_PORT", "15432").parse().unwrap();
     let mut cfg = tokio_postgres::Config::new();
     cfg.host(&host).port(port).user(&user).password(&password).dbname(&dbname);
     match cfg.connect(NoTls).await {
@@ -99,8 +109,8 @@ async fn copied_rows(dest: &MemoryDestination<MemoryStore>) -> usize {
     dest.table_rows().await.values().map(Vec::len).sum()
 }
 
-async fn source_count(client: &Client) -> i64 {
-    client.query_one(&format!("SELECT count(*) FROM {TABLE}"), &[]).await.unwrap().get(0)
+async fn source_count(client: &Client, table: &str) -> i64 {
+    client.query_one(&format!("SELECT count(*) FROM {table}"), &[]).await.unwrap().get(0)
 }
 
 async fn wait_until<F, Fut>(what: &str, timeout: Duration, mut f: F)
@@ -119,17 +129,19 @@ where
 #[ignore = "requires a running Multigres cluster reachable via the multigateway"]
 async fn pipeline_survives_primary_failover_with_failover_slots() {
     // 1. Setup the source through the gateway: fresh table + publication + seed.
+    let table = table_name(PIPELINE_ID);
+    let publication = publication_name(PIPELINE_ID);
     let client = connect().await;
     client
         .batch_execute(&format!(
-            "DROP TABLE IF EXISTS {TABLE} CASCADE;
-             CREATE TABLE {TABLE} (id bigint PRIMARY KEY, note text NOT NULL);
-             DROP PUBLICATION IF EXISTS {PUBLICATION};
-             CREATE PUBLICATION {PUBLICATION} FOR TABLE {TABLE};
-             INSERT INTO {TABLE} SELECT g, 'seed-'||g FROM generate_series(1, {SEED_ROWS}) g;"
+            "DROP TABLE IF EXISTS {table} CASCADE;
+             CREATE TABLE {table} (id bigint PRIMARY KEY, note text NOT NULL);
+             DROP PUBLICATION IF EXISTS {publication};
+             CREATE PUBLICATION {publication} FOR TABLE {table};
+             INSERT INTO {table} SELECT g, 'seed-'||g FROM generate_series(1, {SEED_ROWS}) g;"
         ))
         .await
-        .expect("source setup");
+        .unwrap();
 
     // 2. Build and start a real pipeline with failover slots. `start` is where the
     //    FAILOVER slot is created THROUGH the gateway — without the FAILOVER option
@@ -139,7 +151,7 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
     let mut pipeline = PipelineBuilder::new(
         gw_config(),
         PIPELINE_ID,
-        PUBLICATION.to_owned(),
+        publication.clone(),
         store.clone(),
         destination.clone(),
     )
@@ -165,6 +177,7 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
     let writer = tokio::spawn({
         let stop = Arc::clone(&stop);
         let next_id = Arc::clone(&next_id);
+        let table = table.clone();
         async move {
             while !stop.load(Ordering::Relaxed) {
                 let Some(client) = try_connect().await else {
@@ -176,7 +189,7 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
                     let note = format!("w-{id}");
                     if client
                         .execute(
-                            &format!("INSERT INTO {TABLE}(id, note) VALUES ($1, $2)"),
+                            &format!("INSERT INTO {table}(id, note) VALUES ($1, $2)"),
                             &[&id, &note],
                         )
                         .await
@@ -207,7 +220,7 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
         })
         .await
         .unwrap()
-        .expect("run MULTIGRES_FAILOVER_CMD");
+        .unwrap();
         assert!(status.success(), "failover command failed");
     } else {
         println!("MULTIGRES_FAILOVER_CMD not set — verifying streaming only");
@@ -229,7 +242,7 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
     stop.store(true, Ordering::Relaxed);
     let _ = writer.await;
     let client = connect().await;
-    let src = source_count(&client).await as usize;
+    let src = source_count(&client, &table).await as usize;
     wait_until("consumer drains to source", Duration::from_secs(120), || async {
         copied_rows(&destination).await + insert_events(&destination).await >= src
     })
@@ -246,14 +259,18 @@ async fn pipeline_survives_primary_failover_with_failover_slots() {
     pipeline.shutdown();
     let _ = client
         .batch_execute(&format!(
-            "DROP PUBLICATION IF EXISTS {PUBLICATION}; DROP TABLE IF EXISTS {TABLE} CASCADE;"
+            "DROP PUBLICATION IF EXISTS {publication}; DROP TABLE IF EXISTS {table} CASCADE;"
         ))
         .await;
 }
 
 /// A continuous writer that inserts a row roughly every 100ms, reconnecting
 /// across failover windows. Stops when `stop` is set.
-fn spawn_writer(stop: Arc<AtomicBool>, next_id: Arc<AtomicI64>) -> tokio::task::JoinHandle<()> {
+fn spawn_writer(
+    stop: Arc<AtomicBool>,
+    next_id: Arc<AtomicI64>,
+    table: String,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while !stop.load(Ordering::Relaxed) {
             let Some(client) = try_connect().await else {
@@ -265,7 +282,7 @@ fn spawn_writer(stop: Arc<AtomicBool>, next_id: Arc<AtomicI64>) -> tokio::task::
                 let note = format!("w-{id}");
                 if client
                     .execute(
-                        &format!("INSERT INTO {TABLE}(id, note) VALUES ($1, $2)"),
+                        &format!("INSERT INTO {table}(id, note) VALUES ($1, $2)"),
                         &[&id, &note],
                     )
                     .await
@@ -290,29 +307,31 @@ async fn pipeline_survives_ten_failovers_with_continuous_writes() {
         std::env::var("MULTIGRES_FAILOVER_CMD").expect("MULTIGRES_FAILOVER_CMD is required");
 
     // Fresh, empty source table + publication.
+    let table = table_name(PIPELINE_ID_TEN);
+    let publication = publication_name(PIPELINE_ID_TEN);
     let setup = connect().await;
     setup
         .batch_execute(&format!(
-            "DROP TABLE IF EXISTS {TABLE} CASCADE;
-             CREATE TABLE {TABLE} (id bigint PRIMARY KEY, note text NOT NULL);
-             DROP PUBLICATION IF EXISTS {PUBLICATION};
-             CREATE PUBLICATION {PUBLICATION} FOR TABLE {TABLE};"
+            "DROP TABLE IF EXISTS {table} CASCADE;
+             CREATE TABLE {table} (id bigint PRIMARY KEY, note text NOT NULL);
+             DROP PUBLICATION IF EXISTS {publication};
+             CREATE PUBLICATION {publication} FOR TABLE {table};"
         ))
         .await
-        .expect("source setup");
+        .unwrap();
 
     // Start the client BEFORE the slot exists, so slot creation (and the initial
     // copy) happen against a non-empty, actively-growing table.
     let stop = Arc::new(AtomicBool::new(false));
     let next_id = Arc::new(AtomicI64::new(1));
-    let writer = spawn_writer(Arc::clone(&stop), Arc::clone(&next_id));
+    let writer = spawn_writer(Arc::clone(&stop), Arc::clone(&next_id), table.clone());
     wait_until("client warmup before slot", Duration::from_secs(30), || async {
-        source_count(&setup).await >= 50
+        source_count(&setup, &table).await >= 50
     })
     .await;
     println!(
         "client running; {} rows committed before the slot is created",
-        source_count(&setup).await
+        source_count(&setup, &table).await
     );
 
     // Create the slot / start the pipeline while the client keeps writing.
@@ -321,7 +340,7 @@ async fn pipeline_survives_ten_failovers_with_continuous_writes() {
     let mut pipeline = PipelineBuilder::new(
         gw_config(),
         PIPELINE_ID_TEN,
-        PUBLICATION.to_owned(),
+        publication.clone(),
         store.clone(),
         destination.clone(),
     )
@@ -345,7 +364,7 @@ async fn pipeline_survives_ten_failovers_with_continuous_writes() {
         })
         .await
         .unwrap()
-        .expect("run MULTIGRES_FAILOVER_CMD");
+        .unwrap();
         assert!(status.success(), "failover {i} command failed");
         wait_until(&format!("resume after failover {i}"), Duration::from_secs(240), || async {
             insert_events(&destination).await >= before + 30
@@ -361,7 +380,7 @@ async fn pipeline_survives_ten_failovers_with_continuous_writes() {
     stop.store(true, Ordering::Relaxed);
     let _ = writer.await;
     let client = connect().await;
-    let src = source_count(&client).await as usize;
+    let src = source_count(&client, &table).await as usize;
     wait_until("consumer drains to source", Duration::from_secs(240), || async {
         copied_rows(&destination).await + insert_events(&destination).await >= src
     })
@@ -379,7 +398,7 @@ async fn pipeline_survives_ten_failovers_with_continuous_writes() {
     pipeline.shutdown();
     let _ = client
         .batch_execute(&format!(
-            "DROP PUBLICATION IF EXISTS {PUBLICATION}; DROP TABLE IF EXISTS {TABLE} CASCADE;"
+            "DROP PUBLICATION IF EXISTS {publication}; DROP TABLE IF EXISTS {table} CASCADE;"
         ))
         .await;
 }
