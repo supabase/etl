@@ -24,6 +24,6 @@ pub use async_result::{
 pub use base::Destination;
 pub use capabilities::PipelineDestination;
 pub use metadata::{DestinationTableMetadata, DestinationTableSchema};
-pub use table_copy::{TableCopyBatch, TableCopyBatchId, TableCopyWrite};
+pub use table_copy::{TableCopyAttemptId, TableCopyBatch, TableCopyBatchId, TableCopyWrite};
 
 pub use crate::runtime::concurrency::{TaskSet, TaskSetDrainGuard};

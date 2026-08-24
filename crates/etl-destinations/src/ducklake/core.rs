@@ -3303,7 +3303,7 @@ mod tests {
     use etl::{
         config::{PgConnectionConfig, TcpKeepaliveConfig},
         data::{Cell, PartialTableRow, TableRow},
-        destination::{TableCopyBatch, TableCopyBatchId},
+        destination::{TableCopyAttemptId, TableCopyBatch, TableCopyBatchId},
         schema::{
             ColumnMetadataChange, ColumnSchema, IdentityMask, ReplicationMask, SchemaDiff,
             TableSchema, Type as PgType,
@@ -3335,7 +3335,7 @@ mod tests {
             TableCopyWrite::Finish
         } else {
             let batch_id = NEXT_BATCH_ID.fetch_add(1, Ordering::Relaxed);
-            let batch_id = TableCopyBatchId::new(format!("test:{batch_id}").into_boxed_str());
+            let batch_id = TableCopyBatchId::new(TableCopyAttemptId::from_u128(1), batch_id);
             TableCopyWrite::Batch(TableCopyBatch::new(batch_id, table_rows))
         }
     }

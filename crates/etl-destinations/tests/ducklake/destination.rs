@@ -29,8 +29,8 @@ use duckdb::Connection;
 use etl::{
     data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination, DestinationTableMetadata, DestinationTableSchema, TableCopyBatch,
-        TableCopyBatchId, TableCopyWrite,
+        Destination, DestinationTableMetadata, DestinationTableSchema, TableCopyAttemptId,
+        TableCopyBatch, TableCopyBatchId, TableCopyWrite,
     },
     error::{ErrorKind, EtlResult},
     event::{DeleteEvent, Event},
@@ -826,11 +826,11 @@ async fn write_table_rows_deduplicates_redelivered_batch_id() {
     )
     .await
     .unwrap();
-    let batch_id = TableCopyBatchId::new("test:redelivered-copy-batch");
+    let batch_id = TableCopyBatchId::new(TableCopyAttemptId::from_u128(1), 0);
 
     for _ in 0..2 {
         let table_copy = TableCopyWrite::Batch(TableCopyBatch::new(
-            batch_id.clone(),
+            batch_id,
             vec![TableRow::new(vec![Cell::String("identical".to_owned())])],
         ));
         write_table_copy(&destination, &replicated_table_schema, table_copy).await.unwrap();

@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{
     data::TableRow,
     destination::{
-        Destination, DestinationWriteStatus, TableCopyBatch, TableCopyBatchId, TableCopyWrite,
-        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        Destination, DestinationWriteStatus, TableCopyAttemptId, TableCopyBatch, TableCopyBatchId,
+        TableCopyWrite, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -15,6 +15,8 @@ use crate::{
 
 /// Monotonic ID source for independent table-copy writes in tests.
 static NEXT_TABLE_COPY_BATCH_ID: AtomicU64 = AtomicU64::new(0);
+/// Shared attempt ID for independent table-copy writes in tests.
+const TEST_TABLE_COPY_ATTEMPT_ID: TableCopyAttemptId = TableCopyAttemptId::from_u128(1);
 
 /// Invokes [`Destination::write_events`] and waits for its completion.
 ///
@@ -44,7 +46,7 @@ pub async fn write_table_rows<D: Destination>(
         TableCopyWrite::Finish
     } else {
         let ordinal = NEXT_TABLE_COPY_BATCH_ID.fetch_add(1, Ordering::Relaxed);
-        let id = TableCopyBatchId::new(format!("test:{ordinal}").into_boxed_str());
+        let id = TableCopyBatchId::new(TEST_TABLE_COPY_ATTEMPT_ID, ordinal);
         TableCopyWrite::Batch(TableCopyBatch::new(id, rows))
     };
 

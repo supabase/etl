@@ -2265,6 +2265,7 @@ mod tests {
 
     use etl::{
         data::{OldTableRow, PartialTableRow, UpdatedTableRow},
+        destination::TableCopyAttemptId,
         schema::{
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
             TableSchema, Type as PgType,
@@ -3225,16 +3226,18 @@ mod tests {
     #[test]
     fn prepare_copy_table_batch_uses_propagated_id() {
         let replicated_table_schema = make_replicated_schema();
+        let batch_id = TableCopyBatchId::new(TableCopyAttemptId::from_u128(1), 2);
+        let expected_batch_id = batch_id.to_string();
         let prepared = prepare_copy_table_batch(
             &replicated_table_schema,
             ducklake_table_name(),
             LEGACY_REPLAY_EPOCH.to_owned(),
-            TableCopyBatchId::new("copy-batch-id"),
+            batch_id,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("identical".to_owned())])],
         )
         .unwrap();
 
-        assert_eq!(prepared.batch_id, "copy-batch-id");
+        assert_eq!(prepared.batch_id, expected_batch_id);
     }
 
     #[test]
