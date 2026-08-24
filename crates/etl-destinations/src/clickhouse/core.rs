@@ -1973,7 +1973,10 @@ fn validate_clickhouse_update_without_old_row(
     }
 }
 
-/// Compares key values using PostgreSQL's equality rule for floating-point NaN.
+/// Compares two key values using PostgreSQL equality semantics.
+///
+/// - Treats floating-point `NaN` values as equal, including values inside
+///   arrays.
 fn postgres_key_cell_equal(old_value: &Cell, new_value: &Cell) -> bool {
     use etl::data::ArrayCell;
 
