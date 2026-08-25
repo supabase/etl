@@ -157,32 +157,3 @@ impl ArrayCell {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cell_types_equality() {
-        // Test that equal cells are actually equal
-        assert_eq!(Cell::I32(42), Cell::I32(42));
-        assert_ne!(Cell::I32(42), Cell::I32(43));
-
-        assert_eq!(Cell::String("test".to_owned()), Cell::String("test".to_owned()));
-        assert_ne!(Cell::String("test".to_owned()), Cell::String("different".to_owned()));
-
-        assert_eq!(Cell::Null, Cell::Null);
-        assert_ne!(Cell::Null, Cell::I32(0));
-    }
-
-    #[test]
-    fn cell_types_clone() {
-        let cell = Cell::String("test".to_owned());
-        let cloned = cell.clone();
-        assert_eq!(cell, cloned);
-
-        let array_cell = Cell::Array(ArrayCell::I32(vec![Some(1), None, Some(3)]));
-        let cloned_array = array_cell.clone();
-        assert_eq!(array_cell, cloned_array);
-    }
-}

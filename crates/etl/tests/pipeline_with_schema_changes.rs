@@ -297,6 +297,91 @@ async fn relation_message_updates_when_column_nullability_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn relationless_noop_schema_changes_reuse_previous_relation_masks() {
+    init_test_tracing();
+
+    let (database, table_name, table_id, store, destination, pipeline, _, _) =
+        create_database_and_sync_done_pipeline_with_table(
+            "relationless_noop_schema_changes",
+            &[("name", "text not null"), ("age", "integer")],
+        )
+        .await;
+
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let warm_insert_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    database.insert_values(table_name.clone(), &["name", "age"], &[&"Before", &1]).await.unwrap();
+
+    ready_notify.notified().await;
+    warm_insert_notify.notified().await;
+
+    let schemas_stored_notify = store.notify_on_table_schema_count(table_id, 3).await;
+    let insert_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+
+    // Both commands succeed and reach ddl_command_end, but neither changes a
+    // catalog tuple which invalidates pgoutput's cached relation state.
+    database
+        .run_sql(&format!(
+            "alter table {} owner to current_user",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} alter column age drop not null",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database.insert_values(table_name, &["name", "age"], &[&"Alice", &25]).await.unwrap();
+
+    schemas_stored_notify.notified().await;
+    insert_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 2);
+
+    let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
+        panic!("expected insert event");
+    };
+    let Event::Relation(relation) = get_last_relation_event(&events, table_id) else {
+        panic!("expected relation event");
+    };
+    assert_eq!(insert.table_row.values()[1], Cell::String("Alice".to_owned()));
+    assert_eq!(insert.table_row.values()[2], Cell::I32(25));
+    assert_eq!(
+        insert.replicated_table_schema.replication_mask(),
+        relation.replicated_table_schema.replication_mask()
+    );
+    assert_eq!(
+        insert.replicated_table_schema.identity_mask(),
+        relation.replicated_table_schema.identity_mask()
+    );
+
+    let table_schemas = store.get_table_schemas().await;
+    let (_, newest_table_schema) = table_schemas
+        .get(&table_id)
+        .unwrap()
+        .iter()
+        .max_by_key(|(snapshot_id, _)| *snapshot_id)
+        .unwrap();
+    assert_eq!(insert.replicated_table_schema.inner(), newest_table_schema);
+    assert_ne!(
+        insert.replicated_table_schema.inner().snapshot_id,
+        relation.replicated_table_schema.inner().snapshot_id
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn alter_table_without_dml_stores_schema_snapshot() {
     init_test_tracing();
 

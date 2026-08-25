@@ -528,23 +528,15 @@ mod tests {
     }
 
     #[test]
-    fn builds_table_sync_copy_stream_id() {
+    fn builds_worker_stream_ids() {
         assert_eq!(
             table_sync_worker_copy_stream_id(TableId::new(123)),
             "table_sync_worker_copy_123_stream"
         );
-    }
-
-    #[test]
-    fn builds_table_sync_apply_stream_id() {
         assert_eq!(
             table_sync_worker_apply_stream_id(TableId::new(456)),
             "table_sync_worker_apply_456_stream"
         );
-    }
-
-    #[test]
-    fn builds_apply_worker_apply_stream_id() {
         assert_eq!(apply_worker_apply_stream_id(), "apply_worker_apply_stream");
     }
 
