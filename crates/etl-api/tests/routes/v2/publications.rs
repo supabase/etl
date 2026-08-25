@@ -347,8 +347,9 @@ async fn publication_v2_ignores_client_supplied_schema_and_name() {
         "operations": ["insert"]
     });
 
-    let response =
-        app.create_source_publication_v2(tenant_id, source_id, "schema_name_ignored_v2", &config).await;
+    let response = app
+        .create_source_publication_v2(tenant_id, source_id, "schema_name_ignored_v2", &config)
+        .await;
     assert_eq!(response.status(), StatusCode::CREATED);
     let created: PublicationDetails = response.json().await.unwrap();
     let PublicationTableSelection::Tables { tables } = &created.config.table_selection else {
