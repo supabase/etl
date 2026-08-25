@@ -204,12 +204,14 @@ fn is_public_ip(address: IpAddr) -> bool {
     }
 }
 
-/// Returns whether an IPv4 address is outside all special-purpose ranges.
+/// Returns whether an IPv4 address is publicly routable.
+///
+/// The exclusions follow the IANA IPv4 Special-Purpose Address Registry.
 fn is_public_ipv4(address: Ipv4Addr) -> bool {
     let [a, b, c, d] = address.octets();
     let is_shared = a == 100 && (64..=127).contains(&b);
     let is_protocol_assignment = a == 192 && b == 0 && c == 0 && !matches!(d, 9 | 10);
-    let is_documentation = matches!((a, b, c), (192, 0, 2) | (198, 51, 100) | (203, 0, 113));
+    let is_documentation = address.is_documentation();
     let is_deprecated_6to4 = (a, b, c) == (192, 88, 99);
     let is_benchmarking = a == 198 && matches!(b, 18 | 19);
 
@@ -227,6 +229,8 @@ fn is_public_ipv4(address: Ipv4Addr) -> bool {
 }
 
 /// Returns whether an IPv6 address is publicly routable.
+///
+/// The exclusions follow the IANA IPv6 Special-Purpose Address Registry.
 fn is_public_ipv6(address: Ipv6Addr) -> bool {
     let octets = address.octets();
     let segments = address.segments();
@@ -263,19 +267,26 @@ mod tests {
     fn classifies_public_ipv4_addresses() {
         let cases = [
             ("8.8.8.8", true),
+            ("100.63.255.255", true),
+            ("100.128.0.0", true),
             ("192.0.0.9", true),
             ("192.0.0.10", true),
+            ("198.17.255.255", true),
+            ("198.20.0.0", true),
             ("0.0.0.0", false),
             ("10.0.0.1", false),
-            ("100.64.0.1", false),
+            ("100.64.0.0", false),
+            ("100.127.255.255", false),
             ("127.0.0.1", false),
             ("169.254.169.254", false),
             ("172.16.0.1", false),
             ("192.168.0.1", false),
             ("192.0.0.8", false),
+            ("192.0.0.11", false),
             ("192.0.2.1", false),
             ("192.88.99.1", false),
-            ("198.18.0.1", false),
+            ("198.18.0.0", false),
+            ("198.19.255.255", false),
             ("198.51.100.1", false),
             ("203.0.113.1", false),
             ("224.0.0.1", false),
@@ -294,7 +305,14 @@ mod tests {
         let cases = [
             ("2606:4700:4700::1111", true),
             ("2001:1::1", true),
+            ("2001:1::2", true),
+            ("2001:1::3", true),
+            ("2001:3:ffff:ffff:ffff:ffff:ffff:ffff", true),
+            ("2001:4:112:ffff:ffff:ffff:ffff:ffff", true),
             ("2001:20::1", true),
+            ("2001:2f:ffff:ffff:ffff:ffff:ffff:ffff", true),
+            ("2001:30::1", true),
+            ("2001:3f:ffff:ffff:ffff:ffff:ffff:ffff", true),
             ("::", false),
             ("::1", false),
             ("::ffff:8.8.8.8", false),
@@ -303,7 +321,14 @@ mod tests {
             ("64:ff9b:1::1", false),
             ("100::1", false),
             ("2001::1", false),
+            ("2001:1::", false),
+            ("2001:1::4", false),
+            ("2001:1f:ffff:ffff:ffff:ffff:ffff:ffff", false),
             ("2001:2::1", false),
+            ("2001:4::1", false),
+            ("2001:4:111:ffff:ffff:ffff:ffff:ffff", false),
+            ("2001:4:113::1", false),
+            ("2001:40::1", false),
             ("2001:db8::1", false),
             ("2002::1", false),
             ("3fff::1", false),

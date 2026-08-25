@@ -73,9 +73,9 @@ impl Validator for ClickHouseValidator {
         else {
             return Ok(vec![ValidationFailure::critical(
                 "ClickHouse URL Invalid",
-                "ClickHouse URL must use a public hostname that resolves only to public IP \
-                 addresses.\n\nPrivate, loopback, link-local, reserved, and mixed public/private \
-                 DNS results are not allowed.",
+                "ClickHouse URL must use a public hostname or IP address. Hostnames must resolve \
+                 only to public IP addresses.\n\nPrivate, loopback, link-local, reserved, and \
+                 mixed public/private DNS results are not allowed.",
             )]);
         };
 
@@ -128,6 +128,6 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].name, "ClickHouse URL Invalid");
         assert_eq!(failures[0].failure_type, FailureType::Critical);
-        assert!(failures[0].reason.contains("public hostname"));
+        assert!(failures[0].reason.contains("public hostname or IP address"));
     }
 }
