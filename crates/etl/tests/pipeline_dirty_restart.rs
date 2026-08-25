@@ -132,7 +132,8 @@ async fn wait_for_notification(
         .map_err(|_| TestCaseError::fail(format!("timed out waiting for {description}")))
 }
 
-/// Inserts one autocommit user transaction and waits for its acknowledgement.
+/// Inserts one autocommit user transaction and waits for destination event
+/// recording.
 async fn insert_user_and_wait(
     database: &mut PgDatabase<Client>,
     users_table_name: &TableName,
@@ -145,7 +146,8 @@ async fn insert_user_and_wait(
 
     insert_users_data(database, users_table_name, user_number..=user_number).await;
 
-    wait_for_notification(&delivered, format!("acknowledgement of user {user_id}")).await
+    wait_for_notification(&delivered, format!("destination event recording for user {user_id}"))
+        .await
 }
 
 /// Waits until the old apply worker releases its replication slot connection.
