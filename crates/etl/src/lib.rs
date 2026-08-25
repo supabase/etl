@@ -72,8 +72,8 @@
 //!     },
 //!     data::TableRow,
 //!     destination::{
-//!         Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
-//!         WriteEventsResult, WriteTableRowsResult,
+//!         Destination, DestinationWriteStatus, DropTableForCopyResult, TableCopyBatchId,
+//!         WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
 //!     },
 //!     error::EtlResult,
 //!     event::Event,
@@ -100,6 +100,7 @@
 //!     async fn write_table_rows(
 //!         &self,
 //!         _replicated_table_schema: &ReplicatedTableSchema,
+//!         _batch_id: Option<TableCopyBatchId>,
 //!         _table_rows: Vec<TableRow>,
 //!         async_result: WriteTableRowsResult,
 //!     ) -> EtlResult<()> {

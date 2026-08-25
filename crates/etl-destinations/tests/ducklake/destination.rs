@@ -28,14 +28,20 @@ use chrono::NaiveDate;
 use duckdb::Connection;
 use etl::{
     data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
-    destination::{Destination, DestinationTableMetadata, DestinationTableSchema},
-    error::ErrorKind,
+    destination::{
+        Destination, DestinationTableMetadata, DestinationTableSchema, TableCopyAttemptId,
+        TableCopyBatchId,
+    },
+    error::{ErrorKind, EtlResult},
     event::{DeleteEvent, Event},
     schema::{
         ColumnSchema, IdentityMask, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId,
         TableId, TableName, TableSchema, Type as PgType,
     },
-    store::{MemoryStore, SchemaStore, StateStore},
+    store::{DestinationStore, MemoryStore, SchemaStore, StateStore},
+    test_utils::destination::{
+        write_table_rows as invoke_write_table_rows, write_table_rows_with_batch_id,
+    },
 };
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
@@ -74,6 +80,31 @@ async fn acquire_ducklake_test_hook_guard() -> OwnedSemaphorePermit {
     Arc::clone(&DUCKLAKE_TEST_HOOKS_GUARD).acquire_owned().await.unwrap()
 }
 
+/// Direct-call convenience for DuckLake destination tests.
+trait DuckLakeDestinationTestExt {
+    /// Sends one identified copy batch or finish marker through the trait API.
+    async fn write_table_rows_for_tests(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()>;
+}
+
+impl<S> DuckLakeDestinationTestExt for DuckLakeDestination<S>
+where
+    S: DestinationStore,
+{
+    async fn write_table_rows_for_tests(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        invoke_write_table_rows(self, replicated_table_schema, table_rows).await?;
+
+        Ok(())
+    }
+}
+
 fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
     TableSchema::new(
         TableId::new(table_id),
@@ -82,6 +113,15 @@ fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
             ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
         ],
+    )
+}
+
+/// Builds a one-column table schema without a primary key.
+fn make_schema_without_primary_key(table_id: u32, schema: &str, table: &str) -> TableSchema {
+    TableSchema::new(
+        TableId::new(table_id),
+        TableName::new(schema.to_owned(), table.to_owned()),
+        vec![ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 1, false)],
     )
 }
 
@@ -361,7 +401,7 @@ async fn write_table_rows_basic() {
     .await
     .unwrap();
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![
                 TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())]),
@@ -419,7 +459,7 @@ async fn write_table_rows_small_batch_writes_parquet_before_return() {
     .unwrap();
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())])],
         )
@@ -588,7 +628,7 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
     assert_eq!(destination.copy_connection_open_count_for_tests(), 1);
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())])],
         )
@@ -597,7 +637,7 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
     assert_eq!(destination.copy_connection_open_count_for_tests(), 1);
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())])],
         )
@@ -646,7 +686,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
 
     arm_fail_after_copy_batch_commit_once_for_tests(&table_name.id());
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())])],
         )
@@ -655,7 +695,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
     assert_eq!(destination.copy_connection_open_count_for_tests(), 2);
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())])],
         )
@@ -703,7 +743,7 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
 
     arm_fail_after_copy_batch_commit_once_for_tests(&table_name.id());
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![
                 TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_owned())]),
@@ -718,6 +758,92 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
 
     reset_ducklake_test_hooks();
+}
+
+/// Identical rows in separate copy batches are distinct logical writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_table_rows_preserves_distinct_identical_batches() {
+    let lake = create_test_lake("write_table_rows_preserves_distinct_identical_batches").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schema = make_schema_without_primary_key(23, "public", "identical_copy_batches");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    for _ in 0..2 {
+        destination
+            .write_table_rows_for_tests(
+                &replicated_table_schema,
+                vec![TableRow::new(vec![Cell::String("identical".to_owned())])],
+            )
+            .await
+            .unwrap();
+    }
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 2);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 2);
+}
+
+/// Redelivery of one identified copy batch applies its rows only once.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_table_rows_deduplicates_redelivered_batch_id() {
+    let lake = create_test_lake("write_table_rows_deduplicates_redelivered_batch_id").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schema = make_schema_without_primary_key(24, "public", "redelivered_copy_batch");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+    let batch_id = TableCopyBatchId::new(TableCopyAttemptId::from_u128(1), 0);
+
+    for _ in 0..2 {
+        write_table_rows_with_batch_id(
+            &destination,
+            &replicated_table_schema,
+            batch_id,
+            vec![TableRow::new(vec![Cell::String("identical".to_owned())])],
+        )
+        .await
+        .unwrap();
+    }
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
 }
 
 /// Concurrent same-table copy batches should serialize cleanly and remain
@@ -756,7 +882,7 @@ async fn concurrent_same_table_copy_batches_complete() {
     // test isolates same-table serialization behavior rather than first-use
     // marker-table initialization.
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(-1), Cell::String("seed".to_owned())])],
         )
@@ -775,14 +901,14 @@ async fn concurrent_same_table_copy_batches_complete() {
         let destination = Arc::clone(&destination);
         let replicated_table_schema = replicated_table_schema.clone();
         tokio::spawn(async move {
-            destination.write_table_rows(&replicated_table_schema, first_batch).await
+            destination.write_table_rows_for_tests(&replicated_table_schema, first_batch).await
         })
     };
     let task_b = {
         let destination = Arc::clone(&destination);
         let replicated_table_schema = replicated_table_schema.clone();
         tokio::spawn(async move {
-            destination.write_table_rows(&replicated_table_schema, second_batch).await
+            destination.write_table_rows_for_tests(&replicated_table_schema, second_batch).await
         })
     };
 
@@ -898,7 +1024,7 @@ async fn write_table_rows_empty_creates_table() {
     )
     .await
     .unwrap();
-    destination.write_table_rows(&replicated_table_schema, vec![]).await.unwrap();
+    destination.write_table_rows_for_tests(&replicated_table_schema, vec![]).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 0, "table should exist but be empty");
@@ -932,7 +1058,7 @@ async fn truncate_clears_rows() {
     .await
     .unwrap();
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![
                 TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())]),
@@ -997,9 +1123,9 @@ async fn truncate_rotates_replay_state_for_recopy() {
         TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())]),
     ];
 
-    destination.write_table_rows(&replicated_table_schema, rows.clone()).await.unwrap();
+    destination.write_table_rows_for_tests(&replicated_table_schema, rows.clone()).await.unwrap();
     destination.truncate_table(&replicated_table_schema).await.unwrap();
-    destination.write_table_rows(&replicated_table_schema, rows).await.unwrap();
+    destination.write_table_rows_for_tests(&replicated_table_schema, rows).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
@@ -1213,7 +1339,7 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
     .unwrap();
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &old_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
         )
@@ -1314,7 +1440,7 @@ async fn write_events_rejects_mismatched_relation_before_applying_recovery() {
     .unwrap();
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &old_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
         )
@@ -1382,7 +1508,7 @@ async fn write_events_rejects_stale_relation_before_reverse_ddl() {
     .unwrap();
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &old_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
         )
@@ -1488,7 +1614,7 @@ async fn write_events_applies_defaulted_schema_change() {
     .unwrap();
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &old_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
         )
@@ -1611,7 +1737,7 @@ async fn write_events_reveals_publication_column_nullable_without_default() {
     .await
     .unwrap();
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &old_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
         )
@@ -1724,7 +1850,7 @@ async fn write_events_does_not_reconcile_missing_columns_after_applied_metadata(
     .unwrap();
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &old_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
         )
@@ -1815,7 +1941,7 @@ async fn write_events_supports_drop_and_add_same_column_name() {
 
     let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &old_replicated_table_schema,
             vec![TableRow::new(vec![
                 Cell::I32(1),
@@ -1917,7 +2043,7 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
 
     let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &text_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("old".to_owned())])],
         )
@@ -2004,7 +2130,7 @@ async fn write_table_rows_preserves_active_column_with_tombstone_prefix() {
 
     let destination = new_test_destination(&catalog_url, &data_url, MemoryStore::new()).await;
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("kept".to_owned())])],
         )
@@ -2049,7 +2175,7 @@ async fn startup_after_restart_does_not_reconcile_applied_metadata_missing_colum
 
     let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &old_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
         )
@@ -2069,7 +2195,7 @@ async fn startup_after_restart_does_not_reconcile_applied_metadata_missing_colum
     let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     restarted_destination.startup().await.unwrap();
     let error = restarted_destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &new_replicated_table_schema,
             vec![TableRow::new(vec![
                 Cell::I32(2),
@@ -2105,7 +2231,7 @@ async fn startup_after_restart_recovers_applying_schema_change() {
 
     let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &old_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
         )
@@ -2179,7 +2305,7 @@ async fn startup_after_restart_recovers_publication_mask_expansion() {
 
     let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &previous_replicated_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
         )
@@ -2289,7 +2415,7 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
 
     let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &old_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("existing".to_owned())])],
         )
@@ -2327,7 +2453,7 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
     let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     restarted_destination.startup().await.unwrap();
     restarted_destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &new_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(2), Cell::String("new".to_owned())])],
         )
@@ -2379,7 +2505,7 @@ async fn startup_after_restart_rejects_applying_schema_change_with_pruned_previo
 
     let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &old_replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
         )
@@ -2480,7 +2606,7 @@ async fn startup_after_restart_does_not_recreate_missing_applied_table() {
     let destination = new_test_destination(&catalog_url, &data_url, store).await;
     destination.startup().await.unwrap();
     let error = destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
         )
@@ -2645,7 +2771,7 @@ async fn write_events_with_partial_updates() {
     .unwrap();
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("seed".to_owned())])],
         )
@@ -2731,7 +2857,7 @@ async fn write_events_without_replica_identity_rejects_mutations() {
     .unwrap();
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("seed".to_owned())])],
         )
@@ -3168,13 +3294,13 @@ async fn copy_writes_table_parquet_and_inlines_applied_batch() {
     .unwrap();
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("created".to_owned())])],
         )
         .await
         .unwrap();
-    destination.write_table_rows(&replicated_table_schema, Vec::new()).await.unwrap();
+    destination.write_table_rows_for_tests(&replicated_table_schema, Vec::new()).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
@@ -3347,7 +3473,7 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
     .unwrap();
 
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![
                 TableRow::new(vec![Cell::I32(1), Cell::String("before-1".to_owned())]),
@@ -3544,14 +3670,14 @@ async fn concurrent_writes_with_single_slot_complete() {
         let destination = Arc::clone(&destination);
         let replicated_table_schema_a = replicated_table_schema_a.clone();
         tokio::spawn(async move {
-            destination.write_table_rows(&replicated_table_schema_a, rows_a).await
+            destination.write_table_rows_for_tests(&replicated_table_schema_a, rows_a).await
         })
     };
     let task_b = {
         let destination = Arc::clone(&destination);
         let replicated_table_schema_b = replicated_table_schema_b.clone();
         tokio::spawn(async move {
-            destination.write_table_rows(&replicated_table_schema_b, rows_b).await
+            destination.write_table_rows_for_tests(&replicated_table_schema_b, rows_b).await
         })
     };
 
@@ -3619,7 +3745,7 @@ async fn concurrent_first_writes_with_default_pool_complete() {
                 })
                 .collect::<Vec<_>>();
 
-            destination.write_table_rows(&replicated_table_schema, rows).await
+            destination.write_table_rows_for_tests(&replicated_table_schema, rows).await
         }));
     }
 
@@ -3677,7 +3803,7 @@ async fn concurrent_truncates_with_default_pool_complete() {
     for (index, replicated_table_schema) in replicated_table_schemas.iter().enumerate() {
         let row_id = i32::try_from(index).unwrap();
         destination
-            .write_table_rows(
+            .write_table_rows_for_tests(
                 replicated_table_schema,
                 vec![TableRow::new(vec![
                     Cell::I32(row_id),
@@ -3734,7 +3860,7 @@ async fn type_mapping_round_trip() {
     .await
     .unwrap();
     destination
-        .write_table_rows(
+        .write_table_rows_for_tests(
             &replicated_table_schema,
             vec![TableRow::new(vec![
                 Cell::I32(42),

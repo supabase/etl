@@ -7,7 +7,7 @@ use crate::{
     data::TableRow,
     destination::{
         Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
-        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -170,6 +170,7 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        _batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
