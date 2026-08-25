@@ -484,6 +484,11 @@ async fn publication_v2_reports_postgres_effective_partition_set() {
     let tenant_id = &create_tenant(&app).await;
     let (source_pool, source_id, source_db_config) =
         create_test_source_database(&app, tenant_id).await;
+    let server_version_num: i32 =
+        sqlx::query_scalar("select current_setting('server_version_num')::int")
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
 
     source_pool
         .execute(
@@ -570,7 +575,9 @@ async fn publication_v2_reports_postgres_effective_partition_set() {
     let PublicationTableSelection::Tables { tables } = &mut config.table_selection else {
         panic!("expected an explicit-table publication");
     };
-    tables[2].row_filter = Some("id < 100".to_owned());
+    if server_version_num >= POSTGRES_15 {
+        tables[2].row_filter = Some("id < 100".to_owned());
+    }
     let response =
         app.create_source_publication_v2(tenant_id, source_id, "partition_set_v2", &config).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -578,7 +585,9 @@ async fn publication_v2_reports_postgres_effective_partition_set() {
     let PublicationTableSelection::Tables { tables } = publication.config.table_selection else {
         panic!("expected an explicit-table publication");
     };
-    assert_eq!(tables[2].row_filter.as_deref(), Some("(id < 100)"));
+    if server_version_num >= POSTGRES_15 {
+        assert_eq!(tables[2].row_filter.as_deref(), Some("(id < 100)"));
+    }
 
     config.publish_via_partition_root = true;
     let response =
@@ -605,7 +614,9 @@ async fn publication_v2_reports_postgres_effective_partition_set() {
     let PublicationTableSelection::Tables { tables } = &mut root_config.table_selection else {
         panic!("expected an explicit-table publication");
     };
-    tables[0].row_filter = Some("id >= 0".to_owned());
+    if server_version_num >= POSTGRES_15 {
+        tables[0].row_filter = Some("id >= 0".to_owned());
+    }
     let response = app
         .create_source_publication_v2(tenant_id, source_id, "partition_root_set_v2", &root_config)
         .await;
