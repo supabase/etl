@@ -197,12 +197,117 @@ pub struct PublicationConfig {
     pub publish_generated_columns: Option<PublicationGeneratedColumns>,
 }
 
+/// The request-body counterpart of [`PublicationTableConfig`].
+///
+/// A table is identified for writes by [`PublicationTableConfigInput::id`]
+/// alone, so this type has no `schema`/`name` fields to set: there is
+/// nothing to ignore, because there is nothing to supply. Publication reads
+/// use [`PublicationTableConfig`], which adds those fields back as
+/// server-resolved display metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PublicationTableConfigInput {
+    /// The table's Postgres OID in the source database.
+    pub id: u32,
+    /// Columns to publish, or `null` to use PostgreSQL's default column set.
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
+    /// A self-contained PostgreSQL row-filter expression, or `null` for none.
+    ///
+    /// SQL comments are not accepted. PostgreSQL validates the expression's
+    /// syntax, referenced columns, and publication restrictions.
+    #[serde(default)]
+    pub row_filter: Option<String>,
+}
+
+impl From<PublicationTableConfigInput> for PublicationTableConfig {
+    fn from(input: PublicationTableConfigInput) -> Self {
+        PublicationTableConfig {
+            id: input.id,
+            schema: String::new(),
+            name: String::new(),
+            columns: input.columns,
+            row_filter: input.row_filter,
+        }
+    }
+}
+
+/// The request-body counterpart of [`PublicationTableSelection`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PublicationTableSelectionInput {
+    /// Publish every eligible table in the database.
+    AllTables,
+    /// Publish every eligible table in the selected schemas.
+    TablesInSchema {
+        /// Schemas whose current and future tables are published.
+        schemas: Vec<String>,
+    },
+    /// Publish only the explicitly configured tables.
+    Tables {
+        /// Tables and their optional column and row filters.
+        tables: Vec<PublicationTableConfigInput>,
+    },
+}
+
+impl From<PublicationTableSelectionInput> for PublicationTableSelection {
+    fn from(input: PublicationTableSelectionInput) -> Self {
+        match input {
+            PublicationTableSelectionInput::AllTables => PublicationTableSelection::AllTables,
+            PublicationTableSelectionInput::TablesInSchema { schemas } => {
+                PublicationTableSelection::TablesInSchema { schemas }
+            }
+            PublicationTableSelectionInput::Tables { tables } => {
+                PublicationTableSelection::Tables {
+                    tables: tables.into_iter().map(Into::into).collect(),
+                }
+            }
+        }
+    }
+}
+
+/// The request body accepted by the put-publication endpoint.
+///
+/// This is [`PublicationConfig`] with [`PublicationTableSelectionInput`] in
+/// place of [`PublicationTableSelection`], so that an explicit-table
+/// publication's entries carry only `id`, `columns`, and `row_filter` — the
+/// type itself has no `schema`/`name` fields for a client to set.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PublicationConfigInput {
+    /// The table-selection strategy.
+    #[serde(flatten)]
+    pub table_selection: PublicationTableSelectionInput,
+    /// Data-change operations to publish.
+    pub operations: Vec<PublicationOperation>,
+    /// Whether partition changes use the published partition root's identity.
+    ///
+    /// Omission preserves PostgreSQL's `false` default. This value cannot be
+    /// changed after the publication is created.
+    #[serde(default)]
+    pub publish_via_partition_root: bool,
+    /// PostgreSQL 18 generated-column behavior, when explicitly available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_generated_columns: Option<PublicationGeneratedColumns>,
+}
+
+impl From<PublicationConfigInput> for PublicationConfig {
+    fn from(input: PublicationConfigInput) -> Self {
+        PublicationConfig {
+            table_selection: input.table_selection.into(),
+            operations: input.operations,
+            publish_via_partition_root: input.publish_via_partition_root,
+            publish_generated_columns: input.publish_generated_columns,
+        }
+    }
+}
+
 /// Complete details for a publication in a source database.
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct PublicationDetails {
     /// The publication name.
     pub name: String,
-    /// The configuration that can be supplied to the put endpoint.
+    /// The publication's current configuration, with tables resolved to
+    /// their current schema and name. [`PublicationConfigInput`] is the
+    /// counterpart accepted by the put endpoint.
     pub config: PublicationConfig,
     /// Tables currently exposed by the publication.
     pub tables: Vec<SourceTable>,

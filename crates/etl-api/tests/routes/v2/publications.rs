@@ -323,6 +323,46 @@ async fn publication_v2_resolves_table_names_from_ids_after_renames() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn publication_v2_ignores_client_supplied_schema_and_name() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+
+    source_pool.execute("create table public.orders (id bigint primary key)").await.unwrap();
+    let table_id: i64 = sqlx::query_scalar("select 'public.orders'::regclass::oid::bigint")
+        .fetch_one(&source_pool)
+        .await
+        .unwrap();
+    let table_id = u32::try_from(table_id).unwrap();
+
+    // A client supplying `schema`/`name` alongside `id` (e.g. by echoing back
+    // a GET response) must not influence which table is targeted, or leak
+    // its bogus values into the stored/returned configuration: only `id` is
+    // the request identity.
+    let config = json!({
+        "type": "tables",
+        "tables": [{ "id": table_id, "schema": "not_a_real_schema", "name": "not_a_real_name" }],
+        "operations": ["insert"]
+    });
+
+    let response =
+        app.create_source_publication_v2(tenant_id, source_id, "schema_name_ignored_v2", &config).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: PublicationDetails = response.json().await.unwrap();
+    let PublicationTableSelection::Tables { tables } = &created.config.table_selection else {
+        panic!("expected an explicit-table publication");
+    };
+    assert_eq!(tables[0].id, table_id);
+    assert_eq!(tables[0].schema, "public");
+    assert_eq!(tables[0].name, "orders");
+
+    drop(source_pool);
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn publication_v2_put_replaces_an_explicit_publication_in_place() {
     init_test_tracing();
     let app = spawn_test_app().await;

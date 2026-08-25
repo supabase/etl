@@ -13,7 +13,9 @@ use utoipa::ToSchema;
 use super::SourceInspectionError;
 use crate::{
     configs::encryption::EncryptionKeyring,
-    data::v2::publications::{self, PublicationConfig, PublicationDetails, PublicationSummary},
+    data::v2::publications::{
+        self, PublicationConfigInput, PublicationDetails, PublicationSummary,
+    },
     k8s::SourceTlsConfig,
     routes::{ErrorMessage, v2::connect_source_database},
 };
@@ -119,7 +121,7 @@ pub(crate) async fn read_publication(
     summary = "Put a source publication",
     description = "Creates the named publication or replaces the table configuration of an existing explicit-table publication. Existing open-ended publications cannot be updated, and publish_via_partition_root cannot be changed after creation.",
     tag = "V2 Publications",
-    request_body = PublicationConfig,
+    request_body = PublicationConfigInput,
     params(
         ("source_id" = i64, Path, description = "Unique ID of the source"),
         ("publication_name" = String, Path, description = "Publication name to create"),
@@ -148,7 +150,7 @@ pub(crate) async fn put_publication(
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
     Path((source_id, publication_name)): Path<(i64, String)>,
-    Json(config): Json<PublicationConfig>,
+    Json(config): Json<PublicationConfigInput>,
 ) -> Result<impl IntoResponse, SourceInspectionError> {
     let source_pool = connect_source_database(
         &headers,
@@ -158,6 +160,7 @@ pub(crate) async fn put_publication(
         source_id,
     )
     .await?;
+    let config = config.into();
     let result = publications::put_publication(&source_pool, &publication_name, &config)
         .await
         .map_err(SourceInspectionError::publication_mutation)?;
