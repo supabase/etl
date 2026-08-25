@@ -672,7 +672,7 @@ async fn read_effective_tables(
 ) -> Result<Vec<SourceTable>, PublicationsV2DbError> {
     let rows = sqlx::query_as::<_, SourceTableRow>(
         r#"
-        select
+        select distinct
             c.oid::bigint as id,
             pt.schemaname as schema,
             pt.tablename as name,
