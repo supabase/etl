@@ -24,6 +24,7 @@ use crate::clickhouse::{
         ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS, ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
         REPLICATION_PATH_LABEL,
     },
+    network::new_public_client,
     schema::{clickhouse_column_type, clickhouse_default_clause, clickhouse_default_expression},
     sql::quote_identifier,
 };
@@ -278,7 +279,23 @@ impl ClickHouseClient {
         database: impl Into<String>,
         config: ClickHouseClientConfig,
     ) -> Self {
-        Self::build(url, user, Some(database.into()), password, config)
+        Self::build(Client::default(), url, user, Some(database.into()), password, config)
+    }
+
+    /// Creates a client that requires HTTPS and connects only to public IP
+    /// addresses.
+    ///
+    /// DNS answers are checked again inside the connector before every new
+    /// connection.
+    pub async fn new_public(
+        url: Url,
+        user: impl Into<String>,
+        password: Option<String>,
+        database: impl Into<String>,
+        config: ClickHouseClientConfig,
+    ) -> EtlResult<Self> {
+        let client = new_public_client(&url, config.connectivity_check_timeout).await?;
+        Ok(Self::build(client, url, user, Some(database.into()), password, config))
     }
 
     /// Variant of [`Self::new`] that does not pin the client to a target
@@ -292,10 +309,25 @@ impl ClickHouseClient {
         password: Option<String>,
         config: ClickHouseClientConfig,
     ) -> Self {
-        Self::build(url, user, None, password, config)
+        Self::build(Client::default(), url, user, None, password, config)
+    }
+
+    /// Creates an unscoped client that connects only to public HTTPS addresses.
+    ///
+    /// DNS answers are checked again inside the connector before every new
+    /// connection.
+    pub async fn new_public_without_database(
+        url: Url,
+        user: impl Into<String>,
+        password: Option<String>,
+        config: ClickHouseClientConfig,
+    ) -> EtlResult<Self> {
+        let client = new_public_client(&url, config.connectivity_check_timeout).await?;
+        Ok(Self::build(client, url, user, None, password, config))
     }
 
     fn build(
+        client: Client,
         url: Url,
         user: impl Into<String>,
         database: Option<String>,
@@ -304,7 +336,7 @@ impl ClickHouseClient {
     ) -> Self {
         Self {
             inner: Arc::new({
-                let client = Client::default().with_url(url.to_string()).with_user(user);
+                let client = client.with_url(url.to_string()).with_user(user);
                 let client = match database {
                     Some(database) => client.with_database(database),
                     None => client,

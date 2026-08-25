@@ -61,14 +61,23 @@ impl Validator for ClickHouseValidator {
             )]);
         }
 
-        // Probe with an unscoped client so a missing target database surfaces
-        // as its own failure rather than masquerading as a connectivity error.
-        let client = ClickHouseClient::new_without_database(
+        // Resolve the complete address set before probing. The client repeats
+        // the same policy inside its connector before every new connection.
+        let Ok(client) = ClickHouseClient::new_public_without_database(
             self.url.clone(),
             self.user.clone(),
             self.password.as_ref().map(|password| password.expose_secret().to_owned()),
             ClickHouseClientConfig::default(),
-        );
+        )
+        .await
+        else {
+            return Ok(vec![ValidationFailure::critical(
+                "ClickHouse URL Invalid",
+                "ClickHouse URL must use a public hostname that resolves only to public IP \
+                 addresses.\n\nPrivate, loopback, link-local, reserved, and mixed public/private \
+                 DNS results are not allowed.",
+            )]);
+        };
 
         if client.validate_connectivity().await.is_err() {
             return Ok(vec![ValidationFailure::critical(
@@ -94,5 +103,31 @@ impl Validator for ClickHouseValidator {
                  exists.\n\nGrant this user permission to read `system.databases` and try again.",
             )]),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use etl_config::Environment;
+
+    use super::*;
+    use crate::validation::FailureType;
+
+    #[tokio::test]
+    async fn rejects_private_host_before_connecting() {
+        let validator = ClickHouseValidator::new(
+            Url::parse("https://127.0.0.1:8443").unwrap(),
+            "etl".to_owned(),
+            None,
+            "default".to_owned(),
+        );
+        let context = ValidationContext::builder(Environment::Dev).build();
+
+        let failures = validator.validate(&context).await.unwrap();
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].name, "ClickHouse URL Invalid");
+        assert_eq!(failures[0].failure_type, FailureType::Critical);
+        assert!(failures[0].reason.contains("public hostname"));
     }
 }

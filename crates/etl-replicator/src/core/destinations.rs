@@ -157,15 +157,35 @@ mod clickhouse {
             unreachable!("Destination kind should match ClickHouse config");
         };
 
-        let destination = ClickHouseDestination::new(
-            url.clone(),
-            user,
-            password.as_ref().map(|p| p.expose_secret().to_owned()),
-            database,
-            ClickHouseInserterConfig { engine: *engine, ..Default::default() },
-            ClickHouseClientConfig::default(),
-            store.clone(),
-        )?;
+        let password = password.as_ref().map(|password| password.expose_secret().to_owned());
+        let inserter_config = ClickHouseInserterConfig { engine: *engine, ..Default::default() };
+        let client_config = ClickHouseClientConfig::default();
+
+        // Managed ClickHouse URLs use HTTPS. Apply the public-host policy again
+        // at the long-running connection boundary, while local HTTP remains
+        // available to standalone development configurations.
+        let destination = if url.scheme() == "https" {
+            ClickHouseDestination::new_public(
+                url.clone(),
+                user,
+                password,
+                database,
+                inserter_config,
+                client_config,
+                store.clone(),
+            )
+            .await?
+        } else {
+            ClickHouseDestination::new(
+                url.clone(),
+                user,
+                password,
+                database,
+                inserter_config,
+                client_config,
+                store.clone(),
+            )?
+        };
         destination.validate_engine_support().await?;
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);

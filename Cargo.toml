@@ -90,6 +90,8 @@ futures = { version = "0.3.31", default-features = false }
 gcp-bigquery-client = { git = "https://github.com/iambriccardo/gcp-bigquery-client", rev = "7da9cd7f140f4a5e6dff8c8593ba8fee4bc20904", default-features = false }
 hex = { version = "0.4", default-features = false }
 humantime = { version = "2.3.0", default-features = false }
+hyper-rustls = { version = "0.27.9", default-features = false }
+hyper-util = { version = "0.1.20", default-features = false }
 iceberg = { version = "0.8.0", default-features = false }
 iceberg-catalog-rest = { version = "0.8.0", default-features = false }
 insta = { version = "1.43.1", default-features = false }
@@ -134,6 +136,7 @@ tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = { version = "0.1.18", default-features = false, features = ["sync"] }
 tonic = { version = "0.14.2", default-features = false }
 tower = { version = "0.5.3", default-features = false }
+tower-service = { version = "0.3.3", default-features = false }
 tower-http = { version = "0.6.8", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 tracing-appender = { version = "0.2.3", default-features = false }
