@@ -165,7 +165,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     let pipeline_config = PipelineConfig {
         id: pipeline_id, // Using a simple ID for the example
         publication_name: args.publication,
-        failover: false,
+        replication_slot: Default::default(),
         pg_connection: pg_connection_config,
         store_pg_connection: None,
         batch: BatchConfig {

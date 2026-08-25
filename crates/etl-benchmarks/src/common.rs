@@ -823,7 +823,7 @@ pub fn pipeline_config(
     PipelineConfig {
         id: pipeline_id,
         publication_name,
-        failover: false,
+        replication_slot: Default::default(),
         pg_connection: PgConnectionConfig {
             host: pg.host.clone(),
             hostaddr: None,

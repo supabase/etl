@@ -140,6 +140,8 @@ The source PostgreSQL container started by `cargo x init` or `cargo xtask postgr
 
 The same local PostgreSQL setup also starts a physical read replica for logical decoding tests. By default, the primary listens on `localhost:5430` and the replica listens on `localhost:6430`. Additional sharded test clusters use the same `+1000` port offset for their replicas. The replica is created with `pg_basebackup`, streams from the primary through a physical replication slot, and enables `hot_standby_feedback`. ETL logical slots are created on the read replica during these tests; the primary only owns the physical slot that feeds the replica.
 
+For PostgreSQL 17 and newer, the read replica also enables `sync_replication_slots`, so the pipeline failover tests can verify that ETL failover slots become synchronized and promotion-ready. PostgreSQL 14 through 16 use the same replica setup without that unsupported setting, and the failover tests skip on those versions.
+
 The same Docker Compose stack also starts ClickHouse on `http://localhost:8123` by default, which is enough for local destination development and ClickHouse integration tests.
 
 ### Manual Setup

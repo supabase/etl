@@ -246,8 +246,9 @@ where
             // If a slot already exists at this point, we could delete it and try to
             // recover, but it means that the state was somehow reset without
             // the slot being deleted, and we want to surface this.
-            let (replication_transaction, slot) =
-                replication_client.create_slot_with_transaction(&slot_name).await?;
+            let (replication_transaction, slot) = replication_client
+                .create_slot_with_transaction(&slot_name, config.replication_slot.failover)
+                .await?;
 
             // We copy the table schema and write it both to the state store and
             // destination.

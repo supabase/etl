@@ -171,9 +171,8 @@ where
         );
 
         // We create the first connection to Postgres.
-        let replication_client = PgReplicationClient::connect(self.config.pg_connection.clone())
-            .await?
-            .with_failover(self.config.failover);
+        let replication_client =
+            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
         // We load the destination table metadata and schemas from the store to have
         // them cached for quick access.

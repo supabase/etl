@@ -1,6 +1,6 @@
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig,
+    PipelineConfig, ReplicationSlotConfig, TableSyncCopyConfig,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -57,6 +57,10 @@ const fn default_table_sync_copy() -> TableSyncCopyConfig {
 
 const fn default_invalidated_slot_behavior() -> InvalidatedSlotBehavior {
     InvalidatedSlotBehavior::Error
+}
+
+fn default_replication_slot() -> ReplicationSlotConfig {
+    ReplicationSlotConfig::default()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
@@ -233,6 +237,9 @@ pub struct ApiPipelineConfig {
     #[schema(example = "my_publication")]
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub publication_name: String,
+    /// Configuration for ETL logical replication slots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication_slot: Option<ReplicationSlotConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchConfig>,
     #[schema(example = 1000)]
@@ -294,6 +301,9 @@ pub struct UpdateApiPipelineConfig {
         deserialize_with = "deserialize_update_trimmed_string"
     )]
     pub publication_name: UpdateField<String>,
+    /// Configuration for ETL logical replication slots.
+    #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+    pub replication_slot: UpdateField<ReplicationSlotConfig>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub batch: UpdateField<BatchConfig>,
     #[schema(example = 1000)]
@@ -336,6 +346,7 @@ impl UpdateApiPipelineConfig {
     pub fn from_api_config(value: ApiPipelineConfig) -> Self {
         Self {
             publication_name: UpdateField::Set(value.publication_name),
+            replication_slot: UpdateField::from_option(value.replication_slot),
             batch: UpdateField::from_option(value.batch),
             table_error_retry_delay_ms: UpdateField::from_option(value.table_error_retry_delay_ms),
             table_error_retry_max_attempts: UpdateField::from_option(
@@ -381,6 +392,9 @@ impl UpdateApiPipelineConfig {
                 stored.publication_name,
                 PipelineConfigUpdateError::RequiredFieldCleared { field: "publication_name" },
             )?,
+            replication_slot: self
+                .replication_slot
+                .apply_to_value(stored.replication_slot, default_replication_slot),
             batch: self.batch.apply_to_value(stored.batch, default_batch),
             table_error_retry_delay_ms: self.table_error_retry_delay_ms.apply_to_value(
                 stored.table_error_retry_delay_ms,
@@ -447,6 +461,7 @@ impl From<StoredPipelineConfig> for ApiPipelineConfig {
     fn from(value: StoredPipelineConfig) -> Self {
         Self {
             publication_name: value.publication_name,
+            replication_slot: Some(value.replication_slot),
             batch: Some(value.batch),
             table_error_retry_delay_ms: Some(value.table_error_retry_delay_ms),
             table_error_retry_max_attempts: Some(value.table_error_retry_max_attempts),
@@ -469,6 +484,8 @@ impl From<StoredPipelineConfig> for ApiPipelineConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredPipelineConfig {
     pub publication_name: String,
+    #[serde(default)]
+    pub replication_slot: ReplicationSlotConfig,
     #[serde(default = "default_batch")]
     pub batch: BatchConfig,
     #[serde(default = "default_table_error_retry_delay_ms")]
@@ -508,9 +525,7 @@ impl StoredPipelineConfig {
             publication_name: self.publication_name,
             pg_connection: pg_connection_config,
             store_pg_connection: None,
-            // TODO: expose `failover` through the API pipeline config so
-            // API-managed pipelines can opt into failover replication slots.
-            failover: false,
+            replication_slot: self.replication_slot,
             batch: self.batch,
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
@@ -536,6 +551,7 @@ impl From<ApiPipelineConfig> for StoredPipelineConfig {
 
         Self {
             publication_name: value.publication_name,
+            replication_slot: value.replication_slot.unwrap_or_default(),
             batch,
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
@@ -631,6 +647,7 @@ mod tests {
     fn stored_pipeline_config_serialization() {
         let config = StoredPipelineConfig {
             publication_name: "test_publication".to_owned(),
+            replication_slot: ReplicationSlotConfig { failover: true },
             batch: BatchConfig {
                 max_fill_ms: 5000,
                 memory_budget_ratio: 0.2,
@@ -661,6 +678,7 @@ mod tests {
         let deserialized: StoredPipelineConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(config.publication_name, deserialized.publication_name);
+        assert_eq!(config.replication_slot, deserialized.replication_slot);
         assert_eq!(config.table_error_retry_delay_ms, deserialized.table_error_retry_delay_ms);
         assert_eq!(
             config.table_error_retry_max_attempts,
@@ -677,6 +695,7 @@ mod tests {
     fn api_pipeline_config_conversion() {
         let api_config = ApiPipelineConfig {
             publication_name: "test_publication".to_owned(),
+            replication_slot: Some(ReplicationSlotConfig { failover: true }),
             batch: None,
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
@@ -700,12 +719,14 @@ mod tests {
         let back_to_api: ApiPipelineConfig = stored.into();
 
         assert_eq!(api_config.publication_name, back_to_api.publication_name);
+        assert_eq!(api_config.replication_slot, back_to_api.replication_slot);
     }
 
     #[test]
     fn api_pipeline_config_defaults() {
         let api_config = ApiPipelineConfig {
             publication_name: "test_publication".to_owned(),
+            replication_slot: None,
             batch: None,
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
@@ -747,12 +768,23 @@ mod tests {
         );
         assert_eq!(stored.memory_backpressure, None);
         assert_eq!(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::Error);
+        assert!(!stored.replication_slot.failover);
+    }
+
+    #[test]
+    fn stored_pipeline_config_defaults_replication_slot_for_existing_rows() {
+        let stored: StoredPipelineConfig =
+            serde_json::from_value(serde_json::json!({ "publication_name": "publication" }))
+                .unwrap();
+
+        assert_eq!(stored.replication_slot, ReplicationSlotConfig::default());
     }
 
     #[test]
     fn update_api_pipeline_config_merges_preserve_set_and_clear_fields() {
         let stored = StoredPipelineConfig {
             publication_name: "publication".to_owned(),
+            replication_slot: ReplicationSlotConfig { failover: true },
             batch: BatchConfig {
                 max_fill_ms: 5000,
                 memory_budget_ratio: 0.2,
@@ -789,6 +821,7 @@ mod tests {
         let omitted_create_config: StoredPipelineConfig = omitted_create_config.into();
 
         assert_eq!(updated.publication_name, "updated_publication");
+        assert!(updated.replication_slot.failover);
         assert_eq!(updated.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
         assert_eq!(updated.table_error_retry_delay_ms, 1234);
         assert_eq!(updated.memory_backpressure, omitted_create_config.memory_backpressure);
@@ -799,6 +832,7 @@ mod tests {
     fn update_api_pipeline_config_replaces_present_nested_config_atomically() {
         let stored: StoredPipelineConfig = ApiPipelineConfig {
             publication_name: "publication".to_owned(),
+            replication_slot: None,
             batch: Some(BatchConfig {
                 max_fill_ms: 5000,
                 memory_budget_ratio: 0.4,
@@ -834,6 +868,7 @@ mod tests {
     fn update_api_pipeline_config_rejects_cleared_publication_name() {
         let stored: StoredPipelineConfig = ApiPipelineConfig {
             publication_name: "publication".to_owned(),
+            replication_slot: None,
             batch: None,
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
@@ -866,6 +901,7 @@ mod tests {
     fn update_api_pipeline_config_resets_cleared_defaulted_field() {
         let stored: StoredPipelineConfig = ApiPipelineConfig {
             publication_name: "publication".to_owned(),
+            replication_slot: Some(ReplicationSlotConfig { failover: true }),
             batch: Some(BatchConfig {
                 max_fill_ms: 5000,
                 memory_budget_ratio: 0.2,
@@ -887,6 +923,7 @@ mod tests {
         .into();
         let update = UpdateApiPipelineConfig {
             batch: UpdateField::Clear,
+            replication_slot: UpdateField::Clear,
             ..UpdateApiPipelineConfig::default()
         };
 
@@ -895,12 +932,14 @@ mod tests {
         assert_eq!(updated.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
         assert_eq!(updated.batch.memory_budget_ratio, BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO);
         assert_eq!(updated.batch.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
+        assert_eq!(updated.replication_slot, ReplicationSlotConfig::default());
     }
 
     #[test]
     fn stored_pipeline_config_deserializes_without_replicator_resources() {
         let config = StoredPipelineConfig {
             publication_name: "test_publication".to_owned(),
+            replication_slot: ReplicationSlotConfig::default(),
             batch: BatchConfig {
                 max_fill_ms: 5000,
                 memory_budget_ratio: 0.2,

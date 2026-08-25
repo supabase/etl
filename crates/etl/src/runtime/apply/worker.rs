@@ -261,14 +261,14 @@ where
             self.config.pg_connection.clone(),
             self.pipeline_id,
         )
-        .await?
-        .with_failover(self.config.failover);
+        .await?;
 
         let start_lsn = get_start_lsn(
             self.pipeline_id,
             &replication_client,
             &self.store,
             &self.config.invalidated_slot_behavior,
+            self.config.replication_slot.failover,
         )
         .await?;
 
@@ -344,6 +344,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     replication_client: &PgReplicationClient,
     store: &S,
     invalidated_slot_behavior: &InvalidatedSlotBehavior,
+    failover: bool,
 ) -> EtlResult<PgLsn> {
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
     let worker_type = WorkerType::Apply;
@@ -353,21 +354,12 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     // a crash window where a later restart could pair the new slot with old
     // persisted checkpoint.
     let slot = match replication_client.get_slot(&slot_name).await {
-        Ok(slot) => {
-            // create_slot only applies FAILOVER at creation, so an existing slot
-            // provisioned before failover was enabled is reused unchanged. Reconcile
-            // it here so turning on `failover` also protects an already-provisioned
-            // pipeline instead of silently leaving its slot non-failover.
-            if replication_client.failover_enabled() {
-                replication_client.enable_slot_failover(&slot_name).await?;
-            }
-            GetOrCreateSlotResult::GetSlot(slot)
-        }
+        Ok(slot) => GetOrCreateSlotResult::GetSlot(slot),
         Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
             warn_if_tables_may_have_missed_changes(store).await?;
             store.delete_replication_checkpoint(worker_type).await?;
 
-            let slot = replication_client.create_slot(&slot_name).await?;
+            let slot = replication_client.create_slot(&slot_name, failover).await?;
             GetOrCreateSlotResult::CreateSlot(slot)
         }
         Err(err) => return Err(err),
@@ -396,10 +388,11 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
         }
     }
 
-    // When we get an existing slot, check if it's been invalidated
     if let GetOrCreateSlotResult::GetSlot(_) = &slot {
         let slot_state = replication_client.get_slot_state(&slot_name).await?;
 
+        // If the slot was invalidated, we need to handle its invalidation based on the
+        // configured rules.
         if slot_state == SlotState::Invalidated {
             return handle_invalidated_slot(
                 pipeline_id,
@@ -407,8 +400,16 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
                 store,
                 &slot_name,
                 invalidated_slot_behavior,
+                failover,
             )
             .await;
+        }
+
+        // An apply slot may predate this setting. Reconcile a valid slot before
+        // reuse so enabling failover does not leave it ineligible for standby
+        // synchronization. Invalidated slots are handled above instead of altered.
+        if failover {
+            replication_client.ensure_slot_failover(&slot_name).await?;
         }
     }
 
@@ -460,6 +461,7 @@ async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
     store: &S,
     slot_name: &str,
     behavior: &InvalidatedSlotBehavior,
+    failover: bool,
 ) -> EtlResult<PgLsn> {
     counter!(ETL_SLOT_INVALIDATIONS_TOTAL).increment(1);
 
@@ -495,7 +497,7 @@ async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
 
             // We delete and recreate the main apply worker slot.
             replication_client.delete_slot_if_exists(slot_name).await?;
-            let create_result = replication_client.create_slot(slot_name).await?;
+            let create_result = replication_client.create_slot(slot_name, failover).await?;
 
             info!(
                 slot_name,

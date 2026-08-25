@@ -118,7 +118,7 @@ mod tests {
         PipelineConfig {
             id: 1,
             publication_name: "example_publication".to_owned(),
-            failover: false,
+            replication_slot: Default::default(),
             pg_connection: PgConnectionConfig {
                 host: "example.com".to_owned(),
                 hostaddr: None,

@@ -12,6 +12,34 @@ use crate::{
     schema::TableId,
 };
 
+/// Builds a `CREATE_REPLICATION_SLOT` command for a logical `pgoutput` slot.
+fn create_slot_query(slot_name: &str, snapshot_action: SnapshotAction, failover: bool) -> String {
+    if failover {
+        // PostgreSQL's legacy syntax accepts the snapshot action but has no place
+        // for FAILOVER. The parenthesized PostgreSQL 17+ syntax combines both.
+        let snapshot_option = match snapshot_action {
+            SnapshotAction::Use => "'use'",
+            SnapshotAction::NoExport => "'nothing'",
+        };
+        format!(
+            r#"CREATE_REPLICATION_SLOT {} LOGICAL pgoutput (SNAPSHOT {}, FAILOVER)"#,
+            quote_identifier(slot_name),
+            snapshot_option
+        )
+    } else {
+        // Retain the legacy form for compatibility with PostgreSQL 14 through 16.
+        let snapshot_option = match snapshot_action {
+            SnapshotAction::Use => "USE_SNAPSHOT",
+            SnapshotAction::NoExport => "NOEXPORT_SNAPSHOT",
+        };
+        format!(
+            r#"CREATE_REPLICATION_SLOT {} LOGICAL pgoutput {}"#,
+            quote_identifier(slot_name),
+            snapshot_option
+        )
+    }
+}
+
 /// Private executor for query helpers shared by clients and open transactions.
 #[derive(Clone, Copy)]
 pub(super) enum PgReplicationQueryTarget<'a, 'tx> {
@@ -33,32 +61,7 @@ impl PgReplicationQueryTarget<'_, '_> {
         // replication commands (repl_scanner.l) in Postgres code expects the commands
         // in uppercase. This probably should be fixed in upstream, but for now we will
         // keep the commands in uppercase.
-        let query = if failover {
-            // The FAILOVER option makes the slot synchronize to standbys so it
-            // survives a primary failover (PostgreSQL 17+). It can only be
-            // combined with the snapshot action through the parenthesized
-            // option list, so use that form here; `USE_SNAPSHOT` maps to
-            // `SNAPSHOT 'use'` and `NOEXPORT_SNAPSHOT` to `SNAPSHOT 'nothing'`.
-            let snapshot_option = match snapshot_action {
-                SnapshotAction::Use => "'use'",
-                SnapshotAction::NoExport => "'nothing'",
-            };
-            format!(
-                r#"CREATE_REPLICATION_SLOT {} LOGICAL pgoutput (SNAPSHOT {}, FAILOVER)"#,
-                quote_identifier(slot_name),
-                snapshot_option
-            )
-        } else {
-            let snapshot_option = match snapshot_action {
-                SnapshotAction::Use => "USE_SNAPSHOT",
-                SnapshotAction::NoExport => "NOEXPORT_SNAPSHOT",
-            };
-            format!(
-                r#"CREATE_REPLICATION_SLOT {} LOGICAL pgoutput {}"#,
-                quote_identifier(slot_name),
-                snapshot_option
-            )
-        };
+        let query = create_slot_query(slot_name, snapshot_action, failover);
         match self.simple_query(&query).await {
             Ok(results) => {
                 for result in results {

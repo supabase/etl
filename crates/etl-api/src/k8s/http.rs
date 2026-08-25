@@ -2948,7 +2948,7 @@ mod tests {
             pipeline: PipelineConfig {
                 id: 42,
                 publication_name: "all-pub".to_owned(),
-                failover: false,
+                replication_slot: Default::default(),
                 pg_connection: PgConnectionConfig {
                     host: "localhost".to_owned(),
                     hostaddr: Some("1a02:d034:3b7:f202:1803:84ed:98f8:131c".parse().unwrap()),

@@ -52,12 +52,5 @@ etl-telemetry = { workspace = true }
 name = "main"
 path = "tests/main.rs"
 
-# Manual end-to-end test against a live Multigres cluster (see the module docs).
-# Ignored by default; requires the `test-utils` feature.
-[[test]]
-name = "multigres_failover"
-path = "tests/multigres_failover.rs"
-required-features = ["test-utils"]
-
 [lints]
 workspace = true

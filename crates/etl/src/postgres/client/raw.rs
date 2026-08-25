@@ -4,6 +4,7 @@ use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
     source::extract_server_version,
     tokio::tls::MakeRustlsConnect,
+    version::POSTGRES_17,
 };
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
@@ -45,7 +46,7 @@ const PG_SETTINGS_DEFAULT_DURATION_UNIT: &str = "ms";
 ///
 /// Worker connections append a suffix (see [`etl_postgres::application_name`])
 /// so they can be told apart in `pg_stat_activity`.
-pub const APP_NAME_REPLICATOR_REPLICATION: &str = "supabase_etl_replicator_replication";
+const APP_NAME_REPLICATOR_REPLICATION: &str = "supabase_etl_replicator_replication";
 
 /// Builds connection options for logical replication connections.
 ///
@@ -214,10 +215,6 @@ pub struct PgReplicationClient {
     connection_config: PgReplicationConnectionConfig,
     server_version: Option<NonZeroI32>,
     connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
-    /// Whether replication slots created by this client request the `FAILOVER`
-    /// option so they survive a primary failover (PostgreSQL 17+). Off by
-    /// default; enable via [`PgReplicationClient::with_failover`].
-    failover: bool,
 }
 
 impl fmt::Debug for PgReplicationClient {
@@ -275,20 +272,6 @@ impl PgReplicationClient {
         .await
     }
 
-    /// Configures whether replication slots created by this client request the
-    /// `FAILOVER` option (PostgreSQL 17+), so they synchronize to standbys and
-    /// survive a primary failover. Off by default.
-    pub fn with_failover(mut self, failover: bool) -> Self {
-        self.failover = failover;
-        self
-    }
-
-    /// Reports whether this client requests the `FAILOVER` option for its
-    /// slots.
-    pub fn failover_enabled(&self) -> bool {
-        self.failover
-    }
-
     /// Establishes a replication connection with the supplied
     /// `application_name`.
     async fn connect_with_application_name(
@@ -330,13 +313,7 @@ impl PgReplicationClient {
 
         info!("connected to postgres without tls");
 
-        Ok(PgReplicationClient {
-            client,
-            connection_config,
-            server_version,
-            connection_updates_rx,
-            failover: false,
-        })
+        Ok(PgReplicationClient { client, connection_config, server_version, connection_updates_rx })
     }
 
     /// Establishes a TLS-encrypted connection to Postgres.
@@ -361,13 +338,7 @@ impl PgReplicationClient {
 
         info!("connected to postgres with tls");
 
-        Ok(PgReplicationClient {
-            client,
-            connection_config,
-            server_version,
-            connection_updates_rx,
-            failover: false,
-        })
+        Ok(PgReplicationClient { client, connection_config, server_version, connection_updates_rx })
     }
 
     /// Creates a non-replication child connection from connection settings.
@@ -446,14 +417,20 @@ impl PgReplicationClient {
     /// duration of any operations that depend on this snapshot (e.g. schema
     /// fetches, table copies, or `pg_export_snapshot()` calls
     /// for child connections).
+    ///
+    /// `failover` requests PostgreSQL 17+ standby synchronization for this
+    /// slot. The option applies only to this creation operation and is not
+    /// retained by the client.
     pub async fn create_slot_with_transaction(
         &mut self,
         slot_name: &str,
+        failover: bool,
     ) -> EtlResult<(PgReplicationTransaction<'_>, CreateSlotResult)> {
+        self.validate_replication_slot_failover_support(failover)?;
+
         let connection_config = self.connection_config.clone();
         let server_version = self.server_version;
         let connection_updates_rx = self.connection_updates_rx();
-        let failover = self.failover;
 
         let transaction = self.begin_tx().await?;
         let slot = PgReplicationQueryTarget::Transaction(&transaction)
@@ -473,8 +450,16 @@ impl PgReplicationClient {
 
     /// Creates a new logical replication slot with the specified name and no
     /// snapshot.
-    pub async fn create_slot(&self, slot_name: &str) -> EtlResult<CreateSlotResult> {
-        self.create_slot_internal(slot_name, SnapshotAction::NoExport).await
+    ///
+    /// `failover` requests PostgreSQL 17+ standby synchronization for this
+    /// slot. The option applies only to this creation operation and is not
+    /// retained by the client.
+    pub async fn create_slot(
+        &self,
+        slot_name: &str,
+        failover: bool,
+    ) -> EtlResult<CreateSlotResult> {
+        self.create_slot_internal(slot_name, SnapshotAction::NoExport, failover).await
     }
 
     /// Gets the state of a replication slot by name.
@@ -541,22 +526,49 @@ impl PgReplicationClient {
         );
     }
 
-    /// Enables the `FAILOVER` option on an existing replication slot so it
-    /// synchronizes to standbys and survives a primary failover.
+    /// Ensures that an existing logical replication slot is failover-enabled.
     ///
-    /// [`PgReplicationClient::create_slot`] only applies `FAILOVER` at creation
-    /// time, so a slot provisioned before failover was turned on is otherwise
-    /// reused as-is. Callers reconcile such a slot by invoking this before
-    /// starting replication on it (the slot must be inactive).
+    /// This repairs an apply slot that was created before
+    /// `replication_slot.failover` was enabled. ETL only alters the slot when
+    /// its current `failover` value is false, avoiding an unnecessary
+    /// replication command on normal restarts and after promotion.
     ///
-    /// `ALTER_REPLICATION_SLOT` is a PostgreSQL 17+ replication command, but
-    /// this is only ever called when `FAILOVER` is requested, which already
-    /// requires a 17+ primary — `CREATE_REPLICATION_SLOT ... FAILOVER`
-    /// would have failed otherwise — so the version gate is implicit.
-    pub async fn enable_slot_failover(&self, slot_name: &str) -> EtlResult<()> {
-        // Uppercase per the replication-command lexer (see create_slot).
-        let query = format!(r#"ALTER_REPLICATION_SLOT {} (FAILOVER)"#, quote_identifier(slot_name));
-        self.client.simple_query(&query).await?;
+    /// PostgreSQL 17 introduced both the catalog column and the replication
+    /// command used here. Callers only invoke this method when the PostgreSQL
+    /// 17+ setting is enabled.
+    pub(crate) async fn ensure_slot_failover(&self, slot_name: &str) -> EtlResult<()> {
+        self.validate_replication_slot_failover_support(true)?;
+
+        let query = format!(
+            r#"select failover::int as failover from pg_replication_slots where slot_name = {};"#,
+            quote_literal(slot_name)
+        );
+
+        let results = self.client.simple_query(&query).await?;
+        let mut failover = None;
+        for result in results {
+            if let SimpleQueryMessage::Row(row) = result {
+                failover =
+                    Some(get_row_value::<u8>(&row, "failover", "pg_replication_slots")? != 0);
+                break;
+            }
+        }
+
+        let Some(failover) = failover else {
+            bail!(
+                ErrorKind::ReplicationSlotNotFound,
+                "Replication slot not found",
+                format!("Replication slot '{}' not found in database", slot_name)
+            );
+        };
+
+        if !failover {
+            // Uppercase per the replication-command lexer (see create_slot).
+            let query =
+                format!(r#"ALTER_REPLICATION_SLOT {} (FAILOVER)"#, quote_identifier(slot_name));
+            self.client.simple_query(&query).await?;
+        }
+
         Ok(())
     }
 
@@ -727,8 +739,25 @@ impl PgReplicationClient {
         &self,
         slot_name: &str,
         snapshot_action: SnapshotAction,
+        failover: bool,
     ) -> EtlResult<CreateSlotResult> {
-        self.target().create_slot(slot_name, snapshot_action, self.failover).await
+        self.validate_replication_slot_failover_support(failover)?;
+
+        self.target().create_slot(slot_name, snapshot_action, failover).await
+    }
+
+    /// Rejects a failover-slot request when the server explicitly reports a
+    /// PostgreSQL version older than 17.
+    fn validate_replication_slot_failover_support(&self, failover: bool) -> EtlResult<()> {
+        if failover && self.server_version.is_some_and(|version| version.get() < POSTGRES_17) {
+            bail!(
+                ErrorKind::ConfigError,
+                "Replication slot failover requires PostgreSQL 17 or newer",
+                "Disable replication_slot.failover or upgrade the source database".to_owned()
+            );
+        }
+
+        Ok(())
     }
 
     /// Deletes a replication slot, optionally failing when the slot does not

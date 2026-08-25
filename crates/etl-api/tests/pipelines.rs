@@ -18,7 +18,8 @@ use etl_api::{
     validation::FailureType,
 };
 use etl_config::shared::{
-    BatchConfig, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
+    BatchConfig, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig,
+    ReplicationSlotConfig, TableSyncCopyConfig,
 };
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
@@ -269,6 +270,42 @@ async fn pipeline_can_be_created() {
     let response: CreatePipelineResponse =
         response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_replication_slot_config_can_be_created_and_updated() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+    let mut config = new_pipeline_config();
+    config.replication_slot = Some(ReplicationSlotConfig { failover: true });
+
+    let request = CreatePipelineRequest { source_id, destination_id, config };
+    let response = app.create_pipeline(tenant_id, &request).await;
+    assert!(response.status().is_success());
+    let response: CreatePipelineResponse = response.json().await.unwrap();
+
+    let pipeline = app.read_pipeline(tenant_id, response.id).await;
+    let pipeline: ReadPipelineResponse = pipeline.json().await.unwrap();
+    assert_eq!(pipeline.config.replication_slot, Some(ReplicationSlotConfig { failover: true }));
+
+    let update = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig {
+            replication_slot: UpdateField::Set(ReplicationSlotConfig { failover: false }),
+            ..UpdateApiPipelineConfig::default()
+        },
+    };
+    let response = app.update_pipeline(tenant_id, pipeline.id, &update).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let pipeline = app.read_pipeline(tenant_id, pipeline.id).await;
+    let pipeline: ReadPipelineResponse = pipeline.json().await.unwrap();
+    assert_eq!(pipeline.config.replication_slot, Some(ReplicationSlotConfig { failover: false }));
 }
 
 #[tokio::test(flavor = "multi_thread")]

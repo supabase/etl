@@ -1,6 +1,6 @@
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig,
+    PipelineConfig, ReplicationSlotConfig, TableSyncCopyConfig,
 };
 use etl_postgres::tokio::test_utils::PgDatabase;
 use rand::random;
@@ -81,8 +81,8 @@ pub struct PipelineBuilder<S, D> {
     /// The time between periodic table sync monitor checks. Default:
     /// [`PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS`].
     table_sync_monitor_refresh_interval_ms: u64,
-    /// Create replication slots with the `FAILOVER` option. Default: false.
-    failover: bool,
+    /// Logical replication slot configuration.
+    replication_slot: ReplicationSlotConfig,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -140,13 +140,14 @@ where
             },
             table_sync_monitor_refresh_interval_ms:
                 PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
-            failover: false,
+            replication_slot: ReplicationSlotConfig::default(),
         }
     }
 
-    /// Sets whether replication slots are created with the `FAILOVER` option.
-    pub fn with_failover(mut self, failover: bool) -> Self {
-        self.failover = failover;
+    /// Sets whether PostgreSQL failover support is enabled for replication
+    /// slots.
+    pub fn with_replication_slot_failover(mut self, enabled: bool) -> Self {
+        self.replication_slot.failover = enabled;
         self
     }
 
@@ -208,7 +209,7 @@ where
             publication_name: self.publication_name,
             pg_connection: self.pg_connection_config,
             store_pg_connection: None,
-            failover: self.failover,
+            replication_slot: self.replication_slot,
             batch: self.batch,
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,

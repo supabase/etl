@@ -224,7 +224,7 @@ async fn start_replayable_stream(
 ) -> (PgReplicationClient, LogicalReplicationStream, String, PgLsn) {
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name(slot_suffix);
-    let start_lsn = client.create_slot(&slot_name).await.unwrap().consistent_point;
+    let start_lsn = client.create_slot(&slot_name, false).await.unwrap().consistent_point;
     let stream =
         client.start_logical_replication(publication_name, &slot_name, start_lsn).await.unwrap();
 
@@ -1062,8 +1062,10 @@ async fn table_copy_stream_converts_postgres_type_matrix() {
     insert_type_matrix_row(&database, &table_name).await;
 
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let (transaction, _) =
-        client.create_slot_with_transaction(&test_slot_name("copy_type_matrix")).await.unwrap();
+    let (transaction, _) = client
+        .create_slot_with_transaction(&test_slot_name("copy_type_matrix"), false)
+        .await
+        .unwrap();
     let table_schema = transaction.get_table_schema(table_id).await.unwrap();
     let stream = transaction
         .get_table_copy_stream(table_id, &table_schema.column_schemas, None)
@@ -1086,7 +1088,7 @@ async fn logical_replication_stream_converts_postgres_type_matrix() {
 
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("cdc_type_matrix");
-    let (transaction, slot) = client.create_slot_with_transaction(&slot_name).await.unwrap();
+    let (transaction, slot) = client.create_slot_with_transaction(&slot_name, false).await.unwrap();
     let table_schema = transaction.get_table_schema(table_id).await.unwrap();
     transaction.commit().await.unwrap();
 
@@ -1118,8 +1120,10 @@ async fn table_copy_stream_rejects_known_unsupported_postgres_values() {
     }
 
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let (transaction, _) =
-        client.create_slot_with_transaction(&test_slot_name("copy_unsupported")).await.unwrap();
+    let (transaction, _) = client
+        .create_slot_with_transaction(&test_slot_name("copy_unsupported"), false)
+        .await
+        .unwrap();
 
     for (case, table_id) in tables {
         let table_schema = transaction.get_table_schema(table_id).await.unwrap();
@@ -1160,7 +1164,8 @@ async fn logical_replication_stream_rejects_known_unsupported_postgres_values() 
 
         let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
         let slot_name = test_slot_name(&format!("cdc_unsupported_{index}"));
-        let (transaction, slot) = client.create_slot_with_transaction(&slot_name).await.unwrap();
+        let (transaction, slot) =
+            client.create_slot_with_transaction(&slot_name, false).await.unwrap();
         let table_schema = transaction.get_table_schema(table_id).await.unwrap();
         transaction.commit().await.unwrap();
 
