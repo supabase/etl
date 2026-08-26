@@ -1,0 +1,15 @@
+---
+source: crates/etl-api/tests/routes/destinations.rs
+expression: destination.config
+---
+BigQuery {
+    project_id: "project-id",
+    dataset_id: "dataset-id",
+    max_staleness_mins: None,
+    connection_pool_size: Some(
+        1,
+    ),
+    table_options: BigQueryTableOptionsConfig {
+        tables: [],
+    },
+}

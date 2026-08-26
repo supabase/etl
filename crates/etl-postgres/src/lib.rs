@@ -8,6 +8,7 @@ pub mod application_name;
 pub mod default_expression;
 pub mod lag;
 pub mod numeric;
+pub mod publications;
 pub mod schema;
 pub mod slots;
 pub mod source;

@@ -601,14 +601,16 @@ async fn drop_table_for_copy_shutdown_interrupts_pending_result_wait() {
         StallTarget::DropTableForCopy,
         StallMode::HoldResult,
     );
-    let drop_reached_notify = destination.notify_on_stall();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
         store.clone(),
-        destination,
+        destination.clone(),
     );
+
+    let drop_reached_notify = destination.notify_on_stall();
+
     pipeline.start().await.unwrap();
 
     drop_reached_notify.notified().await;
