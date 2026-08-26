@@ -625,9 +625,6 @@ where
     }
 
     /// Creates a destination that connects only to public HTTPS addresses.
-    ///
-    /// DNS answers are checked again inside the connector before every new
-    /// connection.
     pub async fn new_public(
         url: Url,
         user: impl Into<String>,

@@ -61,8 +61,6 @@ impl Validator for ClickHouseValidator {
             )]);
         }
 
-        // Resolve the complete address set before probing. The client repeats
-        // the same policy inside its connector before every new connection.
         let client = match ClickHouseClient::new_public_without_database(
             self.url.clone(),
             self.user.clone(),

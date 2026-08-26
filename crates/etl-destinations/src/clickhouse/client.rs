@@ -284,9 +284,6 @@ impl ClickHouseClient {
 
     /// Creates a client that requires HTTPS and connects only to public IP
     /// addresses.
-    ///
-    /// DNS answers are checked again inside the connector before every new
-    /// connection.
     pub async fn new_public(
         url: Url,
         user: impl Into<String>,
@@ -313,9 +310,6 @@ impl ClickHouseClient {
     }
 
     /// Creates an unscoped client that connects only to public HTTPS addresses.
-    ///
-    /// DNS answers are checked again inside the connector before every new
-    /// connection.
     pub async fn new_public_without_database(
         url: Url,
         user: impl Into<String>,
