@@ -35,7 +35,7 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 /// DNS resolver that returns only fully validated public address sets.
 #[derive(Clone, Debug)]
 struct PublicDnsResolver {
-    /// System DNS resolver used for each new connection.
+    /// Hyper's default system resolver, backed by blocking `getaddrinfo` calls.
     inner: GaiResolver,
 }
 
