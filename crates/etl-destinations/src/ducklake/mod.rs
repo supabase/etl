@@ -112,8 +112,8 @@ pub(super) const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 1_000_000;
 pub(super) const COPY_DATA_INLINING_ROW_LIMIT: u64 = 0;
 
 pub use core::{
-    DuckLakeDestination, DuckLakeExternalMaintenanceConfig, DuckLakeExternalMaintenancePause,
-    DuckLakeMaintenanceMode, table_name_to_ducklake_table_name,
+    DuckLakeDestination, DuckLakeDestinationBuilder, DuckLakeExternalMaintenanceConfig,
+    DuckLakeExternalMaintenancePause, DuckLakeMaintenanceMode, table_name_to_ducklake_table_name,
 };
 #[cfg(feature = "test-utils")]
 pub use core::{

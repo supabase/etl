@@ -26,8 +26,8 @@ use etl::{
 use etl_config::{
     Environment,
     shared::{
-        BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+        BatchConfig, DuckLakeCopyBufferConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
+        PgConnectionConfig, PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
 };
 #[cfg(feature = "bigquery")]
@@ -36,6 +36,8 @@ use etl_destinations::bigquery::BigQueryDestination;
 use etl_destinations::clickhouse::{
     ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
 };
+#[cfg(feature = "ducklake")]
+use etl_destinations::ducklake::DuckLakeDestination;
 #[cfg(feature = "snowflake")]
 use etl_destinations::snowflake::{
     AuthManager, Client as SnowflakeClient, Config as SnowflakeConfig,
@@ -49,7 +51,7 @@ use sqlx::{
 };
 use tokio::sync::Notify;
 use tracing::info;
-#[cfg(feature = "clickhouse")]
+#[cfg(any(feature = "clickhouse", feature = "ducklake"))]
 use url::Url;
 
 /// Default batch fill time for benchmark runs.
@@ -90,6 +92,9 @@ pub enum DestinationType {
     /// Use ClickHouse as the destination.
     #[value(name = "clickhouse")]
     ClickHouse,
+    /// Use DuckLake as the destination.
+    #[value(name = "ducklake")]
+    DuckLake,
     /// Use Snowflake as the destination.
     #[value(name = "snowflake")]
     Snowflake,
@@ -192,6 +197,24 @@ pub struct DestinationArgs {
     /// ClickHouse database. Must already exist.
     #[arg(long)]
     pub clickhouse_database: Option<String>,
+    /// DuckLake PostgreSQL catalog URL.
+    #[arg(long)]
+    pub ducklake_catalog_url: Option<String>,
+    /// DuckLake local or object-store data URL.
+    #[arg(long)]
+    pub ducklake_data_path: Option<String>,
+    /// Size of the DuckDB connection pool.
+    #[arg(long, default_value_t = 4)]
+    pub ducklake_pool_size: u32,
+    /// Enable deferred initial-copy buffering.
+    #[arg(long, default_value_t = false)]
+    pub ducklake_copy_buffer_enabled: bool,
+    /// Approximate staged row bytes per buffered DuckLake commit.
+    #[arg(long, default_value_t = DuckLakeCopyBufferConfig::DEFAULT_TARGET_BYTES)]
+    pub ducklake_copy_buffer_target_bytes: u64,
+    /// Maximum staged row bytes accepted across DuckLake copy sessions.
+    #[arg(long, default_value_t = DuckLakeCopyBufferConfig::DEFAULT_MAX_TOTAL_BYTES)]
+    pub ducklake_copy_buffer_max_total_bytes: u64,
 }
 
 /// Snapshot of destination-side benchmark counters.
@@ -464,7 +487,10 @@ impl Destination for NullDestination {
 }
 
 /// Benchmark destination variants.
-#[cfg_attr(any(feature = "bigquery", feature = "clickhouse"), expect(clippy::large_enum_variant))]
+#[cfg_attr(
+    any(feature = "bigquery", feature = "clickhouse", feature = "ducklake"),
+    expect(clippy::large_enum_variant)
+)]
 #[derive(Clone)]
 pub enum BenchDestination {
     /// Null destination variant.
@@ -475,6 +501,9 @@ pub enum BenchDestination {
     /// ClickHouse destination variant.
     #[cfg(feature = "clickhouse")]
     ClickHouse(CountingDestination<ClickHouseDestination<NotifyingStore>>),
+    /// DuckLake destination variant.
+    #[cfg(feature = "ducklake")]
+    DuckLake(CountingDestination<DuckLakeDestination<NotifyingStore>>),
     /// Snowflake destination variant.
     #[cfg(feature = "snowflake")]
     Snowflake(CountingDestination<SnowflakeDestination<NotifyingStore>>),
@@ -483,7 +512,7 @@ pub enum BenchDestination {
 impl BenchDestination {
     /// Creates a benchmark destination from CLI arguments.
     #[cfg_attr(
-        not(any(feature = "bigquery", feature = "clickhouse")),
+        not(any(feature = "bigquery", feature = "clickhouse", feature = "ducklake")),
         expect(clippy::unused_async)
     )]
     #[allow(
@@ -574,6 +603,39 @@ impl BenchDestination {
             DestinationType::ClickHouse => {
                 bail!("ClickHouse benchmarks require the etl-benchmarks clickhouse feature")
             }
+            #[cfg(feature = "ducklake")]
+            DestinationType::DuckLake => {
+                let catalog_url = destination_args
+                    .ducklake_catalog_url
+                    .as_deref()
+                    .filter(|url| !url.trim().is_empty())
+                    .context("DuckLake catalog URL is required for DuckLake benchmarks")?;
+                let data_path = destination_args
+                    .ducklake_data_path
+                    .as_deref()
+                    .filter(|path| !path.trim().is_empty())
+                    .context("DuckLake data path is required for DuckLake benchmarks")?;
+                let copy_buffer = DuckLakeCopyBufferConfig {
+                    enabled: destination_args.ducklake_copy_buffer_enabled,
+                    target_bytes: destination_args.ducklake_copy_buffer_target_bytes,
+                    max_total_bytes: destination_args.ducklake_copy_buffer_max_total_bytes,
+                };
+                let destination = DuckLakeDestination::builder(
+                    Url::parse(catalog_url).context("invalid DuckLake catalog URL")?,
+                    Url::parse(data_path).context("invalid DuckLake data path")?,
+                    destination_args.ducklake_pool_size,
+                    store,
+                )
+                .copy_buffer(copy_buffer)
+                .build()
+                .await?;
+
+                Ok(Self::DuckLake(CountingDestination::new(destination)))
+            }
+            #[cfg(not(feature = "ducklake"))]
+            DestinationType::DuckLake => {
+                bail!("DuckLake benchmarks require the etl-benchmarks ducklake feature")
+            }
             #[cfg(feature = "snowflake")]
             DestinationType::Snowflake => {
                 install_crypto_provider();
@@ -600,6 +662,8 @@ impl BenchDestination {
             Self::BigQuery(destination) => destination.stats(),
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => destination.stats(),
+            #[cfg(feature = "ducklake")]
+            Self::DuckLake(destination) => destination.stats(),
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.stats(),
         }
@@ -613,6 +677,8 @@ impl BenchDestination {
             Self::BigQuery(destination) => destination.reset_cdc_stats(),
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => destination.reset_cdc_stats(),
+            #[cfg(feature = "ducklake")]
+            Self::DuckLake(destination) => destination.reset_cdc_stats(),
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.reset_cdc_stats(),
         }
@@ -626,6 +692,8 @@ impl BenchDestination {
             Self::BigQuery(destination) => destination.set_cdc_target(target),
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => destination.set_cdc_target(target),
+            #[cfg(feature = "ducklake")]
+            Self::DuckLake(destination) => destination.set_cdc_target(target),
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.set_cdc_target(target),
         }
@@ -639,6 +707,8 @@ impl BenchDestination {
             Self::BigQuery(destination) => destination.wait_for_cdc_target().await,
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => destination.wait_for_cdc_target().await,
+            #[cfg(feature = "ducklake")]
+            Self::DuckLake(destination) => destination.wait_for_cdc_target().await,
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.wait_for_cdc_target().await,
         }
@@ -657,6 +727,8 @@ impl Destination for BenchDestination {
             Self::BigQuery(destination) => destination.shutdown().await,
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => destination.shutdown().await,
+            #[cfg(feature = "ducklake")]
+            Self::DuckLake(destination) => destination.shutdown().await,
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.shutdown().await,
         }
@@ -677,6 +749,10 @@ impl Destination for BenchDestination {
             }
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => {
+                destination.drop_table_for_copy(replicated_table_schema, async_result).await
+            }
+            #[cfg(feature = "ducklake")]
+            Self::DuckLake(destination) => {
                 destination.drop_table_for_copy(replicated_table_schema, async_result).await
             }
             #[cfg(feature = "snowflake")]
@@ -710,6 +786,12 @@ impl Destination for BenchDestination {
                     .write_table_rows(replicated_table_schema, table_rows, async_result)
                     .await
             }
+            #[cfg(feature = "ducklake")]
+            Self::DuckLake(destination) => {
+                destination
+                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .await
+            }
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => {
                 destination
@@ -735,6 +817,10 @@ impl Destination for BenchDestination {
             }
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => {
+                destination.write_events(events, durability, async_result).await
+            }
+            #[cfg(feature = "ducklake")]
+            Self::DuckLake(destination) => {
                 destination.write_events(events, durability, async_result).await
             }
             #[cfg(feature = "snowflake")]

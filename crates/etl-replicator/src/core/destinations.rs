@@ -215,6 +215,7 @@ mod ducklake {
             maintenance_target_file_size,
             expire_snapshots_older_than,
             maintenance_mode,
+            copy_buffer,
             table_sorting,
         } = &replicator_config.destination
         else {
@@ -248,18 +249,20 @@ mod ducklake {
         let external_maintenance =
             DuckLakeExternalMaintenanceConfig { mode: maintenance_mode, pipeline_id };
 
-        let destination = DuckLakeDestination::new_with_table_sorting_and_external_maintenance(
+        let destination = DuckLakeDestination::builder(
             parse_ducklake_url(catalog_url.expose_secret()).map_err(ReplicatorError::config)?,
             parse_ducklake_s3_data_path(data_path).map_err(ReplicatorError::config)?,
             *pool_size,
-            s3_config,
-            metadata_schema.clone(),
-            maintenance_target_file_size.clone(),
-            expire_snapshots_older_than.clone(),
-            table_sorting.clone(),
-            external_maintenance,
             store.clone(),
         )
+        .s3(s3_config)
+        .metadata_schema(metadata_schema.clone())
+        .maintenance_target_file_size(maintenance_target_file_size.clone())
+        .expire_snapshots_older_than(expire_snapshots_older_than.clone())
+        .copy_buffer(*copy_buffer)
+        .table_sorting(table_sorting.clone())
+        .external_maintenance(external_maintenance)
+        .build()
         .await?;
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);

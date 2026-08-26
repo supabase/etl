@@ -3,7 +3,10 @@ use std::{collections::BTreeMap, fmt, path::PathBuf};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::{
     Config,
-    shared::{DestinationKind, PgConnectionConfig, SentryConfig, TlsConfig},
+    shared::{
+        DestinationKind, DuckLakeCopyBufferConfig, PgConnectionConfig, SentryConfig, TlsConfig,
+        Validate,
+    },
 };
 use serde::{
     Deserialize, Deserializer,
@@ -81,6 +84,13 @@ pub struct K8sConfig {
     /// replicator pod unless a destination-kind default or pipeline-level
     /// override supplies one of those request values.
     pub replicator_resources: DefaultReplicatorResourcesConfig,
+    /// Optional operator override for DuckLake initial-copy buffering.
+    ///
+    /// When set, the generated replicator configuration uses this policy for
+    /// every DuckLake pipeline without changing its stored destination record.
+    /// Omitting it preserves the per-destination configuration.
+    #[serde(default)]
+    pub ducklake_copy_buffer_override: Option<DuckLakeCopyBufferConfig>,
     /// CPU and memory bounds shared by generated VPAs and StatefulSets.
     #[serde(default)]
     pub replicator_autoscaling: ReplicatorAutoscalingConfig,
@@ -247,6 +257,9 @@ impl ApiConfig {
         self.k8s.replicator_resources.validate()?;
         self.k8s.replicator_autoscaling.validate()?;
         self.k8s.vector_resources.validate()?;
+        if let Some(copy_buffer) = &self.k8s.ducklake_copy_buffer_override {
+            copy_buffer.validate().map_err(|error| error.to_string())?;
+        }
 
         Ok(())
     }
@@ -607,6 +620,36 @@ mod tests {
             }
         );
         assert_eq!(config.replicator_autoscaling, ReplicatorAutoscalingConfig::default());
+        assert!(config.ducklake_copy_buffer_override.is_none());
+    }
+
+    #[test]
+    fn ducklake_copy_buffer_override_is_configurable() {
+        let config: K8sConfig = serde_json::from_value(json!({
+            "replicator_resources": {
+                "memory_request_mib": 4096,
+                "cpu_request_millicores": 512
+            },
+            "ducklake_copy_buffer_override": {
+                "enabled": true,
+                "target_bytes": 268435456,
+                "max_total_bytes": 1073741824
+            },
+            "vector_resources": {
+                "memory_request_mib": 192,
+                "cpu_request_millicores": 75
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            config.ducklake_copy_buffer_override,
+            Some(DuckLakeCopyBufferConfig {
+                enabled: true,
+                target_bytes: 256 * 1024 * 1024,
+                max_total_bytes: 1024 * 1024 * 1024,
+            })
+        );
     }
 
     #[test]

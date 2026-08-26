@@ -1,6 +1,7 @@
 use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
+    fs,
+    path::{Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
@@ -93,7 +94,20 @@ struct TableCopyReport {
     batch_max_fill_ms: u64,
     memory_budget_ratio: f32,
     memory_backpressure_enabled: bool,
+    ducklake_files: Option<DuckLakeFileStats>,
     destination_stats: DestinationStatsSnapshot,
+}
+
+/// Local DuckLake Parquet file distribution after a benchmark run.
+#[derive(Debug, Serialize)]
+struct DuckLakeFileStats {
+    file_count: usize,
+    total_bytes: u64,
+    min_bytes: u64,
+    median_bytes: u64,
+    p95_bytes: u64,
+    max_bytes: u64,
+    mean_bytes: f64,
 }
 
 /// Runs the table-copy benchmark binary.
@@ -164,6 +178,7 @@ async fn run(args: RunArgs) -> Result<()> {
     }
 
     let table_count = args.table_ids.len();
+    let ducklake_files = collect_ducklake_file_stats(&args.destination)?;
     let report = TableCopyReport {
         benchmark: "table_copy",
         destination: args.destination.destination,
@@ -186,6 +201,7 @@ async fn run(args: RunArgs) -> Result<()> {
         batch_max_fill_ms: args.tuning.batch_max_fill_ms,
         memory_budget_ratio: args.tuning.memory_budget_ratio,
         memory_backpressure_enabled: !args.tuning.disable_memory_backpressure,
+        ducklake_files,
         destination_stats,
     };
 
@@ -214,6 +230,12 @@ fn print_summary(report: &TableCopyReport) {
         "    Row batches     {}",
         format_integer(u128::from(report.destination_stats.table_row_batches))
     );
+    if let Some(files) = &report.ducklake_files {
+        println!("    Parquet files   {}", format_integer(files.file_count as u128));
+        println!("    Parquet total   {} MiB", format_decimal(bytes_to_mib(files.total_bytes), 2));
+        println!("    Parquet median  {} MiB", format_decimal(bytes_to_mib(files.median_bytes), 2));
+        println!("    Parquet p95     {} MiB", format_decimal(bytes_to_mib(files.p95_bytes), 2));
+    }
     println!();
     println!("  Throughput");
     println!("    Rows/s            {}", format_decimal(report.rows_per_second, 2));
@@ -232,6 +254,7 @@ fn destination_label(destination: DestinationType) -> &'static str {
         DestinationType::Null => "null",
         DestinationType::BigQuery => "bigquery",
         DestinationType::ClickHouse => "clickhouse",
+        DestinationType::DuckLake => "ducklake",
         DestinationType::Snowflake => "snowflake",
     }
 }
@@ -261,14 +284,10 @@ async fn register_table_copy_notifications(
 }
 
 async fn wait_for_table_copies(
-    destination: &BenchDestination,
-    expected_row_count: Option<u64>,
+    _destination: &BenchDestination,
+    _expected_row_count: Option<u64>,
     notifications: Vec<TableCopyNotifications>,
 ) -> Result<()> {
-    if let Some(expected_row_count) = expected_row_count {
-        return wait_for_expected_rows(destination, expected_row_count, notifications).await;
-    }
-
     let mut tasks = JoinSet::new();
     for notification in notifications {
         tasks.spawn(async move {
@@ -289,32 +308,68 @@ async fn wait_for_table_copies(
     Ok(())
 }
 
-async fn wait_for_expected_rows(
-    destination: &BenchDestination,
-    expected_row_count: u64,
-    notifications: Vec<TableCopyNotifications>,
-) -> Result<()> {
-    let mut errors = JoinSet::new();
-    for notification in notifications {
-        errors.spawn(async move {
-            let table_id = notification.table_id;
-            notification.errored.inner().notified().await;
-            bail!("table {table_id} entered errored state during table-copy benchmark")
-        });
+/// Collects Parquet file metrics for a local DuckLake benchmark data path.
+fn collect_ducklake_file_stats(destination: &DestinationArgs) -> Result<Option<DuckLakeFileStats>> {
+    if destination.destination != DestinationType::DuckLake {
+        return Ok(None);
     }
 
-    loop {
-        if destination.stats().table_rows >= expected_row_count {
-            return Ok(());
-        }
+    let data_path = destination
+        .ducklake_data_path
+        .as_deref()
+        .context("DuckLake data path is required for file statistics")?;
+    let url = url::Url::parse(data_path).context("invalid DuckLake data path")?;
+    if url.scheme() != "file" {
+        return Ok(None);
+    }
+    let root = url
+        .to_file_path()
+        .map_err(|_| anyhow::anyhow!("DuckLake file data path is not a valid local path"))?;
+    let mut file_bytes = Vec::new();
+    collect_parquet_file_bytes(&root, &mut file_bytes)?;
+    file_bytes.sort_unstable();
+    if file_bytes.is_empty() {
+        return Ok(Some(DuckLakeFileStats {
+            file_count: 0,
+            total_bytes: 0,
+            min_bytes: 0,
+            median_bytes: 0,
+            p95_bytes: 0,
+            max_bytes: 0,
+            mean_bytes: 0.0,
+        }));
+    }
 
-        tokio::select! {
-            result = errors.join_next() => {
-                if let Some(result) = result {
-                    result.context("table-copy error wait task panicked")??;
-                }
-            }
-            () = tokio::time::sleep(Duration::from_millis(100)) => {}
+    let total_bytes = file_bytes.iter().sum();
+    Ok(Some(DuckLakeFileStats {
+        file_count: file_bytes.len(),
+        total_bytes,
+        min_bytes: file_bytes[0],
+        median_bytes: percentile(&file_bytes, 50),
+        p95_bytes: percentile(&file_bytes, 95),
+        max_bytes: file_bytes[file_bytes.len() - 1],
+        mean_bytes: total_bytes as f64 / file_bytes.len() as f64,
+    }))
+}
+
+/// Recursively collects Parquet file sizes below one local directory.
+fn collect_parquet_file_bytes(path: &Path, file_bytes: &mut Vec<u64>) -> Result<()> {
+    for entry in fs::read_dir(path)
+        .with_context(|| format!("failed to read DuckLake data directory {}", path.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_parquet_file_bytes(&entry.path(), file_bytes)?;
+        } else if entry.path().extension().is_some_and(|extension| extension == "parquet") {
+            file_bytes.push(entry.metadata()?.len());
         }
     }
+    Ok(())
+}
+
+/// Returns the nearest-rank percentile from sorted unsigned values.
+fn percentile(sorted: &[u64], percentile: usize) -> u64 {
+    let rank = sorted.len().saturating_mul(percentile).div_ceil(100).max(1);
+    sorted[rank - 1]
 }

@@ -1,8 +1,8 @@
 use etl_config::{
     SerializableSecretString,
     shared::{
-        BigQueryTableOptionsConfig, ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode,
-        DuckLakeTableSortingConfig, IcebergConfig,
+        BigQueryTableOptionsConfig, ClickHouseEngine, DestinationConfig, DuckLakeCopyBufferConfig,
+        DuckLakeMaintenanceMode, DuckLakeTableSortingConfig, IcebergConfig,
     },
 };
 use secrecy::ExposeSecret;
@@ -182,6 +182,9 @@ pub enum ApiDestinationConfig {
         #[schema(example = "kubernetes")]
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
+        /// Experimental buffering for larger initial-copy Parquet files.
+        #[serde(default, skip_serializing_if = "DuckLakeCopyBufferConfig::is_default")]
+        copy_buffer: DuckLakeCopyBufferConfig,
         /// Per-table DuckLake sort orders. Omit to preserve today's unsorted
         /// behavior.
         #[serde(default, skip_serializing_if = "DuckLakeTableSortingConfig::is_empty")]
@@ -300,6 +303,9 @@ pub enum StrippedApiDestinationConfig {
         expire_snapshots_older_than: Option<String>,
         /// External maintenance coordination backend.
         maintenance_mode: DuckLakeMaintenanceMode,
+        /// Experimental buffering for larger initial-copy Parquet files.
+        #[serde(default, skip_serializing_if = "DuckLakeCopyBufferConfig::is_default")]
+        copy_buffer: DuckLakeCopyBufferConfig,
         /// Per-table DuckLake sort orders.
         #[serde(default, skip_serializing_if = "DuckLakeTableSortingConfig::is_empty")]
         table_sorting: DuckLakeTableSortingConfig,
@@ -609,6 +615,10 @@ pub enum UpdateApiDestinationConfig {
         #[schema(example = "kubernetes")]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         maintenance_mode: UpdateField<DuckLakeMaintenanceMode>,
+        /// Replaces the initial-copy buffering configuration. `null` disables
+        /// it.
+        #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
+        copy_buffer: UpdateField<DuckLakeCopyBufferConfig>,
         /// Replaces all per-table sort orders. `null` resets them.
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         table_sorting: UpdateField<DuckLakeTableSortingConfig>,
@@ -718,6 +728,7 @@ impl UpdateApiDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             } => Self::Ducklake {
                 catalog_url: UpdateField::Set(catalog_url),
@@ -736,6 +747,7 @@ impl UpdateApiDestinationConfig {
                 ),
                 expire_snapshots_older_than: UpdateField::from_option(expire_snapshots_older_than),
                 maintenance_mode: UpdateField::Set(maintenance_mode),
+                copy_buffer: UpdateField::Set(copy_buffer),
                 table_sorting: UpdateField::Set(table_sorting),
             },
             ApiDestinationConfig::Snowflake {
@@ -843,6 +855,7 @@ impl UpdateApiDestinationConfig {
                     maintenance_target_file_size,
                     expire_snapshots_older_than,
                     maintenance_mode,
+                    copy_buffer,
                     table_sorting,
                 },
                 StoredDestinationConfig::Ducklake {
@@ -860,6 +873,7 @@ impl UpdateApiDestinationConfig {
                     maintenance_target_file_size: stored_maintenance_target_file_size,
                     expire_snapshots_older_than: stored_expire_snapshots_older_than,
                     maintenance_mode: stored_maintenance_mode,
+                    copy_buffer: stored_copy_buffer,
                     table_sorting: stored_table_sorting,
                 },
             ) => Ok(StoredDestinationConfig::Ducklake {
@@ -887,6 +901,8 @@ impl UpdateApiDestinationConfig {
                     .apply_to_option(stored_expire_snapshots_older_than),
                 maintenance_mode: maintenance_mode
                     .apply_to_value(stored_maintenance_mode, DuckLakeMaintenanceMode::default),
+                copy_buffer: copy_buffer
+                    .apply_to_value(stored_copy_buffer, DuckLakeCopyBufferConfig::default),
                 table_sorting: table_sorting
                     .apply_to_value(stored_table_sorting, DuckLakeTableSortingConfig::default),
             }),
@@ -1007,6 +1023,7 @@ impl UpdateApiDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             } => Ok(StoredDestinationConfig::Ducklake {
                 catalog_url: catalog_url.into_required(
@@ -1032,6 +1049,10 @@ impl UpdateApiDestinationConfig {
                 maintenance_mode: maintenance_mode.apply_to_value(
                     DuckLakeMaintenanceMode::default(),
                     DuckLakeMaintenanceMode::default,
+                ),
+                copy_buffer: copy_buffer.apply_to_value(
+                    DuckLakeCopyBufferConfig::default(),
+                    DuckLakeCopyBufferConfig::default,
                 ),
                 table_sorting: table_sorting.apply_to_value(
                     DuckLakeTableSortingConfig::default(),
@@ -1172,6 +1193,7 @@ impl From<StoredDestinationConfig> for ApiDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             } => Self::Ducklake {
                 catalog_url,
@@ -1188,6 +1210,7 @@ impl From<StoredDestinationConfig> for ApiDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             },
             StoredDestinationConfig::Snowflake {
@@ -1247,6 +1270,7 @@ impl From<StoredDestinationConfig> for StrippedApiDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             } => Self::Ducklake {
                 data_path,
@@ -1259,6 +1283,7 @@ impl From<StoredDestinationConfig> for StrippedApiDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             },
             StoredDestinationConfig::Snowflake {
@@ -1309,6 +1334,7 @@ pub enum StoredDestinationConfig {
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
         maintenance_mode: DuckLakeMaintenanceMode,
+        copy_buffer: DuckLakeCopyBufferConfig,
         table_sorting: DuckLakeTableSortingConfig,
     },
     Snowflake {
@@ -1402,6 +1428,7 @@ impl StoredDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             } => DestinationConfig::Ducklake {
                 catalog_url: catalog_url.into(),
@@ -1417,6 +1444,7 @@ impl StoredDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             },
             Self::Snowflake {
@@ -1515,6 +1543,7 @@ impl From<ApiDestinationConfig> for StoredDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             } => Self::Ducklake {
                 catalog_url,
@@ -1531,6 +1560,7 @@ impl From<ApiDestinationConfig> for StoredDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             },
             ApiDestinationConfig::Snowflake {
@@ -1664,6 +1694,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             } => {
                 let encrypted_catalog_url =
@@ -1693,6 +1724,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     maintenance_target_file_size,
                     expire_snapshots_older_than,
                     maintenance_mode,
+                    copy_buffer,
                     table_sorting,
                 })
             }
@@ -1779,6 +1811,8 @@ pub enum EncryptedStoredDestinationConfig {
         expire_snapshots_older_than: Option<String>,
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
+        #[serde(default, skip_serializing_if = "DuckLakeCopyBufferConfig::is_default")]
+        copy_buffer: DuckLakeCopyBufferConfig,
         #[serde(default, skip_serializing_if = "DuckLakeTableSortingConfig::is_empty")]
         table_sorting: DuckLakeTableSortingConfig,
     },
@@ -1921,6 +1955,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             } => Ok(StoredDestinationConfig::Ducklake {
                 catalog_url: SerializableSecretString::from(decrypt_text(
@@ -1952,6 +1987,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             }),
             Self::Snowflake {
@@ -2515,6 +2551,7 @@ mod tests {
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer: DuckLakeCopyBufferConfig::default(),
             table_sorting,
         }
     }
@@ -2596,6 +2633,7 @@ mod tests {
                 maintenance_target_file_size: None,
                 expire_snapshots_older_than: None,
                 maintenance_mode: DuckLakeMaintenanceMode::Disabled,
+                copy_buffer: DuckLakeCopyBufferConfig::default(),
                 table_sorting: DuckLakeTableSortingConfig::default(),
             },
             StoredDestinationConfig::Snowflake {
@@ -3364,6 +3402,54 @@ mod tests {
     }
 
     #[test]
+    fn update_api_destination_config_preserves_clears_and_replaces_copy_buffer() {
+        let mut stored_config: StoredDestinationConfig =
+            ducklake_api_config(DuckLakeTableSortingConfig::default()).into();
+        let configured = DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes: 64 * 1024 * 1024,
+            max_total_bytes: 256 * 1024 * 1024,
+        };
+        let StoredDestinationConfig::Ducklake { copy_buffer, .. } = &mut stored_config else {
+            panic!("Config type doesn't match");
+        };
+        *copy_buffer = configured;
+
+        let preserve: UpdateApiDestinationConfig =
+            serde_json::from_value(serde_json::json!({"ducklake": {}})).unwrap();
+        let preserved = preserve.merge_into_stored(stored_config.clone()).unwrap();
+        let StoredDestinationConfig::Ducklake { copy_buffer, .. } = preserved else {
+            panic!("Config type doesn't match");
+        };
+        assert_eq!(copy_buffer, configured);
+
+        let clear: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "ducklake": {"copy_buffer": null}
+        }))
+        .unwrap();
+        let cleared = clear.merge_into_stored(stored_config.clone()).unwrap();
+        let StoredDestinationConfig::Ducklake { copy_buffer, .. } = cleared else {
+            panic!("Config type doesn't match");
+        };
+        assert_eq!(copy_buffer, DuckLakeCopyBufferConfig::default());
+
+        let replacement = DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes: 128 * 1024 * 1024,
+            max_total_bytes: 512 * 1024 * 1024,
+        };
+        let replace: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "ducklake": {"copy_buffer": replacement}
+        }))
+        .unwrap();
+        let replaced = replace.merge_into_stored(stored_config).unwrap();
+        let StoredDestinationConfig::Ducklake { copy_buffer, .. } = replaced else {
+            panic!("Config type doesn't match");
+        };
+        assert_eq!(copy_buffer, replacement);
+    }
+
+    #[test]
     fn update_api_destination_config_replaces_provided_bigquery_secret() {
         let stored_config = StoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
@@ -3714,6 +3800,11 @@ mod tests {
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer: DuckLakeCopyBufferConfig {
+                enabled: true,
+                target_bytes: 32 * 1024 * 1024,
+                max_total_bytes: 128 * 1024 * 1024,
+            },
             table_sorting: ducklake_table_sorting(),
         };
 
@@ -3742,6 +3833,7 @@ mod tests {
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
                     maintenance_mode: mode1,
+                    copy_buffer: buffer1,
                     table_sorting: sorting1,
                 },
                 StoredDestinationConfig::Ducklake {
@@ -3759,6 +3851,7 @@ mod tests {
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
                     maintenance_mode: mode2,
+                    copy_buffer: buffer2,
                     table_sorting: sorting2,
                 },
             ) => {
@@ -3785,6 +3878,7 @@ mod tests {
                 assert_eq!(target1, target2);
                 assert_eq!(expire1, expire2);
                 assert_eq!(mode1, mode2);
+                assert_eq!(buffer1, buffer2);
                 assert_eq!(sorting1, sorting2);
             }
             _ => panic!("Config types don't match"),
@@ -3811,9 +3905,13 @@ mod tests {
 
         match config {
             EncryptedStoredDestinationConfig::Ducklake {
-                maintenance_mode, table_sorting, ..
+                maintenance_mode,
+                copy_buffer,
+                table_sorting,
+                ..
             } => {
                 assert_eq!(maintenance_mode, DuckLakeMaintenanceMode::Disabled);
+                assert_eq!(copy_buffer, DuckLakeCopyBufferConfig::default());
                 assert!(table_sorting.is_empty());
             }
             _ => panic!("Config type doesn't match"),
@@ -3845,8 +3943,11 @@ mod tests {
         .unwrap();
 
         match config {
-            ApiDestinationConfig::Ducklake { maintenance_mode, table_sorting, .. } => {
+            ApiDestinationConfig::Ducklake {
+                maintenance_mode, copy_buffer, table_sorting, ..
+            } => {
                 assert_eq!(maintenance_mode, DuckLakeMaintenanceMode::Disabled);
+                assert_eq!(copy_buffer, DuckLakeCopyBufferConfig::default());
                 assert!(table_sorting.is_empty());
             }
             _ => panic!("Config type doesn't match"),
@@ -3893,6 +3994,7 @@ mod tests {
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer: DuckLakeCopyBufferConfig::default(),
             table_sorting: ducklake_table_sorting(),
         };
 
@@ -3953,6 +4055,7 @@ mod tests {
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer: DuckLakeCopyBufferConfig::default(),
             table_sorting: ducklake_table_sorting(),
         };
 
@@ -3977,6 +4080,7 @@ mod tests {
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
                     maintenance_mode: mode1,
+                    copy_buffer: buffer1,
                     table_sorting: sorting1,
                 },
                 ApiDestinationConfig::Ducklake {
@@ -3994,6 +4098,7 @@ mod tests {
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
                     maintenance_mode: mode2,
+                    copy_buffer: buffer2,
                     table_sorting: sorting2,
                 },
             ) => {
@@ -4020,6 +4125,7 @@ mod tests {
                 assert_eq!(target1, &target2);
                 assert_eq!(expire1, &expire2);
                 assert_eq!(mode1, &mode2);
+                assert_eq!(buffer1, &buffer2);
                 assert_eq!(sorting1, &sorting2);
             }
             _ => panic!("Deserialization failed or variant mismatch"),

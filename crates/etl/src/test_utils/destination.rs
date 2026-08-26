@@ -3,13 +3,24 @@
 use crate::{
     data::TableRow,
     destination::{
-        Destination, DestinationWriteStatus, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
     schema::ReplicatedTableSchema,
 };
+
+/// Invokes [`Destination::drop_table_for_copy`] and waits for its completion.
+pub async fn drop_table_for_copy<D: Destination>(
+    destination: &D,
+    schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    let (async_result, pending_result) = DropTableForCopyResult::new(());
+    Destination::drop_table_for_copy(destination, schema, async_result).await?;
+
+    pending_result.await.into_result()
+}
 
 /// Invokes [`Destination::write_events`] and waits for its completion.
 ///

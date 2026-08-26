@@ -91,6 +91,7 @@ pub(crate) mod destinations {
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer: Default::default(),
             table_sorting: Default::default(),
         }
     }

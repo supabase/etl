@@ -15,9 +15,10 @@ pub use connection::{
 pub use destination::{
     BigQueryPartitionBy, BigQueryTableOptions, BigQueryTableOptionsConfig,
     BigQueryTimePartitionGranularity, ClickHouseEngine, DestinationConfig,
-    DestinationConfigWithoutSecrets, DestinationKind, DuckLakeMaintenanceMode, DuckLakeSortBy,
-    DuckLakeSortColumn, DuckLakeSortDirection, DuckLakeSortNulls, DuckLakeTableSortConfig,
-    DuckLakeTableSortingConfig, IcebergConfig, IcebergConfigWithoutSecrets,
+    DestinationConfigWithoutSecrets, DestinationKind, DuckLakeCopyBufferConfig,
+    DuckLakeMaintenanceMode, DuckLakeSortBy, DuckLakeSortColumn, DuckLakeSortDirection,
+    DuckLakeSortNulls, DuckLakeTableSortConfig, DuckLakeTableSortingConfig, IcebergConfig,
+    IcebergConfigWithoutSecrets,
 };
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,

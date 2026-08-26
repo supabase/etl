@@ -260,6 +260,7 @@ fn test_k8s_config(environment: &Environment) -> K8sConfig {
             cpu_request_millicores,
             destinations: Default::default(),
         },
+        ducklake_copy_buffer_override: None,
         replicator_autoscaling: ReplicatorAutoscalingConfig::default(),
         vector_image: "timberio/vector:0.55.0-distroless-libc".to_owned(),
         vector_resources: DefaultVectorResourcesConfig {

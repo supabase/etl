@@ -32,25 +32,33 @@ use chrono::NaiveDate;
 use chrono::{TimeDelta, Utc};
 use duckdb::Connection;
 use etl::{
-    data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
-    destination::{Destination, DestinationTableMetadata, DestinationTableSchema},
+    data::{Cell, OldTableRow, PartialTableRow, SizeHint, TableRow, UpdatedTableRow},
+    destination::{
+        Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
+    },
     error::{ErrorKind, EtlResult},
     event::{DeleteEvent, Event},
     schema::{
         ColumnSchema, IdentityMask, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId,
         TableId, TableName, TableSchema, Type as PgType,
     },
-    store::{MemoryStore, SchemaStore, StateStore},
+    store::{MemoryStore, SchemaStore, StateStore, TableStateLifecycleStore},
+    test_utils::destination::{
+        drop_table_for_copy as drop_table_for_copy_with_result,
+        write_table_rows as write_table_rows_with_status,
+    },
 };
+use etl_config::shared::DuckLakeCopyBufferConfig;
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
 };
 #[cfg(feature = "test-utils")]
 use etl_destinations::ducklake::{
-    arm_fail_after_atomic_batch_commit_once_for_tests, arm_fail_pool_refresh_once_for_tests,
-    arm_fail_after_copy_batch_commit_once_for_tests, ducklake_staging_table_creations_for_tests,
-    pool_refresh_failure_armed_for_tests, reset_ducklake_test_hooks,
-    reset_pool_refresh_failure_for_tests, run_external_maintenance_watcher,
+    arm_fail_after_atomic_batch_commit_once_for_tests,
+    arm_fail_after_copy_batch_commit_once_for_tests, arm_fail_pool_refresh_once_for_tests,
+    ducklake_staging_table_creations_for_tests, pool_refresh_failure_armed_for_tests,
+    reset_ducklake_test_hooks, reset_pool_refresh_failure_for_tests,
+    run_external_maintenance_watcher,
 };
 #[cfg(feature = "test-utils")]
 use etl_maintenance::{
@@ -522,6 +530,241 @@ async fn write_table_rows_small_batch_writes_parquet_before_return() {
         1,
         "small copy batch should write a Parquet file"
     );
+}
+
+/// Buffered COPY should keep accepted rows connection-local until the terminal
+/// durability barrier commits one combined Parquet file.
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_copy_combines_batches_at_terminal_barrier() {
+    let lake = create_test_lake("buffered_copy_combines_batches_at_terminal_barrier").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let data = lake.data_dir.clone();
+
+    let schema = make_schema(160, "public", "buffered_copy_barrier");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+    let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
+        .copy_buffer(DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes: 1024 * 1024,
+            max_total_bytes: 2 * 1024 * 1024,
+        })
+        .build()
+        .await
+        .unwrap();
+
+    for id in 1..=3 {
+        let status = write_table_rows_with_status(
+            &destination,
+            &replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(id), Cell::String(format!("row-{id}"))])],
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Accepted);
+    }
+    assert_eq!(count_table_files(&data, &table_name), 0);
+
+    let status = write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(status, DestinationWriteStatus::Durable);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 3);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 3);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy_complete"), 1);
+    assert_eq!(count_table_files(&data, &table_name), 1);
+}
+
+/// Reaching the configured byte target should flush one window while leaving
+/// later rows for the terminal barrier.
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_copy_flushes_when_target_bytes_are_reached() {
+    let lake = create_test_lake("buffered_copy_flushes_when_target_bytes_are_reached").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let data = lake.data_dir.clone();
+
+    let schema = make_schema(161, "public", "buffered_copy_threshold");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+    let sample_row = TableRow::new(vec![Cell::I32(1), Cell::String("x".repeat(256))]);
+    let target_bytes = u64::try_from(sample_row.size_hint().saturating_mul(2)).unwrap();
+    let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
+        .copy_buffer(DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes,
+            max_total_bytes: target_bytes * 2,
+        })
+        .build()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        write_table_rows_with_status(&destination, &replicated_table_schema, vec![sample_row],)
+            .await
+            .unwrap(),
+        DestinationWriteStatus::Accepted
+    );
+    assert_eq!(count_table_files(&data, &table_name), 0);
+
+    assert_eq!(
+        write_table_rows_with_status(
+            &destination,
+            &replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("y".repeat(256))])],
+        )
+        .await
+        .unwrap(),
+        DestinationWriteStatus::Accepted
+    );
+    assert_eq!(count_table_files(&data, &table_name), 1);
+
+    write_table_rows_with_status(
+        &destination,
+        &replicated_table_schema,
+        vec![TableRow::new(vec![Cell::I32(3), Cell::String("tail".to_owned())])],
+    )
+    .await
+    .unwrap();
+    write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 3);
+    assert_eq!(count_table_files(&data, &table_name), 2);
+}
+
+/// Losing connection-local accepted rows must require a clean table reset and
+/// full recopy rather than silently continuing or duplicating committed rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_copy_restart_recopies_without_loss_or_duplicates() {
+    let lake = create_test_lake("buffered_copy_restart_recopies_without_loss_or_duplicates").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schema = make_schema(162, "public", "buffered_copy_restart");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema.clone()).await.unwrap();
+    let copy_buffer = DuckLakeCopyBufferConfig {
+        enabled: true,
+        target_bytes: 1024 * 1024,
+        max_total_bytes: 2 * 1024 * 1024,
+    };
+    let destination =
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store.clone())
+            .copy_buffer(copy_buffer)
+            .build()
+            .await
+            .unwrap();
+
+    write_table_rows_with_status(
+        &destination,
+        &replicated_table_schema,
+        vec![TableRow::new(vec![Cell::I32(1), Cell::String("accepted-only".to_owned())])],
+    )
+    .await
+    .unwrap();
+    drop(destination);
+
+    let restarted =
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store.clone())
+            .copy_buffer(copy_buffer)
+            .build()
+            .await
+            .unwrap();
+    drop_table_for_copy_with_result(&restarted, &replicated_table_schema).await.unwrap();
+    store.prepare_table_state_for_copy(schema.id).await.unwrap();
+    store.store_table_schema(schema).await.unwrap();
+    write_table_rows_with_status(
+        &restarted,
+        &replicated_table_schema,
+        vec![
+            TableRow::new(vec![Cell::I32(1), Cell::String("accepted-only".to_owned())]),
+            TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())]),
+        ],
+    )
+    .await
+    .unwrap();
+    write_table_rows_with_status(&restarted, &replicated_table_schema, Vec::new()).await.unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 2);
+    let distinct_ids: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(DISTINCT id) FROM {}", qualified_lake_table_name(&table_name)),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(distinct_ids, 2);
+}
+
+/// A buffered post-commit failure must stay sticky until recovery performs a
+/// clean table reset and full recopy.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_copy_ambiguous_commit_requires_full_recopy() {
+    let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
+    reset_ducklake_test_hooks();
+    let lake = create_test_lake("buffered_copy_ambiguous_commit_requires_full_recopy").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schema = make_schema(163, "public", "buffered_copy_ambiguous_commit");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema.clone()).await.unwrap();
+    let row = TableRow::new(vec![Cell::I32(1), Cell::String("committed-once".to_owned())]);
+    let target_bytes = u64::try_from(row.size_hint()).unwrap();
+    let destination =
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store.clone())
+            .copy_buffer(DuckLakeCopyBufferConfig {
+                enabled: true,
+                target_bytes,
+                max_total_bytes: target_bytes * 2,
+            })
+            .build()
+            .await
+            .unwrap();
+
+    arm_fail_after_copy_batch_commit_once_for_tests(&table_name.id());
+    let error =
+        write_table_rows_with_status(&destination, &replicated_table_schema, vec![row.clone()])
+            .await
+            .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+
+    let error =
+        write_table_rows_with_status(&destination, &replicated_table_schema, vec![row.clone()])
+            .await
+            .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    drop(conn);
+
+    drop_table_for_copy_with_result(&destination, &replicated_table_schema).await.unwrap();
+    store.prepare_table_state_for_copy(schema.id).await.unwrap();
+    store.store_table_schema(schema).await.unwrap();
+    write_table_rows_with_status(&destination, &replicated_table_schema, vec![row]).await.unwrap();
+    write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    // Applied markers retain one entry per replay epoch; physical table rows do
+    // not.
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 2);
+    reset_ducklake_test_hooks();
 }
 
 /// `pool_size = 0` should fail fast with a configuration error.

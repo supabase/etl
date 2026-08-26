@@ -697,6 +697,7 @@ async fn spawn_test_app_with_services(
                 cpu_request_millicores: 125,
                 destinations: Default::default(),
             },
+            ducklake_copy_buffer_override: None,
             replicator_autoscaling: Default::default(),
             vector_image: "timberio/vector:0.55.0-distroless-libc".to_owned(),
             vector_resources: DefaultVectorResourcesConfig {

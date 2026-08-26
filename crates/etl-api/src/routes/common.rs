@@ -72,6 +72,7 @@ pub(crate) async fn restart_replicator_if_running(
         source,
         destination,
         api_config.supabase_api_url.as_deref(),
+        api_config.k8s.ducklake_copy_buffer_override,
         source_tls_config.get_tls_config(),
     )
     .await?;
