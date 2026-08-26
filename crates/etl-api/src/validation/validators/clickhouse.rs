@@ -63,20 +63,24 @@ impl Validator for ClickHouseValidator {
 
         // Resolve the complete address set before probing. The client repeats
         // the same policy inside its connector before every new connection.
-        let Ok(client) = ClickHouseClient::new_public_without_database(
+        let client = match ClickHouseClient::new_public_without_database(
             self.url.clone(),
             self.user.clone(),
             self.password.as_ref().map(|password| password.expose_secret().to_owned()),
             ClickHouseClientConfig::default(),
         )
         .await
-        else {
-            return Ok(vec![ValidationFailure::critical(
-                "ClickHouse URL Invalid",
-                "ClickHouse URL must use a public hostname or IP address. Hostnames must resolve \
-                 only to public IP addresses.\n\nPrivate, loopback, link-local, reserved, and \
-                 mixed public/private DNS results are not allowed.",
-            )]);
+        {
+            Ok(client) => client,
+            Err(error) => {
+                let reason =
+                    error.description().unwrap_or("ClickHouse client configuration failed");
+
+                return Ok(vec![ValidationFailure::critical(
+                    "ClickHouse Configuration Invalid",
+                    reason,
+                )]);
+            }
         };
 
         if client.validate_connectivity().await.is_err() {
@@ -126,8 +130,8 @@ mod tests {
         let failures = validator.validate(&context).await.unwrap();
 
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].name, "ClickHouse URL Invalid");
+        assert_eq!(failures[0].name, "ClickHouse Configuration Invalid");
         assert_eq!(failures[0].failure_type, FailureType::Critical);
-        assert!(failures[0].reason.contains("public hostname or IP address"));
+        assert_eq!(failures[0].reason, "ClickHouse URL host is not publicly routable");
     }
 }
