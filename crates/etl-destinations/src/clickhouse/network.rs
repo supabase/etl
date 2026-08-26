@@ -197,7 +197,7 @@ fn ensure_public_ip(address: IpAddr) -> io::Result<()> {
     }
 }
 
-/// Returns whether an address is globally routable unicast traffic.
+/// Returns whether an IPv4 or IPv6 address is publicly routable.
 fn is_public_ip(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => is_public_ipv4(address),
