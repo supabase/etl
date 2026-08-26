@@ -117,8 +117,9 @@ pub use core::{
 };
 #[cfg(feature = "test-utils")]
 pub use core::{
-    arm_pause_next_streaming_write_for_tests, release_paused_streaming_write_for_tests,
-    reset_paused_streaming_write_for_tests,
+    arm_fail_pool_refresh_once_for_tests, arm_pause_next_streaming_write_for_tests,
+    pool_refresh_failure_armed_for_tests, release_paused_streaming_write_for_tests,
+    reset_paused_streaming_write_for_tests, reset_pool_refresh_failure_for_tests,
 };
 
 #[cfg(feature = "test-utils")]

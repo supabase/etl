@@ -30,7 +30,7 @@ use etl_config::{
     },
 };
 use metrics::gauge;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 #[cfg(unix)]
@@ -394,6 +394,70 @@ fn active_sort_order_matches(
 // ── destination
 // ───────────────────────────────────────────────────────────────
 
+/// Shared handle to one initialized DuckDB connection pool.
+type DuckLakePool = Arc<r2d2::Pool<DuckLakeConnectionManager>>;
+
+/// Streaming and initial-copy pools installed as one destination generation.
+#[derive(Clone)]
+struct DuckLakePools {
+    /// Connections attached with streaming data inlining enabled.
+    streaming: DuckLakePool,
+    /// Connections attached with data inlining disabled for initial copy.
+    copy: DuckLakePool,
+}
+
+impl DuckLakePools {
+    /// Creates one fully initialized pair of DuckLake connection pools.
+    fn new(streaming: DuckLakePool, copy: DuckLakePool) -> Self {
+        Self { streaming, copy }
+    }
+}
+
+/// Atomically replaceable DuckLake pool pair shared by destination clones.
+struct DuckLakePoolHandle {
+    /// Currently installed pools, or `None` after a failed maintenance refresh.
+    current: ParkingLotRwLock<Option<DuckLakePools>>,
+}
+
+impl DuckLakePoolHandle {
+    /// Creates a handle with an initialized pool pair.
+    fn new(pools: DuckLakePools) -> Self {
+        Self { current: ParkingLotRwLock::new(Some(pools)) }
+    }
+
+    /// Returns the currently installed streaming pool.
+    fn streaming(&self) -> EtlResult<DuckLakePool> {
+        self.current.read().as_ref().map(|pools| Arc::clone(&pools.streaming)).ok_or_else(|| {
+            etl_error!(
+                ErrorKind::DestinationConnectionFailed,
+                "DuckLake connection pools are unavailable",
+                "Pool refresh failed after external maintenance"
+            )
+        })
+    }
+
+    /// Returns the currently installed initial-copy pool.
+    fn copy(&self) -> EtlResult<DuckLakePool> {
+        self.current.read().as_ref().map(|pools| Arc::clone(&pools.copy)).ok_or_else(|| {
+            etl_error!(
+                ErrorKind::DestinationConnectionFailed,
+                "DuckLake connection pools are unavailable",
+                "Pool refresh failed after external maintenance"
+            )
+        })
+    }
+
+    /// Installs a fully initialized pair and returns the previous pools.
+    fn replace(&self, pools: DuckLakePools) -> Option<DuckLakePools> {
+        self.current.write().replace(pools)
+    }
+
+    /// Removes every installed pool after replacement initialization fails.
+    fn invalidate(&self) -> Option<DuckLakePools> {
+        self.current.write().take()
+    }
+}
+
 /// A DuckLake destination that implements the ETL [`Destination`] trait.
 ///
 /// Writes data to a DuckLake data lake. DuckDB connections are pre-initialized,
@@ -409,12 +473,11 @@ fn active_sort_order_matches(
 pub struct DuckLakeDestination<S> {
     manager: Arc<DuckLakeConnectionManager>,
     /// Connection manager for the pool dedicated to initial-copy writes.
-    #[cfg(feature = "test-utils")]
     copy_manager: DuckLakeConnectionManager,
-    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
-    /// Connections attached with data inlining disabled for initial-copy
-    /// transactions.
-    copy_pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    /// Atomically replaceable streaming and initial-copy connection pools.
+    pools: Arc<DuckLakePoolHandle>,
+    /// Number of warm connections created in each DuckDB pool.
+    pool_size: u32,
     blocking_slots: Arc<Semaphore>,
     /// Shared gate that keeps external maintenance pauses from overlapping
     /// active foreground or table-scoped mutations.
@@ -1531,9 +1594,6 @@ where
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         };
-        #[cfg(feature = "test-utils")]
-        let copy_manager_for_tests = copy_manager.clone();
-
         let pool =
             Arc::new(build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?);
         let blocking_slots = Arc::new(Semaphore::new(pool_size as usize));
@@ -1629,15 +1689,17 @@ where
         )
         .await?;
 
-        let copy_pool = Arc::new(build_warm_ducklake_pool(copy_manager, pool_size, "copy").await?);
+        let copy_pool =
+            Arc::new(build_warm_ducklake_pool(copy_manager.clone(), pool_size, "copy").await?);
+        let pools =
+            Arc::new(DuckLakePoolHandle::new(DuckLakePools::new(Arc::clone(&pool), copy_pool)));
         let applied_tables = Arc::default();
         let checkpoint_gate = Arc::new(RwLock::new(()));
         let mut destination = Self {
             manager: Arc::clone(&manager),
-            #[cfg(feature = "test-utils")]
-            copy_manager: copy_manager_for_tests,
-            pool: Arc::clone(&pool),
-            copy_pool,
+            copy_manager,
+            pools,
+            pool_size,
             blocking_slots: Arc::clone(&blocking_slots),
             checkpoint_gate: Arc::clone(&checkpoint_gate),
             tasks: TaskSet::new(),
@@ -1894,7 +1956,7 @@ where
             }
         };
         apply_table_batch_with_retry(
-            Arc::clone(&self.copy_pool),
+            self.copy_pool()?,
             Arc::clone(&self.blocking_slots),
             prepared_batch,
         )
@@ -2054,7 +2116,7 @@ where
         let table_name = table_name.clone();
         let plan = plan.clone();
 
-        run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), move |conn| {
+        run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
             let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
                 conn.execute_batch(sql).map_err(|source| {
                     etl_error!(
@@ -2167,7 +2229,7 @@ where
         };
         let table_name = table_name.clone();
 
-        run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), move |conn| {
+        run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
             conn.execute_batch(&ddl).map_err(|source| {
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
@@ -2189,12 +2251,15 @@ where
         target_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let table_name_for_read = table_name.clone();
-        let ducklake_columns = run_duckdb_blocking(
-            Arc::clone(&self.pool),
-            Arc::clone(&self.blocking_slots),
-            move |conn| read_ducklake_table_column_names_blocking(conn, &table_name_for_read),
-        )
-        .await?;
+        let ducklake_columns = {
+            let _checkpoint_guard = self.acquire_mutation_guard().await;
+            run_duckdb_blocking(
+                self.streaming_pool()?,
+                Arc::clone(&self.blocking_slots),
+                move |conn| read_ducklake_table_column_names_blocking(conn, &table_name_for_read),
+            )
+            .await?
+        };
         if ducklake_columns.is_empty() {
             return Err(etl_error!(
                 ErrorKind::DestinationTableMissing,
@@ -2241,7 +2306,7 @@ where
         let table_name = table_name.clone();
         let target_schema = target_schema.clone();
 
-        run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), move |conn| {
+        run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
             let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
                 conn.execute_batch(sql).map_err(|source| {
                     etl_error!(
@@ -2510,7 +2575,7 @@ where
                             }
                             let last_sequence_key =
                                 read_table_streaming_progress_sequence_key_blocking(
-                                    Arc::clone(&destination.pool),
+                                    destination.streaming_pool()?,
                                     Arc::clone(&destination.blocking_slots),
                                     destination_table_name.clone(),
                                     replay_epoch.clone(),
@@ -2542,7 +2607,7 @@ where
                                 pending_mutations,
                             )?;
                             apply_table_batches_with_retry(
-                                Arc::clone(&destination.pool),
+                                destination.streaming_pool()?,
                                 Arc::clone(&destination.blocking_slots),
                                 prepared_batches,
                             )
@@ -2603,11 +2668,12 @@ where
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
                     let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
                     let checkpoint_gate = Arc::clone(&self.checkpoint_gate);
-                    let pool = Arc::clone(&self.pool);
+                    let pools = Arc::clone(&self.pools);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
                         let _checkpoint_guard = checkpoint_gate.read_owned().await;
+                        let pool = pools.streaming()?;
                         let last_sequence_key =
                             read_table_streaming_progress_sequence_key_blocking(
                                 Arc::clone(&pool),
@@ -2686,7 +2752,7 @@ where
         let _checkpoint_guard = self.acquire_mutation_guard().await;
 
         run_duckdb_blocking(
-            Arc::clone(&self.pool),
+            self.streaming_pool()?,
             Arc::clone(&self.blocking_slots),
             move |conn| -> EtlResult<()> {
                 debug!(table = %table_name, "ducklake create table begin");
@@ -2953,7 +3019,7 @@ where
     async fn ensure_applied_batches_table_exists(&self) -> EtlResult<()> {
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         ensure_applied_batches_table_exists(
-            Arc::clone(&self.pool),
+            self.streaming_pool()?,
             Arc::clone(&self.blocking_slots),
             Arc::clone(&self.table_creation_slots),
             Arc::clone(&self.applied_batches_table_created),
@@ -2965,7 +3031,7 @@ where
     async fn ensure_streaming_progress_table_exists(&self) -> EtlResult<()> {
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         ensure_streaming_progress_table_exists(
-            Arc::clone(&self.pool),
+            self.streaming_pool()?,
             Arc::clone(&self.blocking_slots),
             Arc::clone(&self.table_creation_slots),
             Arc::clone(&self.streaming_progress_table_created),
@@ -3013,6 +3079,65 @@ where
                 Err(etl_error!(ErrorKind::InvalidState, "DuckLake table write semaphore closed"))
             }
         }
+    }
+
+    /// Returns the currently installed streaming connection pool.
+    fn streaming_pool(&self) -> EtlResult<DuckLakePool> {
+        self.pools.streaming()
+    }
+
+    /// Returns the currently installed initial-copy connection pool.
+    fn copy_pool(&self) -> EtlResult<DuckLakePool> {
+        self.pools.copy()
+    }
+
+    /// Recreates and atomically installs both connection pools after successful
+    /// external maintenance.
+    ///
+    /// The caller must retain the exclusive external-maintenance pause until
+    /// this method returns. If either replacement pool fails to initialize, the
+    /// old pools are removed so later replication cannot reuse stale
+    /// connections after the pause guard is released.
+    pub(super) async fn recreate_pools_after_external_maintenance(&self) -> EtlResult<()> {
+        #[cfg(feature = "test-utils")]
+        if FAIL_POOL_REFRESH_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            drop(self.pools.invalidate());
+            return Err(etl_error!(
+                ErrorKind::DestinationConnectionFailed,
+                "Failed to recreate DuckLake connection pools",
+                "Injected pool recreation failure"
+            ));
+        }
+
+        let streaming =
+            match build_warm_ducklake_pool(self.manager.as_ref().clone(), self.pool_size, "write")
+                .await
+            {
+                Ok(pool) => Arc::new(pool),
+                Err(error) => {
+                    drop(self.pools.invalidate());
+                    return Err(error);
+                }
+            };
+        let copy = match build_warm_ducklake_pool(self.copy_manager.clone(), self.pool_size, "copy")
+            .await
+        {
+            Ok(pool) => Arc::new(pool),
+            Err(error) => {
+                drop(streaming);
+                drop(self.pools.invalidate());
+                return Err(error);
+            }
+        };
+
+        let previous = self.pools.replace(DuckLakePools::new(streaming, copy));
+        drop(previous);
+        info!(
+            pool_size = self.pool_size,
+            "ducklake connection pools recreated after external maintenance"
+        );
+
+        Ok(())
     }
 
     /// Acquires shared mutation access so exclusive external maintenance cannot
@@ -3195,7 +3320,7 @@ where
         R: Send + 'static,
         F: FnOnce(&duckdb::Connection) -> EtlResult<R> + Send + 'static,
     {
-        run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), operation)
+        run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), operation)
             .await
     }
 
@@ -3225,6 +3350,13 @@ where
     pub fn copy_connection_open_count_for_tests(&self) -> usize {
         self.copy_manager.open_count_for_tests()
     }
+
+    /// Returns how many streaming-pool DuckDB connections have been initialized
+    /// for tests.
+    #[cfg(feature = "test-utils")]
+    pub fn streaming_connection_open_count_for_tests(&self) -> usize {
+        self.manager.open_count_for_tests()
+    }
 }
 
 /// Reads the persisted streaming replay watermark for one table on DuckDB's
@@ -3253,6 +3385,26 @@ static PAUSED_STREAMING_WRITE_HOOK: std::sync::LazyLock<Mutex<Option<PausedStrea
 #[cfg(feature = "test-utils")]
 static PAUSED_STREAMING_WRITE_RESUME_TX: std::sync::LazyLock<Mutex<Option<oneshot::Sender<()>>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
+#[cfg(feature = "test-utils")]
+static FAIL_POOL_REFRESH_ONCE: AtomicBool = AtomicBool::new(false);
+
+/// Injects one pool-refresh failure for tests.
+#[cfg(feature = "test-utils")]
+pub fn arm_fail_pool_refresh_once_for_tests() {
+    FAIL_POOL_REFRESH_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Returns whether the one-shot pool-refresh failure remains armed for tests.
+#[cfg(feature = "test-utils")]
+pub fn pool_refresh_failure_armed_for_tests() -> bool {
+    FAIL_POOL_REFRESH_ONCE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Clears the one-shot pool-refresh failure for tests.
+#[cfg(feature = "test-utils")]
+pub fn reset_pool_refresh_failure_for_tests() {
+    FAIL_POOL_REFRESH_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Arms a one-shot hook that pauses the next streaming write before DuckLake
 /// starts applying it.
@@ -3353,6 +3505,19 @@ mod tests {
         assert!(!should_request_file_maintenance(true, 41, 40));
         assert!(!should_request_file_maintenance(false, 40, 40));
         assert!(should_request_file_maintenance(false, 41, 40));
+    }
+
+    #[test]
+    fn invalidated_connection_pools_return_destination_connection_error() {
+        let pools = DuckLakePoolHandle { current: ParkingLotRwLock::new(None) };
+
+        for result in [pools.streaming(), pools.copy()] {
+            let Err(error) = result else {
+                panic!("invalidated DuckLake pool handle should not return a pool");
+            };
+            assert_eq!(error.kind(), ErrorKind::DestinationConnectionFailed);
+            assert_eq!(error.description(), Some("DuckLake connection pools are unavailable"));
+        }
     }
 
     #[test]
