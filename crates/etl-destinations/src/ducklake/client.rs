@@ -315,10 +315,8 @@ pub(super) struct DuckLakeInterruptRegistry {
 impl DuckLakeInterruptRegistry {
     /// Registers one live DuckLake connection interrupt handle.
     fn register(&self, handle: &Arc<RegisteredDuckLakeInterrupt>) {
-        let mut handles = self
-            .handles
-            .lock()
-            .expect("ducklake interrupt registry mutex should not be poisoned");
+        let mut handles =
+            self.handles.lock().expect("ducklake interrupt registry mutex should not be poisoned");
         handles.retain(|registered| registered.strong_count() > 0);
         handles.push(Arc::downgrade(handle));
     }

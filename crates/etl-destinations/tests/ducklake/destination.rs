@@ -47,10 +47,11 @@ use etl_destinations::ducklake::{
 };
 #[cfg(feature = "test-utils")]
 use etl_destinations::ducklake::{
-    arm_fail_after_atomic_batch_commit_once_for_tests, arm_fail_pool_refresh_once_for_tests,
-    arm_fail_after_copy_batch_commit_once_for_tests, ducklake_staging_table_creations_for_tests,
-    pool_refresh_failure_armed_for_tests, reset_ducklake_test_hooks,
-    reset_pool_refresh_failure_for_tests, run_external_maintenance_watcher,
+    arm_fail_after_atomic_batch_commit_once_for_tests,
+    arm_fail_after_copy_batch_commit_once_for_tests, arm_fail_pool_refresh_once_for_tests,
+    ducklake_staging_table_creations_for_tests, pool_refresh_failure_armed_for_tests,
+    reset_ducklake_test_hooks, reset_pool_refresh_failure_for_tests,
+    run_external_maintenance_watcher,
 };
 #[cfg(feature = "test-utils")]
 use etl_maintenance::{

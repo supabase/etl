@@ -145,7 +145,8 @@ where
                 }
 
                 expire_snapshots_gate.initialize_from_state_once(&state);
-                match reconcile_pause(&store, &config, &destination, &mut held_pause, &state).await {
+                match reconcile_pause(&store, &config, &destination, &mut held_pause, &state).await
+                {
                     Ok(()) => {
                         maybe_request_operations(
                             &store,
@@ -171,13 +172,9 @@ where
                     timeout_ms = config.store_timeout.as_millis() as u64,
                     "failed to read ducklake external maintenance state"
                 );
-                if let Err(error) = release_expired_pause_if_needed(
-                    &store,
-                    &config,
-                    &destination,
-                    &mut held_pause,
-                )
-                .await
+                if let Err(error) =
+                    release_expired_pause_if_needed(&store, &config, &destination, &mut held_pause)
+                        .await
                 {
                     warn!(
                         error = %error,
@@ -191,13 +188,9 @@ where
                     timeout_ms = config.store_timeout.as_millis() as u64,
                     "timed out reading ducklake external maintenance state"
                 );
-                if let Err(error) = release_expired_pause_if_needed(
-                    &store,
-                    &config,
-                    &destination,
-                    &mut held_pause,
-                )
-                .await
+                if let Err(error) =
+                    release_expired_pause_if_needed(&store, &config, &destination, &mut held_pause)
+                        .await
                 {
                     warn!(
                         error = %error,
@@ -458,7 +451,8 @@ fn active_pause_operations(
         .map_or(ExternalMaintenanceOperations::default(), |request| request.operations)
 }
 
-/// Returns whether one paused run successfully completed any selected operation.
+/// Returns whether one paused run successfully completed any selected
+/// operation.
 fn successful_maintenance_run(
     state: &ExternalMaintenanceState,
     held_run_id: &str,
