@@ -7,9 +7,10 @@ use sqlx::{PgPool, error::DatabaseError};
 /// Classification for source database errors exposed by API routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceDatabaseErrorKind {
-    /// The source database did not respond before the request timeout.
+    /// The source operation or transaction exceeded a configured timeout.
     TimedOut,
-    /// The source database is unavailable or the existing connection was lost.
+    /// The source is unavailable, a connection was lost, or the pool cannot
+    /// provide a usable connection.
     Unavailable,
     /// The source database returned an error that is not a connection lifecycle
     /// failure.
@@ -51,21 +52,23 @@ pub(crate) async fn connect(config: &PgConnectionConfig) -> Result<PgPool, sqlx:
 /// Classifies a source database error using stable SQLSTATE and IO categories.
 pub(crate) fn classify_error(error: &sqlx::Error) -> SourceDatabaseErrorKind {
     match error {
-        sqlx::Error::Io(error) if error.kind() == ErrorKind::TimedOut => {
-            SourceDatabaseErrorKind::TimedOut
+        sqlx::Error::Io(error) => classify_io_error(error.kind()),
+        sqlx::Error::Database(error) => classify_database_error(error.as_ref()),
+        sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::WorkerCrashed => {
+            SourceDatabaseErrorKind::Unavailable
         }
-        error if error_is_unavailable(error) => SourceDatabaseErrorKind::Unavailable,
         _ => SourceDatabaseErrorKind::Failed,
     }
 }
 
-/// Returns true when a source database error means the source is unavailable.
-pub(crate) fn error_is_unavailable(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::WorkerCrashed => true,
-        sqlx::Error::Io(error) => io_error_is_unavailable(error.kind()),
-        sqlx::Error::Database(error) => database_error_is_unavailable(error.as_ref()),
-        _ => false,
+/// Classifies an IO error without conflating timeouts with connectivity loss.
+fn classify_io_error(error_kind: ErrorKind) -> SourceDatabaseErrorKind {
+    if error_kind == ErrorKind::TimedOut {
+        SourceDatabaseErrorKind::TimedOut
+    } else if io_error_is_unavailable(error_kind) {
+        SourceDatabaseErrorKind::Unavailable
+    } else {
+        SourceDatabaseErrorKind::Failed
     }
 }
 
@@ -75,27 +78,49 @@ fn io_error_is_unavailable(error_kind: ErrorKind) -> bool {
         error_kind,
         ErrorKind::ConnectionRefused
             | ErrorKind::ConnectionReset
+            | ErrorKind::HostUnreachable
+            | ErrorKind::NetworkUnreachable
             | ErrorKind::ConnectionAborted
             | ErrorKind::NotConnected
+            | ErrorKind::NetworkDown
             | ErrorKind::BrokenPipe
-            | ErrorKind::TimedOut
             | ErrorKind::UnexpectedEof
     )
 }
 
-/// Returns true when a database SQLSTATE means the source connection cannot be
-/// used.
-fn database_error_is_unavailable(error: &dyn DatabaseError) -> bool {
+/// Classifies a PostgreSQL error using its stable SQLSTATE code.
+fn classify_database_error(error: &dyn DatabaseError) -> SourceDatabaseErrorKind {
     let Some(code) = error.code() else {
-        return false;
+        return SourceDatabaseErrorKind::Failed;
     };
 
+    if sqlstate_is_timeout(code.as_ref()) {
+        SourceDatabaseErrorKind::TimedOut
+    } else if sqlstate_is_unavailable(code.as_ref()) {
+        SourceDatabaseErrorKind::Unavailable
+    } else {
+        SourceDatabaseErrorKind::Failed
+    }
+}
+
+/// Returns whether a SQLSTATE represents a timeout in API source sessions.
+fn sqlstate_is_timeout(code: &str) -> bool {
+    // API source sessions configure statement, lock, and idle-in-transaction
+    // timeouts and do not issue explicit query cancellation or NOWAIT queries.
+    // PostgreSQL uses the broader query_canceled and lock_not_available codes
+    // when the first two timeouts expire. Newer PostgreSQL versions also
+    // define a transaction_timeout code.
+    matches!(code, "57014" | "55P03" | "25P03" | "25P04")
+}
+
+/// Returns whether a SQLSTATE means the source connection cannot be used.
+fn sqlstate_is_unavailable(code: &str) -> bool {
     // PostgreSQL recommends matching on SQLSTATE codes rather than localized
     // message text. Class 08 covers connection exceptions; 53300 covers server
     // connection exhaustion; 57P01-57P05 cover shutdown/crash/database-dropped
     // and idle-session lifecycle failures.
     code.starts_with("08")
-        || matches!(code.as_ref(), "53300" | "57P01" | "57P02" | "57P03" | "57P04" | "57P05")
+        || matches!(code, "53300" | "57P01" | "57P02" | "57P03" | "57P04" | "57P05")
 }
 
 #[cfg(test)]
@@ -153,10 +178,30 @@ mod tests {
     }
 
     #[test]
-    fn pool_timeout_is_reported_as_service_unavailable() {
-        let error = sqlx::Error::PoolTimedOut;
+    fn pool_lifecycle_errors_are_reported_as_service_unavailable() {
+        for error in
+            [sqlx::Error::PoolTimedOut, sqlx::Error::PoolClosed, sqlx::Error::WorkerCrashed]
+        {
+            assert_eq!(classify_error(&error), SourceDatabaseErrorKind::Unavailable);
+        }
+    }
 
-        assert_eq!(classify_error(&error), SourceDatabaseErrorKind::Unavailable);
+    #[test]
+    fn non_connectivity_sqlx_errors_are_reported_as_upstream_failures() {
+        for error in
+            [sqlx::Error::Protocol("bad source response".to_owned()), sqlx::Error::RowNotFound]
+        {
+            assert_eq!(classify_error(&error), SourceDatabaseErrorKind::Failed);
+        }
+    }
+
+    #[test]
+    fn non_connectivity_io_errors_are_reported_as_upstream_failures() {
+        for error_kind in [ErrorKind::InvalidData, ErrorKind::PermissionDenied] {
+            let error = sqlx::Error::Io(std::io::Error::new(error_kind, "test IO error"));
+
+            assert_eq!(classify_error(&error), SourceDatabaseErrorKind::Failed);
+        }
     }
 
     #[test]
@@ -168,15 +213,29 @@ mod tests {
 
     #[test]
     fn connection_io_errors_are_reported_as_service_unavailable() {
-        let error =
-            sqlx::Error::Io(std::io::Error::new(ErrorKind::ConnectionReset, "connection reset"));
+        for error_kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::ConnectionReset,
+            ErrorKind::HostUnreachable,
+            ErrorKind::NetworkUnreachable,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::NotConnected,
+            ErrorKind::NetworkDown,
+            ErrorKind::BrokenPipe,
+            ErrorKind::UnexpectedEof,
+        ] {
+            let error = sqlx::Error::Io(std::io::Error::new(error_kind, "test IO error"));
 
-        assert_eq!(classify_error(&error), SourceDatabaseErrorKind::Unavailable);
+            assert_eq!(classify_error(&error), SourceDatabaseErrorKind::Unavailable);
+        }
     }
 
     #[test]
     fn connection_sqlstate_errors_are_reported_as_service_unavailable() {
-        for code in ["08006", "53300", "57P01", "57P02", "57P03", "57P04", "57P05"] {
+        for code in [
+            "08000", "08001", "08003", "08004", "08006", "08007", "08P01", "53300", "57P01",
+            "57P02", "57P03", "57P04", "57P05",
+        ] {
             let error = sqlx::Error::Database(Box::new(TestDatabaseError::new(code)));
 
             assert_eq!(classify_error(&error), SourceDatabaseErrorKind::Unavailable);
@@ -184,16 +243,23 @@ mod tests {
     }
 
     #[test]
-    fn non_connection_sqlstate_errors_are_reported_as_upstream_failures() {
-        let error = sqlx::Error::Database(Box::new(TestDatabaseError::new("42501")));
+    fn server_side_timeouts_are_reported_as_timed_out() {
+        for code in ["57014", "55P03", "25P03", "25P04"] {
+            let error = sqlx::Error::Database(Box::new(TestDatabaseError::new(code)));
 
-        assert_eq!(classify_error(&error), SourceDatabaseErrorKind::Failed);
+            assert_eq!(classify_error(&error), SourceDatabaseErrorKind::TimedOut);
+        }
     }
 
     #[test]
-    fn protocol_errors_are_reported_as_upstream_failures() {
-        let error = sqlx::Error::Protocol("bad source response".to_owned());
+    fn non_connection_sqlstate_errors_are_reported_as_upstream_failures() {
+        for code in [
+            "25P02", "40001", "40P01", "42501", "53100", "53200", "53400", "55006", "57000",
+            "58030",
+        ] {
+            let error = sqlx::Error::Database(Box::new(TestDatabaseError::new(code)));
 
-        assert_eq!(classify_error(&error), SourceDatabaseErrorKind::Failed);
+            assert_eq!(classify_error(&error), SourceDatabaseErrorKind::Failed);
+        }
     }
 }

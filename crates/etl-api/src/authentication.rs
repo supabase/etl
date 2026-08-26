@@ -11,17 +11,19 @@ use axum::{
 };
 use constant_time_eq::constant_time_eq_n;
 
-use crate::config::{ApiConfig, ApiKey};
+use crate::{
+    config::{ApiConfig, ApiKey},
+    routes::error_response,
+};
 
 /// Authentication failure for protected API routes.
 pub struct AuthError;
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
-        let mut response = StatusCode::UNAUTHORIZED.into_response();
-        response
-            .headers_mut()
-            .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer scope=\"v1\""));
+        let mut response = error_response(StatusCode::UNAUTHORIZED, "Unauthorized".to_owned());
+        response.headers_mut().insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+
         response
     }
 }

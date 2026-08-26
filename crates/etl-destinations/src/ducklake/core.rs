@@ -10,8 +10,8 @@ use etl::{
     data::{OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TaskSet, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, TaskSet, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -802,11 +802,18 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         let copy_complete = table_rows.is_empty();
-        let result = self.write_table_rows(replicated_table_schema, table_rows).await;
+        let result = DuckLakeDestination::write_table_rows(
+            self,
+            replicated_table_schema,
+            batch_id,
+            table_rows,
+        )
+        .await;
         async_result.send(result.map(|_| {
             if copy_complete {
                 DestinationWriteStatus::Durable
@@ -1562,9 +1569,10 @@ where
     pub async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.write_table_rows_inner(replicated_table_schema, table_rows).await
+        self.write_table_rows_inner(replicated_table_schema, batch_id, table_rows).await
     }
 
     /// Writes one streaming CDC batch directly to the destination.
@@ -2130,19 +2138,23 @@ where
     async fn write_table_rows_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         if self.copy_buffer_config.enabled {
-            return self.write_table_rows_buffered_inner(replicated_table_schema, table_rows).await;
+            return self
+                .write_table_rows_buffered_inner(replicated_table_schema, batch_id, table_rows)
+                .await;
         }
 
-        self.write_table_rows_immediate_inner(replicated_table_schema, table_rows).await
+        self.write_table_rows_immediate_inner(replicated_table_schema, batch_id, table_rows).await
     }
 
     /// Writes one initial-copy batch using the existing per-batch commit path.
     async fn write_table_rows_immediate_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let table_name = self.prepare_table_for_writes(replicated_table_schema).await?;
@@ -2153,11 +2165,22 @@ where
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
-        let prepared_batch = if table_rows.is_empty() {
-            prepare_copy_complete_table_batch(table_name, replay_epoch)
-        } else {
-            prepare_copy_table_batch(replicated_table_schema, table_name, replay_epoch, table_rows)?
-                .into_atomic_batch()
+        let prepared_batch = match (batch_id, table_rows.is_empty()) {
+            (Some(batch_id), false) => prepare_copy_table_batch(
+                replicated_table_schema,
+                table_name,
+                replay_epoch,
+                batch_id,
+                table_rows,
+            )?
+            .into_atomic_batch(),
+            (None, true) => prepare_copy_complete_table_batch(table_name, replay_epoch),
+            _ => {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "Table copy batch ID and rows are inconsistent"
+                ));
+            }
         };
         apply_table_batch_with_retry(
             self.copy_pool()?,
@@ -2174,6 +2197,7 @@ where
     async fn write_table_rows_buffered_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let table_name = self.prepare_table_for_writes(replicated_table_schema).await?;
@@ -2186,6 +2210,12 @@ where
         }
 
         if table_rows.is_empty() {
+            if batch_id.is_some() {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "Table copy batch ID and rows are inconsistent"
+                ));
+            }
             let copy_complete = prepare_copy_complete_table_batch(table_name.clone(), replay_epoch);
             let handle = self.copy_buffers.lock().get(&table_name).cloned();
             let Some(handle) = handle else {
@@ -2208,10 +2238,14 @@ where
             return Ok(());
         }
 
+        let batch_id = batch_id.ok_or_else(|| {
+            etl_error!(ErrorKind::InvalidState, "Table copy batch ID and rows are inconsistent")
+        })?;
         let prepared_batch = prepare_copy_table_batch(
             replicated_table_schema,
             table_name.clone(),
             replay_epoch,
+            batch_id,
             table_rows,
         )?;
         let handle = self.copy_buffer_handle(&table_name, &prepared_batch).await?;
@@ -3838,6 +3872,7 @@ mod tests {
     use std::{
         env,
         path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
         time::Instant,
     };
 
@@ -3845,6 +3880,7 @@ mod tests {
     use etl::{
         config::{PgConnectionConfig, TcpKeepaliveConfig},
         data::{Cell, PartialTableRow, TableRow},
+        destination::{TableCopyAttemptId, TableCopyBatchId},
         schema::{
             ColumnMetadataChange, ColumnSchema, IdentityMask, ReplicationMask, SchemaDiff,
             TableSchema, Type as PgType,
@@ -3867,6 +3903,14 @@ mod tests {
     };
 
     const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
+
+    /// Returns a unique table-copy batch ID for direct unit-test calls.
+    fn test_table_copy_batch_id() -> TableCopyBatchId {
+        static NEXT_BATCH_ID: AtomicU64 = AtomicU64::new(0);
+
+        let batch_id = NEXT_BATCH_ID.fetch_add(1, Ordering::Relaxed);
+        TableCopyBatchId::new(TableCopyAttemptId::from_u128(1), batch_id)
+    }
 
     /// Keeps compaction from competing with batches that are creating Parquet
     /// files during an initial copy.
@@ -4940,6 +4984,7 @@ mod tests {
             destination
                 .write_table_rows(
                     &replicated_table_schema,
+                    Some(test_table_copy_batch_id()),
                     vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())])],
                 )
                 .await
@@ -5019,6 +5064,7 @@ mod tests {
             destination
                 .write_table_rows(
                     &replicated_table_schema,
+                    Some(test_table_copy_batch_id()),
                     vec![
                         TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]),
                         TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_owned())]),
@@ -5085,6 +5131,7 @@ mod tests {
             destination
                 .write_table_rows(
                     &replicated_table_schema,
+                    Some(test_table_copy_batch_id()),
                     vec![
                         TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]),
                         TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_owned())]),
@@ -5148,6 +5195,7 @@ mod tests {
             destination
                 .write_table_rows(
                     &replicated_table_schema,
+                    Some(test_table_copy_batch_id()),
                     vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())])],
                 )
                 .await

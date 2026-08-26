@@ -16,7 +16,7 @@ use etl::{
     data::{SizeHint, TableRow},
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
-        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -412,12 +412,15 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         let row_count = table_rows.len() as u64;
         let row_bytes = table_rows.iter().map(SizeHint::size_hint).sum::<usize>() as u64;
-        self.inner.write_table_rows(replicated_table_schema, table_rows, async_result).await?;
+        self.inner
+            .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
+            .await?;
 
         self.stats.table_rows.fetch_add(row_count, Ordering::Relaxed);
         self.stats.table_row_bytes.fetch_add(row_bytes, Ordering::Relaxed);
@@ -468,6 +471,7 @@ impl Destination for NullDestination {
     async fn write_table_rows(
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
+        _batch_id: Option<TableCopyBatchId>,
         _table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
@@ -765,37 +769,38 @@ impl Destination for BenchDestination {
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         match self {
             Self::Null(destination) => {
                 destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
                     .await
             }
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => {
                 destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
                     .await
             }
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => {
                 destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
                     .await
             }
             #[cfg(feature = "ducklake")]
             Self::DuckLake(destination) => {
                 destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
                     .await
             }
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => {
                 destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
                     .await
             }
         }
