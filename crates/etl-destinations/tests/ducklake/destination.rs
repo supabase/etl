@@ -615,6 +615,179 @@ async fn buffered_copy_combines_batches_at_terminal_barrier() {
     assert_eq!(count_table_files(&data, &table_name), 1);
 }
 
+/// A queued maintenance pause must not block later batches in an existing
+/// buffered copy session.
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_copy_continues_while_maintenance_waits_for_session() {
+    let lake =
+        create_test_lake("buffered_copy_continues_while_maintenance_waits_for_session").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schema = make_schema(164, "public", "buffered_copy_maintenance_wait");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+    let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
+        .copy_buffer(DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes: 1024 * 1024,
+            max_total_bytes: 2 * 1024 * 1024,
+        })
+        .build()
+        .await
+        .unwrap();
+
+    let status = write_table_rows_with_status(
+        &destination,
+        &replicated_table_schema,
+        vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())])],
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, DestinationWriteStatus::Accepted);
+
+    let mut pause_task = tokio::spawn({
+        let destination = destination.clone();
+        async move { destination.acquire_external_maintenance_pause().await }
+    });
+
+    // The existing copy session holds shared mutation access, so this proves
+    // the exclusive maintenance request has entered the lock's wait queue.
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut pause_task).await.is_err());
+
+    let second_write = tokio::time::timeout(
+        Duration::from_secs(1),
+        write_table_rows_with_status(
+            &destination,
+            &replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())])],
+        ),
+    )
+    .await;
+    pause_task.abort();
+    let _ = pause_task.await;
+
+    assert!(second_write.is_ok());
+    assert_eq!(second_write.unwrap().unwrap(), DestinationWriteStatus::Accepted);
+
+    write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 2);
+}
+
+/// An external maintenance pause that expires while a buffered copy is active
+/// must cancel its queued exclusive lock request.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_copy_expired_maintenance_pause_resumes_watcher() {
+    let lake = create_test_lake("buffered_copy_expired_maintenance_pause_resumes_watcher").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let pipeline_id = 1164_i64;
+    let run_id = "pipe-1164-buffered-copy-pause";
+
+    let schema = make_schema(165, "public", "buffered_copy_expired_pause");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+    let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
+        .copy_buffer(DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes: 1024 * 1024,
+            max_total_bytes: 2 * 1024 * 1024,
+        })
+        .build()
+        .await
+        .unwrap();
+
+    write_table_rows_with_status(
+        &destination,
+        &replicated_table_schema,
+        vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())])],
+    )
+    .await
+    .unwrap();
+
+    let coordination_pool =
+        PgPoolOptions::new().max_connections(2).connect(catalog_url.as_str()).await.unwrap();
+    let coordination_store =
+        PostgresExternalMaintenanceStore::new(pipeline_id, coordination_pool.clone());
+    coordination_store.ensure_schema().await.unwrap();
+    coordination_store
+        .ensure_pipeline_state(
+            ExternalMaintenancePausePolicy::default(),
+            ExternalMaintenanceOperationPolicy::default(),
+        )
+        .await
+        .unwrap();
+
+    let watcher = tokio::spawn(run_external_maintenance_watcher(
+        destination.clone(),
+        coordination_store.clone(),
+        ExternalMaintenanceWatcherConfig {
+            poll_interval: Duration::from_millis(10),
+            request_cooldown: Duration::ZERO,
+            store_timeout: Duration::from_millis(100),
+            inline_flush_min_inlined_bytes: u64::MAX,
+            rewrite_data_files_min_active_data_files: i64::MAX,
+        },
+    ));
+
+    let requested_at = Utc::now();
+    let operations = ExternalMaintenanceOperations {
+        rewrite_data_files: true,
+        ..ExternalMaintenanceOperations::default()
+    };
+    sqlx::query(
+        "update etl.external_maintenance_state set active_run = $2, pause_request = $3, \
+         operation_request = null, updated_at = now() where pipeline_id = $1",
+    )
+    .bind(pipeline_id)
+    .bind(Json(ExternalMaintenanceRun {
+        run_id: run_id.to_owned(),
+        started_at: Some(requested_at),
+        operations,
+    }))
+    .bind(Json(ExternalMaintenancePause {
+        run_id: run_id.to_owned(),
+        requested_at: Some(requested_at),
+        expires_at: requested_at + TimeDelta::milliseconds(300),
+    }))
+    .execute(&coordination_pool)
+    .await
+    .unwrap();
+
+    wait_for_replicator_maintenance_state(
+        &coordination_store,
+        ExternalMaintenanceReplicatorState::Pausing,
+    )
+    .await;
+    wait_for_replicator_maintenance_state(
+        &coordination_store,
+        ExternalMaintenanceReplicatorState::Running,
+    )
+    .await;
+
+    write_table_rows_with_status(
+        &destination,
+        &replicated_table_schema,
+        vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())])],
+    )
+    .await
+    .unwrap();
+    write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
+
+    watcher.abort();
+    assert!(watcher.await.unwrap_err().is_cancelled());
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 2);
+}
+
 /// Reaching the configured byte target should flush one window while leaving
 /// later rows for the terminal barrier.
 #[tokio::test(flavor = "multi_thread")]

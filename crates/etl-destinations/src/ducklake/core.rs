@@ -2,7 +2,10 @@
 use std::sync::atomic::AtomicUsize;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -3431,6 +3434,13 @@ where
 
     /// Ensures the ETL-managed replay marker table exists.
     async fn ensure_applied_batches_table_exists(&self) -> EtlResult<()> {
+        // Buffered copy sessions retain a read guard until their terminal
+        // durability barrier. Avoid queuing another read behind a waiting
+        // external-maintenance writer when initialization already completed.
+        if self.applied_batches_table_created.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         ensure_applied_batches_table_exists(
             self.streaming_pool()?,
@@ -3443,6 +3453,10 @@ where
 
     /// Ensures the ETL-managed streaming progress table exists.
     async fn ensure_streaming_progress_table_exists(&self) -> EtlResult<()> {
+        if self.streaming_progress_table_created.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         ensure_streaming_progress_table_exists(
             self.streaming_pool()?,
