@@ -634,32 +634,25 @@ mod tests {
     }
 
     #[test]
-    fn batch_config_deserializes_without_max_bytes() {
-        let json = r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2}"#;
-        let config: BatchConfig = serde_json::from_str(json).unwrap();
+    fn batch_config_deserializes_defaults_overrides_and_unknown_fields() {
+        for (json, expected_max_bytes) in [
+            (r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2}"#, BatchConfig::DEFAULT_MAX_BYTES),
+            (
+                r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304}"#,
+                4 * 1024 * 1024,
+            ),
+            (
+                r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304,"future_field":true}"#,
+                4 * 1024 * 1024,
+            ),
+        ] {
+            let config: BatchConfig = serde_json::from_str(json).unwrap();
 
-        assert_eq!(config.max_fill_ms, 5000);
-        assert_eq!(config.memory_budget_ratio, 0.2);
-        assert_eq!(config.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
-        config.validate().unwrap();
-    }
-
-    #[test]
-    fn batch_config_deserializes_with_max_bytes() {
-        let json = r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304}"#;
-        let config: BatchConfig = serde_json::from_str(json).unwrap();
-
-        assert_eq!(config.max_bytes, 4 * 1024 * 1024);
-        config.validate().unwrap();
-    }
-
-    #[test]
-    fn batch_config_deserialization_ignores_unknown_fields() {
-        let json = r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304,"future_field":true}"#;
-        let config: BatchConfig = serde_json::from_str(json).unwrap();
-
-        assert_eq!(config.max_bytes, 4 * 1024 * 1024);
-        config.validate().unwrap();
+            assert_eq!(config.max_fill_ms, 5000);
+            assert_eq!(config.memory_budget_ratio, 0.2);
+            assert_eq!(config.max_bytes, expected_max_bytes);
+            config.validate().unwrap();
+        }
     }
 
     #[test]
@@ -721,30 +714,17 @@ mod tests {
     }
 
     #[test]
-    fn table_sync_copy_serialization_skip_all() {
-        let selection = TableSyncCopyConfig::SkipAllTables;
-        let json = serde_json::to_string(&selection).unwrap();
-        let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
+    fn table_sync_copy_serialization_roundtrips_variants() {
+        for selection in [
+            TableSyncCopyConfig::SkipAllTables,
+            TableSyncCopyConfig::IncludeTables { table_ids: vec![1, 2, 3] },
+            TableSyncCopyConfig::SkipTables { table_ids: vec![4, 5] },
+        ] {
+            let json = serde_json::to_string(&selection).unwrap();
+            let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(selection, decoded);
-    }
-
-    #[test]
-    fn table_sync_copy_serialization_include_tables() {
-        let selection = TableSyncCopyConfig::IncludeTables { table_ids: vec![1, 2, 3] };
-        let json = serde_json::to_string(&selection).unwrap();
-        let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(selection, decoded);
-    }
-
-    #[test]
-    fn table_sync_copy_serialization_exclude_tables() {
-        let selection = TableSyncCopyConfig::SkipTables { table_ids: vec![4, 5] };
-        let json = serde_json::to_string(&selection).unwrap();
-        let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(selection, decoded);
+            assert_eq!(selection, decoded);
+        }
     }
 
     #[test]

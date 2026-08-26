@@ -362,15 +362,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_used_percent_handles_zero_total() {
-        let snapshot = MemorySnapshot { used: 100, total: 0 };
-        assert_eq!(snapshot.used_percent(), 1.0);
-    }
-
-    #[test]
-    fn memory_used_percent_half() {
-        let snapshot = MemorySnapshot { used: 50, total: 100 };
-        assert_eq!(snapshot.used_percent(), 0.5);
+    fn memory_used_percent_handles_regular_and_zero_totals() {
+        assert_eq!(MemorySnapshot { used: 50, total: 100 }.used_percent(), 0.5);
+        assert_eq!(MemorySnapshot { used: 100, total: 0 }.used_percent(), 1.0);
     }
 
     #[test]

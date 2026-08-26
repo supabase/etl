@@ -78,7 +78,7 @@ use etl::{
     data::TableRow,
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        TableCopyBatchId, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -109,6 +109,7 @@ impl Destination for LoggingDestination {
     async fn write_table_rows(
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
+        _batch_id: Option<TableCopyBatchId>,
         rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {

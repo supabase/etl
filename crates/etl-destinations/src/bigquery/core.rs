@@ -10,8 +10,8 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TaskSet, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, TaskSet, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -1567,6 +1567,7 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        _batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
@@ -2133,15 +2134,15 @@ mod tests {
     }
 
     #[test]
-    fn table_name_to_bigquery_table_id_no_underscores() {
-        let table_name = TableName::new("schema".to_owned(), "table".to_owned());
-        assert_eq!(table_name_to_bigquery_table_id(&table_name).unwrap(), "schema_table");
-    }
-
-    #[test]
-    fn table_name_to_bigquery_table_id_with_underscores() {
-        let table_name = TableName::new("a_b".to_owned(), "c_d".to_owned());
-        assert_eq!(table_name_to_bigquery_table_id(&table_name).unwrap(), "a__b_c__d");
+    fn table_name_to_bigquery_table_id_uses_escaped_components() {
+        for (schema, table, expected) in [
+            ("schema", "table", "schema_table"),
+            ("a_b", "c_d", "a__b_c__d"),
+            ("a__b", "c__d", "a____b_c____d"),
+        ] {
+            let table_name = TableName::new(schema.to_owned(), table.to_owned());
+            assert_eq!(table_name_to_bigquery_table_id(&table_name).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -2159,101 +2160,32 @@ mod tests {
     }
 
     #[test]
-    fn table_name_to_bigquery_table_id_multiple_underscores() {
-        let table_name = TableName::new("a__b".to_owned(), "c__d".to_owned());
-        assert_eq!(table_name_to_bigquery_table_id(&table_name).unwrap(), "a____b_c____d");
+    fn sequenced_bigquery_table_id_parses_and_roundtrips_valid_ids() {
+        for (input, base, sequence) in [
+            ("users_table_123", "users_table", 123),
+            ("simple_table_0", "simple_table", 0),
+            ("test_table_18446744073709551615", "test_table", u64::MAX),
+            ("a__b_c__d_42", "a__b_c__d", 42),
+        ] {
+            let parsed = input.parse::<SequencedBigQueryTableId>().unwrap();
+            assert_eq!(parsed.to_bigquery_table_id(), base);
+            assert_eq!(parsed.1, sequence);
+            assert_eq!(parsed.to_string(), input);
+        }
     }
 
     #[test]
-    fn sequenced_bigquery_table_id_from_str_valid() {
-        let table_id = "users_table_123";
-        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
-        assert_eq!(parsed.to_bigquery_table_id(), "users_table");
-        assert_eq!(parsed.1, 123);
-    }
+    fn sequenced_bigquery_table_id_starts_at_zero_and_increments() {
+        let initial = SequencedBigQueryTableId::new("users_table".to_owned());
+        assert_eq!(initial, SequencedBigQueryTableId("users_table".to_owned(), 0));
 
-    #[test]
-    fn sequenced_bigquery_table_id_from_str_zero_sequence() {
-        let table_id = "simple_table_0";
-        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
-        assert_eq!(parsed.to_bigquery_table_id(), "simple_table");
-        assert_eq!(parsed.1, 0);
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_from_str_large_sequence() {
-        let table_id = "test_table_18446744073709551615"; // u64::MAX
-        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
-        assert_eq!(parsed.to_bigquery_table_id(), "test_table");
-        assert_eq!(parsed.1, u64::MAX);
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_from_str_escaped_underscores() {
-        let table_id = "a__b_c__d_42";
-        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
-        assert_eq!(parsed.to_bigquery_table_id(), "a__b_c__d");
-        assert_eq!(parsed.1, 42);
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_new() {
-        let table_id = SequencedBigQueryTableId::new("users_table".to_owned());
-        assert_eq!(table_id.to_bigquery_table_id(), "users_table");
-        assert_eq!(table_id.1, 0);
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_new_with_underscores() {
-        let table_id = SequencedBigQueryTableId::new("a__b_c__d".to_owned());
-        assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
-        assert_eq!(table_id.1, 0);
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_next() {
-        let table_id = SequencedBigQueryTableId::new("users_table".to_owned());
-        let next_table_id = table_id.next();
-
-        assert_eq!(table_id.1, 0);
-        assert_eq!(next_table_id.1, 1);
-        assert_eq!(next_table_id.to_bigquery_table_id(), "users_table");
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_next_increments_correctly() {
-        let table_id = SequencedBigQueryTableId("test_table".to_owned(), 42);
-        let next_table_id = table_id.next();
-
-        assert_eq!(next_table_id.1, 43);
-        assert_eq!(next_table_id.to_bigquery_table_id(), "test_table");
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_next_max_value() {
-        let table_id = SequencedBigQueryTableId("test_table".to_owned(), u64::MAX - 1);
-        let next_table_id = table_id.next();
-
-        assert_eq!(next_table_id.1, u64::MAX);
-        assert_eq!(next_table_id.to_bigquery_table_id(), "test_table");
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_to_bigquery_table_id() {
-        let table_id = SequencedBigQueryTableId("users_table".to_owned(), 123);
-        assert_eq!(table_id.to_bigquery_table_id(), "users_table");
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_to_bigquery_table_id_with_underscores() {
-        let table_id = SequencedBigQueryTableId("a__b_c__d".to_owned(), 42);
-        assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_to_bigquery_table_id_zero_sequence() {
-        let table_id = SequencedBigQueryTableId("simple_table".to_owned(), 0);
-        assert_eq!(table_id.to_bigquery_table_id(), "simple_table");
+        for sequence in [0, 42, u64::MAX - 1] {
+            let current = SequencedBigQueryTableId("users_table".to_owned(), sequence);
+            assert_eq!(
+                current.next(),
+                SequencedBigQueryTableId("users_table".to_owned(), sequence + 1)
+            );
+        }
     }
 
     #[test]
@@ -2645,264 +2577,76 @@ mod tests {
     }
 
     #[test]
-    fn sequenced_bigquery_table_id_from_str_no_underscore() {
-        let result = "tablewithoutsequence".parse::<SequencedBigQueryTableId>();
-        assert!(result.is_err());
+    fn sequenced_bigquery_table_id_rejects_invalid_ids() {
+        for (input, expected_detail) in [
+            ("tablewithoutsequence", "No underscore found"),
+            ("", "No underscore found"),
+            ("users_table_not_a_number", "Failed to parse sequence number"),
+            ("table_word", "Failed to parse sequence number"),
+            ("users_table_-123", "Failed to parse sequence number"),
+            ("users_table_18446744073709551616", "Failed to parse sequence number"),
+            ("users_table_", "Sequence number cannot be empty"),
+            ("_123", "Table name cannot be empty"),
+        ] {
+            let error = input.parse::<SequencedBigQueryTableId>().unwrap_err();
 
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
-        assert!(err.to_string().contains("No underscore found"));
-        assert!(err.to_string().contains("tablewithoutsequence"));
-        assert!(err.to_string().contains("Expected format: 'table_name_sequence'"));
+            assert_eq!(error.kind(), ErrorKind::DestinationTableNameInvalid);
+            assert!(error.to_string().contains(expected_detail), "input: {input}");
+            assert!(error.to_string().contains(input), "input: {input}");
+        }
     }
 
     #[test]
-    fn sequenced_bigquery_table_id_from_str_invalid_sequence_number() {
-        let result = "users_table_not_a_number".parse::<SequencedBigQueryTableId>();
-        assert!(result.is_err());
+    fn split_table_rows_distributes_rows_across_target_batches() {
+        for (row_count, target_batches, expected_batch_sizes) in [
+            (0, 4, vec![]),
+            (1, 0, vec![1]),
+            (2, 1, vec![2]),
+            (2, 5, vec![2]),
+            (4, 2, vec![2, 2]),
+            (5, 3, vec![2, 2, 1]),
+            (10, 4, vec![3, 3, 2, 2]),
+        ] {
+            let rows = (0..row_count)
+                .map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap())
+                .collect();
+            let batches = split_table_rows(rows, target_batches);
+            let batch_sizes: Vec<_> = batches.iter().map(Vec::len).collect();
 
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
-        assert!(err.to_string().contains("Failed to parse sequence number"));
-        assert!(err.to_string().contains("not_a_number"));
-        assert!(err.to_string().contains("users_table_not_a_number"));
-        assert!(err.to_string().contains("Expected a non-negative integer"));
+            assert_eq!(batch_sizes, expected_batch_sizes);
+            assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), row_count);
+        }
     }
 
     #[test]
-    fn sequenced_bigquery_table_id_from_str_sequence_is_word() {
-        let result = "table_word".parse::<SequencedBigQueryTableId>();
-        assert!(result.is_err());
+    fn calculate_target_batches_handles_empty_small_and_oversized_rows() {
+        assert_eq!(calculate_target_batches_for_table_copy(&[]).unwrap(), 0);
 
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
-        assert!(err.to_string().contains("Failed to parse sequence number"));
-        assert!(err.to_string().contains("word"));
-        assert!(err.to_string().contains("table_word"));
-        assert!(err.to_string().contains("Expected a non-negative integer"));
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_from_str_negative_sequence() {
-        let result = "users_table_-123".parse::<SequencedBigQueryTableId>();
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
-        assert!(err.to_string().contains("Failed to parse sequence number"));
-        assert!(err.to_string().contains("-123"));
-        assert!(err.to_string().contains("users_table_-123"));
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_from_str_sequence_overflow() {
-        let result = "users_table_18446744073709551616".parse::<SequencedBigQueryTableId>(); // u64::MAX + 1
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
-        assert!(err.to_string().contains("Failed to parse sequence number"));
-        assert!(err.to_string().contains("18446744073709551616"));
-        assert!(err.to_string().contains("users_table_18446744073709551616"));
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_from_str_empty_string() {
-        let result = "".parse::<SequencedBigQueryTableId>();
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
-        assert!(err.to_string().contains("No underscore found"));
-        assert!(err.to_string().contains("''"));
-        assert!(err.to_string().contains("Expected format: 'table_name_sequence'"));
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_from_str_empty_sequence() {
-        let result = "users_table_".parse::<SequencedBigQueryTableId>();
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
-        assert!(err.to_string().contains("Sequence number cannot be empty"));
-        assert!(err.to_string().contains("users_table_"));
-        assert!(err.to_string().contains("Expected format: 'table_name_sequence'"));
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_from_str_empty_table_name() {
-        let result = "_123".parse::<SequencedBigQueryTableId>();
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
-        assert!(err.to_string().contains("Table name cannot be empty"));
-        assert!(err.to_string().contains("_123"));
-        assert!(err.to_string().contains("Expected format: 'table_name_sequence'"));
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_round_trip() {
-        let original = "users_table_123";
-        let parsed = original.parse::<SequencedBigQueryTableId>().unwrap();
-        let formatted = parsed.to_string();
-        assert_eq!(original, formatted);
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_round_trip_complex() {
-        let original = "a__b_c__d_999";
-        let parsed = original.parse::<SequencedBigQueryTableId>().unwrap();
-        let formatted = parsed.to_string();
-        assert_eq!(original, formatted);
-        assert_eq!(parsed.to_bigquery_table_id(), "a__b_c__d");
-        assert_eq!(parsed.1, 999);
-    }
-
-    #[test]
-    fn split_table_rows_empty_input() {
-        let rows: Vec<BigQueryTableRow> = vec![];
-        let result = split_table_rows(rows, 4);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn split_table_rows_zero_concurrent_streams() {
-        let rows = vec![BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()];
-        let result = split_table_rows(rows, 0);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].len(), 1);
-    }
-
-    #[test]
-    fn split_table_rows_single_concurrent_stream() {
-        let rows = vec![
-            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
-            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
-        ];
-        let result = split_table_rows(rows, 1);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].len(), 2);
-    }
-
-    #[test]
-    fn split_table_rows_fewer_rows_than_streams() {
-        let rows = vec![
-            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
-            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
-        ];
-        let result = split_table_rows(rows, 5);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].len(), 2);
-    }
-
-    #[test]
-    fn split_table_rows_equal_distribution() {
-        let rows =
-            (0..4).map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()).collect();
-        let result = split_table_rows(rows, 2);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].len(), 2);
-        assert_eq!(result[1].len(), 2);
-    }
-
-    #[test]
-    fn split_table_rows_uneven_distribution() {
-        let rows =
-            (0..5).map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()).collect();
-        let result = split_table_rows(rows, 3);
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0].len(), 2); // Gets extra row
-        assert_eq!(result[1].len(), 2); // Gets extra row
-        assert_eq!(result[2].len(), 1);
-    }
-
-    #[test]
-    fn split_table_rows_many_streams() {
-        let rows =
-            (0..10).map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()).collect();
-        let result = split_table_rows(rows, 4);
-        assert_eq!(result.len(), 4);
-
-        // Verify all rows are accounted for
-        let total_rows: usize = result.iter().map(Vec::len).sum();
-        assert_eq!(total_rows, 10);
-
-        // Verify approximately equal distribution
-        assert_eq!(result[0].len(), 3); // Gets extra row
-        assert_eq!(result[1].len(), 3); // Gets extra row
-        assert_eq!(result[2].len(), 2);
-        assert_eq!(result[3].len(), 2);
-    }
-
-    #[test]
-    fn split_table_rows_single_row() {
-        let rows = vec![BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()];
-        let result = split_table_rows(rows, 5);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].len(), 1);
-    }
-
-    #[test]
-    fn calculate_target_batches_empty_rows() {
-        let rows: Vec<BigQueryTableRow> = vec![];
-        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
-        assert_eq!(result, 0);
-    }
-
-    #[test]
-    fn calculate_target_batches_single_small_row() {
-        // Create a single row with one small string value
-        let rows = vec![
+        let small_row =
             BigQueryTableRow::try_from(TableRow::new(vec![Cell::String("test".to_owned())]))
-                .unwrap(),
-        ];
-        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
-        assert_eq!(result, 1);
+                .unwrap();
+        assert_eq!(calculate_target_batches_for_table_copy(&[small_row]).unwrap(), 1);
+
+        let oversized_row = BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(
+            "x".repeat(MAX_BATCH_SIZE_BYTES + 1),
+        )]))
+        .unwrap();
+        assert_eq!(calculate_target_batches_for_table_copy(&[oversized_row]).unwrap(), 1);
     }
 
     #[test]
-    fn calculate_target_batches_many_small_rows() {
-        // Create many rows with small values (estimated ~50 bytes each when encoded)
-        let rows: Vec<BigQueryTableRow> = (0..100_000)
-            .map(|i| {
-                BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(format!("value_{i}"))]))
-                    .unwrap()
-            })
-            .collect();
-
-        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
-        assert_eq!(result, 1);
-    }
-
-    #[test]
-    fn calculate_target_batches_large_rows() {
-        // Create rows with large string values (each ~1MB)
-        let large_string = "x".repeat(1024 * 1024); // 1MB string
-        let rows: Vec<BigQueryTableRow> = (0..50)
-            .map(|_| {
-                BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(large_string.clone())]))
-                    .unwrap()
-            })
-            .collect();
-
-        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
-        assert_eq!(result, 3);
-    }
-
-    #[test]
-    fn calculate_target_batches_very_large_single_row() {
-        // Create a row larger than the client's batch target.
-        let huge_string = "x".repeat(MAX_BATCH_SIZE_BYTES + 1);
-        let rows = vec![
-            BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(huge_string)])).unwrap(),
+    fn calculate_target_batches_estimates_multiple_batches_from_the_first_row() {
+        let estimated_large_row = BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(
+            "x".repeat(MAX_BATCH_SIZE_BYTES / 2 + 1),
+        )]))
+        .unwrap();
+        let rows = [
+            estimated_large_row,
+            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
         ];
 
-        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
-        // Even though the row is too large, we should still get 1 batch
-        // (the actual send will fail, but batching logic should handle it)
-        assert_eq!(result, 1);
+        assert_eq!(calculate_target_batches_for_table_copy(&rows).unwrap(), 3);
     }
 
     #[test]

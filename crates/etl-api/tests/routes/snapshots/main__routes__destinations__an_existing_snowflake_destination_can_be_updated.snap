@@ -1,0 +1,13 @@
+---
+source: crates/etl-api/tests/routes/destinations.rs
+expression: response.config
+---
+Snowflake {
+    account_id: "updatedorg-updatedaccount",
+    user: "updated_etl_user",
+    database: "updated_database",
+    schema: "updated_schema",
+    role: Some(
+        "updated_role",
+    ),
+}

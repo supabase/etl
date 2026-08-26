@@ -75,35 +75,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stringifies_valid_table_name() {
-        let table_name = TableName::new("a_b".to_owned(), "c_d".to_owned());
-        let escaped = try_stringify_table_name(&table_name).unwrap();
-
-        assert_eq!(escaped, "a__b_c__d");
-    }
-
-    #[test]
-    fn rejects_leading_underscore() {
-        let table_name = TableName::new("_schema".to_owned(), "users".to_owned());
-        let err = try_stringify_table_name(&table_name).unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::ValidationError);
-        assert_eq!(
-            err.description(),
-            Some("Destination table name cannot use leading or trailing underscores")
-        );
-    }
-
-    #[test]
-    fn rejects_trailing_underscore() {
-        let table_name = TableName::new("public".to_owned(), "users_".to_owned());
-        let err = try_stringify_table_name(&table_name).unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::ValidationError);
-        assert_eq!(
-            err.description(),
-            Some("Destination table name cannot use leading or trailing underscores")
-        );
+    fn stringifies_valid_table_names() {
+        for (schema, table, expected) in
+            [("a_b", "c_d", "a__b_c__d"), ("a__b", "c__d", "a____b_c____d")]
+        {
+            let table_name = TableName::new(schema.to_owned(), table.to_owned());
+            assert_eq!(try_stringify_table_name(&table_name).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -120,34 +98,34 @@ mod tests {
     }
 
     #[test]
-    fn preserves_multiple_underscores() {
-        let table_name = TableName::new("a__b".to_owned(), "c__d".to_owned());
+    fn rejects_ambiguous_or_unsupported_components() {
+        for (schema, table, description) in [
+            (
+                "_schema",
+                "users",
+                "Destination table name cannot use leading or trailing underscores",
+            ),
+            (
+                "public",
+                "users_",
+                "Destination table name cannot use leading or trailing underscores",
+            ),
+            (
+                "public",
+                "users\"quoted",
+                "Destination table name contains an unsupported SQL identifier character",
+            ),
+            (
+                "public",
+                "users;drop",
+                "Destination table name contains an unsupported SQL identifier character",
+            ),
+        ] {
+            let table_name = TableName::new(schema.to_owned(), table.to_owned());
+            let error = try_stringify_table_name(&table_name).unwrap_err();
 
-        assert_eq!(try_stringify_table_name(&table_name).unwrap(), "a____b_c____d");
-    }
-
-    #[test]
-    fn rejects_double_quote() {
-        let table_name =
-            TableName::new("public".to_owned(), "users\"; drop table x; --".to_owned());
-        let err = try_stringify_table_name(&table_name).unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::ValidationError);
-        assert_eq!(
-            err.description(),
-            Some("Destination table name contains an unsupported SQL identifier character")
-        );
-    }
-
-    #[test]
-    fn rejects_semicolon() {
-        let table_name = TableName::new("public".to_owned(), "users;drop".to_owned());
-        let err = try_stringify_table_name(&table_name).unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::ValidationError);
-        assert_eq!(
-            err.description(),
-            Some("Destination table name contains an unsupported SQL identifier character")
-        );
+            assert_eq!(error.kind(), ErrorKind::ValidationError);
+            assert_eq!(error.description(), Some(description));
+        }
     }
 }

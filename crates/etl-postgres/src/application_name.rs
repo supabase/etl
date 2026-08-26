@@ -69,25 +69,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn apply_worker_name_appends_tag_and_pipeline_id() {
-        // --- GIVEN: a base name and pipeline id ---
-        let name = apply_worker_application_name("supabase_etl_replicator_replication", 42);
+    fn worker_names_include_their_identity() {
+        let base = "supabase_etl_replicator_replication";
 
-        // --- THEN: the name carries the apply tag and pipeline id ---
-        assert_eq!(name, "supabase_etl_replicator_replication:apply:42");
-    }
-
-    #[test]
-    fn table_sync_worker_name_appends_tag_pipeline_id_and_table_oid() {
-        // --- GIVEN: a base name, pipeline id, and table id ---
-        let name = table_sync_worker_application_name(
-            "supabase_etl_replicator_replication",
-            42,
-            TableId::new(16384),
+        assert_eq!(apply_worker_application_name(base, 42), format!("{base}:apply:42"));
+        assert_eq!(
+            table_sync_worker_application_name(base, 42, TableId::new(16384)),
+            format!("{base}:table_sync:42:16384")
         );
-
-        // --- THEN: the name carries the table_sync tag, pipeline id, and table oid ---
-        assert_eq!(name, "supabase_etl_replicator_replication:table_sync:42:16384");
     }
 
     #[test]
