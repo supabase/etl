@@ -35,8 +35,8 @@ pub(crate) struct MultigresArgs {
 enum MultigresCommand {
     /// Pull and start a local Multigres cluster.
     Start(StartArgs),
-    /// Run the isolated pipeline Multigres failover test.
-    PipelineFailover(TestArgs),
+    /// Run the isolated Multigres tests.
+    Test(TestArgs),
 }
 
 /// Arguments for starting the local Multigres cluster.
@@ -71,7 +71,7 @@ impl MultigresArgs {
     pub(crate) fn run(self) -> Result<()> {
         match self.command {
             MultigresCommand::Start(args) => args.run(),
-            MultigresCommand::PipelineFailover(args) => args.run(),
+            MultigresCommand::Test(args) => args.run(),
         }
     }
 }
@@ -162,7 +162,7 @@ impl StartArgs {
 }
 
 impl TestArgs {
-    /// Starts the supported topology and runs the pipeline failover test.
+    /// Starts the supported topology and runs the Multigres tests.
     fn run(self) -> Result<()> {
         self.recreate_cluster()?;
 
@@ -179,14 +179,13 @@ impl TestArgs {
             "--run-ignored",
             "only",
             "--no-capture",
-            "pipeline_failover::pipeline_multigres_failover",
         ]);
         test.env("MULTIGRES_GW_HOST", "127.0.0.1");
         test.env("MULTIGRES_GW_PORT", self.gateway_port.to_string());
         test.env("MULTIGRES_GW_USER", "postgres");
         test.env("MULTIGRES_GW_PASSWORD", "postgres");
         test.env("MULTIGRES_GW_DBNAME", "postgres");
-        run_command(test, "Pipeline Multigres failover test failed")
+        run_command(test, "Multigres tests failed")
     }
 
     /// Recreates the test cluster, retrying one failed image bootstrap.

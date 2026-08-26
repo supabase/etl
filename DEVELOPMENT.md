@@ -152,13 +152,13 @@ Start the ephemeral two-cell Multigres compatibility cluster with:
 cargo xtask multigres start
 ```
 
-Run the isolated pipeline primary-switch test with:
+Run the isolated Multigres tests with:
 
 ```bash
-cargo xtask multigres pipeline-failover
+cargo xtask multigres test
 ```
 
-The failover test command recreates the dedicated `etl-multigres` Compose project before it runs. Treat data in this local compatibility cluster as ephemeral; the reset prevents a previous primary switch or failed test from affecting slot synchronization in the next run.
+The test command recreates the dedicated `etl-multigres` Compose project before it runs. Treat data in this local compatibility cluster as ephemeral; the reset prevents a previous primary switch or failed test from affecting slot synchronization in the next run.
 
 The command pulls the pinned official all-in-one image and exposes the zone-one multigateway on `127.0.0.1:15432`. The mounted `mtconfig.yaml` enables Multigres slot-based replication so the gateway admits persistent failover logical slots and the poolers synchronize them. Two cells match the upstream compatibility image's minimum and support the graceful `multigres cluster switch-primary` path. Override `MULTIGRES_IMAGE`, `MULTIGRES_NUM_CELLS`, or `MULTIGRES_GATEWAY_PORT` to test a deliberate image upgrade, a three-cell topology, or a different local port.
 
@@ -168,7 +168,7 @@ The current compatibility cluster serves the fixed `postgres` database through t
 
 At the pinned image revision, a replication stream is pinned to one pooler and is torn down during a leader change. The ETL apply worker reconnects through the gateway and resumes the synchronized failover slot on the new primary. The test waits until the standby slot's confirmed position reaches an acknowledged streaming write, holds the next write unacknowledged across the primary switch, and verifies that the promoted standby retransmits it without repeating the initial copy or the previously acknowledged write. Transparent same-connection repointing is described by Multigres as a later gateway feature and is not asserted by this test.
 
-CI runs `Pipeline Multigres Failover` after the regular PostgreSQL matrix on a separate runner with a separately provisioned cluster, so its primary switch cannot affect any other test process.
+CI runs `Multigres Tests` concurrently with the regular PostgreSQL matrix on a separate runner with a separately provisioned cluster, so its primary switch cannot affect any other test process.
 
 Connect manually with the documented local test credentials:
 

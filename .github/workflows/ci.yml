@@ -296,9 +296,8 @@ jobs:
           path-to-lcov: lcov.info
           debug: true
 
-  test-pipeline-multigres-failover:
-    name: Pipeline Multigres Failover
-    needs: test-full
+  test-multigres:
+    name: Multigres Tests
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
@@ -311,12 +310,12 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: test-pipeline-multigres-failover
+          key: test-multigres
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: cargo-nextest
 
-      - name: Run Pipeline Multigres Failover Test
-        run: cargo xtask multigres pipeline-failover
+      - name: Run Multigres Tests
+        run: cargo xtask multigres test
