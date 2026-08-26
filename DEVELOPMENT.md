@@ -144,6 +144,44 @@ For PostgreSQL 17 and newer, the read replica also enables `sync_replication_slo
 
 The same Docker Compose stack also starts ClickHouse on `http://localhost:8123` by default, which is enough for local destination development and ClickHouse integration tests.
 
+### Multigres Setup
+
+Start the ephemeral two-cell Multigres compatibility cluster with:
+
+```bash
+cargo xtask multigres start
+```
+
+Run the isolated pipeline primary-switch test with:
+
+```bash
+cargo xtask multigres pipeline-failover
+```
+
+The failover test command recreates the dedicated `etl-multigres` Compose project before it runs. Treat data in this local compatibility cluster as ephemeral; the reset prevents a previous primary switch or failed test from affecting slot synchronization in the next run.
+
+The command pulls the pinned official all-in-one image and exposes the zone-one multigateway on `127.0.0.1:15432`. The mounted `mtconfig.yaml` enables Multigres slot-based replication so the gateway admits persistent failover logical slots and the poolers synchronize them. Two cells match the upstream compatibility image's minimum and support the graceful `multigres cluster switch-primary` path. Override `MULTIGRES_IMAGE`, `MULTIGRES_NUM_CELLS`, or `MULTIGRES_GATEWAY_PORT` to test a deliberate image upgrade, a three-cell topology, or a different local port.
+
+At the pinned image digest, a three-cell slot-based cluster can start with one follower's physical slot inactive even though WAL streaming is connected. PostgreSQL then blocks logical decoding on `synchronized_standby_slots`. Keep the two-cell default for graceful-switchover tests, and verify that every required follower physical slot is active before using three cells for crash-failover coverage.
+
+The current compatibility cluster serves the fixed `postgres` database through the gateway. The normal ETL integration suite cannot run unchanged against it because [`PgDatabase`](crates/etl-postgres/src/tokio/test_utils.rs) creates a unique database for every test. For now, only the ignored `pipeline_failover::pipeline_multigres_failover` test in the `multigres` target uses Multigres. The test owns its pipeline, table, publication, and replication-slot identities and supplies them to the Multigres database helper, which operates inside the fixed database and reconnects after failover.
+
+At the pinned image revision, a replication stream is pinned to one pooler and is torn down during a leader change. The ETL apply worker reconnects through the gateway and resumes the synchronized failover slot on the new primary. The test waits until the standby slot's confirmed position reaches an acknowledged streaming write, holds the next write unacknowledged across the primary switch, and verifies that the promoted standby retransmits it without repeating the initial copy or the previously acknowledged write. Transparent same-connection repointing is described by Multigres as a later gateway feature and is not asserted by this test.
+
+CI runs `Pipeline Multigres Failover` after the regular PostgreSQL matrix on a separate runner with a separately provisioned cluster, so its primary switch cannot affect any other test process.
+
+Connect manually with the documented local test credentials:
+
+```bash
+PGPASSWORD=postgres psql -h 127.0.0.1 -p 15432 -U postgres -d postgres
+```
+
+Remove the ephemeral cluster when it is no longer needed:
+
+```bash
+docker compose -f scripts/docker/docker-compose-multigres.yaml down
+```
+
 ### Manual Setup
 
 If you prefer manual setup or have an existing PostgreSQL instance:
