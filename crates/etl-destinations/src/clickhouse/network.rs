@@ -212,7 +212,6 @@ fn is_public_ipv4(address: Ipv4Addr) -> bool {
     let [a, b, c, d] = address.octets();
     let is_shared = a == 100 && (64..=127).contains(&b);
     let is_protocol_assignment = a == 192 && b == 0 && c == 0 && !matches!(d, 9 | 10);
-    let is_documentation = address.is_documentation();
     let is_deprecated_6to4 = (a, b, c) == (192, 88, 99);
     let is_benchmarking = a == 198 && matches!(b, 18 | 19);
 
@@ -222,7 +221,7 @@ fn is_public_ipv4(address: Ipv4Addr) -> bool {
         || address.is_loopback()
         || address.is_link_local()
         || is_protocol_assignment
-        || is_documentation
+        || address.is_documentation()
         || is_deprecated_6to4
         || is_benchmarking
         || address.is_multicast()
