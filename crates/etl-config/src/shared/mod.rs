@@ -21,7 +21,7 @@ pub use destination::{
 };
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,
-    PipelineConfigWithoutSecrets, TableSyncCopyConfig,
+    PipelineConfigWithoutSecrets, ReplicationSlotConfig, TableSyncCopyConfig,
 };
 pub use replicator::{ReplicatorConfig, ReplicatorConfigWithoutSecrets};
 pub use sentry::SentryConfig;
