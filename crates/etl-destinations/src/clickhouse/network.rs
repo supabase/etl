@@ -229,8 +229,6 @@ fn is_public_ipv4(address: Ipv4Addr) -> bool {
 }
 
 /// Returns whether an IPv6 address is publicly routable.
-///
-/// The exclusions follow the IANA IPv6 Special-Purpose Address Registry.
 fn is_public_ipv6(address: Ipv6Addr) -> bool {
     let octets = address.octets();
     let segments = address.segments();
