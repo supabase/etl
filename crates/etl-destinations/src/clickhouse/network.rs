@@ -248,13 +248,15 @@ fn is_public_ipv6(address: Ipv6Addr) -> bool {
     let is_documentation =
         matches!(segments, [0x2001, 0x0db8, ..]) || (segments[0] == 0x3fff && segments[1] < 0x1000);
     let is_6to4 = segments[0] == 0x2002;
+    let is_reserved_6bone = segments[0] == 0x3ffe;
     let is_ipv4_mapped = matches!(segments, [0, 0, 0, 0, 0, 0xffff, _, _]);
 
     is_global_unicast
         && !(is_ipv4_mapped
             || (is_ietf_assignment && !is_ietf_global_exception)
             || is_documentation
-            || is_6to4)
+            || is_6to4
+            || is_reserved_6bone)
 }
 
 #[cfg(test)]
@@ -329,6 +331,7 @@ mod tests {
             ("2001:40::1", false),
             ("2001:db8::1", false),
             ("2002::1", false),
+            ("3ffe::1", false),
             ("3fff::1", false),
             ("5f00::1", false),
             ("fc00::1", false),
