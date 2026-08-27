@@ -30,7 +30,6 @@ use crate::{
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
         metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
-            CDC_TX_ORDINAL_COLUMN_NAME, add_merge_tree_tx_ordinal_column_sql,
             create_current_view_sql, create_table_sql, drop_current_view_sql,
             supports_column_default, trailing_cdc_column_names,
         },
@@ -717,24 +716,6 @@ where
         ))
     }
 
-    /// Adds missing CDC ordering metadata to legacy MergeTree tables.
-    async fn table_columns_with_merge_tree_compatibility(
-        &self,
-        clickhouse_table_name: &str,
-    ) -> EtlResult<Vec<ClickHouseTableColumn>> {
-        let mut actual_columns = self.client.table_columns(clickhouse_table_name).await?;
-        let needs_tx_ordinal = matches!(self.inserter_config.engine, ClickHouseEngine::MergeTree)
-            && !actual_columns.iter().any(|column| column.name == CDC_TX_ORDINAL_COLUMN_NAME);
-
-        if needs_tx_ordinal {
-            let ddl = add_merge_tree_tx_ordinal_column_sql(clickhouse_table_name);
-            self.client.execute_ddl(DdlKind::AddColumn, &ddl).await?;
-            actual_columns = self.client.table_columns(clickhouse_table_name).await?;
-        }
-
-        Ok(actual_columns)
-    }
-
     /// Issues the engine-correct `CREATE TABLE`, and under ReplacingMergeTree
     /// also the companion `CREATE VIEW "<table>__current"`. Both statements
     /// are `IF NOT EXISTS`, so retries on the recovery path are idempotent.
@@ -865,8 +846,7 @@ where
         // `ALTER TABLE ADD COLUMN`: ClickHouse scalar columns are forced to
         // `Nullable(T)` even when the Postgres column is `NOT NULL`, so RowBinary must
         // include the nullable marker byte ClickHouse expects.
-        let actual_columns =
-            self.table_columns_with_merge_tree_compatibility(&clickhouse_table_name).await?;
+        let actual_columns = self.client.table_columns(&clickhouse_table_name).await?;
         let expected_column_names =
             expected_clickhouse_column_names(schema, self.inserter_config.engine);
         let nullable_flags = nullable_flags_from_clickhouse_columns(
@@ -1011,8 +991,7 @@ where
             }
         }
 
-        let actual_columns =
-            self.table_columns_with_merge_tree_compatibility(clickhouse_table_name).await?;
+        let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
         let expected_column_names =
             expected_clickhouse_column_names(schema, self.inserter_config.engine);
         nullable_flags_from_clickhouse_columns(
@@ -2261,8 +2240,8 @@ mod tests {
     use crate::clickhouse::{
         encoding::encode_to_row_binary,
         schema::{
-            CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME,
-            ETL_VERSION_COLUMN_NAME, clickhouse_column_type,
+            CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,
+            ETL_DELETED_COLUMN_NAME, ETL_VERSION_COLUMN_NAME, clickhouse_column_type,
         },
     };
 

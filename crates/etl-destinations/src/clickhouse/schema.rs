@@ -254,23 +254,13 @@ where
 
     cols.push(format!("  {} String", quote_identifier(CDC_OPERATION_COLUMN_NAME)));
     cols.push(format!("  {} UInt64", quote_identifier(CDC_LSN_COLUMN_NAME)));
-    cols.push(format!("  {} UInt64 DEFAULT 0", quote_identifier(CDC_TX_ORDINAL_COLUMN_NAME)));
+    cols.push(format!("  {} UInt64", quote_identifier(CDC_TX_ORDINAL_COLUMN_NAME)));
 
     let col_defs = cols.join(",\n");
     let quoted_table_name = quote_identifier(table_name);
     format!(
         "CREATE TABLE IF NOT EXISTS {quoted_table_name} (\n{col_defs}\n) ENGINE = \
          MergeTree()\nORDER BY tuple()"
-    )
-}
-
-/// Adds the transaction ordinal to a legacy MergeTree table.
-pub(super) fn add_merge_tree_tx_ordinal_column_sql(table_name: &str) -> String {
-    format!(
-        "alter table {} add column if not exists {} UInt64 default 0 after {}",
-        quote_identifier(table_name),
-        quote_identifier(CDC_TX_ORDINAL_COLUMN_NAME),
-        quote_identifier(CDC_LSN_COLUMN_NAME),
     )
 }
 
@@ -564,20 +554,9 @@ mod tests {
         let sql = create_merge_tree_sql("public_t", &schemas);
         assert!(sql.contains("\"cdc_operation\" String"), "cdc_operation should be non-nullable");
         assert!(sql.contains("\"cdc_lsn\" UInt64"), "cdc_lsn should be non-nullable UInt64");
-        assert!(sql.contains("\"cdc_tx_ordinal\" UInt64 DEFAULT 0"));
+        assert!(sql.contains("\"cdc_tx_ordinal\" UInt64"));
         assert!(sql.contains("ENGINE = MergeTree()"));
         assert!(sql.contains("ORDER BY tuple()"));
-    }
-
-    #[test]
-    fn add_merge_tree_tx_ordinal_column_sql_is_idempotent() {
-        let sql = add_merge_tree_tx_ordinal_column_sql("public_us\"ers");
-
-        assert_eq!(
-            sql,
-            "alter table \"public_us\\\"ers\" add column if not exists \"cdc_tx_ordinal\" UInt64 \
-             default 0 after \"cdc_lsn\""
-        );
     }
 
     #[test]

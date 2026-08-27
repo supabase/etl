@@ -155,7 +155,7 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
     init_test_tracing();
     install_crypto_provider();
 
-    // --- GIVEN: a legacy MergeTree table with one copied row ---
+    // --- GIVEN: a source table with one row ready for initial copy ---
     let mut database = spawn_source_database().await;
     let table_name = test_table_name("same_tx_pk_change");
     let table_id = database
@@ -177,19 +177,6 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
         .expect("Failed to insert initial same_tx_pk_change row");
 
     let clickhouse_db = setup_clickhouse_database().await;
-    clickhouse_db
-        .db_client()
-        .query(
-            "create table \"test_same__tx__pk__change\" (
-                \"id\" Int64,
-                \"value\" String,
-                \"cdc_operation\" String,
-                \"cdc_lsn\" UInt64
-            ) engine = MergeTree() order by tuple()",
-        )
-        .execute()
-        .await
-        .expect("Failed to create legacy MergeTree table");
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db
