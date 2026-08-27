@@ -296,6 +296,7 @@ pub(crate) mod pipelines {
     pub(crate) fn new_pipeline_config() -> ApiPipelineConfig {
         ApiPipelineConfig {
             publication_name: "publication".to_owned(),
+            replication_slot: None,
             batch: Some(BatchConfig {
                 max_fill_ms: 5,
                 memory_budget_ratio: 0.2,
@@ -320,6 +321,7 @@ pub(crate) mod pipelines {
     pub(crate) fn updated_pipeline_config() -> ApiPipelineConfig {
         ApiPipelineConfig {
             publication_name: "updated_publication".to_owned(),
+            replication_slot: None,
             batch: Some(BatchConfig {
                 max_fill_ms: 10,
                 memory_budget_ratio: 0.2,

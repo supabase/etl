@@ -22,6 +22,7 @@ pub mod sources;
 pub mod tenants;
 pub mod tenants_sources;
 pub mod utils;
+pub mod v2;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ErrorMessage {

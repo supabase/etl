@@ -52,5 +52,11 @@ etl-telemetry = { workspace = true }
 name = "main"
 path = "tests/main.rs"
 
+# Multigres integration coverage in its own cluster.
+[[test]]
+name = "multigres"
+path = "tests/multigres/main.rs"
+required-features = ["test-utils"]
+
 [lints]
 workspace = true

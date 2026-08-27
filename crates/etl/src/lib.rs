@@ -142,6 +142,7 @@
 //!         publication_name: "my_publication".to_string(),
 //!         pg_connection: pg_config,
 //!         store_pg_connection: None,
+//!         replication_slot: Default::default(),
 //!         batch: BatchConfig {
 //!             max_fill_ms: 5000,
 //!             memory_budget_ratio: 0.2,

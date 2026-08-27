@@ -315,10 +315,10 @@ pub(super) struct DuckLakeInterruptRegistry {
 impl DuckLakeInterruptRegistry {
     /// Registers one live DuckLake connection interrupt handle.
     fn register(&self, handle: &Arc<RegisteredDuckLakeInterrupt>) {
-        self.handles
-            .lock()
-            .expect("ducklake interrupt registry mutex should not be poisoned")
-            .push(Arc::downgrade(handle));
+        let mut handles =
+            self.handles.lock().expect("ducklake interrupt registry mutex should not be poisoned");
+        handles.retain(|registered| registered.strong_count() > 0);
+        handles.push(Arc::downgrade(handle));
     }
 
     /// Interrupts all currently live registered DuckLake connections.
@@ -1047,6 +1047,26 @@ mod tests {
         state.clear();
 
         assert_eq!(state.reason(), DuckLakeInterruptReason::None);
+    }
+
+    #[test]
+    fn interrupt_registry_prunes_dropped_handles_during_registration() {
+        let registry = DuckLakeInterruptRegistry::default();
+        let first_conn =
+            duckdb::Connection::open_in_memory().expect("failed to open first test connection");
+        let first = Arc::new(RegisteredDuckLakeInterrupt::new(first_conn.interrupt_handle()));
+        registry.register(&first);
+        assert_eq!(registry.handles.lock().unwrap().len(), 1);
+
+        drop(first);
+
+        let second_conn =
+            duckdb::Connection::open_in_memory().expect("failed to open second test connection");
+        let second = Arc::new(RegisteredDuckLakeInterrupt::new(second_conn.interrupt_handle()));
+        registry.register(&second);
+
+        assert_eq!(registry.handles.lock().unwrap().len(), 1);
+        assert_eq!(registry.interrupt_all(), 1);
     }
 
     #[test]

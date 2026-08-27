@@ -268,6 +268,21 @@ impl Default for MemoryBackpressureConfig {
     }
 }
 
+/// Configuration for a pipeline's PostgreSQL logical replication slots.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct ReplicationSlotConfig {
+    /// Enables PostgreSQL failover support for logical replication slots.
+    ///
+    /// On PostgreSQL 17 or newer, ETL creates new slots with the `FAILOVER`
+    /// option and upgrades an existing apply-worker slot that is not already
+    /// failover-enabled. Standbys must still be configured to synchronize
+    /// failover slots before those slots can be used after promotion.
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(example = false))]
+    pub failover: bool,
+}
+
 /// Configuration for an ETL pipeline.
 ///
 /// Contains all settings required to run a replication pipeline including
@@ -296,6 +311,9 @@ pub struct PipelineConfig {
     /// store on a writable endpoint.
     #[serde(default)]
     pub store_pg_connection: Option<PgConnectionConfig>,
+    /// Configuration for the pipeline's logical replication slots.
+    #[serde(default)]
+    pub replication_slot: ReplicationSlotConfig,
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
@@ -505,6 +523,9 @@ pub struct PipelineConfigWithoutSecrets {
     /// When `None`, state storage uses [`Self::pg_connection`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_pg_connection: Option<PgConnectionConfigWithoutSecrets>,
+    /// Configuration for the pipeline's logical replication slots.
+    #[serde(default)]
+    pub replication_slot: ReplicationSlotConfig,
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
@@ -578,6 +599,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             publication_name: value.publication_name,
             pg_connection: value.pg_connection.into(),
             store_pg_connection: value.store_pg_connection.map(Into::into),
+            replication_slot: value.replication_slot,
             batch: value.batch,
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
@@ -655,6 +677,7 @@ mod tests {
         let config: PipelineConfig = serde_json::from_str(json).unwrap();
 
         assert!(config.run_source_migrations);
+        assert_eq!(config.replication_slot, ReplicationSlotConfig::default());
     }
 
     #[test]
@@ -674,15 +697,20 @@ mod tests {
                     "enabled": false
                 }
             },
+            "replication_slot": {
+                "failover": true
+            },
             "run_source_migrations": false
         }"#;
 
         let config: PipelineConfig = serde_json::from_str(json).unwrap();
 
         assert!(!config.run_source_migrations);
+        assert!(config.replication_slot.failover);
 
         let without_secrets = PipelineConfigWithoutSecrets::from(config);
         assert!(!without_secrets.run_source_migrations);
+        assert!(without_secrets.replication_slot.failover);
     }
 
     #[test]
@@ -721,6 +749,7 @@ mod tests {
             publication_name: "publication".to_owned(),
             pg_connection,
             store_pg_connection: None,
+            replication_slot: ReplicationSlotConfig::default(),
             batch: BatchConfig::default(),
             table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
             table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
@@ -746,6 +775,7 @@ mod tests {
             publication_name: "publication".to_owned(),
             pg_connection: pg_connection("replica.local", 5432),
             store_pg_connection: Some(pg_connection("primary.local", 6432)),
+            replication_slot: ReplicationSlotConfig::default(),
             batch: BatchConfig::default(),
             table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
             table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,

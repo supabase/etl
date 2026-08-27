@@ -1,0 +1,14 @@
+---
+source: crates/etl-api/tests/routes/destinations_pipelines.rs
+expression: response.config
+---
+Iceberg {
+    config: Supabase {
+        project_ref: "tsrqponmlkjihgfedcba",
+        warehouse_name: "my-updated-warehouse",
+        namespace: Some(
+            "my-updated-namespace",
+        ),
+        s3_region: "us-west-2",
+    },
+}

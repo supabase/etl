@@ -1,0 +1,11 @@
+mod destinations;
+mod destinations_pipelines;
+mod health_check;
+mod images;
+mod metrics;
+mod pipelines;
+mod runtime_config;
+mod sources;
+mod tenants;
+mod tenants_sources;
+mod v2;
