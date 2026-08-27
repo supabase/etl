@@ -16,6 +16,49 @@ const fn default_ducklake_pool_size() -> u32 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
 }
 
+/// Default DuckLake target data-file size.
+pub const DEFAULT_DUCKLAKE_TARGET_FILE_SIZE: &str = "256MiB";
+/// Default DuckLake Parquet row-group byte limit.
+pub const DEFAULT_DUCKLAKE_PARQUET_ROW_GROUP_SIZE_BYTES: &str = "128MiB";
+/// Default DuckLake Parquet row-group row limit.
+pub const DEFAULT_DUCKLAKE_PARQUET_ROW_GROUP_SIZE: &str = "2500000";
+
+/// DuckLake writer options shared by replication and external maintenance.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DuckLakeWriterConfig {
+    target_file_size: Option<String>,
+    parquet_row_group_size_bytes: Option<String>,
+    parquet_row_group_size: Option<String>,
+}
+
+impl DuckLakeWriterConfig {
+    /// Creates DuckLake writer configuration from optional overrides.
+    pub fn new(
+        target_file_size: Option<String>,
+        parquet_row_group_size_bytes: Option<String>,
+        parquet_row_group_size: Option<String>,
+    ) -> Self {
+        Self { target_file_size, parquet_row_group_size_bytes, parquet_row_group_size }
+    }
+
+    /// Returns the configured target data-file size or its default.
+    pub fn target_file_size(&self) -> &str {
+        self.target_file_size.as_deref().unwrap_or(DEFAULT_DUCKLAKE_TARGET_FILE_SIZE)
+    }
+
+    /// Returns the configured Parquet row-group byte limit or its default.
+    pub fn parquet_row_group_size_bytes(&self) -> &str {
+        self.parquet_row_group_size_bytes
+            .as_deref()
+            .unwrap_or(DEFAULT_DUCKLAKE_PARQUET_ROW_GROUP_SIZE_BYTES)
+    }
+
+    /// Returns the configured Parquet row-group row limit or its default.
+    pub fn parquet_row_group_size(&self) -> &str {
+        self.parquet_row_group_size.as_deref().unwrap_or(DEFAULT_DUCKLAKE_PARQUET_ROW_GROUP_SIZE)
+    }
+}
+
 /// Per-table creation options for BigQuery destinations.
 ///
 /// Applied only when a table is created or recreated (first replication,
@@ -462,6 +505,10 @@ pub enum DestinationConfig {
         metadata_schema: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
+        /// Optional Parquet row-group byte limit.
+        parquet_row_group_size_bytes: Option<String>,
+        /// Optional Parquet row-group row limit.
+        parquet_row_group_size: Option<String>,
         /// Optional DuckLake snapshot-retention interval.
         expire_snapshots_older_than: Option<String>,
         /// External maintenance coordination backend.
@@ -709,6 +756,10 @@ pub enum DestinationConfigWithoutSecrets {
         metadata_schema: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
+        /// Optional Parquet row-group byte limit.
+        parquet_row_group_size_bytes: Option<String>,
+        /// Optional Parquet row-group row limit.
+        parquet_row_group_size: Option<String>,
         /// Optional DuckLake snapshot-retention interval.
         expire_snapshots_older_than: Option<String>,
         /// External maintenance coordination backend.
@@ -784,6 +835,8 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 table_sorting,
@@ -796,6 +849,8 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 table_sorting,
@@ -824,6 +879,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ducklake_writer_config_resolves_defaults_and_overrides() {
+        let defaults = DuckLakeWriterConfig::default();
+        assert_eq!(defaults.target_file_size(), "256MiB");
+        assert_eq!(defaults.parquet_row_group_size_bytes(), "128MiB");
+        assert_eq!(defaults.parquet_row_group_size(), "2500000");
+
+        let configured = DuckLakeWriterConfig::new(
+            Some("64MB".to_owned()),
+            Some("32MB".to_owned()),
+            Some("500000".to_owned()),
+        );
+        assert_eq!(configured.target_file_size(), "64MB");
+        assert_eq!(configured.parquet_row_group_size_bytes(), "32MB");
+        assert_eq!(configured.parquet_row_group_size(), "500000");
+    }
+
+    #[test]
     fn ducklake_without_secrets_omits_catalog_url() {
         let config = DestinationConfig::Ducklake {
             catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned().into(),
@@ -837,6 +909,8 @@ mod tests {
             s3_use_ssl: None,
             metadata_schema: None,
             maintenance_target_file_size: None,
+            parquet_row_group_size_bytes: None,
+            parquet_row_group_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
             table_sorting: DuckLakeTableSortingConfig {
