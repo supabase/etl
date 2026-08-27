@@ -1974,12 +1974,15 @@ async fn write_events_rejects_mismatched_relation_before_applying_recovery() {
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name"]);
 }
 
-/// `write_events` rejects a stale relation before it can reverse applied DDL.
+/// Replay skips a stale relation and durable row prefix, but rejects new work
+/// against the stale schema.
 #[tokio::test(flavor = "multi_thread")]
-async fn write_events_rejects_stale_relation_before_reverse_ddl() {
+async fn write_events_skips_applied_stale_prefix_and_rejects_pending_stale_row() {
     use etl::event::{InsertEvent, RelationEvent};
 
-    let lake = create_test_lake("write_events_rejects_stale_relation_before_reverse_ddl").await;
+    let lake =
+        create_test_lake("write_events_skips_applied_stale_prefix_and_rejects_pending_stale_row")
+            .await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
 
@@ -2032,10 +2035,33 @@ async fn write_events_rejects_stale_relation_before_reverse_ddl() {
         .await
         .unwrap();
 
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                replicated_table_schema: old_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(101_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: old_replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(3), Cell::String("replayed".to_owned())]),
+            }),
+        ])
+        .await
+        .unwrap();
+
     let error = destination
-        .write_events(vec![Event::Relation(RelationEvent {
-            replicated_table_schema: old_replicated_table_schema,
-        })])
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                replicated_table_schema: old_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(102_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: old_replicated_table_schema,
+                table_row: TableRow::new(vec![Cell::I32(4), Cell::String("pending".to_owned())]),
+            }),
+        ])
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);

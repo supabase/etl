@@ -2421,9 +2421,21 @@ where
         let current_snapshot_id = metadata.snapshot_id();
         let current_replication_mask = metadata.replication_mask().clone();
 
+        if new_snapshot_id < current_snapshot_id {
+            info!(
+                table_id = %table_id,
+                applied_snapshot_id = %current_snapshot_id,
+                replayed_snapshot_id = %new_snapshot_id,
+                "ducklake stale schema relation replay skipped"
+            );
+            return Ok(());
+        }
+
         // A relation carries no durable DML sequence key. Reject both schema
-        // rewind and an equal-snapshot mask conflict before either can drive
-        // DuckLake DDL or run ahead of streaming replay-watermark checks.
+        // advancement and an equal-snapshot mask conflict before either can
+        // drive DuckLake DDL. Older relations are harmless replay markers;
+        // later row and truncate handling validates retained events after the
+        // durable streaming watermark has removed an already-applied prefix.
         ensure_relation_schema_transition(
             "DuckLake",
             table_id,
@@ -2968,16 +2980,58 @@ where
 
                     join_set.spawn(async move {
                         for segment in mutation_segments {
-                            let destination_table_name = destination
-                                .ensure_table_ready_for_streaming_schema(
-                                    &segment.replicated_table_schema,
-                                )
-                                .await?;
-                            let _table_write_permit = destination
+                            let destination_table_name = match destination
+                                .applied_table_name_for_replay(&segment.replicated_table_schema)
+                                .await?
+                            {
+                                Some(table_name) => table_name,
+                                None => {
+                                    destination
+                                        .ensure_table_ready_for_streaming_schema(
+                                            &segment.replicated_table_schema,
+                                        )
+                                        .await?
+                                }
+                            };
+                            let replay_table_write_permit = destination
                                 .acquire_table_write_slot(&destination_table_name)
                                 .await?;
                             let replay_epoch = destination
                                 .read_table_replay_epoch(&destination_table_name)
+                                .await?;
+                            let replay_checkpoint_guard =
+                                Arc::clone(&destination.checkpoint_gate).read_owned().await;
+                            let last_sequence_key =
+                                read_table_streaming_progress_sequence_key_blocking(
+                                    destination.streaming_pool()?,
+                                    Arc::clone(&destination.blocking_slots),
+                                    destination_table_name.clone(),
+                                    replay_epoch.clone(),
+                                )
+                                .await?;
+                            // Schema reconciliation acquires the checkpoint gate itself.
+                            drop(replay_checkpoint_guard);
+                            let pending_mutations = retain_mutations_after_sequence_key(
+                                segment.mutations,
+                                last_sequence_key,
+                            );
+                            if pending_mutations.is_empty() {
+                                debug!(
+                                    table = %destination_table_name,
+                                    "ducklake streaming mutation replay skipped, no pending events"
+                                );
+                                continue;
+                            }
+                            // Schema reconciliation also acquires the table write slot.
+                            drop(replay_table_write_permit);
+                            let ready_table_name = destination
+                                .ensure_table_ready_for_streaming_schema(
+                                    &segment.replicated_table_schema,
+                                )
+                                .await?;
+                            debug_assert_eq!(ready_table_name, destination_table_name);
+                            let _table_write_permit = destination
+                                .acquire_table_write_slot(&destination_table_name)
                                 .await?;
                             let checkpoint_wait_started = tokio::time::Instant::now();
                             let _checkpoint_guard =
@@ -2989,25 +3043,6 @@ where
                                     checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
                                     "ducklake waited for checkpoint gate before streaming write"
                                 );
-                            }
-                            let last_sequence_key =
-                                read_table_streaming_progress_sequence_key_blocking(
-                                    destination.streaming_pool()?,
-                                    Arc::clone(&destination.blocking_slots),
-                                    destination_table_name.clone(),
-                                    replay_epoch.clone(),
-                                )
-                                .await?;
-                            let pending_mutations = retain_mutations_after_sequence_key(
-                                segment.mutations,
-                                last_sequence_key,
-                            );
-                            if pending_mutations.is_empty() {
-                                debug!(
-                                    table = %destination_table_name,
-                                    "ducklake streaming mutation replay skipped, no pending events"
-                                );
-                                continue;
                             }
                             let is_first_streaming_batch = last_sequence_key.is_none();
                             info!(
@@ -3080,25 +3115,36 @@ where
                 let mut join_set = JoinSet::new();
 
                 for (_, (replicated_table_schema, truncates)) in truncate_table_ids {
-                    let table_name =
-                        self.prepare_table_for_writes(&replicated_table_schema).await?;
-                    let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
-                    let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
-                    let checkpoint_gate = Arc::clone(&self.checkpoint_gate);
-                    let pools = Arc::clone(&self.pools);
-                    let blocking_slots = Arc::clone(&self.blocking_slots);
+                    let destination = self.clone();
                     join_set.spawn(async move {
-                        let _table_write_permit = table_write_permit;
-                        let _checkpoint_guard = checkpoint_gate.read_owned().await;
-                        let pool = pools.streaming()?;
+                        let table_name = match destination
+                            .applied_table_name_for_replay(&replicated_table_schema)
+                            .await?
+                        {
+                            Some(table_name) => table_name,
+                            None => {
+                                destination
+                                    .ensure_table_ready_for_streaming_schema(
+                                        &replicated_table_schema,
+                                    )
+                                    .await?
+                            }
+                        };
+                        let replay_table_write_permit =
+                            destination.acquire_table_write_slot(&table_name).await?;
+                        let replay_epoch = destination.read_table_replay_epoch(&table_name).await?;
+                        let replay_checkpoint_guard =
+                            Arc::clone(&destination.checkpoint_gate).read_owned().await;
                         let last_sequence_key =
                             read_table_streaming_progress_sequence_key_blocking(
-                                Arc::clone(&pool),
-                                Arc::clone(&blocking_slots),
+                                destination.streaming_pool()?,
+                                Arc::clone(&destination.blocking_slots),
                                 table_name.clone(),
                                 replay_epoch.clone(),
                             )
                             .await?;
+                        // Schema reconciliation acquires the checkpoint gate itself.
+                        drop(replay_checkpoint_guard);
                         let pending_truncates =
                             retain_truncates_after_sequence_key(truncates, last_sequence_key);
                         if pending_truncates.is_empty() {
@@ -3108,13 +3154,29 @@ where
                             );
                             return Ok(());
                         }
+                        // Schema reconciliation also acquires the table write slot.
+                        drop(replay_table_write_permit);
+                        let ready_table_name = destination
+                            .ensure_table_ready_for_streaming_schema(&replicated_table_schema)
+                            .await?;
+                        debug_assert_eq!(ready_table_name, table_name);
+                        let _table_write_permit =
+                            destination.acquire_table_write_slot(&table_name).await?;
+                        let _checkpoint_guard =
+                            Arc::clone(&destination.checkpoint_gate).read_owned().await;
+                        let pool = destination.streaming_pool()?;
 
                         let prepared_batch = prepare_truncate_table_batch(
                             table_name,
                             replay_epoch,
                             pending_truncates,
                         );
-                        apply_table_batch_with_retry(pool, blocking_slots, prepared_batch).await
+                        apply_table_batch_with_retry(
+                            pool,
+                            Arc::clone(&destination.blocking_slots),
+                            prepared_batch,
+                        )
+                        .await
                     });
                 }
 
@@ -3404,6 +3466,27 @@ where
         }
 
         Ok(table_name)
+    }
+
+    /// Resolves an applied table without validating a replayed event schema.
+    ///
+    /// This is only for reading the durable streaming watermark before schema
+    /// validation. Callers must validate the schema before applying any event
+    /// that remains after the already-applied replay prefix is removed.
+    async fn applied_table_name_for_replay(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<Option<DuckLakeTableName>> {
+        let Some(metadata) =
+            self.store.get_destination_table_metadata(replicated_table_schema.id()).await?
+        else {
+            return Ok(None);
+        };
+        if !metadata.is_applied() {
+            return Ok(None);
+        }
+
+        DuckLakeTableName::from_metadata_id(metadata.table_id()).map(Some)
     }
 
     /// Ensures destination metadata and physical columns can accept a row
