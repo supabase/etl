@@ -16,8 +16,9 @@ embed Supabase ETL themselves.
 
 - **PostgreSQL 14 through 18.** PostgreSQL 15 adds publication filtering;
   PostgreSQL 16 adds logical decoding on physical read replicas.
-- Superuser access to the Postgres server
 - Ability to restart Postgres (required for `wal_level` changes)
+- Superuser access to enable logical WAL and, by default, to install ETL source
+  migrations
 
 ## Enable Logical WAL
 
@@ -28,19 +29,40 @@ in the WAL, which external tools can then decode and replicate.
 wal_level = logical
 ```
 
-**Restart Postgres** after changing this setting.
+**Restart Postgres** after changing this setting. Confirm with `SHOW wal_level;`.
+
+## Replication User
+
+ETL needs a login role with the `REPLICATION` privilege. A superuser works for
+local development. For production, create a dedicated role:
+
+```sql
+CREATE ROLE etl_user WITH LOGIN REPLICATION PASSWORD 'placeholder-password';
+GRANT CONNECT ON DATABASE example_database TO etl_user;
+GRANT USAGE ON SCHEMA public TO etl_user;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO etl_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO etl_user;
+```
+
+The role must be able to `SELECT` every published table so ETL can copy existing
+rows. Create the publication as a table owner or superuser; the replication
+role does not have to own the tables.
+
+By default, `Pipeline::start()` also installs ETL source helpers and a
+`ddl_command_end` event trigger. Creating that event trigger requires
+superuser. Either run the pipeline as a superuser, or apply the source
+migrations in `crates/etl/migrations/source/` as an admin and set
+`run_source_migrations: false`.
 
 ## Replication Slots
 
 A replication slot records a consumer's progress and retains the WAL it still
 needs. This lets ETL catch up after a temporary disconnect.
 
-### Creating Replication Slots
-
-```sql
--- Create a logical replication slot
-SELECT pg_create_logical_replication_slot('my_slot', 'pgoutput');
-```
+**ETL creates its logical slots automatically.** Do not pre-create a slot for
+the pipeline. The apply worker uses `supabase_etl_apply_{pipeline_id}`; table
+sync workers create temporary `supabase_etl_table_sync_{pipeline_id}_{table_id}`
+slots during initial sync and drop them when that copy finishes.
 
 ### Viewing Replication Slots
 
@@ -53,8 +75,8 @@ FROM pg_replication_slots;
 ### Deleting Replication Slots
 
 ```sql
--- Drop a replication slot when no longer needed
-SELECT pg_drop_replication_slot('my_slot');
+-- Drop a leftover ETL slot only after the pipeline has stopped
+SELECT pg_drop_replication_slot('supabase_etl_apply_1');
 ```
 
 <Callout className="etl-callout" type="warn" title="Warning">
@@ -153,8 +175,6 @@ available:
 - `lost`: required WAL was removed and the slot is no longer usable.
 - `NULL`: the slot has not reserved WAL yet, usually because `restart_lsn` is `NULL`.
 
-ETL API responses return unknown future Postgres `wal_status` values as `unknown`.
-
 ### Recommendations
 
 - Bound retention with `max_slot_wal_keep_size` based on available disk.
@@ -246,23 +266,12 @@ synchronization](https://www.postgresql.org/docs/17/logicaldecoding-explanation.
 Failover support is disabled by default. Enable it only when the source and
 every intended failover target run PostgreSQL 17 or newer.
 
-Enable the feature in the ETL pipeline configuration:
+Enable the feature in the replicator configuration:
 
-```yaml title="replicator.yaml"
+```yaml title="base.yaml"
 pipeline:
   replication_slot:
     failover: true
-```
-
-For API-managed pipelines, set the same field in the pipeline configuration:
-
-```text
-{
-  "publication_name": "my_publication",
-  "replication_slot": {
-    "failover": true
-  }
-}
 ```
 
 ETL then creates its apply-worker and short-lived table-sync logical slots with
@@ -469,14 +478,16 @@ max_slot_wal_keep_size = 10GB
 After editing the configuration:
 
 1. Restart Postgres
-2. Create your publication:
+2. Create the replication role and grant `SELECT` on the published tables
+3. Create your publication:
    ```sql
    CREATE PUBLICATION etl_publication FOR TABLE your_table;
    ```
-3. Verify the setup:
+4. Verify the setup:
    ```sql
    SHOW wal_level;
    SHOW max_replication_slots;
+   SELECT rolname, rolreplication FROM pg_roles WHERE rolname = 'etl_user';
    SELECT * FROM pg_publication WHERE pubname = 'etl_publication';
    ```
 

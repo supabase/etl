@@ -1,16 +1,16 @@
-# `etl` - Destinations
+# `etl-destinations`
 
-Destination implementations for the ETL system.
-
-Enable the destination modules you need with crate features:
+Built-in destination implementations for [Supabase ETL](https://supabase.github.io/etl/).
+Enable only the destination feature you need when embedding the `etl` crate or
+building `etl-replicator`.
 
 | Feature | Destination | Status |
 | --- | --- | --- |
 | `bigquery` | Google BigQuery | Stable |
 | `clickhouse` | ClickHouse | In progress |
 | `ducklake` | DuckLake | In progress |
-| `iceberg` | Apache Iceberg | Deprecated |
 | `snowflake` | Snowflake | In progress |
+| `iceberg` | Apache Iceberg | Deprecated |
 
 BigQuery is the stable, recommended default. See the
 [Destinations reference](https://supabase.github.io/etl/reference/destinations/)

@@ -1,14 +1,15 @@
-# `etl` Benchmarks
+# `etl-benchmarks`
 
-Performance benchmarks for ETL replication pipelines.
+Performance benchmarks for [Supabase ETL](https://supabase.github.io/etl/)
+replication pipelines.
 
 The preferred entrypoint is:
 
 ```bash
-cargo xtask benchmark
+cargo x benchmark
 ```
 
-`xtask` prepares the source Postgres database, loads TPC-C data when needed,
+`cargo x` prepares the source Postgres database, loads TPC-C data when needed,
 creates the publications, runs the benchmark binaries, and writes JSON reports.
 Use the direct benchmark binaries only when developing the benchmark code itself.
 
@@ -35,7 +36,7 @@ terminal output.
 Local runs need:
 
 - Rust from the repository `rust-toolchain.toml`.
-- Docker, for `cargo xtask postgres start`.
+- Docker, for `cargo x postgres start` (or `cargo x init` for the full local stack).
 - `go-tpc`, for preparing TPC-C data.
 
 Install the pinned `go-tpc` version used by CI:
@@ -59,7 +60,7 @@ The local benchmark source database defaults to:
 Start the local source Postgres instance:
 
 ```bash
-cargo xtask postgres start --shards 1 --base-port 5430 --source-only
+cargo x postgres start --shards 1 --base-port 5430 --source-only
 ```
 
 `xtask benchmark` creates the `bench` database if it does not exist. TPC-C data
@@ -91,7 +92,7 @@ updates, and deletes, drains CDC, and writes reports under
 `target/bench-results-smoke/`.
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --warehouses 1 \
   --streaming-duration-seconds 10 \
   --batch-max-fill-ms 100 \
@@ -109,7 +110,7 @@ This is closer to the default CI-sized run, but still practical on a strong
 developer machine:
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --force-prepare \
   --warehouses 10 \
   --streaming-duration-seconds 300 \
@@ -142,7 +143,7 @@ Override it only when the benchmark host and Postgres instance can sustain more
 workload concurrency:
 
 ```bash
-cargo xtask benchmark --warehouses 20 --tpcc-threads 64
+cargo x benchmark --warehouses 20 --tpcc-threads 64
 ```
 
 ## Controlling Row Counts
@@ -182,7 +183,7 @@ the requested target. The command also prints `pg_total_relation_size` so
 relation bloat and physical growth are visible during the run:
 
 ```bash
-cargo xtask pg-fill-table \
+cargo x pg-fill-table \
   --host my-db.example.com \
   --port 5432 \
   --database bench \
@@ -207,7 +208,7 @@ replication do not matter.
 Run only the table-copy benchmark:
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --skip-table-streaming \
   --force-prepare \
   --warehouses 10 \
@@ -217,7 +218,7 @@ cargo xtask benchmark \
 Run only the table-streaming benchmark:
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --skip-table-copy \
   --skip-prepare \
   --streaming-duration-seconds 300 \
@@ -229,7 +230,7 @@ cargo xtask benchmark \
 For BigQuery, provide destination configuration and service account credentials:
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --destination bigquery \
   --bq-project-id my-gcp-project \
   --bq-dataset-id my_dataset \
@@ -250,7 +251,7 @@ Snowflake credentials are read from environment variables.
 Set `BENCH_SNOWFLAKE_CONNECTION` in `.env` (see `crates/etl-destinations/src/snowflake/README.md`):
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --destination snowflake \
   --warehouses 1 \
   --streaming-duration-seconds 10
@@ -275,7 +276,7 @@ to point at any other ClickHouse 23.5 or newer (required by the default
 Run the benchmark:
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --destination clickhouse \
   --warehouses 1 \
   --streaming-duration-seconds 10
@@ -345,7 +346,7 @@ starts the `clickhouse` service from `scripts/docker/docker-compose.yaml` and po
 the benchmark at it (user `etl`, database `default`); no secrets are needed.
 
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs
-`cargo xtask benchmark` with three measured samples plus one warmup sample,
+`cargo x benchmark` with three measured samples plus one warmup sample,
 compares the median reports against the most recent successful
 `benchmark-results` artifact on the same ref, and uploads
 `target/bench-results/*.json`. The GitHub step summary contains the benchmark
@@ -364,7 +365,7 @@ benchmark.
 The comparison is also available locally when you have two result directories:
 
 ```bash
-cargo xtask benchmark-compare \
+cargo x benchmark-compare \
   --previous-dir target/bench-results-old \
   --current-dir target/bench-results \
   --output target/bench-results/benchmark-comparison.md
@@ -429,7 +430,7 @@ not raw WAL bytes, network bytes, or destination billing bytes.
 
 ## Direct Benchmark Binaries
 
-Prefer `cargo xtask benchmark`. Direct invocation expects that the database,
+Prefer `cargo x benchmark`. Direct invocation expects that the database,
 tables, publications, and table IDs already exist.
 
 To find TPC-C table IDs for a direct `table_copy` run:

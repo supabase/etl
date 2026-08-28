@@ -6,10 +6,13 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "env"] }
 etl-api = { path = "../etl-api", default-features = false }
 etl-config = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
+rand = { workspace = true, features = ["std", "thread_rng"] }
+secrecy = { workspace = true }
 kube = { workspace = true, features = ["client", "derive", "rustls-tls", "ring"] }
 pg_escape = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }

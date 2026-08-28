@@ -64,8 +64,8 @@ Supabase ETL replicates each table in two phases:
 
 1. **Initial sync:** Copy the existing rows selected by the publication, then
    catch up changes that occurred while the copy was running.
-2. **Ongoing replication:** Capture new inserts, updates, deletes, and truncates,
-   then deliver those changes as ordered events.
+2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and
+   truncates, then deliver those changes as ordered events.
 
 Across both phases, a store persists checkpoints, schemas, destination
 metadata, and table state so replication can recover safely after a restart.
@@ -132,8 +132,15 @@ for the complete setup and production guidance.
 
 ## Development
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for local setup, migrations, formatting,
-linting, and tests. The workspace uses Rust 1.95.0 from `rust-toolchain.toml`.
+```bash
+cargo x init              # Docker, databases, migrations
+cargo x setup api && cargo x run api
+cargo x setup replicator --destination clickhouse && cargo x seed && cargo x run replicator
+```
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) to start the replicator or API, pick a
+destination, and run tests. The workspace uses Rust 1.95.0 from
+`rust-toolchain.toml`.
 
 ## Contributing
 

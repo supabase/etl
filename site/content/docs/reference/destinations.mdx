@@ -38,22 +38,17 @@ behavior. These semantics apply consistently to initial copy, inserts, and
 updates.
 
 ETL returns a local error only when it cannot construct a faithful wire
-representation. The ETL API may also emit non-blocking preflight warnings for
-known destination differences, but those warnings do not add per-cell runtime
+representation. Known destination differences do not add per-cell runtime
 validation. Test destination-specific value semantics that matter to your
 workload.
 
 ## Publication column additions
 
 An existing column newly exposed by a publication is added as nullable so old
-destination rows remain `NULL`; future row events carry the real PostgreSQL
-value. Defaults are installed only when they cannot affect old rows. BigQuery
-supports that future-only behavior, while ClickHouse, DuckLake, and Snowflake
-omit the default. BigQuery and ClickHouse reject publication-added arrays
-because they cannot represent the unknown historical value as `NULL`.
-
-See [Publication column changes](/explanation/schema-changes/#publication-column-changes)
-for the complete policy.
+destination rows remain `NULL`. Defaults and array handling differ by
+destination. See [Publication column
+changes](/explanation/schema-changes/#publication-column-changes) for the
+complete policy.
 
 ## Destination ownership
 
@@ -87,9 +82,8 @@ when a table is created or recreated, never to a table that already exists.
 Restarting a pipeline does not modify an existing table, and changing either
 setting has no effect until the table is created again. A table is created,
 and so picks up the current settings, when it is replicated for the first
-time, when its replication state is reset (for example from the dashboard
-or the pipeline resync API), or when a source truncate makes ETL create a
-new physical table.
+time, when its replication state is reset, or when a source truncate makes
+ETL create a new physical table.
 
 ```yaml
 destination:

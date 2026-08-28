@@ -29,16 +29,17 @@ path.
 ## Prerequisites
 
 - Rust 1.95.0, as pinned by `rust-toolchain.toml`.
-- PostgreSQL 14 through 18 configured for logical replication.
-- A publication containing the tables and operations you want to replicate.
-- A Google Cloud project with the BigQuery API enabled and a dataset for the
-  replicated tables.
-- A service account with the BigQuery Data Editor and BigQuery Job User roles.
+- PostgreSQL 14 through 18 configured for logical replication, including a
+  replication user and publication. Complete
+  [Configure Postgres](/guides/configure-postgres/) first.
+- For this BigQuery walkthrough: a Google Cloud project with the BigQuery API
+  enabled, a dataset for the replicated tables, and a service account with the
+  BigQuery Data Editor and BigQuery Job User roles.
 
-Complete [Configure Postgres](/guides/configure-postgres/) before starting the
-replicator. PostgreSQL 15 or newer is recommended for column and row
-publication filters, and PostgreSQL 16 or newer is required when replication
-connects to a physical read replica.
+PostgreSQL 15 or newer is recommended for column and row publication filters,
+and PostgreSQL 16 or newer is required when replication connects to a physical
+read replica. Other built-in destinations use the same binary with a different
+`--features` flag; see [Destinations](/reference/destinations/).
 
 ## Build the binary
 

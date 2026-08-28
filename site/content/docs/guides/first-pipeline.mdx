@@ -15,11 +15,15 @@ replicates row changes through a small custom `Destination`.
 ## Prerequisites
 
 - Rust toolchain 1.95.0, matching `rust-toolchain.toml`
-- Postgres 14+ with logical replication enabled (`wal_level = logical` in `postgresql.conf`)
+- PostgreSQL 14 through 18 with `wal_level = logical`
+- A Postgres user with `LOGIN` and `REPLICATION`. A local superuser such as
+  `postgres` is enough for this tutorial.
 - Basic familiarity with Rust and SQL
 
 New to Postgres logical replication? Read
-[Logical Replication](/explanation/concepts/) first.
+[Logical Replication](/explanation/concepts/) first. For production settings,
+publications, and a dedicated replication user, see
+[Configure Postgres](/guides/configure-postgres/).
 
 ## Create the project [#create-the-project] [step]
 
@@ -62,8 +66,9 @@ INSERT INTO users (name, email) VALUES
 CREATE PUBLICATION my_publication FOR TABLE users;
 ```
 
-**Check:** `SELECT * FROM pg_publication WHERE pubname = 'my_publication';`
-returns one row.
+**Check:** `SHOW wal_level;` returns `logical`, and
+`SELECT * FROM pg_publication WHERE pubname = 'my_publication';` returns one
+row.
 
 ## Write the pipeline [#write-the-pipeline] [step]
 
@@ -190,8 +195,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
   The example reads the standard `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`,
   and `PGPASSWORD` environment variables, with local defaults where possible.
   `Pipeline::start()` installs the ETL **source-side schema helpers** before
-  replication begins, even when the tutorial keeps runtime state in
-  `MemoryStore`.
+  replication begins. `MemoryStore` is for this tutorial only: it does not
+  survive process restart. Production pipelines should use `PostgresStore` or
+  another durable [store](/guides/custom-implementations/).
 </Callout>
 
 ## Run the pipeline [#run-the-pipeline] [step]

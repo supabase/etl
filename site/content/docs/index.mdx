@@ -70,12 +70,16 @@ pricing, and operations—use the
 
 Supabase ETL replicates each table in two phases:
 
-1. **Initial sync:** Copy the existing rows selected by the publication.
+1. **Initial sync:** Copy the existing rows selected by the publication, then
+   catch up changes that occurred while the copy was running.
 2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and
    truncates, then deliver those changes as ordered [events](/explanation/events/).
 
-Across both phases, a [store](/explanation/traits/) persists checkpoints and
-table state so replication can recover safely after a restart.
+Across both phases, a [store](/explanation/traits/) persists checkpoints,
+schemas, destination metadata, and table state so replication can recover
+safely after a restart. Copy and change data capture (CDC) are replication
+paths, not customer-visible phases. Initial sync uses the copy path followed by
+CDC catch-up; ongoing replication uses the CDC path after the table is ready.
 
 Continue with the [First Pipeline tutorial](/guides/first-pipeline/), or read the
 [architecture overview](/explanation/architecture/) before integrating ETL.

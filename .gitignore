@@ -44,6 +44,7 @@ pyvenv.cfg
 vendor/duckdb/extensions/
 
 # Configuration files
+crates/etl-api/configuration
 crates/etl-replicator/configuration
 configuration
 

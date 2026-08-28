@@ -4,7 +4,7 @@ use std::{
     process::Command,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use xshell::Cmd;
 
@@ -112,7 +112,7 @@ impl CargoFeatureSelection {
 }
 
 /// Destination-specific xtask preset.
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum DestinationPreset {
     /// BigQuery destination.
     #[value(name = "bigquery")]
@@ -132,8 +132,13 @@ pub(crate) enum DestinationPreset {
 }
 
 impl DestinationPreset {
+    /// Returns every destination preset.
+    pub(crate) const fn all() -> [Self; 5] {
+        [Self::BigQuery, Self::ClickHouse, Self::DuckLake, Self::Iceberg, Self::Snowflake]
+    }
+
     /// Returns the Cargo feature for this destination.
-    fn feature(self) -> &'static str {
+    pub(crate) fn feature(self) -> &'static str {
         match self {
             DestinationPreset::BigQuery => "bigquery",
             DestinationPreset::ClickHouse => "clickhouse",
@@ -141,6 +146,43 @@ impl DestinationPreset {
             DestinationPreset::Iceberg => "iceberg",
             DestinationPreset::Snowflake => "snowflake",
         }
+    }
+
+    /// Returns a short status label used in local setup output.
+    pub(crate) fn status_label(self) -> &'static str {
+        match self {
+            Self::BigQuery => "stable, needs GCP credentials",
+            Self::ClickHouse => "local Docker from cargo x init, no cloud credentials",
+            Self::DuckLake => "in progress, needs catalog + object storage",
+            Self::Iceberg => "deprecated; REST uses local Docker, supabase needs cloud credentials",
+            Self::Snowflake => "in progress, needs key-pair credentials",
+        }
+    }
+
+    /// Parses a destination name from flags or interactive input.
+    pub(crate) fn parse(name: &str) -> Result<Self> {
+        match Self::from_str(name, true) {
+            Ok(destination) => Ok(destination),
+            Err(_) => {
+                bail!(
+                    "Unknown destination `{name}`. Use bigquery, clickhouse, ducklake, iceberg, \
+                     or snowflake."
+                )
+            }
+        }
+    }
+
+    /// Prints the destination menu for local setup.
+    pub(crate) fn print_choices() {
+        println!("Destinations:");
+        for destination in Self::all() {
+            println!(
+                "  --destination {:<10}  {}",
+                destination.feature(),
+                destination.status_label()
+            );
+        }
+        println!();
     }
 }
 

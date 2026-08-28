@@ -1,9 +1,15 @@
-# Snowflake Destination
+# Snowflake
+
+Snowflake destination for [Supabase ETL](https://supabase.github.io/etl/).
+Status: In progress. See the
+[Destinations reference](https://supabase.github.io/etl/reference/destinations/)
+and the [`etl-examples` Snowflake section](../../../etl-examples/README.md#snowflake)
+for the runnable example.
 
 ## Running Integration Tests
 
 The easiest way to run the full Snowflake test suite (API tests, validator integration, and
-destination integration) is a single xtask command:
+destination integration) is a single `cargo x` command:
 
 ```bash
 cargo x test-snowflake

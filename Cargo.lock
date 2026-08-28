@@ -7925,14 +7925,17 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "etl-api",
  "etl-config",
  "k8s-openapi",
  "kube",
  "pg_escape",
+ "rand 0.9.4",
  "reqwest",
  "schemars 0.8.22",
+ "secrecy",
  "serde",
  "serde_json",
  "sqlx",
