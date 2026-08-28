@@ -201,10 +201,14 @@ impl TruncateEvent {
 /// PostgreSQL generates relation messages at runtime from `pgoutput`'s
 /// session-local schema cache; they are not WAL-backed changes. Which relation
 /// messages appear is therefore session-dependent: a fresh session resets the
-/// cache and can re-emit schema metadata during replay. This event
-/// intentionally has no LSN, transaction ordinal, or sequence key because such
-/// metadata would not be a durable replay identity. Consumers should instead
-/// treat it as an ordered schema barrier for the row events that follow it.
+/// cache and can re-emit schema metadata during replay. ETL also emits this
+/// event when a stored schema snapshot is materialized for a following insert,
+/// update, or delete because pgoutput omitted a protocol relation. Truncate
+/// does not use that path: pgoutput emits a protocol relation first. This
+/// event intentionally has no LSN, transaction ordinal, or sequence key
+/// because such metadata would not be a durable replay identity. Consumers
+/// should instead treat it as an ordered schema barrier for the row events
+/// that follow it.
 ///
 /// The carried [`crate::schema::SnapshotId`] identifies the underlying stored
 /// table schema, and it is created as `0:0` when a table is just copied. Then
