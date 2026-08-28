@@ -29,7 +29,7 @@ use etl_config::{
     ducklake_catalog_metadata_connect_options,
     shared::{
         DuckLakeCopyBufferConfig, DuckLakeSortBy, DuckLakeSortColumn, DuckLakeSortDirection,
-        DuckLakeSortNulls, DuckLakeTableSortingConfig, Validate,
+        DuckLakeSortNulls, DuckLakeTableSortingConfig, DuckLakeWriterConfig, Validate,
     },
 };
 use metrics::gauge;
@@ -69,9 +69,9 @@ use crate::{
             run_duckdb_dedicated_blocking_with_context,
         },
         config::{
-            MAINTENANCE_TARGET_FILE_SIZE, MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, build_setup_plan,
-            current_duckdb_extension_strategy, maintenance_target_file_size_sql,
-            resolve_expire_snapshots_older_than, validate_expire_snapshots_older_than_sql,
+            MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, build_setup_plan, current_duckdb_extension_strategy,
+            maintenance_target_file_size_sql, resolve_expire_snapshots_older_than,
+            validate_expire_snapshots_older_than_sql,
         },
         external_maintenance::ExternalMaintenanceOperations,
         inline_size::DuckLakePendingInlineSizeSampler,
@@ -558,6 +558,10 @@ pub struct DuckLakeDestinationBuilder<S> {
     metadata_schema: Option<String>,
     /// Optional target size used by DuckLake maintenance.
     maintenance_target_file_size: Option<String>,
+    /// Optional Parquet row-group byte limit.
+    parquet_row_group_size_bytes: Option<String>,
+    /// Optional Parquet row-group row limit.
+    parquet_row_group_size: Option<String>,
     /// Optional snapshot-retention interval.
     expire_snapshots_older_than: Option<String>,
     /// Initial-copy buffering policy.
@@ -581,6 +585,8 @@ impl<S> DuckLakeDestinationBuilder<S> {
             s3: None,
             metadata_schema: None,
             maintenance_target_file_size: None,
+            parquet_row_group_size_bytes: None,
+            parquet_row_group_size: None,
             expire_snapshots_older_than: None,
             copy_buffer_config: DuckLakeCopyBufferConfig::default(),
             table_sorting: DuckLakeTableSortingConfig::default(),
@@ -607,6 +613,21 @@ impl<S> DuckLakeDestinationBuilder<S> {
         maintenance_target_file_size: Option<String>,
     ) -> Self {
         self.maintenance_target_file_size = maintenance_target_file_size;
+        self
+    }
+
+    /// Sets the optional Parquet row-group byte limit.
+    pub fn parquet_row_group_size_bytes(
+        mut self,
+        parquet_row_group_size_bytes: Option<String>,
+    ) -> Self {
+        self.parquet_row_group_size_bytes = parquet_row_group_size_bytes;
+        self
+    }
+
+    /// Sets the optional Parquet row-group row limit.
+    pub fn parquet_row_group_size(mut self, parquet_row_group_size: Option<String>) -> Self {
+        self.parquet_row_group_size = parquet_row_group_size;
         self
     }
 
@@ -647,13 +668,18 @@ where
 {
     /// Validates the configuration and creates the destination.
     pub async fn build(self) -> EtlResult<DuckLakeDestination<S>> {
+        let writer_config = DuckLakeWriterConfig::new(
+            self.maintenance_target_file_size,
+            self.parquet_row_group_size_bytes,
+            self.parquet_row_group_size,
+        );
         DuckLakeDestination::new_inner(
             self.catalog_url,
             self.data_path,
             self.pool_size,
             self.s3,
             self.metadata_schema,
-            self.maintenance_target_file_size,
+            writer_config,
             self.expire_snapshots_older_than,
             self.copy_buffer_config,
             self.table_sorting,
@@ -1614,7 +1640,7 @@ where
     ///   tables (e.g. `"ducklake"`). Uses the catalog default schema when not
     ///   set.
     /// - `maintenance_target_file_size`: Optional DuckLake maintenance
-    ///   `target_file_size` value (e.g. `"500MB"`). Defaults to `500MB`.
+    ///   `target_file_size` value (e.g. `"256MiB"`). Defaults to `"256MiB"`.
     /// - `expire_snapshots_older_than`: Optional DuckLake snapshot-retention
     ///   interval (e.g. `"7 days"`). Defaults to `7 days`.
     /// - `duckdb_log`: Optional DuckDB log storage and shutdown dump paths.
@@ -1645,6 +1671,34 @@ where
             .expire_snapshots_older_than(expire_snapshots_older_than)
             .build()
             .await
+    }
+
+    /// Creates a new DuckLake destination with explicit writer configuration.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_writer_config(
+        catalog_url: Url,
+        data_path: Url,
+        pool_size: u32,
+        s3: Option<S3Config>,
+        metadata_schema: Option<String>,
+        writer_config: DuckLakeWriterConfig,
+        expire_snapshots_older_than: Option<String>,
+        store: S,
+    ) -> EtlResult<Self> {
+        Self::new_inner(
+            catalog_url,
+            data_path,
+            pool_size,
+            s3,
+            metadata_schema,
+            writer_config,
+            expire_snapshots_older_than,
+            DuckLakeCopyBufferConfig::default(),
+            DuckLakeTableSortingConfig::default(),
+            DuckLakeExternalMaintenanceConfig::default(),
+            store,
+        )
+        .await
     }
 
     /// Creates a new DuckLake destination with explicit external maintenance
@@ -1705,7 +1759,7 @@ where
         pool_size: u32,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
-        maintenance_target_file_size: Option<String>,
+        writer_config: DuckLakeWriterConfig,
         expire_snapshots_older_than: Option<String>,
         copy_buffer_config: DuckLakeCopyBufferConfig,
         table_sorting: DuckLakeTableSortingConfig,
@@ -1749,9 +1803,7 @@ where
 
         let extension_strategy = current_duckdb_extension_strategy()?;
         let disable_extension_autoload = extension_strategy.disables_autoload();
-        let maintenance_target_file_size = Arc::<str>::from(
-            maintenance_target_file_size.unwrap_or_else(|| MAINTENANCE_TARGET_FILE_SIZE.to_owned()),
-        );
+        let target_file_size = Arc::<str>::from(writer_config.target_file_size());
         let expire_snapshots_older_than = Arc::<str>::from(
             resolve_expire_snapshots_older_than(expire_snapshots_older_than.as_deref()).to_owned(),
         );
@@ -1765,6 +1817,7 @@ where
             &data_path,
             s3.as_ref(),
             metadata_schema.as_deref(),
+            &writer_config,
             ATTACH_DATA_INLINING_ROW_LIMIT,
         )?);
         let copy_setup_plan = Arc::new(build_setup_plan(
@@ -1772,6 +1825,7 @@ where
             &data_path,
             s3.as_ref(),
             metadata_schema.as_deref(),
+            &writer_config,
             COPY_DATA_INLINING_ROW_LIMIT,
         )?);
 
@@ -1800,8 +1854,7 @@ where
         // `target_file_size` is a catalog-wide DuckLake option consumed during
         // compaction. Apply it once on the write pool so foreground writes and
         // external maintenance jobs use the same configured catalog option.
-        let target_file_size_sql =
-            maintenance_target_file_size_sql(Some(maintenance_target_file_size.as_ref()));
+        let target_file_size_sql = maintenance_target_file_size_sql(target_file_size.as_ref());
         run_duckdb_blocking(
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),

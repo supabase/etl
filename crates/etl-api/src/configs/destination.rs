@@ -163,13 +163,29 @@ pub enum ApiDestinationConfig {
         )]
         metadata_schema: Option<String>,
         /// Optional DuckLake maintenance target file size.
-        #[schema(example = "500MB")]
+        #[schema(example = "256MiB")]
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "crate::utils::trim_option_string"
         )]
         maintenance_target_file_size: Option<String>,
+        /// Optional Parquet row-group byte limit.
+        #[schema(example = "128MiB")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        parquet_row_group_size_bytes: Option<String>,
+        /// Optional Parquet row-group row limit.
+        #[schema(example = "2500000")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        parquet_row_group_size: Option<String>,
         /// Optional DuckLake snapshot-retention interval.
         #[schema(example = "7 days")]
         #[serde(
@@ -298,6 +314,12 @@ pub enum StrippedApiDestinationConfig {
         /// Optional DuckLake maintenance target file size.
         #[serde(skip_serializing_if = "Option::is_none")]
         maintenance_target_file_size: Option<String>,
+        /// Optional Parquet row-group byte limit.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parquet_row_group_size_bytes: Option<String>,
+        /// Optional Parquet row-group row limit.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parquet_row_group_size: Option<String>,
         /// Optional DuckLake snapshot-retention interval.
         #[serde(skip_serializing_if = "Option::is_none")]
         expire_snapshots_older_than: Option<String>,
@@ -427,6 +449,10 @@ where
 /// defaults rather than members from the stored configuration. A nested config
 /// is patchable member by member only when it has a dedicated update type, such
 /// as [`UpdateApiIcebergConfig`].
+///
+/// Variants mirror the stable serialized patch shapes, so they remain inline
+/// even though the DuckLake variant is larger than the others.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateApiDestinationConfig {
@@ -596,13 +622,29 @@ pub enum UpdateApiDestinationConfig {
         )]
         metadata_schema: UpdateField<String>,
         /// Optional DuckLake maintenance target file size.
-        #[schema(example = "500MB")]
+        #[schema(example = "256MiB")]
         #[serde(
             default,
             skip_serializing_if = "UpdateField::is_preserve",
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         maintenance_target_file_size: UpdateField<String>,
+        /// Optional Parquet row-group byte limit.
+        #[schema(example = "128MiB")]
+        #[serde(
+            default,
+            skip_serializing_if = "UpdateField::is_preserve",
+            deserialize_with = "deserialize_update_trimmed_string"
+        )]
+        parquet_row_group_size_bytes: UpdateField<String>,
+        /// Optional Parquet row-group row limit.
+        #[schema(example = "2500000")]
+        #[serde(
+            default,
+            skip_serializing_if = "UpdateField::is_preserve",
+            deserialize_with = "deserialize_update_trimmed_string"
+        )]
+        parquet_row_group_size: UpdateField<String>,
         /// Optional DuckLake snapshot-retention interval.
         #[schema(example = "7 days")]
         #[serde(
@@ -726,6 +768,8 @@ impl UpdateApiDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -745,6 +789,10 @@ impl UpdateApiDestinationConfig {
                 maintenance_target_file_size: UpdateField::from_option(
                     maintenance_target_file_size,
                 ),
+                parquet_row_group_size_bytes: UpdateField::from_option(
+                    parquet_row_group_size_bytes,
+                ),
+                parquet_row_group_size: UpdateField::from_option(parquet_row_group_size),
                 expire_snapshots_older_than: UpdateField::from_option(expire_snapshots_older_than),
                 maintenance_mode: UpdateField::Set(maintenance_mode),
                 copy_buffer: UpdateField::Set(copy_buffer),
@@ -853,6 +901,8 @@ impl UpdateApiDestinationConfig {
                     s3_use_ssl,
                     metadata_schema,
                     maintenance_target_file_size,
+                    parquet_row_group_size_bytes,
+                    parquet_row_group_size,
                     expire_snapshots_older_than,
                     maintenance_mode,
                     copy_buffer,
@@ -871,6 +921,8 @@ impl UpdateApiDestinationConfig {
                     s3_use_ssl: stored_s3_use_ssl,
                     metadata_schema: stored_metadata_schema,
                     maintenance_target_file_size: stored_maintenance_target_file_size,
+                    parquet_row_group_size_bytes: stored_parquet_row_group_size_bytes,
+                    parquet_row_group_size: stored_parquet_row_group_size,
                     expire_snapshots_older_than: stored_expire_snapshots_older_than,
                     maintenance_mode: stored_maintenance_mode,
                     copy_buffer: stored_copy_buffer,
@@ -897,6 +949,10 @@ impl UpdateApiDestinationConfig {
                 metadata_schema: metadata_schema.apply_to_option(stored_metadata_schema),
                 maintenance_target_file_size: maintenance_target_file_size
                     .apply_to_option(stored_maintenance_target_file_size),
+                parquet_row_group_size_bytes: parquet_row_group_size_bytes
+                    .apply_to_option(stored_parquet_row_group_size_bytes),
+                parquet_row_group_size: parquet_row_group_size
+                    .apply_to_option(stored_parquet_row_group_size),
                 expire_snapshots_older_than: expire_snapshots_older_than
                     .apply_to_option(stored_expire_snapshots_older_than),
                 maintenance_mode: maintenance_mode
@@ -1021,6 +1077,8 @@ impl UpdateApiDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -1045,6 +1103,8 @@ impl UpdateApiDestinationConfig {
                 s3_use_ssl: s3_use_ssl.apply_to_option(None),
                 metadata_schema: metadata_schema.apply_to_option(None),
                 maintenance_target_file_size: maintenance_target_file_size.apply_to_option(None),
+                parquet_row_group_size_bytes: parquet_row_group_size_bytes.apply_to_option(None),
+                parquet_row_group_size: parquet_row_group_size.apply_to_option(None),
                 expire_snapshots_older_than: expire_snapshots_older_than.apply_to_option(None),
                 maintenance_mode: maintenance_mode.apply_to_value(
                     DuckLakeMaintenanceMode::default(),
@@ -1191,6 +1251,8 @@ impl From<StoredDestinationConfig> for ApiDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -1208,6 +1270,8 @@ impl From<StoredDestinationConfig> for ApiDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -1268,6 +1332,8 @@ impl From<StoredDestinationConfig> for StrippedApiDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -1281,6 +1347,8 @@ impl From<StoredDestinationConfig> for StrippedApiDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -1332,6 +1400,8 @@ pub enum StoredDestinationConfig {
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
         maintenance_target_file_size: Option<String>,
+        parquet_row_group_size_bytes: Option<String>,
+        parquet_row_group_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
         maintenance_mode: DuckLakeMaintenanceMode,
         copy_buffer: DuckLakeCopyBufferConfig,
@@ -1426,6 +1496,8 @@ impl StoredDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -1442,6 +1514,8 @@ impl StoredDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -1541,6 +1615,8 @@ impl From<ApiDestinationConfig> for StoredDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -1558,6 +1634,8 @@ impl From<ApiDestinationConfig> for StoredDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -1692,6 +1770,8 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -1722,6 +1802,8 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     s3_use_ssl,
                     metadata_schema,
                     maintenance_target_file_size,
+                    parquet_row_group_size_bytes,
+                    parquet_row_group_size,
                     expire_snapshots_older_than,
                     maintenance_mode,
                     copy_buffer,
@@ -1757,6 +1839,11 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
     }
 }
 
+/// Encrypted destination configuration persisted by the ETL API.
+///
+/// Variants mirror the stable serialized config shapes, so they remain inline
+/// even though the DuckLake variant is larger than the others.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptedStoredDestinationConfig {
@@ -1807,6 +1894,10 @@ pub enum EncryptedStoredDestinationConfig {
         metadata_schema: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         maintenance_target_file_size: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parquet_row_group_size_bytes: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parquet_row_group_size: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expire_snapshots_older_than: Option<String>,
         #[serde(default)]
@@ -1953,6 +2044,8 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -1985,6 +2078,8 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 s3_use_ssl,
                 metadata_schema,
                 maintenance_target_file_size,
+                parquet_row_group_size_bytes,
+                parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
                 copy_buffer,
@@ -2549,6 +2644,8 @@ mod tests {
             s3_use_ssl: None,
             metadata_schema: None,
             maintenance_target_file_size: None,
+            parquet_row_group_size_bytes: None,
+            parquet_row_group_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
             copy_buffer: DuckLakeCopyBufferConfig::default(),
@@ -2631,6 +2728,8 @@ mod tests {
                 s3_use_ssl: Some(true),
                 metadata_schema: Some("ducklake".to_owned()),
                 maintenance_target_file_size: None,
+                parquet_row_group_size_bytes: None,
+                parquet_row_group_size: None,
                 expire_snapshots_older_than: None,
                 maintenance_mode: DuckLakeMaintenanceMode::Disabled,
                 copy_buffer: DuckLakeCopyBufferConfig::default(),
@@ -3450,6 +3549,84 @@ mod tests {
     }
 
     #[test]
+    fn update_api_destination_config_preserves_clears_and_replaces_ducklake_writer_options() {
+        let mut stored_config: StoredDestinationConfig =
+            ducklake_api_config(DuckLakeTableSortingConfig::default()).into();
+        let StoredDestinationConfig::Ducklake {
+            maintenance_target_file_size,
+            parquet_row_group_size_bytes,
+            parquet_row_group_size,
+            ..
+        } = &mut stored_config
+        else {
+            panic!("Config type doesn't match");
+        };
+        *maintenance_target_file_size = Some("256MiB".to_owned());
+        *parquet_row_group_size_bytes = Some("128MiB".to_owned());
+        *parquet_row_group_size = Some("2500000".to_owned());
+
+        let preserve: UpdateApiDestinationConfig =
+            serde_json::from_value(serde_json::json!({"ducklake": {}})).unwrap();
+        let preserved = preserve.merge_into_stored(stored_config.clone()).unwrap();
+        let StoredDestinationConfig::Ducklake {
+            maintenance_target_file_size,
+            parquet_row_group_size_bytes,
+            parquet_row_group_size,
+            ..
+        } = preserved
+        else {
+            panic!("Config type doesn't match");
+        };
+        assert_eq!(maintenance_target_file_size.as_deref(), Some("256MiB"));
+        assert_eq!(parquet_row_group_size_bytes.as_deref(), Some("128MiB"));
+        assert_eq!(parquet_row_group_size.as_deref(), Some("2500000"));
+
+        let clear: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "ducklake": {
+                "maintenance_target_file_size": null,
+                "parquet_row_group_size_bytes": null,
+                "parquet_row_group_size": null
+            }
+        }))
+        .unwrap();
+        let cleared = clear.merge_into_stored(stored_config.clone()).unwrap();
+        let StoredDestinationConfig::Ducklake {
+            maintenance_target_file_size,
+            parquet_row_group_size_bytes,
+            parquet_row_group_size,
+            ..
+        } = cleared
+        else {
+            panic!("Config type doesn't match");
+        };
+        assert_eq!(maintenance_target_file_size, None);
+        assert_eq!(parquet_row_group_size_bytes, None);
+        assert_eq!(parquet_row_group_size, None);
+
+        let replace: UpdateApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "ducklake": {
+                "maintenance_target_file_size": "64MB",
+                "parquet_row_group_size_bytes": "32MB",
+                "parquet_row_group_size": "500000"
+            }
+        }))
+        .unwrap();
+        let replaced = replace.merge_into_stored(stored_config).unwrap();
+        let StoredDestinationConfig::Ducklake {
+            maintenance_target_file_size,
+            parquet_row_group_size_bytes,
+            parquet_row_group_size,
+            ..
+        } = replaced
+        else {
+            panic!("Config type doesn't match");
+        };
+        assert_eq!(maintenance_target_file_size.as_deref(), Some("64MB"));
+        assert_eq!(parquet_row_group_size_bytes.as_deref(), Some("32MB"));
+        assert_eq!(parquet_row_group_size.as_deref(), Some("500000"));
+    }
+
+    #[test]
     fn update_api_destination_config_replaces_provided_bigquery_secret() {
         let stored_config = StoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
@@ -3798,6 +3975,8 @@ mod tests {
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
+            parquet_row_group_size_bytes: Some("5MB".to_owned()),
+            parquet_row_group_size: Some("100000".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
             copy_buffer: DuckLakeCopyBufferConfig {
@@ -3831,6 +4010,8 @@ mod tests {
                     s3_use_ssl: ssl1,
                     metadata_schema: m1,
                     maintenance_target_file_size: target1,
+                    parquet_row_group_size_bytes: row_group_bytes1,
+                    parquet_row_group_size: row_group_rows1,
                     expire_snapshots_older_than: expire1,
                     maintenance_mode: mode1,
                     copy_buffer: buffer1,
@@ -3849,6 +4030,8 @@ mod tests {
                     s3_use_ssl: ssl2,
                     metadata_schema: m2,
                     maintenance_target_file_size: target2,
+                    parquet_row_group_size_bytes: row_group_bytes2,
+                    parquet_row_group_size: row_group_rows2,
                     expire_snapshots_older_than: expire2,
                     maintenance_mode: mode2,
                     copy_buffer: buffer2,
@@ -3876,6 +4059,8 @@ mod tests {
                 assert_eq!(ssl1, ssl2);
                 assert_eq!(m1, m2);
                 assert_eq!(target1, target2);
+                assert_eq!(row_group_bytes1, row_group_bytes2);
+                assert_eq!(row_group_rows1, row_group_rows2);
                 assert_eq!(expire1, expire2);
                 assert_eq!(mode1, mode2);
                 assert_eq!(buffer1, buffer2);
@@ -3992,6 +4177,8 @@ mod tests {
             s3_use_ssl: None,
             metadata_schema: Some("ducklake".to_owned()),
             maintenance_target_file_size: None,
+            parquet_row_group_size_bytes: Some("128MiB".to_owned()),
+            parquet_row_group_size: Some("2500000".to_owned()),
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
             copy_buffer: DuckLakeCopyBufferConfig::default(),
@@ -4009,6 +4196,8 @@ mod tests {
                     pool_size: p1,
                     metadata_schema: m1,
                     maintenance_target_file_size: target1,
+                    parquet_row_group_size_bytes: row_group_bytes1,
+                    parquet_row_group_size: row_group_rows1,
                     expire_snapshots_older_than: expire1,
                     ..
                 },
@@ -4018,6 +4207,8 @@ mod tests {
                     pool_size: p2,
                     metadata_schema: m2,
                     maintenance_target_file_size: target2,
+                    parquet_row_group_size_bytes: row_group_bytes2,
+                    parquet_row_group_size: row_group_rows2,
                     expire_snapshots_older_than: expire2,
                     ..
                 },
@@ -4028,6 +4219,8 @@ mod tests {
                 assert_eq!(p2, Some(DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE));
                 assert_eq!(m1, m2);
                 assert_eq!(target1, target2);
+                assert_eq!(row_group_bytes1, row_group_bytes2);
+                assert_eq!(row_group_rows1, row_group_rows2);
                 assert_eq!(expire1, expire2);
             }
             _ => panic!("Config types don't match"),
@@ -4053,6 +4246,8 @@ mod tests {
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
+            parquet_row_group_size_bytes: Some("5MB".to_owned()),
+            parquet_row_group_size: Some("100000".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
             copy_buffer: DuckLakeCopyBufferConfig::default(),
@@ -4078,6 +4273,8 @@ mod tests {
                     s3_use_ssl: ssl1,
                     metadata_schema: m1,
                     maintenance_target_file_size: target1,
+                    parquet_row_group_size_bytes: row_group_bytes1,
+                    parquet_row_group_size: row_group_rows1,
                     expire_snapshots_older_than: expire1,
                     maintenance_mode: mode1,
                     copy_buffer: buffer1,
@@ -4096,6 +4293,8 @@ mod tests {
                     s3_use_ssl: ssl2,
                     metadata_schema: m2,
                     maintenance_target_file_size: target2,
+                    parquet_row_group_size_bytes: row_group_bytes2,
+                    parquet_row_group_size: row_group_rows2,
                     expire_snapshots_older_than: expire2,
                     maintenance_mode: mode2,
                     copy_buffer: buffer2,
@@ -4123,6 +4322,8 @@ mod tests {
                 assert_eq!(ssl1, &ssl2);
                 assert_eq!(m1, &m2);
                 assert_eq!(target1, &target2);
+                assert_eq!(row_group_bytes1, &row_group_bytes2);
+                assert_eq!(row_group_rows1, &row_group_rows2);
                 assert_eq!(expire1, &expire2);
                 assert_eq!(mode1, &mode2);
                 assert_eq!(buffer1, &buffer2);

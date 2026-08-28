@@ -914,6 +914,7 @@ pub fn pipeline_config(
     PipelineConfig {
         id: pipeline_id,
         publication_name,
+        replication_slot: Default::default(),
         pg_connection: PgConnectionConfig {
             host: pg.host.clone(),
             hostaddr: None,

@@ -17,6 +17,7 @@ use etl::{
     etl_error,
     schema::{ColumnNameMapping, TableName},
 };
+pub use etl_config::shared::DuckLakeWriterConfig;
 use serde::{Deserialize, Serialize};
 
 /// The DuckDB catalog alias used in every `lake.<table>` qualified name.

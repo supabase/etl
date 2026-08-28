@@ -42,6 +42,8 @@ fn create_ducklake_config(
         s3_use_ssl: Some(false),
         metadata_schema,
         maintenance_target_file_size: None,
+        parquet_row_group_size_bytes: None,
+        parquet_row_group_size: None,
         expire_snapshots_older_than: None,
         maintenance_mode: DuckLakeMaintenanceMode::Disabled,
         copy_buffer: Default::default(),

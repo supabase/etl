@@ -5,6 +5,11 @@ expression: pipeline.config
 ---
 ApiPipelineConfig {
     publication_name: "publication",
+    replication_slot: Some(
+        ReplicationSlotConfig {
+            failover: false,
+        },
+    ),
     batch: Some(
         BatchConfig {
             max_fill_ms: 5,

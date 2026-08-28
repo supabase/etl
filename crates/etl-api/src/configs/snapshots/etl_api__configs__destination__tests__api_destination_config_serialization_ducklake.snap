@@ -1,6 +1,6 @@
 ---
 source: crates/etl-api/src/configs/destination.rs
-assertion_line: 3733
+assertion_line: 4067
 expression: api_config
 ---
 {
@@ -17,6 +17,8 @@ expression: api_config
     "s3_use_ssl": false,
     "metadata_schema": "ducklake",
     "maintenance_target_file_size": "10MB",
+    "parquet_row_group_size_bytes": "5MB",
+    "parquet_row_group_size": "100000",
     "expire_snapshots_older_than": "7 days",
     "maintenance_mode": "kubernetes",
     "table_sorting": {

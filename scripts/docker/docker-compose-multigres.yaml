@@ -1,0 +1,16 @@
+name: etl-multigres
+
+services:
+  multigres:
+    # Pinned from ghcr.io/multigres/multigres-cluster:latest on 2026-08-25.
+    # Override MULTIGRES_IMAGE to test a deliberate upgrade.
+    image: ${MULTIGRES_IMAGE:-ghcr.io/multigres/multigres-cluster@sha256:d52bc819d17bf0526a428a1eeba2187841331cc55537c7a58309f3c0f4a5d084}
+    init: true
+    shm_size: 1gb
+    environment:
+      MULTIGRES_GATEWAY_PG_PORT: "15432"
+      MULTIGRES_NUM_CELLS: ${MULTIGRES_NUM_CELLS:-2}
+    ports:
+      - "127.0.0.1:${MULTIGRES_GATEWAY_PORT:-15432}:15432"
+    volumes:
+      - ./multigres/mtconfig.yaml:/multigres/cluster/multigres_local/mtconfig.yaml:ro

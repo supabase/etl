@@ -95,6 +95,15 @@ fi
 chown -R postgres:postgres "$pgdata"
 chmod 700 "$pgdata"
 
+postgres_major_version="$(cut -d. -f1 "$pgdata/PG_VERSION")"
+slot_sync_args=()
+if [ "$postgres_major_version" -ge 17 ]; then
+  # PostgreSQL 17 introduced failover logical-slot synchronization. Keep the
+  # shared replica usable by older test versions while enabling it where the
+  # setting exists.
+  slot_sync_args=(-c sync_replication_slots=on)
+fi
+
 exec_as_postgres postgres \
   -D "$pgdata" \
   -N 1000 \
@@ -107,5 +116,6 @@ exec_as_postgres postgres \
   -c wal_sender_timeout="$wal_sender_timeout" \
   -c wal_receiver_status_interval="$wal_receiver_status_interval" \
   -c max_standby_streaming_delay="$max_standby_streaming_delay" \
+  "${slot_sync_args[@]}" \
   -c hba_file=/etc/postgresql/pg_hba.conf \
   ${POSTGRES_SSL_ARGS:-}

@@ -213,6 +213,8 @@ mod ducklake {
             s3_use_ssl,
             metadata_schema,
             maintenance_target_file_size,
+            parquet_row_group_size_bytes,
+            parquet_row_group_size,
             expire_snapshots_older_than,
             maintenance_mode,
             copy_buffer,
@@ -258,6 +260,8 @@ mod ducklake {
         .s3(s3_config)
         .metadata_schema(metadata_schema.clone())
         .maintenance_target_file_size(maintenance_target_file_size.clone())
+        .parquet_row_group_size_bytes(parquet_row_group_size_bytes.clone())
+        .parquet_row_group_size(parquet_row_group_size.clone())
         .expire_snapshots_older_than(expire_snapshots_older_than.clone())
         .copy_buffer(*copy_buffer)
         .table_sorting(table_sorting.clone())

@@ -1,15 +1,10 @@
-use std::{
-    future::Future,
-    time::{Duration, Instant},
-};
-
 use etl::{
     event::EventType,
     pipeline::PipelineId,
     test_utils::{
         database::{
             local_pg_read_replica_connection_config, spawn_source_database, test_table_name,
-            try_replication_slot_state,
+            wait_for_replication_slot_flush_lsn,
         },
         event::EventCondition,
         memory_destination::MemoryDestination,
@@ -28,20 +23,15 @@ use etl_postgres::{
 };
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
-use tokio::{
-    select,
-    task::yield_now,
-    time::{interval, sleep},
-};
-use tokio_postgres::{Client, types::PgLsn};
+use tokio::{select, time::interval};
+use tokio_postgres::Client;
 
-const READ_REPLICA_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
-const READ_REPLICA_POLL_INTERVAL: Duration = Duration::from_millis(200);
+use crate::support::read_replica::{
+    READ_REPLICA_POLL_INTERVAL, wait_for_read_replica_replay, wait_for_read_replica_to_catch_up,
+};
 
 async fn assert_read_replica(replica_config: &PgConnectionConfig) {
-    let (client, _) = try_connect_to_pg_database(replica_config)
-        .await
-        .expect("read replica should accept connections");
+    let (client, _) = try_connect_to_pg_database(replica_config).await.unwrap();
     let row = client.query_one("select pg_is_in_recovery()", &[]).await.unwrap();
     let in_recovery: bool = row.get(0);
 
@@ -53,9 +43,7 @@ async fn assert_database_and_publication_visible_on_read_replica(
     expected_database_name: &str,
     publication_name: &str,
 ) {
-    let (client, _) = try_connect_to_pg_database(replica_config)
-        .await
-        .expect("read replica should accept connections to the test database");
+    let (client, _) = try_connect_to_pg_database(replica_config).await.unwrap();
     let row = client
         .query_one(
             "select current_database(), exists(select 1 from pg_publication where pubname = $1)",
@@ -70,43 +58,11 @@ async fn assert_database_and_publication_visible_on_read_replica(
     assert!(publication_exists, "Publication {publication_name} should be visible on the replica");
 }
 
-async fn wait_for_read_replica_replay(replica_config: &PgConnectionConfig, target_lsn: PgLsn) {
-    let mut monitor_config = replica_config.clone();
-    monitor_config.name = "postgres".to_owned();
-
-    wait_until("read replica replay", || async {
-        let Ok((client, _)) = try_connect_to_pg_database(&monitor_config).await else {
-            return Ok(false);
-        };
-
-        let row =
-            client.query_one("select pg_is_in_recovery(), pg_last_wal_replay_lsn()", &[]).await?;
-        let in_recovery: bool = row.get(0);
-        let replay_lsn: Option<PgLsn> = row.get(1);
-
-        Ok(in_recovery && replay_lsn.is_some_and(|replay_lsn| replay_lsn >= target_lsn))
-    })
-    .await;
-}
-
-async fn wait_for_read_replica_to_catch_up(
-    primary: &PgDatabase<Client>,
-    replica_config: &PgConnectionConfig,
-) -> PgLsn {
-    // Emit a standby snapshot WAL record so the returned LSN is a concrete
-    // replay barrier and standby logical slot creation has fresh transaction
-    // snapshot metadata available.
-    let target_lsn = primary.log_standby_snapshot().await.unwrap();
-    wait_for_read_replica_replay(replica_config, target_lsn).await;
-
-    target_lsn
-}
-
 async fn assert_replication_slot_absent(primary: &PgDatabase<Client>, slot_name: &str) {
     let row = primary
         .client
         .as_ref()
-        .expect("primary client should be initialized")
+        .unwrap()
         .query_opt("select 1 from pg_replication_slots where slot_name = $1", &[&slot_name])
         .await
         .unwrap();
@@ -131,48 +87,6 @@ where
                 primary.log_standby_snapshot().await.unwrap();
             }
         }
-    }
-}
-
-/// Waits until the standby's logical slot confirms the source-side target.
-async fn wait_for_read_replica_slot_flush_lsn(
-    replica_config: &PgConnectionConfig,
-    slot_name: &str,
-    target_lsn: PgLsn,
-) {
-    wait_until("read replica slot confirmed_flush_lsn", || async {
-        let Ok((client, _)) = try_connect_to_pg_database(replica_config).await else {
-            return Ok(false);
-        };
-        let Ok((confirmed_flush_lsn, _)) = try_replication_slot_state(&client, slot_name).await
-        else {
-            return Ok(false);
-        };
-
-        Ok(confirmed_flush_lsn >= target_lsn)
-    })
-    .await;
-}
-
-async fn wait_until<F, Fut>(description: &str, mut condition: F)
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<bool, tokio_postgres::Error>>,
-{
-    let deadline = Instant::now() + READ_REPLICA_WAIT_TIMEOUT;
-
-    loop {
-        if condition().await.unwrap_or(false) {
-            return;
-        }
-
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {description} after {READ_REPLICA_WAIT_TIMEOUT:?}",
-        );
-
-        sleep(READ_REPLICA_POLL_INTERVAL).await;
-        yield_now().await;
     }
 }
 
@@ -335,7 +249,8 @@ async fn pipeline_advances_read_replica_slot_on_idle_keepalive() {
 
     // Even though the change is not in the publication and emits no data event,
     // idle keepalive feedback should still advance the replica-side slot.
-    wait_for_read_replica_slot_flush_lsn(&replica_config, &apply_slot_name, unrelated_change_lsn)
+    let (replica_client, _) = try_connect_to_pg_database(&replica_config).await.unwrap();
+    wait_for_replication_slot_flush_lsn(&replica_client, &apply_slot_name, unrelated_change_lsn)
         .await;
 
     pipeline.shutdown_and_wait().await.unwrap();
