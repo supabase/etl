@@ -371,12 +371,45 @@ impl ReplicationLagMetrics {
     }
 }
 
+/// Row-decoding schema resolved for a DML message.
+#[derive(Debug)]
+struct ResolvedTableSchema {
+    /// Complete decoder for the row payload.
+    replicated_table_schema: ReplicatedTableSchema,
+    /// Destination schema barrier to emit before the row.
+    ///
+    /// Set when this resolution materialized
+    /// [`TableDecodingState::PendingRelation`] because pgoutput omitted a
+    /// protocol relation after a stored schema snapshot.
+    relation: Option<RelationEvent>,
+}
+
+impl ResolvedTableSchema {
+    /// Returns a decoder that does not require a destination schema barrier.
+    fn with_schema(replicated_table_schema: ReplicatedTableSchema) -> Self {
+        Self { replicated_table_schema, relation: None }
+    }
+
+    /// Returns a decoder and the relation barrier for a materialized pending
+    /// schema snapshot.
+    fn with_pending_relation(replicated_table_schema: ReplicatedTableSchema) -> Self {
+        let relation = RelationEvent { replicated_table_schema: replicated_table_schema.clone() };
+
+        Self { replicated_table_schema, relation: Some(relation) }
+    }
+}
+
 /// Result returned from [`ApplyLoop::handle_replication_message`] and related
 /// functions.
 #[derive(Debug, Default)]
 struct HandleMessageResult {
-    /// The event converted from the replication message.
-    event: Option<Event>,
+    /// Converted event, with an optional destination schema barrier.
+    ///
+    /// The barrier is only representable when an event is present. When set, it
+    /// is written immediately before the event. Protocol relations remain in
+    /// the event itself. Truncate never sets the barrier: pgoutput emits a
+    /// protocol relation first, and a missing decoder is an error.
+    event: Option<(Event, Option<RelationEvent>)>,
     /// PostgreSQL source metadata represented by the returned event.
     streaming_payload_metadata: StreamingPayloadMetadata,
     /// Set to a commit message's end_lsn value, [`None`] otherwise.
@@ -394,15 +427,20 @@ impl HandleMessageResult {
 
     /// Creates a result that returns an event without affecting batch state.
     fn return_event(event: Event) -> Self {
-        Self { event: Some(event), ..Default::default() }
+        Self { event: Some((event, None)), ..Default::default() }
     }
 
     /// Creates a result containing a row event and its source metadata.
+    ///
+    /// `relation` is the destination schema barrier from
+    /// [`ResolvedTableSchema`], if a pending snapshot was materialized without
+    /// a protocol relation.
     fn return_row_event(
+        relation: Option<RelationEvent>,
         event: Event,
         streaming_payload_metadata: StreamingPayloadMetadata,
     ) -> Self {
-        Self { event: Some(event), streaming_payload_metadata, ..Default::default() }
+        Self { event: Some((event, relation)), streaming_payload_metadata, ..Default::default() }
     }
 }
 
@@ -2068,7 +2106,16 @@ where
         let result =
             self.handle_replication_message(replication_message_stream.as_mut(), message).await?;
 
-        if let Some(event) = result.event {
+        if let Some((event, relation)) = result.event {
+            // A schema snapshot that pgoutput did not accompany with a protocol
+            // relation is written first so destinations apply the new schema
+            // before the following row.
+            if let Some(relation) = relation {
+                self.state
+                    .event_batch
+                    .push(Event::Relation(relation), StreamingPayloadMetadata::default());
+            }
+
             // We add the element to the pending batch.
             self.state.event_batch.push(event, result.streaming_payload_metadata);
 
@@ -2535,7 +2582,7 @@ where
         let event = parse_event_from_commit_message(commit_lsn, tx_ordinal, message);
 
         let mut result = HandleMessageResult {
-            event: Some(Event::Commit(event)),
+            event: Some((Event::Commit(event), None)),
             end_lsn: Some(end_lsn),
             ..Default::default()
         };
@@ -2874,24 +2921,28 @@ where
         Ok(Some(replicated_table_schema))
     }
 
-    /// Materializes and installs `WithSchema` after DML arrives without a new
-    /// relation message.
+    /// Materializes and installs `WithSchema` after a row arrives without a
+    /// new protocol relation.
     ///
     /// The DDL event trigger emits a logical message for every handled schema
-    /// command, including commands whose successful no-op path does not
-    /// invalidate pgoutput's cached relation metadata. ETL therefore stores a
-    /// new table-schema snapshot and enters `PendingRelation`, but pgoutput may
-    /// send the next row without first sending another `RELATION`. In that
-    /// sequence, the stored snapshot is the current table schema and the masks
-    /// from the previous relation are still the current positional decoding
-    /// metadata. Combining them produces the complete decoder for the row and
-    /// returns the connection-local state to `WithSchema`.
+    /// command, including no-op DDL that does not invalidate pgoutput's cached
+    /// relation metadata. ETL therefore stores a new schema snapshot and
+    /// enters `PendingRelation`, but pgoutput may send the next row without
+    /// another protocol relation. In that sequence, the stored snapshot is the
+    /// current table schema and the masks from the previous relation are still
+    /// the current positional decoding metadata. Combining them produces the
+    /// complete decoder and returns the connection-local state to
+    /// `WithSchema`.
+    ///
+    /// The returned [`ResolvedTableSchema::relation`] is the destination schema
+    /// barrier for that snapshot. Destinations require a [`RelationEvent`]
+    /// before they will accept rows at a newer schema.
     async fn materialize_pending_replicated_table_schema(
         &mut self,
         table_id: TableId,
         snapshot_id: SnapshotId,
         previous_relation_masks: PreviousRelationMasks,
-    ) -> EtlResult<ReplicatedTableSchema> {
+    ) -> EtlResult<ResolvedTableSchema> {
         let table_schema = self
             .get_table_schema_for_relation(table_id, RelationSchemaSelection::Exact(snapshot_id))
             .await?;
@@ -2900,7 +2951,14 @@ where
         self.table_decoding_states
             .insert(table_id, TableDecodingState::WithSchema(replicated_table_schema.clone()));
 
-        Ok(replicated_table_schema)
+        debug!(
+            table_id = %table_id,
+            snapshot_id = %replicated_table_schema.inner().snapshot_id,
+            replication_mask = %replicated_table_schema.replication_mask(),
+            "materialized pending schema snapshot without protocol relation"
+        );
+
+        Ok(ResolvedTableSchema::with_pending_relation(replicated_table_schema))
     }
 
     /// Resolves the complete decoding schema for a row event.
@@ -2918,15 +2976,21 @@ where
     /// The last case covers a same-connection table-sync handover where apply
     /// skipped the relation while table sync still owned the table. PostgreSQL
     /// need not resend that relation before the first apply-owned DML.
+    ///
+    /// Materializing `PendingRelation` also returns a [`RelationEvent`] so the
+    /// destination can apply the stored schema snapshot before the row.
+    /// Restoring a complete `SyncDone` decoder does not, because that snapshot
+    /// was already applied during table sync. Truncate does not use this path:
+    /// pgoutput emits a protocol relation first.
     async fn get_replicated_table_schema(
         &mut self,
         table_id: TableId,
         remote_final_lsn: PgLsn,
-    ) -> EtlResult<ReplicatedTableSchema> {
+    ) -> EtlResult<ResolvedTableSchema> {
         let table_decoding_state = self.table_decoding_states.get(&table_id).cloned();
         match table_decoding_state {
             Some(TableDecodingState::WithSchema(replicated_table_schema)) => {
-                Ok(replicated_table_schema)
+                Ok(ResolvedTableSchema::with_schema(replicated_table_schema))
             }
             Some(TableDecodingState::PendingRelation { snapshot_id, previous_relation_masks }) => {
                 let previous_relation_masks = match previous_relation_masks {
@@ -2977,8 +3041,37 @@ where
                     TableDecodingState::WithSchema(replicated_table_schema.clone()),
                 );
 
-                Ok(replicated_table_schema)
+                Ok(ResolvedTableSchema::with_schema(replicated_table_schema))
             }
+        }
+    }
+
+    /// Returns the complete decoder required to handle a truncate message.
+    ///
+    /// pgoutput emits a protocol relation before truncate, so the connection
+    /// must already have [`TableDecodingState::WithSchema`]. A pending schema
+    /// snapshot or missing decoder means that relation did not arrive.
+    fn replicated_table_schema_for_truncate(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<ReplicatedTableSchema> {
+        match self.table_decoding_states.get(&table_id) {
+            Some(TableDecodingState::WithSchema(replicated_table_schema)) => {
+                Ok(replicated_table_schema.clone())
+            }
+            Some(TableDecodingState::PendingRelation { snapshot_id, .. }) => Err(etl_error!(
+                ErrorKind::InvalidState,
+                "Relation message missing before truncate",
+                format!(
+                    "Table {table_id} received a truncate event while waiting for relation \
+                     snapshot {snapshot_id}"
+                )
+            )),
+            None => Err(etl_error!(
+                ErrorKind::InvalidState,
+                "Relation state missing for truncate event",
+                format!("Table {table_id} has no relation decoder")
+            )),
         }
     }
 
@@ -3013,17 +3106,19 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        let replicated_table_schema =
-            self.get_replicated_table_schema(table_id, remote_final_lsn).await?;
-
+        let resolved = self.get_replicated_table_schema(table_id, remote_final_lsn).await?;
         let event = parse_event_from_insert_message(
-            replicated_table_schema,
+            resolved.replicated_table_schema,
             remote_final_lsn,
             tx_ordinal,
             message,
         )?;
 
-        Ok(HandleMessageResult::return_row_event(Event::Insert(event), streaming_payload_metadata))
+        Ok(HandleMessageResult::return_row_event(
+            resolved.relation,
+            Event::Insert(event),
+            streaming_payload_metadata,
+        ))
     }
 
     /// Handles Postgres UPDATE messages.
@@ -3057,17 +3152,19 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        let replicated_table_schema =
-            self.get_replicated_table_schema(table_id, remote_final_lsn).await?;
-
+        let resolved = self.get_replicated_table_schema(table_id, remote_final_lsn).await?;
         let event = parse_event_from_update_message(
-            replicated_table_schema,
+            resolved.replicated_table_schema,
             remote_final_lsn,
             tx_ordinal,
             message,
         )?;
 
-        Ok(HandleMessageResult::return_row_event(Event::Update(event), streaming_payload_metadata))
+        Ok(HandleMessageResult::return_row_event(
+            resolved.relation,
+            Event::Update(event),
+            streaming_payload_metadata,
+        ))
     }
 
     /// Handles Postgres DELETE messages.
@@ -3101,17 +3198,19 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        let replicated_table_schema =
-            self.get_replicated_table_schema(table_id, remote_final_lsn).await?;
-
+        let resolved = self.get_replicated_table_schema(table_id, remote_final_lsn).await?;
         let event = parse_event_from_delete_message(
-            replicated_table_schema,
+            resolved.replicated_table_schema,
             remote_final_lsn,
             tx_ordinal,
             message,
         )?;
 
-        Ok(HandleMessageResult::return_row_event(Event::Delete(event), streaming_payload_metadata))
+        Ok(HandleMessageResult::return_row_event(
+            resolved.relation,
+            Event::Delete(event),
+            streaming_payload_metadata,
+        ))
     }
 
     /// Handles Postgres TRUNCATE messages.
@@ -3139,9 +3238,7 @@ where
             // Exactly one worker owns protocol interpretation for a table at a time, so
             // non-owning workers skip truncation handling for that table as well.
             if self.should_apply_changes(table_id, remote_final_lsn).await? {
-                let replicated_table_schema =
-                    self.get_replicated_table_schema(table_id, remote_final_lsn).await?;
-                truncated_tables.push(replicated_table_schema);
+                truncated_tables.push(self.replicated_table_schema_for_truncate(table_id)?);
             }
         }
 
