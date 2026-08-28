@@ -187,7 +187,7 @@ impl ReplicatorSetup {
         self.postgres.host = prompt("Postgres host", &self.postgres.host)?;
         self.postgres.port = prompt("Postgres port", &self.postgres.port)?;
         self.postgres.name = prompt("Postgres database", &self.postgres.name)?;
-        self.postgres.username = prompt("Postgres user", &self.postgres.username)?;
+        self.postgres.username = prompt_secret("Postgres user", &self.postgres.username)?;
         self.postgres.password = prompt_secret("Postgres password", &self.postgres.password)?;
         self.publication = prompt("Publication name", &self.publication)?;
         self.destination.prompt()

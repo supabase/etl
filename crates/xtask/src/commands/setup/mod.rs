@@ -311,20 +311,22 @@ fn print_replicator_next_steps(destination: DestinationPreset, iceberg_catalog: 
 
 /// Reads one line from stdin, using `default` when the user presses Enter.
 pub(super) fn prompt(label: &str, default: &str) -> Result<String> {
-    read_prompt(&format!("{label} [{default}]: "), default)
+    print!("{label} [{default}]: ");
+    finish_prompt(default)
 }
 
 /// Reads a secret from stdin without echoing `default`.
 ///
-/// Empty input keeps `default`. Passwords and connection strings that embed
-/// credentials must use this so they are not written to the terminal.
+/// Empty input keeps `default`. Passwords, usernames, account identifiers, and
+/// connection strings that embed credentials must use this so they are not
+/// written to the terminal.
 pub(super) fn prompt_secret(label: &str, default: &str) -> Result<String> {
-    read_prompt(&format!("{label} [hidden]: "), default)
+    print!("{label} [hidden]: ");
+    finish_prompt(default)
 }
 
-/// Flushes `prompt_text`, then returns the trimmed line or `default`.
-fn read_prompt(prompt_text: &str, default: &str) -> Result<String> {
-    print!("{prompt_text}");
+/// Flushes the prompt and returns the trimmed line or `default`.
+fn finish_prompt(default: &str) -> Result<String> {
     io::stdout().flush().context("Failed to flush prompt")?;
     let mut line = String::new();
     io::stdin().read_line(&mut line).context("Failed to read prompt")?;
