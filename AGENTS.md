@@ -31,7 +31,7 @@ Do this on a fresh clone before tests, examples, or local services.
 4. Then configure only the service you need:
 
    ```bash
-   cargo x setup replicator --destination clickhouse && cargo x seed && cargo x run replicator
+   cargo x setup replicator && cargo x seed && cargo x run replicator
    cargo x setup api && cargo x run api
    ```
 

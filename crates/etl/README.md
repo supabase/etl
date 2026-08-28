@@ -62,7 +62,7 @@ graph TB
 
     PG[("Postgres<br/>Source Database")]
 
-    Destination[("Destination<br/>BigQuery, etc.")]
+    Destination[("Destination<br/>ClickHouse, etc.")]
 
     Pipeline --> ApplyWorker
 

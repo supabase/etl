@@ -17,8 +17,8 @@ That starts Docker and databases. Then:
 ```bash
 cargo x setup api && cargo x run api
 
-# or
-cargo x setup replicator --destination clickhouse
+# or, ClickHouse by default:
+cargo x setup replicator
 cargo x seed
 cargo x run replicator
 ```

@@ -46,9 +46,11 @@ fn print_next_steps() {
     println!("  cargo x setup api");
     println!("  cargo x run api");
     println!();
-    println!("If you want to set up the replicator, pick a destination:");
-    DestinationPreset::print_choices();
-    println!("  cargo x setup replicator --destination clickhouse");
+    println!("If you want a local replicator (ClickHouse by default):");
+    println!("  cargo x setup replicator");
     println!("  cargo x seed");
     println!("  cargo x run replicator");
+    println!();
+    println!("Other destinations:");
+    DestinationPreset::print_choices();
 }

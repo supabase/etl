@@ -132,9 +132,15 @@ pub(crate) enum DestinationPreset {
 }
 
 impl DestinationPreset {
-    /// Returns every destination preset.
+    /// Returns the destination used when `cargo x setup replicator` omits
+    /// `--destination`.
+    pub(crate) const fn local_default() -> Self {
+        Self::ClickHouse
+    }
+
+    /// Returns every destination preset, local-first.
     pub(crate) const fn all() -> [Self; 5] {
-        [Self::BigQuery, Self::ClickHouse, Self::DuckLake, Self::Iceberg, Self::Snowflake]
+        [Self::ClickHouse, Self::BigQuery, Self::DuckLake, Self::Snowflake, Self::Iceberg]
     }
 
     /// Returns the Cargo feature for this destination.
@@ -151,8 +157,8 @@ impl DestinationPreset {
     /// Returns a short status label used in local setup output.
     pub(crate) fn status_label(self) -> &'static str {
         match self {
-            Self::BigQuery => "stable, needs GCP credentials",
-            Self::ClickHouse => "local Docker from cargo x init, no cloud credentials",
+            Self::ClickHouse => "local default, Docker from cargo x init, no cloud credentials",
+            Self::BigQuery => "stable cloud destination, needs GCP credentials",
             Self::DuckLake => "in progress, needs catalog + object storage",
             Self::Iceberg => "deprecated; REST uses local Docker, supabase needs cloud credentials",
             Self::Snowflake => "in progress, needs key-pair credentials",

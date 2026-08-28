@@ -6,13 +6,14 @@ building `etl-replicator`.
 
 | Feature | Destination | Status |
 | --- | --- | --- |
-| `bigquery` | Google BigQuery | Stable |
 | `clickhouse` | ClickHouse | In progress |
+| `bigquery` | Google BigQuery | Stable |
 | `ducklake` | DuckLake | In progress |
 | `snowflake` | Snowflake | In progress |
 | `iceberg` | Apache Iceberg | Deprecated |
 
-BigQuery is the stable, recommended default. See the
+ClickHouse is the easiest destination to run locally. BigQuery is the most
+mature cloud destination. See the
 [Destinations reference](https://supabase.github.io/etl/reference/destinations/)
 for each implementation's maturity, requirements, and limitations.
 

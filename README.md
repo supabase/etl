@@ -109,13 +109,15 @@ tokio = { version = "1", features = ["full"] }
 
 | Feature | Destination | Status |
 | --- | --- | --- |
-| `bigquery` | Google BigQuery | Stable |
 | `clickhouse` | ClickHouse | In progress |
+| `bigquery` | Google BigQuery | Stable |
 | `ducklake` | DuckLake | In progress |
 | `snowflake` | Snowflake | In progress |
 | `iceberg` | Apache Iceberg | Deprecated |
 
-BigQuery is the stable, recommended default. See the
+ClickHouse is the fastest way to start locally: `cargo x init` runs it, and
+`cargo x setup replicator` configures it by default. BigQuery is the most
+mature cloud destination. See the
 [Destinations reference](https://supabase.github.io/etl/reference/destinations/)
 for maturity and limitations, and the
 [`etl-examples` guide](crates/etl-examples/README.md) for runnable examples.
@@ -135,7 +137,7 @@ for the complete setup and production guidance.
 ```bash
 cargo x init              # Docker, databases, migrations
 cargo x setup api && cargo x run api
-cargo x setup replicator --destination clickhouse && cargo x seed && cargo x run replicator
+cargo x setup replicator && cargo x seed && cargo x run replicator
 ```
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) to start the replicator or API, pick a

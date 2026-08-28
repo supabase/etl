@@ -1,8 +1,9 @@
 # `etl-examples`
 
 Runnable binaries that replicate a Postgres publication to a built-in
-destination using [Supabase ETL](https://supabase.github.io/etl/). BigQuery is
-the stable, recommended default. See the
+destination using [Supabase ETL](https://supabase.github.io/etl/). ClickHouse is
+the fastest local path: `cargo x init` starts it, and no cloud account is
+required. See the
 [Destinations reference](https://supabase.github.io/etl/reference/destinations/)
 for maturity and limitations, and the
 [First Pipeline](https://supabase.github.io/etl/guides/first-pipeline/) tutorial
@@ -12,8 +13,8 @@ if you want to embed the `etl` crate instead.
 
 | Example                     | Binary       | Feature      | Destination                            | Status      |
 | --------------------------- | ------------ | ------------ | -------------------------------------- | ----------- |
-| [BigQuery](#bigquery)       | `bigquery`   | `bigquery`   | Google BigQuery                        | Stable      |
 | [ClickHouse](#clickhouse)   | `clickhouse` | `clickhouse` | ClickHouse                             | In progress |
+| [BigQuery](#bigquery)       | `bigquery`   | `bigquery`   | Google BigQuery                        | Stable      |
 | [DuckLake](#ducklake)       | `ducklake`   | `ducklake`   | DuckLake                               | In progress |
 | [Snowflake](#snowflake)     | `snowflake`  | `snowflake`  | Snowflake                              | In progress |
 
@@ -26,8 +27,8 @@ The quickest path is `cargo x example` after sourcing `.env` (see `.env.example`
 
 ```bash
 source .env
-cargo x example bigquery
 cargo x example clickhouse
+cargo x example bigquery
 cargo x example ducklake
 cargo x example snowflake
 ```
@@ -49,11 +50,11 @@ destinations (for example `ducklake`) pull in heavy native dependencies that can
 take several minutes to compile.
 
 ```bash
-cargo build --bin bigquery -p etl-examples --features bigquery
-cargo run --bin bigquery -p etl-examples --features bigquery -- [flags]
+cargo build --bin clickhouse -p etl-examples --features clickhouse
+cargo run --bin clickhouse -p etl-examples --features clickhouse -- [flags]
 ```
 
-Replace `bigquery` with `clickhouse`, `ducklake`, or `snowflake` as needed.
+Replace `clickhouse` with `bigquery`, `ducklake`, or `snowflake` as needed.
 
 ```bash
 cargo build -p etl-examples --all-features
@@ -105,6 +106,19 @@ publication would include the `etl` schema. Prefer an explicit table list or
 `FOR TABLES IN SCHEMA ...` for customer-owned schemas.
 
 ---
+
+## Start with ClickHouse
+
+`cargo x init` starts ClickHouse at `http://localhost:8123` (`etl` / `etl`).
+After `cargo x seed`:
+
+```bash
+cargo x example clickhouse
+```
+
+No cloud account is required. Full flags and table-engine notes are in
+[ClickHouse](#clickhouse) below. Use BigQuery, DuckLake, or Snowflake only when
+you already have those services.
 
 ## BigQuery
 

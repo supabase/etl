@@ -19,7 +19,7 @@ use crate::{
 Examples:
   cargo x init
   cargo x setup api && cargo x run api
-  cargo x setup replicator --destination clickhouse && cargo x seed && cargo x run replicator
+  cargo x setup replicator && cargo x seed && cargo x run replicator
 ")]
 pub(crate) struct RunArgs {
     #[command(subcommand)]
@@ -94,11 +94,10 @@ fn run_replicator(args: RunReplicatorArgs) -> Result<()> {
 
     if !replicator_config_exists()? {
         bail!(
-            "No local replicator configuration found.\n\nInitialize a destination first:\n  cargo \
-             x setup replicator --destination clickhouse\n  cargo x setup replicator \
-             --destination bigquery\n  cargo x setup replicator --destination ducklake\n  cargo x \
-             setup replicator --destination iceberg\n  cargo x setup replicator --destination \
-             snowflake\n\nThen start it:\n  cargo x run replicator"
+            "No local replicator configuration found.\n\nInitialize ClickHouse (the local \
+             default):\n  cargo x setup replicator\n  cargo x seed\n\nOr pass --destination \
+             bigquery, ducklake, iceberg, or snowflake.\n\nThen start it:\n  cargo x run \
+             replicator"
         );
     }
 

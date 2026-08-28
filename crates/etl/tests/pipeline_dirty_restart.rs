@@ -445,7 +445,7 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
     drop(held_response);
 
     let users_ready_after_restart = notify_if_ready_pending(&store, table_id).await?;
- 
+
     let restarted_destination = TestDestinationWrapper::wrap(memory_destination.clone());
     let mut restarted_pipeline = create_pipeline(
         &database.config,

@@ -7,6 +7,21 @@ icon: Rocket
 Build a pipeline that performs an initial sync of a Postgres table, then
 replicates row changes through a small custom `Destination`.
 
+<Callout className="etl-callout" type="info" title="Want a real destination immediately?">
+  The fastest full pipeline is local ClickHouse. After cloning this repository:
+
+  ```bash
+  cargo x init
+  cargo x setup replicator
+  cargo x seed
+  cargo x run replicator
+  ```
+
+  No cloud account is required. See
+  [Standalone Replicator](/guides/standalone-replicator/) for that path. This
+  tutorial embeds the `etl` crate with a tiny custom destination instead.
+</Callout>
+
 <Callout className="etl-callout" type="info" title="Active development">
   Supabase ETL is under active development. APIs and setup steps may change
   before the first stable release.
@@ -157,7 +172,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let config = PipelineConfig {
-        id: 1,
+        id: 1, // Unique per Postgres cluster. Local `cargo x setup replicator` also uses 1.
         publication_name: "my_publication".to_string(),
         pg_connection: pg_config,
         store_pg_connection: None,
@@ -236,6 +251,7 @@ DROP DATABASE etl_tutorial;
 
 ## Next Steps
 
+- [Standalone Replicator](/guides/standalone-replicator/): Run the packaged process against local ClickHouse
 - [Custom Implementations](/guides/custom-implementations/): Build your own components
 - [Configure Postgres](/guides/configure-postgres/): Production Postgres setup
 - [Architecture](/explanation/architecture/): How ETL works internally

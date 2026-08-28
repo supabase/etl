@@ -29,7 +29,7 @@ use crate::{
 Examples:
   cargo x init
   cargo x setup api && cargo x run api
-  cargo x setup replicator --destination clickhouse && cargo x seed && cargo x run replicator
+  cargo x setup replicator && cargo x seed && cargo x run replicator
 ")]
 pub(crate) struct SetupArgs {
     #[command(subcommand)]
@@ -56,8 +56,7 @@ struct SetupApiArgs {
 /// Options for `cargo x setup replicator`.
 #[derive(Args)]
 struct SetupReplicatorArgs {
-    /// Destination to configure. Defaults to BigQuery, the stable product
-    /// default.
+    /// Destination to configure. Defaults to ClickHouse from `cargo x init`.
     #[arg(long, value_enum)]
     destination: Option<DestinationPreset>,
     /// Iceberg catalog kind. Used only with `--destination iceberg`.
@@ -125,6 +124,8 @@ impl SetupReplicatorArgs {
             format!("Failed to change directory to {}", workspace_root.display())
         })?;
 
+        require_command("psql", &["--version"], "Postgres client (psql) is not installed")?;
+
         print_banner("ETL replicator local setup");
         println!("This writes gitignored files in crates/etl-replicator/configuration/.");
         println!("Local destinations use Docker values from cargo x init.");
@@ -136,14 +137,14 @@ impl SetupReplicatorArgs {
 
         let defaults = InitConfig::from_env();
         let destination = if self.interactive && self.destination.is_none() {
-            prompt_destination(DestinationPreset::BigQuery)?
+            prompt_destination(DestinationPreset::local_default())?
         } else {
-            self.destination.unwrap_or(DestinationPreset::BigQuery)
+            self.destination.unwrap_or(DestinationPreset::local_default())
         };
         if self.destination.is_none() && !self.interactive {
             println!(
-                "Using BigQuery (stable default). For local Docker ClickHouse, pass --destination \
-                 clickhouse."
+                "Using ClickHouse (local default from cargo x init). Pass --destination bigquery \
+                 for BigQuery."
             );
             println!();
         }
@@ -186,6 +187,7 @@ impl SetupReplicatorArgs {
         }
 
         write_replicator_config(&options, self.force)?;
+        options.release_conflicting_apply_slot()?;
 
         println!();
         println!("✅ Replicator configuration is ready.");
@@ -213,9 +215,8 @@ fn print_destination_prerequisites(
         }
         DestinationPreset::ClickHouse => {
             println!("ClickHouse setup uses the Docker Compose service from cargo x init.");
-            println!(
-                "After setup: cargo x seed && cargo x run replicator --destination clickhouse"
-            );
+            println!("No cloud credentials are required.");
+            println!("After setup: cargo x seed && cargo x run replicator");
         }
         DestinationPreset::DuckLake => {
             println!("DuckLake setup writes catalog and data-path fields only.");
@@ -250,7 +251,7 @@ fn print_destination_prerequisites(
 /// Prompts for a destination, using `default` when the user presses Enter.
 fn prompt_destination(default: DestinationPreset) -> Result<DestinationPreset> {
     let selected = prompt(
-        "Destination (bigquery, clickhouse, ducklake, iceberg, snowflake)",
+        "Destination (clickhouse, bigquery, ducklake, iceberg, snowflake)",
         default.feature(),
     )?;
     DestinationPreset::parse(&selected)
@@ -396,6 +397,12 @@ mod tests {
         for destination in DestinationPreset::all() {
             assert_eq!(DestinationPreset::parse(destination.feature()).unwrap(), destination);
         }
+    }
+
+    #[test]
+    fn local_default_destination_is_clickhouse() {
+        assert_eq!(DestinationPreset::local_default(), DestinationPreset::ClickHouse);
+        assert_eq!(DestinationPreset::all()[0], DestinationPreset::ClickHouse);
     }
 
     #[test]

@@ -5,11 +5,13 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use etl_config::shared::{DestinationConfig, IcebergConfig, ReplicatorConfig};
+use pg_escape::quote_literal;
 use secrecy::ExposeSecret;
 
 use crate::{
@@ -23,6 +25,8 @@ use crate::{
     utils::DestinationPreset,
 };
 
+/// Pipeline id written into generated local replicator configuration.
+const LOCAL_PIPELINE_ID: u64 = 1;
 /// Placeholder accepted by interactive prompts when a secret will be supplied
 /// later through the environment.
 const REPLACE_ME: &str = "REPLACE_ME";
@@ -168,6 +172,93 @@ impl ReplicatorSetup {
         matches!(self.destination, DestinationSetup::Iceberg(IcebergSetup::Rest { .. }))
     }
 
+    /// Drops an inactive apply slot for this pipeline when it is bound to a
+    /// different database.
+    ///
+    /// Slot names are cluster-wide. A previous pipeline with the same id on
+    /// another database, such as the first-pipeline tutorial, leaves
+    /// `supabase_etl_apply_1` behind and local setup then fails to start.
+    pub(super) fn release_conflicting_apply_slot(&self) -> Result<()> {
+        let slot_name = format!("supabase_etl_apply_{LOCAL_PIPELINE_ID}");
+        let quoted_slot = quote_literal(&slot_name);
+        let lookup = format!(
+            "select database || '|' || active::text from pg_replication_slots where slot_name = \
+             {quoted_slot}"
+        );
+        let output = Command::new("psql")
+            .args([
+                "-q",
+                "-h",
+                &self.postgres.host,
+                "-p",
+                &self.postgres.port,
+                "-U",
+                &self.postgres.username,
+                "-d",
+                "postgres",
+                "-tA",
+                "-c",
+                &lookup,
+            ])
+            .env("PGPASSWORD", &self.postgres.password)
+            .output()
+            .context("Failed to inspect replication slots")?;
+        if !output.status.success() {
+            bail!(
+                "Failed to inspect replication slots: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let row = String::from_utf8_lossy(&output.stdout);
+        let row = row.trim();
+        if row.is_empty() {
+            return Ok(());
+        }
+
+        let Some((database, active)) = row.split_once('|') else {
+            bail!("Unexpected replication slot row: {row}");
+        };
+        if database == self.postgres.name {
+            return Ok(());
+        }
+        if active == "t" {
+            bail!(
+                "Replication slot {slot_name} is active on database `{database}`. Stop that \
+                 pipeline, or drop the slot:\n  select pg_drop_replication_slot('{slot_name}');"
+            );
+        }
+
+        let drop = format!("select pg_drop_replication_slot({quoted_slot})");
+        let status = Command::new("psql")
+            .args([
+                "-q",
+                "-h",
+                &self.postgres.host,
+                "-p",
+                &self.postgres.port,
+                "-U",
+                &self.postgres.username,
+                "-d",
+                "postgres",
+                "-tA",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-c",
+                &drop,
+            ])
+            .env("PGPASSWORD", &self.postgres.password)
+            .status()
+            .context("Failed to drop leftover replication slot")?;
+        if !status.success() {
+            bail!("Failed to drop leftover replication slot {slot_name}");
+        }
+        println!(
+            "Dropped leftover replication slot {slot_name} (was bound to database `{database}`)."
+        );
+        Ok(())
+    }
+
     /// Replaces the BigQuery service-account key when this setup is BigQuery.
     pub(super) fn set_bigquery_service_account_key(&mut self, key: &str) -> Result<()> {
         match &mut self.destination {
@@ -203,7 +294,7 @@ impl ReplicatorSetup {
 # Cloud secrets are fake placeholders. Override them with APP_ environment variables.
 {destination}
 pipeline:
-  id: 1
+  id: {pipeline_id}
   publication_name: {publication}
   pg_connection:
     host: {host}
@@ -216,6 +307,7 @@ pipeline:
       trusted_root_certs: \"\"
 ",
             destination = self.destination.to_yaml().trim_end(),
+            pipeline_id = LOCAL_PIPELINE_ID,
             publication = yaml_string(&self.publication),
             host = yaml_string(&self.postgres.host),
             port = self.postgres.port,
@@ -622,6 +714,8 @@ mod tests {
         let yaml = test_setup(DestinationPreset::ClickHouse, IcebergCatalog::Rest).to_yaml();
         assert!(yaml.contains("  clickhouse:"));
         assert!(yaml.contains("password: \"etl\""));
+        assert!(yaml.contains("  id: 1"));
+        assert!(yaml.contains("name: \"etl_testdata\""));
         load_replicator_yaml(&yaml);
     }
 

@@ -6,14 +6,16 @@ destination.
 
 | Feature | Destination | Status |
 | --- | --- | --- |
-| `bigquery` | Google BigQuery | Stable |
 | `clickhouse` | ClickHouse | In progress |
+| `bigquery` | Google BigQuery | Stable |
 | `ducklake` | DuckLake | In progress |
 | `snowflake` | Snowflake | In progress |
 | `iceberg` | Apache Iceberg | Deprecated |
 
-BigQuery is the stable, recommended default. Compare maturity and limitations in
-the [Destinations reference](https://supabase.github.io/etl/reference/destinations/).
+ClickHouse is the local default: `cargo x init` starts it, and `cargo x setup
+replicator` configures it. BigQuery is the most mature cloud destination.
+Compare maturity and limitations in the
+[Destinations reference](https://supabase.github.io/etl/reference/destinations/).
 For production configuration and credential handling, see the
 [Standalone Replicator](https://supabase.github.io/etl/guides/standalone-replicator/)
 guide.
@@ -21,7 +23,7 @@ guide.
 ## Local development
 
 ```bash
-cargo x setup replicator --destination clickhouse
+cargo x setup replicator
 cargo x seed
 cargo x run replicator
 ```

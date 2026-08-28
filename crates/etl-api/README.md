@@ -40,7 +40,7 @@ listens on `http://127.0.0.1:8010` (Swagger UI at `/swagger-ui`) and
 
 `cargo x init` starts the local stack only. Then `cargo x setup api` writes
 this configuration. Replicator configuration is separate:
-`cargo x setup replicator --destination <name>`. See
+`cargo x setup replicator` (ClickHouse by default). See
 [DEVELOPMENT.md](../../DEVELOPMENT.md).
 
 ## Prerequisites

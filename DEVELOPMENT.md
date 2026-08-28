@@ -26,8 +26,8 @@ Then set up the service you want:
 cargo x setup api
 cargo x run api
 
-# or
-cargo x setup replicator --destination clickhouse
+# or, ClickHouse by default:
+cargo x setup replicator
 cargo x seed
 cargo x run replicator
 ```
@@ -48,13 +48,14 @@ cargo install --version 0.9.0-alpha.1 sqlx-cli --no-default-features --features 
 
 ## Replicator
 
-Pick a destination, then start. ClickHouse and Iceberg REST use the local Docker
-services from `cargo x init`. Cloud destinations write fake identifiers and
-placeholder secrets; override them with `APP_DESTINATION__*` for a real run.
+ClickHouse is the default and uses the Docker service from `cargo x init`. No
+cloud credentials are required. Iceberg REST also uses local Docker. Cloud
+destinations write fake identifiers and placeholder secrets; override them with
+`APP_DESTINATION__*` for a real run.
 
 | Destination | Setup | Then |
 | --- | --- | --- |
-| `clickhouse` | `cargo x setup replicator --destination clickhouse` | `cargo x seed && cargo x run replicator` |
+| `clickhouse` (default) | `cargo x setup replicator` | `cargo x seed && cargo x run replicator` |
 | `iceberg` | `cargo x setup replicator --destination iceberg` | `cargo x seed && cargo x run replicator` |
 | `bigquery` | `cargo x setup replicator --destination bigquery` | export `APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY`, then `cargo x run replicator` |
 | `ducklake` | `cargo x setup replicator --destination ducklake` | export `APP_DESTINATION__DUCKLAKE__S3_*`, then `cargo x run replicator` |
@@ -65,7 +66,18 @@ and export `APP_DESTINATION__ICEBERG__SUPABASE__*`.
 
 `cargo x setup replicator --help` lists flags. `--interactive` prompts for hosts
 and names. `cargo x run replicator` compiles the destination from the generated
-config. The replicator does not need Kubernetes.
+config. The replicator does not need Kubernetes. Re-run `cargo x seed` as often
+as you like; it keeps the existing database unless you pass `--force`.
+
+When the replicator is running, seed tables show up in ClickHouse as
+`public_users`, `public_orders`, and `public_events`, plus `__current` views:
+
+```bash
+curl -sS 'http://localhost:8123/?user=etl&password=etl' \
+  --data-binary 'SELECT count() FROM "public_users__current"'
+```
+
+Stop the replicator with Ctrl+C.
 
 ## API
 
@@ -153,4 +165,12 @@ Parser fuzz targets live in `fuzz/`.
   `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and
   `POSTGRES_DB`).
 - API exits on Kubernetes: enable OrbStack Kubernetes, then `cargo x setup api`.
-- Replicator config missing: `cargo x setup replicator --destination <name>`.
+- Replicator config missing: `cargo x setup replicator` (ClickHouse) or
+  `--destination <name>`.
+- `cargo x seed` keeps `etl_testdata` if it already exists. Recreate with
+  `cargo x seed --force`.
+- Replicator fails with `replication slot "supabase_etl_apply_1" was not
+  created in this database`: another pipeline used id `1` on this Postgres
+  cluster (for example the first-pipeline tutorial). `cargo x setup
+  replicator` drops an inactive leftover slot. If the slot is still active,
+  stop that process, then re-run setup.
