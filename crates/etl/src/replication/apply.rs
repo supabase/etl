@@ -2910,12 +2910,14 @@ where
         let replicated_table_schema =
             table_decoding_state.materialize(table_schema, sync_done_lsn)?;
 
-        info!(
-            worker_type = %WorkerType::Apply,
-            table_id = table_id.0,
+        debug!(
+            table_id = %table_id,
+            snapshot_id = %replicated_table_schema.inner().snapshot_id,
+            replication_mask = %replicated_table_schema.replication_mask(),
+            identity_mask = %replicated_table_schema.identity_mask(),
             %sync_done_lsn,
             %current_lsn,
-            "resolved sync_done table decoding state",
+            "resolved sync_done table decoding state"
         );
 
         Ok(Some(replicated_table_schema))
@@ -2955,6 +2957,7 @@ where
             table_id = %table_id,
             snapshot_id = %replicated_table_schema.inner().snapshot_id,
             replication_mask = %replicated_table_schema.replication_mask(),
+            identity_mask = %replicated_table_schema.identity_mask(),
             "materialized pending schema snapshot without protocol relation"
         );
 
