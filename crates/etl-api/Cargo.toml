@@ -30,15 +30,7 @@ snowflake = ["etl-destinations/snowflake"]
 anyhow = { workspace = true, features = ["std"] }
 async-trait = { workspace = true }
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys"] }
-axum = { workspace = true, features = [
-    "http1",
-    "http2",
-    "json",
-    "matched-path",
-    "query",
-    "tokio",
-    "tracing",
-] }
+axum = { workspace = true, features = ["http1", "http2", "json", "matched-path", "query", "tokio", "tracing"] }
 base64 = { workspace = true, features = ["std"] }
 chrono = { workspace = true }
 configcat = { workspace = true }
@@ -50,12 +42,7 @@ etl-maintenance = { workspace = true }
 etl-postgres = { workspace = true, features = ["store"] }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
-kube = { workspace = true, features = [
-    "runtime",
-    "derive",
-    "client",
-    "rustls-tls",
-] }
+kube = { workspace = true, features = ["runtime", "derive", "client", "rustls-tls"] }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 pg_escape = { workspace = true }
@@ -65,14 +52,7 @@ secrecy = { workspace = true }
 sentry = { workspace = true, features = ["tower-http", "tower-axum-matched-path"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
-sqlx = { workspace = true, features = [
-    "runtime-tokio",
-    "tls-rustls",
-    "macros",
-    "postgres",
-    "json",
-    "migrate",
-] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "macros", "postgres", "json", "migrate"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-rustls = { workspace = true, features = ["aws-lc-rs", "logging", "tls12"] }

@@ -11,12 +11,12 @@ clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-
 etl-api = { path = "../etl-api", default-features = false }
 etl-config = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
-rand = { workspace = true, features = ["std", "thread_rng"] }
-secrecy = { workspace = true }
 kube = { workspace = true, features = ["client", "derive", "rustls-tls", "ring"] }
 pg_escape = { workspace = true }
+rand = { workspace = true, features = ["std", "thread_rng"] }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 schemars = "0.8"
+secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "json"] }
