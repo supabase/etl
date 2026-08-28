@@ -1073,9 +1073,26 @@ mod tests {
             .validate()
             .unwrap();
 
-        DuckLakeCopyBufferConfig { enabled: true, target_bytes: 1024, max_total_bytes: 256 }
-            .validate()
-            .unwrap_err();
+        let ValidationError::InvalidFieldValue { field, .. } =
+            (DuckLakeCopyBufferConfig { enabled: true, target_bytes: 0, max_total_bytes: 256 })
+                .validate()
+                .unwrap_err();
+        assert_eq!(field, "copy_buffer.target_bytes");
+
+        let ValidationError::InvalidFieldValue { field, .. } =
+            (DuckLakeCopyBufferConfig { enabled: true, target_bytes: 1024, max_total_bytes: 256 })
+                .validate()
+                .unwrap_err();
+        assert_eq!(field, "copy_buffer.max_total_bytes");
+
+        let ValidationError::InvalidFieldValue { field, .. } = DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes: 1,
+            max_total_bytes: u64::from(u32::MAX) + 1,
+        }
+        .validate()
+        .unwrap_err();
+        assert_eq!(field, "copy_buffer.max_total_bytes");
     }
 
     #[test]

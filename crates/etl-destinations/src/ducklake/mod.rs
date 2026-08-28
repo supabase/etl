@@ -118,9 +118,12 @@ pub use core::{
 };
 #[cfg(feature = "test-utils")]
 pub use core::{
-    arm_fail_pool_refresh_once_for_tests, arm_pause_next_streaming_write_for_tests,
-    pool_refresh_failure_armed_for_tests, release_paused_streaming_write_for_tests,
-    reset_paused_streaming_write_for_tests, reset_pool_refresh_failure_for_tests,
+    arm_fail_drop_table_for_copy_once_for_tests, arm_fail_pool_refresh_once_for_tests,
+    arm_pause_next_copy_append_for_tests, arm_pause_next_streaming_write_for_tests,
+    pool_refresh_failure_armed_for_tests, release_paused_copy_append_for_tests,
+    release_paused_streaming_write_for_tests, reset_drop_table_for_copy_failure_for_tests,
+    reset_paused_copy_append_for_tests, reset_paused_streaming_write_for_tests,
+    reset_pool_refresh_failure_for_tests,
 };
 
 #[cfg(feature = "test-utils")]

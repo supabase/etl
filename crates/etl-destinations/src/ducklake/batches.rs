@@ -8,10 +8,9 @@
 //! transaction grow unbounded.
 
 #[cfg(feature = "test-utils")]
-use std::collections::HashMap;
-#[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
 use std::{
+    collections::HashMap,
     error, fmt,
     hash::{Hash, Hasher},
     sync::{
@@ -343,6 +342,13 @@ pub(super) struct PreparedDuckLakeTableBatch {
     action: PreparedDuckLakeTableBatchAction,
 }
 
+/// Compact durable marker retained while COPY rows remain staged.
+struct PreparedDuckLakeBatchMarker {
+    batch_kind: DuckLakeTableBatchKind,
+    first_start_lsn: Option<PgLsn>,
+    last_commit_lsn: Option<PgLsn>,
+}
+
 /// Prepared initial-copy rows with a lightweight size estimate for buffering.
 pub(super) struct PreparedDuckLakeCopyBatch {
     batch: PreparedDuckLakeTableBatch,
@@ -361,7 +367,9 @@ impl PreparedDuckLakeCopyBatch {
     }
 
     /// Separates staged row data from its durable applied-batch marker.
-    fn into_buffer_parts(mut self) -> EtlResult<(PreparedDuckLakeTableBatch, PreparedRows)> {
+    fn into_buffer_parts(
+        mut self,
+    ) -> EtlResult<(String, PreparedDuckLakeBatchMarker, PreparedRows)> {
         let PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) = &mut self.batch.action
         else {
             return Err(etl_error!(
@@ -386,7 +394,13 @@ impl PreparedDuckLakeCopyBatch {
             ));
         };
 
-        Ok((self.batch, prepared_rows))
+        let marker = PreparedDuckLakeBatchMarker {
+            batch_kind: self.batch.batch_kind,
+            first_start_lsn: self.batch.first_start_lsn,
+            last_commit_lsn: self.batch.last_commit_lsn,
+        };
+
+        Ok((self.batch.batch_id, marker, prepared_rows))
     }
 }
 
@@ -1603,7 +1617,17 @@ fn applied_batch_marker_exists(
     conn: &duckdb::Connection,
     batch: &PreparedDuckLakeTableBatch,
 ) -> EtlResult<bool> {
-    let table_id = batch.table_name.id();
+    applied_batch_marker_id_exists(conn, &batch.table_name, &batch.replay_epoch, &batch.batch_id)
+}
+
+/// Returns whether one marker identity already exists.
+fn applied_batch_marker_id_exists(
+    conn: &duckdb::Connection,
+    table_name: &DuckLakeTableName,
+    replay_epoch: &str,
+    batch_id: &str,
+) -> EtlResult<bool> {
+    let table_id = table_name.id();
     let sql = format!(
         r#"SELECT 1 FROM {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}"
          WHERE table_name = {}
@@ -1612,8 +1636,8 @@ fn applied_batch_marker_exists(
          LIMIT 1;"#,
         quote_literal(&table_id),
         quote_literal(LEGACY_REPLAY_EPOCH),
-        quote_literal(&batch.replay_epoch),
-        quote_literal(&batch.batch_id)
+        quote_literal(replay_epoch),
+        quote_literal(batch_id)
     );
     let mut statement = conn.prepare(&sql).map_err(|err| {
         etl_error!(
@@ -1647,17 +1671,39 @@ fn insert_applied_batch_marker(
     conn: &duckdb::Connection,
     batch: &PreparedDuckLakeTableBatch,
 ) -> EtlResult<()> {
-    let table_id = batch.table_name.id();
+    let marker = PreparedDuckLakeBatchMarker {
+        batch_kind: batch.batch_kind,
+        first_start_lsn: batch.first_start_lsn,
+        last_commit_lsn: batch.last_commit_lsn,
+    };
+    insert_applied_batch_marker_fields(
+        conn,
+        &batch.table_name,
+        &batch.replay_epoch,
+        &batch.batch_id,
+        &marker,
+    )
+}
+
+/// Inserts one compact marker inside the open DuckLake transaction.
+fn insert_applied_batch_marker_fields(
+    conn: &duckdb::Connection,
+    table_name: &DuckLakeTableName,
+    replay_epoch: &str,
+    batch_id: &str,
+    marker: &PreparedDuckLakeBatchMarker,
+) -> EtlResult<()> {
+    let table_id = table_name.id();
     let sql = format!(
         r#"INSERT INTO {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}"
          (table_name, replay_epoch, batch_id, batch_kind, first_start_lsn, last_commit_lsn, applied_at)
          VALUES ({}, {}, {}, {}, {}, {}, current_timestamp);"#,
         quote_literal(&table_id),
-        quote_literal(&batch.replay_epoch),
-        quote_literal(&batch.batch_id),
-        quote_literal(batch.batch_kind.as_str()),
-        optional_lsn_to_sql_literal(batch.first_start_lsn),
-        optional_lsn_to_sql_literal(batch.last_commit_lsn),
+        quote_literal(replay_epoch),
+        quote_literal(batch_id),
+        quote_literal(marker.batch_kind.as_str()),
+        optional_lsn_to_sql_literal(marker.first_start_lsn),
+        optional_lsn_to_sql_literal(marker.last_commit_lsn),
     );
     conn.execute_batch(&sql).map_err(|err| {
         etl_error!(
@@ -1912,7 +1958,7 @@ pub(super) struct DuckLakeCopyAccumulator {
     table_name: DuckLakeTableName,
     replay_epoch: String,
     staging: ReusableStagingTable,
-    pending_markers: Vec<PreparedDuckLakeTableBatch>,
+    pending_markers: HashMap<String, PreparedDuckLakeBatchMarker>,
     staged_bytes: u64,
 }
 
@@ -1926,7 +1972,7 @@ impl DuckLakeCopyAccumulator {
                 &batch.batch.table_name,
                 batch.batch.insert_column_names.clone(),
             ),
-            pending_markers: Vec::new(),
+            pending_markers: HashMap::new(),
             staged_bytes: 0,
         }
     }
@@ -1956,7 +2002,7 @@ impl DuckLakeCopyAccumulator {
             ));
         }
 
-        if self.pending_markers.iter().any(|pending| pending.batch_id == batch.batch.batch_id)
+        if self.pending_markers.contains_key(&batch.batch.batch_id)
             || applied_batch_marker_exists(conn, &batch.batch)?
         {
             record_replayed_batch_skip(&batch.batch);
@@ -1964,10 +2010,10 @@ impl DuckLakeCopyAccumulator {
         }
 
         let estimated_bytes = batch.estimated_bytes;
-        let (marker, prepared_rows) = batch.into_buffer_parts()?;
+        let (batch_id, marker, prepared_rows) = batch.into_buffer_parts()?;
         self.staging.ensure_created(conn)?;
         self.staging.load_rows(conn, &prepared_rows)?;
-        self.pending_markers.push(marker);
+        self.pending_markers.insert(batch_id, marker);
         self.staged_bytes = self.staged_bytes.saturating_add(estimated_bytes);
 
         Ok(true)
@@ -1990,7 +2036,7 @@ impl DuckLakeCopyAccumulator {
         }
 
         let started = Instant::now();
-        conn.execute_batch("BEGIN TRANSACTION").map_err(|error| {
+        conn.execute_batch("begin transaction").map_err(|error| {
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake buffered copy BEGIN TRANSACTION failed",
@@ -2001,8 +2047,14 @@ impl DuckLakeCopyAccumulator {
         let result = (|| -> EtlResult<()> {
             if !self.pending_markers.is_empty() {
                 self.staging.insert_staged_rows(conn)?;
-                for marker in &self.pending_markers {
-                    insert_applied_batch_marker(conn, marker)?;
+                for (batch_id, marker) in &self.pending_markers {
+                    insert_applied_batch_marker_fields(
+                        conn,
+                        &self.table_name,
+                        &self.replay_epoch,
+                        batch_id,
+                        marker,
+                    )?;
                 }
             }
 
@@ -2025,7 +2077,7 @@ impl DuckLakeCopyAccumulator {
         })();
 
         if let Err(error) = result {
-            if let Err(rollback_error) = conn.execute_batch("ROLLBACK") {
+            if let Err(rollback_error) = conn.execute_batch("rollback") {
                 tracing::error!(error = %rollback_error, "error rollback buffered copy");
             }
             return Err(error);
@@ -2035,7 +2087,7 @@ impl DuckLakeCopyAccumulator {
         // the error makes the shared runner mark this connection broken; the
         // owner then fences the buffer until recovery drops and recopies the
         // complete table instead of retrying an ambiguous transaction.
-        conn.execute_batch("COMMIT").map_err(|error| {
+        conn.execute_batch("commit").map_err(|error| {
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake buffered copy COMMIT failed",

@@ -625,8 +625,8 @@ impl BenchDestination {
                     max_total_bytes: destination_args.ducklake_copy_buffer_max_total_bytes,
                 };
                 let destination = DuckLakeDestination::builder(
-                    Url::parse(catalog_url).context("invalid DuckLake catalog URL")?,
-                    Url::parse(data_path).context("invalid DuckLake data path")?,
+                    Url::parse(catalog_url).context("Invalid DuckLake catalog URL")?,
+                    Url::parse(data_path).context("Invalid DuckLake data path")?,
                     destination_args.ducklake_pool_size,
                     store,
                 )
@@ -671,6 +671,16 @@ impl BenchDestination {
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.stats(),
         }
+    }
+
+    /// Returns peak deferred-copy bytes for a DuckLake benchmark.
+    pub fn ducklake_copy_buffer_peak_staged_bytes(&self) -> Option<u64> {
+        #[cfg(feature = "ducklake")]
+        if let Self::DuckLake(destination) = self {
+            return Some(destination.inner.copy_buffer_peak_staged_bytes());
+        }
+
+        None
     }
 
     /// Resets CDC counters.
