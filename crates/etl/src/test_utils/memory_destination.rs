@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{
     data::TableRow,
@@ -9,11 +9,84 @@ use crate::{
         Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
         TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
-    error::EtlResult,
+    error::{ErrorKind, EtlResult},
+    etl_error,
     event::Event,
-    schema::{ReplicatedTableSchema, TableId},
+    schema::{ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId},
     store::SharedStateStore,
 };
+
+/// Display name used in destination schema-validation errors.
+const DESTINATION_NAME: &str = "memory";
+
+/// Validates that a relation can advance an applied destination schema.
+fn ensure_relation_schema_transition(
+    table_id: TableId,
+    applied_snapshot_id: SnapshotId,
+    applied_replication_mask: &ReplicationMask,
+    received_snapshot_id: SnapshotId,
+    received_replication_mask: &ReplicationMask,
+) -> EtlResult<()> {
+    if received_snapshot_id < applied_snapshot_id {
+        return Err(etl_error!(
+            ErrorKind::DestinationSchemaRewind,
+            "Destination schema is newer than the replayed schema snapshot",
+            format!(
+                "{DESTINATION_NAME} table {table_id} received schema snapshot \
+                 {received_snapshot_id}, but the destination already applied snapshot \
+                 {applied_snapshot_id}. Reverse DDL is not executed because it could delete newer \
+                 column data; resynchronize the table to recover."
+            )
+        ));
+    }
+
+    if received_snapshot_id == applied_snapshot_id
+        && received_replication_mask != applied_replication_mask
+    {
+        return Err(etl_error!(
+            ErrorKind::DestinationSchemaRewind,
+            "Relation reused an applied schema snapshot with a different replication mask",
+            format!(
+                "{DESTINATION_NAME} table {table_id} received schema snapshot \
+                 {received_snapshot_id} with replication mask {received_replication_mask}, but \
+                 the destination already applied the same snapshot with replication mask \
+                 {applied_replication_mask}. Supported publication column-list changes use a \
+                 newer schema snapshot, and equal-snapshot relations have no ordering with which \
+                 to choose a mask; resynchronize the table to recover."
+            )
+        ));
+    }
+
+    Ok(())
+}
+
+/// Requires an arriving row schema to match the exact destination metadata.
+fn ensure_destination_schema_matches_metadata(
+    table_id: TableId,
+    metadata: &DestinationTableMetadata,
+    received_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    let received_snapshot_id = received_schema.inner().snapshot_id;
+    let received_replication_mask = received_schema.replication_mask();
+    if metadata.snapshot_id() == received_snapshot_id
+        && metadata.replication_mask() == received_replication_mask
+    {
+        return Ok(());
+    }
+
+    Err(etl_error!(
+        ErrorKind::DestinationSchemaRewind,
+        "Destination metadata does not match the received schema",
+        format!(
+            "{DESTINATION_NAME} table {table_id} has destination metadata for snapshot {} and \
+             replication mask {}, but received snapshot {received_snapshot_id} and replication \
+             mask {received_replication_mask}. Recover the recorded destination operation or \
+             resynchronize the table before retrying.",
+            metadata.snapshot_id(),
+            metadata.replication_mask(),
+        )
+    ))
+}
 
 #[derive(Debug)]
 struct Inner {
@@ -29,8 +102,10 @@ struct Inner {
 /// terminates.
 ///
 /// Like real destinations (BigQuery, Iceberg), this destination tracks table
-/// metadata (snapshot IDs and replication masks) in a state store to mirror
-/// destinations that persist table-copy state.
+/// metadata (snapshot IDs and replication masks) in a state store and validates
+/// incoming schemas against that metadata. Relation events may advance an
+/// applied snapshot; row events must match the applied snapshot and
+/// replication mask exactly.
 #[derive(Clone)]
 pub struct MemoryDestination<S> {
     inner: Arc<Mutex<Inner>>,
@@ -84,32 +159,92 @@ where
         inner.table_rows.clear();
     }
 
-    /// Stores or advances destination table metadata for a table.
-    async fn sync_destination_table_metadata(
+    /// Applies a relation event against stored destination table metadata.
+    ///
+    /// Missing metadata is treated as a broken invariant because initial copy
+    /// should have recorded it. A newer snapshot replaces the applied
+    /// metadata. An older snapshot, or an equal snapshot with a different
+    /// replication mask, is rejected.
+    async fn apply_relation_schema(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let table_id = replicated_table_schema.id();
-        let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
-        let metadata = match existing_metadata {
-            Some(metadata)
-                if metadata.snapshot_id() == replicated_table_schema.inner().snapshot_id
-                    && metadata.replication_mask()
-                        == replicated_table_schema.replication_mask() =>
-            {
-                metadata.to_applied()
-            }
-            Some(metadata) => DestinationTableMetadata::new_applied(
-                metadata.table_id().to_owned(),
-                replicated_table_schema.inner().snapshot_id,
-                replicated_table_schema.replication_mask().clone(),
-            ),
-            None => Self::build_destination_table_metadata(replicated_table_schema),
+        let received_snapshot_id = replicated_table_schema.inner().snapshot_id;
+        let received_replication_mask = replicated_table_schema.replication_mask();
+        let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
+            return Err(etl_error!(
+                ErrorKind::CorruptedTableSchema,
+                "Destination metadata missing for memory schema change",
+                format!(
+                    "{DESTINATION_NAME} table {table_id} received schema snapshot \
+                     {received_snapshot_id}, but destination metadata from initial \
+                     synchronization was not found."
+                )
+            ));
         };
 
+        ensure_relation_schema_transition(
+            table_id,
+            metadata.snapshot_id(),
+            metadata.replication_mask(),
+            received_snapshot_id,
+            received_replication_mask,
+        )?;
+
+        if metadata.snapshot_id() == received_snapshot_id {
+            debug!(
+                table_id = %table_id,
+                snapshot_id = %received_snapshot_id,
+                replication_mask = %received_replication_mask,
+                "memory table schema unchanged"
+            );
+            return Ok(());
+        }
+
+        info!(
+            table_id = %table_id,
+            current_snapshot_id = %metadata.snapshot_id(),
+            new_snapshot_id = %received_snapshot_id,
+            current_replication_mask = %metadata.replication_mask(),
+            new_replication_mask = %received_replication_mask,
+            "memory table schema change applied"
+        );
+
+        let metadata = DestinationTableMetadata::new_applied(
+            metadata.table_id().to_owned(),
+            received_snapshot_id,
+            received_replication_mask.clone(),
+        );
         self.store.store_destination_table_metadata(table_id, metadata).await?;
 
         Ok(())
+    }
+
+    /// Requires a row schema to match applied destination metadata.
+    ///
+    /// The first write for a table records applied metadata, matching real
+    /// destinations that create the destination table during initial copy.
+    async fn ensure_row_schema(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_id = replicated_table_schema.id();
+        match self.store.get_destination_table_metadata(table_id).await? {
+            Some(metadata) => ensure_destination_schema_matches_metadata(
+                table_id,
+                &metadata,
+                replicated_table_schema,
+            ),
+            None => {
+                self.store
+                    .store_destination_table_metadata(
+                        table_id,
+                        Self::build_destination_table_metadata(replicated_table_schema),
+                    )
+                    .await
+            }
+        }
     }
 
     /// Builds applied destination table metadata for a memory-backed table.
@@ -176,9 +311,7 @@ where
     ) -> EtlResult<()> {
         let table_id = replicated_table_schema.id();
 
-        // Store destination table metadata on first write, like real destinations
-        // (BigQuery, Iceberg) do.
-        self.sync_destination_table_metadata(replicated_table_schema).await?;
+        self.ensure_row_schema(replicated_table_schema).await?;
 
         let mut inner = self.inner.lock().await;
         info!(%table_id, row_count = table_rows.len(), "writing table rows");
@@ -195,45 +328,27 @@ where
         _durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        let mut table_schemas = HashMap::new();
         for event in &events {
             match event {
+                Event::Relation(event) => {
+                    self.apply_relation_schema(&event.replicated_table_schema).await?;
+                }
                 Event::Insert(event) => {
-                    table_schemas.insert(
-                        event.replicated_table_schema.id(),
-                        event.replicated_table_schema.clone(),
-                    );
+                    self.ensure_row_schema(&event.replicated_table_schema).await?;
                 }
                 Event::Update(event) => {
-                    table_schemas.insert(
-                        event.replicated_table_schema.id(),
-                        event.replicated_table_schema.clone(),
-                    );
+                    self.ensure_row_schema(&event.replicated_table_schema).await?;
                 }
                 Event::Delete(event) => {
-                    table_schemas.insert(
-                        event.replicated_table_schema.id(),
-                        event.replicated_table_schema.clone(),
-                    );
-                }
-                Event::Relation(event) => {
-                    table_schemas.insert(
-                        event.replicated_table_schema.id(),
-                        event.replicated_table_schema.clone(),
-                    );
+                    self.ensure_row_schema(&event.replicated_table_schema).await?;
                 }
                 Event::Truncate(event) => {
                     for replicated_table_schema in &event.truncated_tables {
-                        table_schemas
-                            .insert(replicated_table_schema.id(), replicated_table_schema.clone());
+                        self.ensure_row_schema(replicated_table_schema).await?;
                     }
                 }
                 Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
             }
-        }
-
-        for replicated_table_schema in table_schemas.into_values() {
-            self.sync_destination_table_metadata(&replicated_table_schema).await?;
         }
 
         let mut inner = self.inner.lock().await;
@@ -243,5 +358,166 @@ where
         async_result.send(Ok(DestinationWriteStatus::Durable));
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{
+        destination::WriteEventsDurability,
+        event::{InsertEvent, RelationEvent},
+        schema::{
+            ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
+            TableName, TableSchema, Type,
+        },
+        store::{MemoryStore, StateStore},
+        test_utils::destination::{write_events, write_table_rows},
+    };
+
+    fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
+        SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+    }
+
+    fn test_schema(snapshot_id: SnapshotId) -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::with_snapshot_id(
+            TableId::new(7),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)],
+            snapshot_id,
+        ));
+        ReplicatedTableSchema::all(table_schema)
+    }
+
+    fn relation_event(schema: ReplicatedTableSchema) -> Event {
+        Event::Relation(RelationEvent { replicated_table_schema: schema })
+    }
+
+    fn insert_event(schema: ReplicatedTableSchema) -> Event {
+        Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(1),
+            tx_ordinal: 0,
+            replicated_table_schema: schema,
+            table_row: TableRow::new(Vec::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn relation_event_advances_applied_destination_metadata() {
+        let store = MemoryStore::new();
+        let destination = MemoryDestination::new(store.clone());
+        let initial_schema = test_schema(test_snapshot_id(100, 100));
+        let next_schema = test_schema(test_snapshot_id(200, 200));
+
+        write_table_rows(&destination, &initial_schema, Vec::new()).await.unwrap();
+        write_events(
+            &destination,
+            WriteEventsDurability::RequireDurable,
+            vec![relation_event(next_schema.clone())],
+        )
+        .await
+        .unwrap();
+
+        let metadata =
+            store.get_destination_table_metadata(TableId::new(7)).await.unwrap().unwrap();
+        assert_eq!(metadata.snapshot_id(), next_schema.inner().snapshot_id);
+        assert_eq!(metadata.replication_mask(), next_schema.replication_mask());
+    }
+
+    #[tokio::test]
+    async fn relation_then_insert_in_the_same_batch_uses_the_new_schema() {
+        let store = MemoryStore::new();
+        let destination = MemoryDestination::new(store);
+        let initial_schema = test_schema(test_snapshot_id(100, 100));
+        let next_schema = test_schema(test_snapshot_id(200, 200));
+
+        write_table_rows(&destination, &initial_schema, Vec::new()).await.unwrap();
+        write_events(
+            &destination,
+            WriteEventsDurability::RequireDurable,
+            vec![relation_event(next_schema.clone()), insert_event(next_schema)],
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn insert_without_relation_rejects_a_newer_schema() {
+        let store = MemoryStore::new();
+        let destination = MemoryDestination::new(store);
+        let initial_schema = test_schema(test_snapshot_id(100, 100));
+        let next_schema = test_schema(test_snapshot_id(200, 200));
+
+        write_table_rows(&destination, &initial_schema, Vec::new()).await.unwrap();
+        let error = write_events(
+            &destination,
+            WriteEventsDurability::RequireDurable,
+            vec![insert_event(next_schema)],
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
+    }
+
+    #[tokio::test]
+    async fn relation_event_rejects_an_older_schema_snapshot() {
+        let store = MemoryStore::new();
+        let destination = MemoryDestination::new(store);
+        let applied_schema = test_schema(test_snapshot_id(200, 200));
+        let older_schema = test_schema(test_snapshot_id(100, 100));
+
+        write_table_rows(&destination, &applied_schema, Vec::new()).await.unwrap();
+        let error = write_events(
+            &destination,
+            WriteEventsDurability::RequireDurable,
+            vec![relation_event(older_schema)],
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
+    }
+
+    #[tokio::test]
+    async fn relation_event_rejects_a_different_mask_at_the_same_snapshot() {
+        let store = MemoryStore::new();
+        let destination = MemoryDestination::new(store);
+        let snapshot_id = test_snapshot_id(200, 200);
+        let applied_schema = test_schema(snapshot_id);
+        let conflicting_schema = ReplicatedTableSchema::from_mask(
+            Arc::new(applied_schema.inner().clone()),
+            ReplicationMask::from_bytes(vec![0]),
+        );
+
+        write_table_rows(&destination, &applied_schema, Vec::new()).await.unwrap();
+        let error = write_events(
+            &destination,
+            WriteEventsDurability::RequireDurable,
+            vec![relation_event(conflicting_schema)],
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
+    }
+
+    #[tokio::test]
+    async fn relation_event_requires_destination_metadata_from_copy() {
+        let store = MemoryStore::new();
+        let destination = MemoryDestination::new(store);
+        let schema = test_schema(test_snapshot_id(100, 100));
+
+        let error = write_events(
+            &destination,
+            WriteEventsDurability::RequireDurable,
+            vec![relation_event(schema)],
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
     }
 }
