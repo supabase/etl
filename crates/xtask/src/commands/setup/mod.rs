@@ -108,11 +108,11 @@ impl SetupApiArgs {
         let config = prepare_local_databases()?;
         seed_default_replicator_image(&config.database_url())?;
         configure_kubernetes()?;
-        let written = write_api_config(&config, self.force)?;
+        write_api_config(&config, self.force)?;
 
         println!();
         println!("✅ ETL API is ready to start.");
-        print_api_next_steps(written.api_key.as_deref());
+        print_api_next_steps();
         Ok(())
     }
 }
@@ -263,19 +263,14 @@ fn prompt_iceberg_catalog(default: IcebergCatalog) -> Result<IcebergCatalog> {
 }
 
 /// Prints how to start the API after setup.
-fn print_api_next_steps(api_key: Option<&str>) {
+fn print_api_next_steps() {
     println!("API:");
     println!("  cargo x run api");
     println!("  Health      http://127.0.0.1:8010/health_check");
     println!("  Swagger UI  http://127.0.0.1:8010/swagger-ui");
     println!("  Internal    http://127.0.0.1:8081/health_check");
-    if let Some(api_key) = api_key {
-        println!("  Auth        Authorization: Bearer {api_key}");
-        println!("  The key is also in crates/etl-api/configuration/dev.yaml (gitignored).");
-    } else {
-        println!("  Keys        crates/etl-api/configuration/dev.yaml (gitignored)");
-        println!("  Rotate      cargo x setup api --force");
-    }
+    println!("  Keys        crates/etl-api/configuration/dev.yaml (gitignored)");
+    println!("  Rotate      cargo x setup api --force");
 }
 
 /// Prints how to start the replicator after setup.
@@ -316,7 +311,20 @@ fn print_replicator_next_steps(destination: DestinationPreset, iceberg_catalog: 
 
 /// Reads one line from stdin, using `default` when the user presses Enter.
 pub(super) fn prompt(label: &str, default: &str) -> Result<String> {
-    print!("{label} [{default}]: ");
+    read_prompt(&format!("{label} [{default}]: "), default)
+}
+
+/// Reads a secret from stdin without echoing `default`.
+///
+/// Empty input keeps `default`. Passwords and connection strings that embed
+/// credentials must use this so they are not written to the terminal.
+pub(super) fn prompt_secret(label: &str, default: &str) -> Result<String> {
+    read_prompt(&format!("{label} [hidden]: "), default)
+}
+
+/// Flushes `prompt_text`, then returns the trimmed line or `default`.
+fn read_prompt(prompt_text: &str, default: &str) -> Result<String> {
+    print!("{prompt_text}");
     io::stdout().flush().context("Failed to flush prompt")?;
     let mut line = String::new();
     io::stdin().read_line(&mut line).context("Failed to read prompt")?;

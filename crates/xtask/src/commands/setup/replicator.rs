@@ -15,7 +15,10 @@ use secrecy::ExposeSecret;
 use crate::{
     commands::{
         local::InitConfig,
-        setup::{ensure_config_dir, prompt, replicator_config_dir, write_file, yaml_string},
+        setup::{
+            ensure_config_dir, prompt, prompt_secret, replicator_config_dir, write_file,
+            yaml_string,
+        },
     },
     utils::DestinationPreset,
 };
@@ -185,7 +188,7 @@ impl ReplicatorSetup {
         self.postgres.port = prompt("Postgres port", &self.postgres.port)?;
         self.postgres.name = prompt("Postgres database", &self.postgres.name)?;
         self.postgres.username = prompt("Postgres user", &self.postgres.username)?;
-        self.postgres.password = prompt("Postgres password", &self.postgres.password)?;
+        self.postgres.password = prompt_secret("Postgres password", &self.postgres.password)?;
         self.publication = prompt("Publication name", &self.publication)?;
         self.destination.prompt()
     }
@@ -278,7 +281,7 @@ impl DestinationSetup {
             Self::ClickHouse { url, user, password } => {
                 *url = prompt("ClickHouse HTTP URL", url)?;
                 *user = prompt("ClickHouse user", user)?;
-                *password = prompt("ClickHouse password", password)?;
+                *password = prompt_secret("ClickHouse password", password)?;
             }
             Self::BigQuery { project_id, dataset_id, service_account_key } => {
                 *project_id = prompt("BigQuery project id", project_id)?;
@@ -293,7 +296,7 @@ impl DestinationSetup {
                 }
             }
             Self::DuckLake { catalog_url, data_path } => {
-                *catalog_url = prompt("DuckLake catalog URL", catalog_url)?;
+                *catalog_url = prompt_secret("DuckLake catalog URL", catalog_url)?;
                 *data_path = prompt("DuckLake data path (s3://...)", data_path)?;
             }
             Self::Iceberg(IcebergSetup::Rest {
@@ -314,7 +317,7 @@ impl DestinationSetup {
                 *s3_region = prompt("Iceberg S3 region", s3_region)?;
             }
             Self::Snowflake { account_id, user, database, schema, .. } => {
-                *account_id = prompt("Snowflake account", account_id)?;
+                *account_id = prompt_secret("Snowflake account", account_id)?;
                 *user = prompt("Snowflake user", user)?;
                 *database = prompt("Snowflake database", database)?;
                 *schema = prompt("Snowflake schema", schema)?;
