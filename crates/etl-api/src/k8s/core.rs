@@ -125,7 +125,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
     source: Source,
     destination: Destination,
     supabase_api_url: Option<&str>,
-    ducklake_copy_buffer_override: Option<DuckLakeCopyBufferConfig>,
+    ducklake_copy_buffer_default: DuckLakeCopyBufferConfig,
     tls_config: TlsConfig,
 ) -> Result<(), K8sCoreError> {
     let resource_prefix = create_k8s_object_prefix(tenant_id, replicator.id);
@@ -162,7 +162,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         destination.config,
         pipeline.config,
         supabase_config,
-        ducklake_copy_buffer_override,
+        ducklake_copy_buffer_default,
         tls_config,
     )?;
 
@@ -388,19 +388,14 @@ fn build_replicator_config_without_secrets(
     destination_config: StoredDestinationConfig,
     pipeline_config: StoredPipelineConfig,
     supabase_config: SupabaseConfigWithoutSecrets,
-    ducklake_copy_buffer_override: Option<DuckLakeCopyBufferConfig>,
+    ducklake_copy_buffer_default: DuckLakeCopyBufferConfig,
     tls_config: TlsConfig,
 ) -> Result<ReplicatorConfigWithoutSecrets, ValidationError> {
     let pg_connection_config = source_config.into_connection_config(tls_config);
-    let mut destination_config = destination_config;
-    if let (Some(copy_buffer_override), StoredDestinationConfig::Ducklake { copy_buffer, .. }) =
-        (ducklake_copy_buffer_override, &mut destination_config)
-    {
-        *copy_buffer = copy_buffer_override;
-    }
-
     let config = ReplicatorConfigWithoutSecrets {
-        destination: destination_config.into_etl_config().into(),
+        destination: destination_config
+            .into_etl_config_with_ducklake_copy_buffer_default(ducklake_copy_buffer_default)
+            .into(),
         pipeline: pipeline_config.into_etl_config(pipeline_id, pg_connection_config).into(),
         supabase: Some(supabase_config),
     };
@@ -736,6 +731,31 @@ mod tests {
         }
     }
 
+    fn ducklake_destination_config(
+        copy_buffer: Option<DuckLakeCopyBufferConfig>,
+    ) -> StoredDestinationConfig {
+        StoredDestinationConfig::Ducklake {
+            catalog_url: SerializableSecretString::from("postgres://catalog".to_owned()),
+            catalog_pooler_url: None,
+            data_path: "s3://bucket/path".to_owned(),
+            pool_size: 4,
+            s3_access_key_id: Some(SerializableSecretString::from("key-id".to_owned())),
+            s3_secret_access_key: Some(SerializableSecretString::from("secret-key".to_owned())),
+            s3_region: None,
+            s3_endpoint: None,
+            s3_url_style: None,
+            s3_use_ssl: None,
+            metadata_schema: None,
+            maintenance_target_file_size: None,
+            parquet_row_group_size_bytes: None,
+            parquet_row_group_size: None,
+            expire_snapshots_older_than: None,
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer,
+            table_sorting: Default::default(),
+        }
+    }
+
     #[test]
     fn replicator_config_builder_validates_the_final_without_secret_config() {
         let destination_config = StoredDestinationConfig::BigQuery {
@@ -767,7 +787,7 @@ mod tests {
             destination_config,
             pipeline_config,
             supabase_config,
-            None,
+            DuckLakeCopyBufferConfig::default(),
             TlsConfig::disabled(),
         )
         .unwrap_err();
@@ -777,56 +797,42 @@ mod tests {
     }
 
     #[test]
-    fn replicator_config_builder_applies_ducklake_copy_buffer_override() {
-        let destination_config = StoredDestinationConfig::Ducklake {
-            catalog_url: SerializableSecretString::from("postgres://catalog".to_owned()),
-            catalog_pooler_url: None,
-            data_path: "s3://bucket/path".to_owned(),
-            pool_size: 4,
-            s3_access_key_id: Some(SerializableSecretString::from("key-id".to_owned())),
-            s3_secret_access_key: Some(SerializableSecretString::from("secret-key".to_owned())),
-            s3_region: None,
-            s3_endpoint: None,
-            s3_url_style: None,
-            s3_use_ssl: None,
-            metadata_schema: None,
-            maintenance_target_file_size: None,
-            parquet_row_group_size_bytes: None,
-            parquet_row_group_size: None,
-            expire_snapshots_older_than: None,
-            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
-            copy_buffer: DuckLakeCopyBufferConfig::default(),
-            table_sorting: Default::default(),
-        };
-        let pipeline_config = serde_json::from_value(serde_json::json!({
-            "publication_name": "example_publication"
-        }))
-        .unwrap();
-        let copy_buffer_override = DuckLakeCopyBufferConfig {
+    fn replicator_config_builder_prefers_pipeline_copy_buffer_over_api_default() {
+        let api_default = DuckLakeCopyBufferConfig {
             enabled: true,
-            target_bytes: 256 * 1024 * 1024,
+            target_bytes: 512 * 1024 * 1024,
             max_total_bytes: 1024 * 1024 * 1024,
         };
+        let pipeline_config =
+            DuckLakeCopyBufferConfig { enabled: false, ..DuckLakeCopyBufferConfig::default() };
 
-        let config = build_replicator_config_without_secrets(
-            1,
-            source_config_with_password(),
-            destination_config,
-            pipeline_config,
-            SupabaseConfigWithoutSecrets {
-                project_ref: "example-project-ref".to_owned(),
-                api_url: None,
-            },
-            Some(copy_buffer_override),
-            TlsConfig::disabled(),
-        )
-        .unwrap();
+        for (stored_copy_buffer, expected) in
+            [(Some(pipeline_config), pipeline_config), (None, api_default)]
+        {
+            let pipeline_config = serde_json::from_value(serde_json::json!({
+                "publication_name": "example_publication"
+            }))
+            .unwrap();
+            let config = build_replicator_config_without_secrets(
+                1,
+                source_config_with_password(),
+                ducklake_destination_config(stored_copy_buffer),
+                pipeline_config,
+                SupabaseConfigWithoutSecrets {
+                    project_ref: "example-project-ref".to_owned(),
+                    api_url: None,
+                },
+                api_default,
+                TlsConfig::disabled(),
+            )
+            .unwrap();
 
-        let DestinationConfigWithoutSecrets::Ducklake { copy_buffer, .. } = config.destination
-        else {
-            unreachable!("destination kind should remain DuckLake");
-        };
-        assert_eq!(copy_buffer, copy_buffer_override);
+            let DestinationConfigWithoutSecrets::Ducklake { copy_buffer, .. } = config.destination
+            else {
+                unreachable!("destination kind should remain DuckLake");
+            };
+            assert_eq!(copy_buffer, expected);
+        }
     }
 
     #[async_trait]

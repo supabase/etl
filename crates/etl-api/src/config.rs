@@ -29,6 +29,9 @@ pub struct ApiConfig {
     pub application: ApplicationSettings,
     /// Kubernetes-specific API configuration.
     pub k8s: K8sConfig,
+    /// Replicator runtime defaults applied when pipelines omit a setting.
+    #[serde(default)]
+    pub replicator: ApiReplicatorConfig,
     /// Source database configuration and validation settings.
     pub source: SourceConfig,
     /// Encryption key configurations.
@@ -62,6 +65,30 @@ pub struct ApiConfig {
     pub configcat_sdk_key: Option<String>,
 }
 
+/// Defaults applied to generated replicator configurations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct ApiReplicatorConfig {
+    /// Defaults grouped by destination kind.
+    #[serde(default)]
+    pub destination_defaults: DestinationDefaultsConfig,
+}
+
+/// Replicator defaults grouped by destination kind.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct DestinationDefaultsConfig {
+    /// Defaults for DuckLake destinations.
+    #[serde(default)]
+    pub ducklake: DuckLakeDestinationDefaultsConfig,
+}
+
+/// Replicator defaults for DuckLake destinations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct DuckLakeDestinationDefaultsConfig {
+    /// Initial-copy buffering used when a pipeline does not configure it.
+    #[serde(default)]
+    pub copy_buffer: DuckLakeCopyBufferConfig,
+}
+
 /// Kubernetes-specific API configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct K8sConfig {
@@ -84,13 +111,6 @@ pub struct K8sConfig {
     /// replicator pod unless a destination-kind default or pipeline-level
     /// override supplies one of those request values.
     pub replicator_resources: DefaultReplicatorResourcesConfig,
-    /// Optional operator override for DuckLake initial-copy buffering.
-    ///
-    /// When set, the generated replicator configuration uses this policy for
-    /// every DuckLake pipeline without changing its stored destination record.
-    /// Omitting it preserves the per-destination configuration.
-    #[serde(default)]
-    pub ducklake_copy_buffer_override: Option<DuckLakeCopyBufferConfig>,
     /// CPU and memory bounds shared by generated VPAs and StatefulSets.
     #[serde(default)]
     pub replicator_autoscaling: ReplicatorAutoscalingConfig,
@@ -257,9 +277,12 @@ impl ApiConfig {
         self.k8s.replicator_resources.validate()?;
         self.k8s.replicator_autoscaling.validate()?;
         self.k8s.vector_resources.validate()?;
-        if let Some(copy_buffer) = &self.k8s.ducklake_copy_buffer_override {
-            copy_buffer.validate().map_err(|error| error.to_string())?;
-        }
+        self.replicator
+            .destination_defaults
+            .ducklake
+            .copy_buffer
+            .validate()
+            .map_err(|error| error.to_string())?;
 
         Ok(())
     }
@@ -620,36 +643,45 @@ mod tests {
             }
         );
         assert_eq!(config.replicator_autoscaling, ReplicatorAutoscalingConfig::default());
-        assert!(config.ducklake_copy_buffer_override.is_none());
     }
 
     #[test]
-    fn ducklake_copy_buffer_override_is_configurable() {
-        let config: K8sConfig = serde_json::from_value(json!({
-            "replicator_resources": {
-                "memory_request_mib": 4096,
-                "cpu_request_millicores": 512
-            },
-            "ducklake_copy_buffer_override": {
-                "enabled": true,
-                "target_bytes": 268435456,
-                "max_total_bytes": 1073741824
-            },
-            "vector_resources": {
-                "memory_request_mib": 192,
-                "cpu_request_millicores": 75
+    fn ducklake_copy_buffer_default_is_configurable() {
+        #[derive(serde::Deserialize)]
+        struct ConfigFragment {
+            replicator: ApiReplicatorConfig,
+        }
+
+        let config: ConfigFragment = serde_json::from_value(json!({
+            "replicator": {
+                "destination_defaults": {
+                    "ducklake": {
+                        "copy_buffer": {
+                            "enabled": true,
+                            "target_bytes": 268435456,
+                            "max_total_bytes": 1073741824
+                        }
+                    }
+                }
             }
         }))
         .unwrap();
 
         assert_eq!(
-            config.ducklake_copy_buffer_override,
-            Some(DuckLakeCopyBufferConfig {
+            config.replicator.destination_defaults.ducklake.copy_buffer,
+            DuckLakeCopyBufferConfig {
                 enabled: true,
                 target_bytes: 256 * 1024 * 1024,
                 max_total_bytes: 1024 * 1024 * 1024,
-            })
+            }
         );
+    }
+
+    #[test]
+    fn ducklake_copy_buffer_is_enabled_by_default() {
+        let config: ApiReplicatorConfig = serde_json::from_value(json!({})).unwrap();
+
+        assert!(config.destination_defaults.ducklake.copy_buffer.enabled);
     }
 
     #[test]

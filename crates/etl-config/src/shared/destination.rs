@@ -290,7 +290,7 @@ pub enum DuckLakeMaintenanceMode {
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct DuckLakeCopyBufferConfig {
     /// Whether initial-copy batches are staged before being committed.
-    #[serde(default)]
+    #[serde(default = "DuckLakeCopyBufferConfig::default_enabled")]
     pub enabled: bool,
     /// Approximate staged row bytes that trigger one DuckLake commit.
     ///
@@ -311,6 +311,10 @@ impl DuckLakeCopyBufferConfig {
     /// Default process-wide byte limit for accepted DuckLake copy rows: 1 GiB.
     pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 
+    const fn default_enabled() -> bool {
+        true
+    }
+
     const fn default_target_bytes() -> u64 {
         Self::DEFAULT_TARGET_BYTES
     }
@@ -319,7 +323,7 @@ impl DuckLakeCopyBufferConfig {
         Self::DEFAULT_MAX_TOTAL_BYTES
     }
 
-    /// Returns whether this configuration is fully disabled and defaulted.
+    /// Returns whether this configuration matches the default policy.
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -328,7 +332,7 @@ impl DuckLakeCopyBufferConfig {
 impl Default for DuckLakeCopyBufferConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: Self::default_enabled(),
             target_bytes: Self::DEFAULT_TARGET_BYTES,
             max_total_bytes: Self::DEFAULT_MAX_TOTAL_BYTES,
         }
@@ -1065,6 +1069,15 @@ mod tests {
         assert_eq!(columns[1].direction, DuckLakeSortDirection::Desc);
         assert_eq!(columns[1].nulls, Some(DuckLakeSortNulls::First));
         assert_eq!(config.tables[1].sort_by, DuckLakeSortBy::PrimaryKey);
+    }
+
+    #[test]
+    fn ducklake_copy_buffer_is_enabled_by_default() {
+        let config: DuckLakeCopyBufferConfig =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+
+        assert_eq!(config, DuckLakeCopyBufferConfig::default());
+        assert!(config.enabled);
     }
 
     #[test]
