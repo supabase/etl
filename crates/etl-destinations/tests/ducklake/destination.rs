@@ -915,8 +915,8 @@ async fn buffered_copy_capacity_pressure_waits_for_cancelled_blocking_append() {
     reset_paused_copy_append_for_tests();
 }
 
-/// A queued maintenance pause must not block later batches in an existing
-/// buffered copy session.
+/// A queued maintenance pause must not block an existing buffered copy session
+/// or unrelated foreground mutations while that session drains.
 #[tokio::test(flavor = "multi_thread")]
 async fn buffered_copy_continues_while_maintenance_waits_for_session() {
     let lake =
@@ -925,10 +925,13 @@ async fn buffered_copy_continues_while_maintenance_waits_for_session() {
     let data_url = lake.data_url.clone();
 
     let schema = make_schema(164, "public", "buffered_copy_maintenance_wait");
+    let unrelated_schema = make_schema(171, "public", "buffered_copy_unrelated_mutation");
     let replicated_table_schema = make_replicated_table_schema(&schema);
+    let unrelated_replicated_table_schema = make_replicated_table_schema(&unrelated_schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(unrelated_schema).await.unwrap();
     let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
         .copy_buffer(DuckLakeCopyBufferConfig {
             enabled: true,
@@ -936,6 +939,17 @@ async fn buffered_copy_continues_while_maintenance_waits_for_session() {
             max_total_bytes: 2 * 1024 * 1024,
         })
         .build()
+        .await
+        .unwrap();
+
+    write_table_rows_with_status(
+        &destination,
+        &unrelated_replicated_table_schema,
+        vec![TableRow::new(vec![Cell::I32(1), Cell::String("unrelated".to_owned())])],
+    )
+    .await
+    .unwrap();
+    write_table_rows_with_status(&destination, &unrelated_replicated_table_schema, Vec::new())
         .await
         .unwrap();
 
@@ -953,8 +967,8 @@ async fn buffered_copy_continues_while_maintenance_waits_for_session() {
         async move { destination.acquire_external_maintenance_pause().await }
     });
 
-    // The existing copy session holds shared mutation access, so this proves
-    // the exclusive maintenance request has entered the lock's wait queue.
+    // The existing copy session holds shared session access, so this proves
+    // the exclusive maintenance request is waiting for it to drain.
     assert!(tokio::time::timeout(Duration::from_millis(100), &mut pause_task).await.is_err());
 
     let second_write = tokio::time::timeout(
@@ -966,13 +980,31 @@ async fn buffered_copy_continues_while_maintenance_waits_for_session() {
         ),
     )
     .await;
-    pause_task.abort();
-    let _ = pause_task.await;
+
+    let unrelated_drop = tokio::time::timeout(
+        Duration::from_secs(1),
+        drop_table_for_copy_with_result(&destination, &unrelated_replicated_table_schema),
+    )
+    .await;
 
     assert!(second_write.is_ok());
     assert_eq!(second_write.unwrap().unwrap(), DestinationWriteStatus::Accepted);
+    assert!(unrelated_drop.is_ok());
+    unrelated_drop.unwrap().unwrap();
 
     write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
+
+    let external_pause =
+        tokio::time::timeout(Duration::from_secs(5), pause_task).await.unwrap().unwrap();
+    let mut blocked_drop = tokio::spawn({
+        let destination = destination.clone();
+        let replicated_table_schema = replicated_table_schema.clone();
+        async move { drop_table_for_copy_with_result(&destination, &replicated_table_schema).await }
+    });
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut blocked_drop).await.is_err());
+    blocked_drop.abort();
+    assert!(blocked_drop.await.unwrap_err().is_cancelled());
+    drop(external_pause);
 
     let row_count = count_rows_when_visible(&catalog_url, &data_url, &table_name).await;
     assert_eq!(row_count, 2);

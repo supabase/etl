@@ -407,7 +407,7 @@ struct DuckLakeCopyBufferHandle {
     accumulator: Arc<Mutex<DuckLakeCopyAccumulator>>,
     reservations: Mutex<Vec<OwnedSemaphorePermit>>,
     _session_permit: OwnedSemaphorePermit,
-    _checkpoint_guard: OwnedRwLockReadGuard<()>,
+    _session_guard: OwnedRwLockReadGuard<()>,
 }
 
 impl DuckLakeCopyBufferHandle {
@@ -416,14 +416,14 @@ impl DuckLakeCopyBufferHandle {
         pool: DuckLakePool,
         batch: &PreparedDuckLakeCopyBatch,
         session_permit: OwnedSemaphorePermit,
-        checkpoint_guard: OwnedRwLockReadGuard<()>,
+        session_guard: OwnedRwLockReadGuard<()>,
     ) -> Self {
         Self {
             connection: DuckLakeDedicatedConnection::new(pool),
             accumulator: Arc::new(Mutex::new(DuckLakeCopyAccumulator::new(batch))),
             reservations: Mutex::new(Vec::new()),
             _session_permit: session_permit,
-            _checkpoint_guard: checkpoint_guard,
+            _session_guard: session_guard,
         }
     }
 }
@@ -518,9 +518,12 @@ pub struct DuckLakeDestination<S> {
     /// Number of warm connections created in each DuckDB pool.
     pool_size: u32,
     blocking_slots: Arc<Semaphore>,
-    /// Shared gate that keeps external maintenance pauses from overlapping
-    /// active foreground or table-scoped mutations.
+    /// Global gate that excludes external maintenance from foreground and
+    /// table-scoped mutations after pinned copy sessions have drained.
     checkpoint_gate: Arc<RwLock<()>>,
+    /// Gate held by connection-pinned copy sessions and acquired exclusively
+    /// by maintenance before it queues on [`Self::checkpoint_gate`].
+    copy_session_gate: Arc<RwLock<()>>,
     tasks: TaskSet,
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
     metadata_schema: Arc<str>,
@@ -711,7 +714,8 @@ where
 /// Held by an external DuckLake maintenance coordinator while foreground
 /// mutations must be quiesced.
 pub struct DuckLakeExternalMaintenancePause {
-    _guard: OwnedRwLockWriteGuard<()>,
+    _copy_session_guard: OwnedRwLockWriteGuard<()>,
+    _checkpoint_guard: OwnedRwLockWriteGuard<()>,
 }
 
 /// Maintenance operations sampled from DuckLake catalog state.
@@ -1993,6 +1997,7 @@ where
             Arc::new(DuckLakePoolHandle::new(DuckLakePools::new(Arc::clone(&pool), copy_pool)));
         let applied_tables = Arc::default();
         let checkpoint_gate = Arc::new(RwLock::new(()));
+        let copy_session_gate = Arc::new(RwLock::new(()));
         let mut destination = Self {
             manager: Arc::clone(&manager),
             copy_manager,
@@ -2000,6 +2005,7 @@ where
             pool_size,
             blocking_slots: Arc::clone(&blocking_slots),
             checkpoint_gate: Arc::clone(&checkpoint_gate),
+            copy_session_gate,
             tasks: TaskSet::new(),
             metrics_sampler: Arc::new(None),
             metadata_schema: Arc::clone(&metadata_schema),
@@ -2354,7 +2360,7 @@ where
             .await?;
         // Store the reservation before the blocking call starts. If the async
         // caller is cancelled, the detached blocking task and live session
-        // retain both the capacity and checkpoint fences until reset.
+        // retain both the capacity and copy-session fences until reset.
         handle.reservations.lock().push(reservation);
         let blocking_handle = Arc::clone(&handle);
         let connection = handle.connection.clone();
@@ -2420,12 +2426,15 @@ where
             return Err(Self::invalidated_copy_buffer_error(table_name));
         }
 
-        let checkpoint_guard = self.acquire_mutation_guard().await;
+        // External maintenance waits on this session-specific gate before it
+        // queues on the destination-wide checkpoint gate. Existing buffered
+        // sessions can therefore drain without blocking unrelated mutations.
+        let session_guard = Arc::clone(&self.copy_session_gate).read_owned().await;
         let handle = Arc::new(DuckLakeCopyBufferHandle::new(
             self.copy_pool()?,
             batch,
             session_permit,
-            checkpoint_guard,
+            session_guard,
         ));
         self.copy_buffers.lock().insert(table_name.clone(), Arc::clone(&handle));
         Ok(handle)
@@ -3644,9 +3653,8 @@ where
 
     /// Ensures the ETL-managed replay marker table exists.
     async fn ensure_applied_batches_table_exists(&self) -> EtlResult<()> {
-        // Buffered copy sessions retain a read guard until their terminal
-        // durability barrier. Avoid queuing another read behind a waiting
-        // external-maintenance writer when initialization already completed.
+        // Avoid acquiring the global mutation gate or running DuckDB work when
+        // initialization has already completed.
         if self.applied_batches_table_created.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -3852,8 +3860,14 @@ where
     /// run. While this guard is held, new foreground writes and in-process
     /// background maintenance operations wait before mutating the catalog.
     pub async fn acquire_external_maintenance_pause(&self) -> DuckLakeExternalMaintenancePause {
+        // Drain pinned COPY connections before queueing the global writer. A
+        // writer queued directly on `checkpoint_gate` would prevent unrelated
+        // readers from entering while a long-lived COPY session drains.
+        let copy_session_guard = Arc::clone(&self.copy_session_gate).write_owned().await;
+        let checkpoint_guard = Arc::clone(&self.checkpoint_gate).write_owned().await;
         DuckLakeExternalMaintenancePause {
-            _guard: Arc::clone(&self.checkpoint_gate).write_owned().await,
+            _copy_session_guard: copy_session_guard,
+            _checkpoint_guard: checkpoint_guard,
         }
     }
 
