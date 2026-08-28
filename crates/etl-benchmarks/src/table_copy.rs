@@ -222,7 +222,7 @@ async fn run(args: RunArgs) -> Result<()> {
             max_total_bytes: args.destination.ducklake_copy_buffer_max_total_bytes,
             peak_staged_bytes,
         });
-    let ducklake_files = collect_ducklake_file_stats(&args.destination)?;
+    let ducklake_files = collect_ducklake_file_stats(&args.destination).await?;
     let ducklake_snapshot_count = collect_ducklake_snapshot_count(&args.destination).await?;
     let total_ms = duration_millis(total_started.elapsed());
     let ducklake_compaction = run_ducklake_compaction(&args).await?;
@@ -518,7 +518,9 @@ async fn run_ducklake_compaction(args: &RunArgs) -> Result<Option<DuckLakeCompac
 }
 
 /// Collects Parquet file metrics for a local DuckLake benchmark data path.
-fn collect_ducklake_file_stats(destination: &DestinationArgs) -> Result<Option<DuckLakeFileStats>> {
+async fn collect_ducklake_file_stats(
+    destination: &DestinationArgs,
+) -> Result<Option<DuckLakeFileStats>> {
     if destination.destination != DestinationType::DuckLake {
         return Ok(None);
     }
@@ -534,8 +536,13 @@ fn collect_ducklake_file_stats(destination: &DestinationArgs) -> Result<Option<D
     let root = url
         .to_file_path()
         .map_err(|_| anyhow::anyhow!("DuckLake file data path is not a valid local path"))?;
-    let mut file_bytes = Vec::new();
-    collect_parquet_file_bytes(&root, &mut file_bytes)?;
+    let mut file_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u64>> {
+        let mut file_bytes = Vec::new();
+        collect_parquet_file_bytes(&root, &mut file_bytes)?;
+        Ok(file_bytes)
+    })
+    .await
+    .context("DuckLake file statistics task panicked")??;
     file_bytes.sort_unstable();
     if file_bytes.is_empty() {
         return Ok(Some(DuckLakeFileStats {

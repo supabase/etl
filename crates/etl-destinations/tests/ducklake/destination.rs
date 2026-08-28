@@ -273,14 +273,24 @@ async fn open_lake_conn_when_tables_visible(
 ) -> Connection {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
+        let catalog = catalog.clone();
+        let data = data.clone();
+        let owned_table_names =
+            table_names.iter().map(|table_name| (*table_name).clone()).collect::<Vec<_>>();
         // The attach can fail transiently (e.g. DuckDB WAL checkpoint mismatch
         // while the destination connection is still flushing). Retry instead of
         // panicking.
-        if let Ok(conn) = try_open_lake_conn(catalog, data) {
-            if table_names.iter().all(|table_name| lake_table_exists(&conn, table_name)) {
-                return conn;
-            }
-            drop(conn);
+        let connection = tokio::task::spawn_blocking(move || {
+            let conn = try_open_lake_conn(&catalog, &data).ok()?;
+            owned_table_names
+                .iter()
+                .all(|table_name| lake_table_exists(&conn, table_name))
+                .then_some(conn)
+        })
+        .await
+        .unwrap();
+        if let Some(conn) = connection {
+            return conn;
         }
 
         assert!(
@@ -289,6 +299,30 @@ async fn open_lake_conn_when_tables_visible(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Runs verification queries after all requested DuckLake tables are visible.
+async fn query_lake_when_tables_visible<T, F>(
+    catalog: &Url,
+    data: &Url,
+    table_names: Vec<DuckLakeTableName>,
+    query: F,
+) -> T
+where
+    T: Send + 'static,
+    F: FnOnce(&Connection, &[DuckLakeTableName]) -> T + Send + 'static,
+{
+    let table_name_refs = table_names.iter().collect::<Vec<_>>();
+    let conn = open_lake_conn_when_tables_visible(catalog, data, &table_name_refs).await;
+    tokio::task::spawn_blocking(move || query(&conn, &table_names)).await.unwrap()
+}
+
+/// Counts rows after the requested DuckLake table becomes visible.
+async fn count_rows_when_visible(catalog: &Url, data: &Url, table_name: &DuckLakeTableName) -> i64 {
+    query_lake_when_tables_visible(catalog, data, vec![table_name.clone()], |conn, table_names| {
+        count_rows(conn, &table_names[0])
+    })
+    .await
 }
 
 #[cfg(feature = "test-utils")]
@@ -417,6 +451,13 @@ fn read_streaming_progress(
 fn count_table_files(data: &Path, table_name: &DuckLakeTableName) -> usize {
     let table_dir = data.join(table_name.schema()).join(table_name.table());
     count_files_in_dir(&table_dir)
+}
+
+/// Counts table files without blocking the async test runtime.
+async fn count_table_files_async(data: &Path, table_name: &DuckLakeTableName) -> usize {
+    let data = data.to_owned();
+    let table_name = table_name.clone();
+    tokio::task::spawn_blocking(move || count_table_files(&data, &table_name)).await.unwrap()
 }
 
 fn count_internal_table_files(data: &Path, table_name: &str) -> usize {
@@ -603,18 +644,31 @@ async fn buffered_copy_combines_batches_at_terminal_barrier() {
         .unwrap();
         assert_eq!(status, DestinationWriteStatus::Accepted);
     }
-    assert_eq!(count_table_files(&data, &table_name), 0);
+    assert_eq!(count_table_files_async(&data, &table_name).await, 0);
 
     let status = write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new())
         .await
         .unwrap();
     assert_eq!(status, DestinationWriteStatus::Durable);
 
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 3);
-    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 3);
-    assert_eq!(count_applied_batches(&conn, &table_name, "copy_complete"), 1);
-    assert_eq!(count_table_files(&data, &table_name), 1);
+    let (row_count, copy_batch_count, copy_complete_batch_count) = query_lake_when_tables_visible(
+        &catalog_url,
+        &data_url,
+        vec![table_name.clone()],
+        |conn, table_names| {
+            let table_name = &table_names[0];
+            (
+                count_rows(conn, table_name),
+                count_applied_batches(conn, table_name, "copy"),
+                count_applied_batches(conn, table_name, "copy_complete"),
+            )
+        },
+    )
+    .await;
+    assert_eq!(row_count, 3);
+    assert_eq!(copy_batch_count, 3);
+    assert_eq!(copy_complete_batch_count, 1);
+    assert_eq!(count_table_files_async(&data, &table_name).await, 1);
 }
 
 /// Waiting for a second connection-pinned session must not consume the only
@@ -671,14 +725,15 @@ async fn buffered_copy_sessions_do_not_self_starve_with_single_connection() {
     tokio::time::timeout(Duration::from_secs(5), table_b_write).await.unwrap().unwrap().unwrap();
     write_table_rows_with_status(&destination, &replicated_schema_b, Vec::new()).await.unwrap();
 
-    let conn = open_lake_conn_when_tables_visible(
+    let (table_a_row_count, table_b_row_count) = query_lake_when_tables_visible(
         &catalog_url,
         &data_url,
-        &[&table_name_a, &table_name_b],
+        vec![table_name_a, table_name_b],
+        |conn, table_names| (count_rows(conn, &table_names[0]), count_rows(conn, &table_names[1])),
     )
     .await;
-    assert_eq!(count_rows(&conn, &table_name_a), 1);
-    assert_eq!(count_rows(&conn, &table_name_b), 1);
+    assert_eq!(table_a_row_count, 1);
+    assert_eq!(table_b_row_count, 1);
 }
 
 /// A single batch larger than the global staging bound must be rejected before
@@ -721,8 +776,8 @@ async fn buffered_copy_rejects_batch_larger_than_global_bound() {
     assert_eq!(destination.copy_buffer_peak_staged_bytes(), max_total_bytes);
     write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
 
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 1);
+    let row_count = count_rows_when_visible(&catalog_url, &data_url, &table_name).await;
+    assert_eq!(row_count, 1);
 }
 
 /// Reset must wait for a cancelled async caller's detached blocking append so
@@ -789,8 +844,74 @@ async fn buffered_copy_reset_waits_for_cancelled_blocking_append() {
     .unwrap();
     write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
 
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 1);
+    let row_count = count_rows_when_visible(&catalog_url, &data_url, &table_name).await;
+    assert_eq!(row_count, 1);
+    reset_paused_copy_append_for_tests();
+}
+
+/// Capacity pressure must wait for a cancelled caller's detached append on the
+/// blocking pool, then release its retained reservation without stalling.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_copy_capacity_pressure_waits_for_cancelled_blocking_append() {
+    let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
+    reset_paused_copy_append_for_tests();
+    let lake =
+        create_test_lake("buffered_copy_capacity_pressure_waits_for_cancelled_blocking_append")
+            .await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let schema = make_schema(170, "public", "buffered_copy_cancelled_capacity");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+    let first_row = TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())]);
+    let max_total_bytes = u64::try_from(first_row.size_hint()).unwrap();
+    let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
+        .copy_buffer(DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes: max_total_bytes,
+            max_total_bytes,
+        })
+        .build()
+        .await
+        .unwrap();
+
+    let append_reached = arm_pause_next_copy_append_for_tests();
+    let first_write = tokio::spawn({
+        let destination = destination.clone();
+        let replicated_table_schema = replicated_table_schema.clone();
+        async move {
+            write_table_rows_with_status(&destination, &replicated_table_schema, vec![first_row])
+                .await
+        }
+    });
+    append_reached.await.unwrap();
+    first_write.abort();
+    assert!(first_write.await.unwrap_err().is_cancelled());
+
+    let mut second_write = tokio::spawn({
+        let destination = destination.clone();
+        let replicated_table_schema = replicated_table_schema.clone();
+        async move {
+            write_table_rows_with_status(
+                &destination,
+                &replicated_table_schema,
+                vec![TableRow::new(vec![Cell::I32(2), Cell::String("other".to_owned())])],
+            )
+            .await
+        }
+    });
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut second_write).await.is_err());
+
+    release_paused_copy_append_for_tests();
+    tokio::time::timeout(Duration::from_secs(5), second_write).await.unwrap().unwrap().unwrap();
+    write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
+
+    let row_count = count_rows_when_visible(&catalog_url, &data_url, &table_name).await;
+    assert_eq!(row_count, 2);
     reset_paused_copy_append_for_tests();
 }
 
@@ -853,8 +974,8 @@ async fn buffered_copy_continues_while_maintenance_waits_for_session() {
 
     write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
 
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 2);
+    let row_count = count_rows_when_visible(&catalog_url, &data_url, &table_name).await;
+    assert_eq!(row_count, 2);
 }
 
 /// An external maintenance pause that expires while a buffered copy is active
@@ -963,8 +1084,8 @@ async fn buffered_copy_expired_maintenance_pause_resumes_watcher() {
     watcher.abort();
     assert!(watcher.await.unwrap_err().is_cancelled());
 
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 2);
+    let row_count = count_rows_when_visible(&catalog_url, &data_url, &table_name).await;
+    assert_eq!(row_count, 2);
 }
 
 /// Reaching the configured byte target should flush one window while leaving
@@ -999,7 +1120,7 @@ async fn buffered_copy_flushes_when_target_bytes_are_reached() {
             .unwrap(),
         DestinationWriteStatus::Accepted
     );
-    assert_eq!(count_table_files(&data, &table_name), 0);
+    assert_eq!(count_table_files_async(&data, &table_name).await, 0);
 
     assert_eq!(
         write_table_rows_with_status(
@@ -1011,7 +1132,7 @@ async fn buffered_copy_flushes_when_target_bytes_are_reached() {
         .unwrap(),
         DestinationWriteStatus::Accepted
     );
-    assert_eq!(count_table_files(&data, &table_name), 1);
+    assert_eq!(count_table_files_async(&data, &table_name).await, 1);
 
     write_table_rows_with_status(
         &destination,
@@ -1022,9 +1143,9 @@ async fn buffered_copy_flushes_when_target_bytes_are_reached() {
     .unwrap();
     write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
 
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 3);
-    assert_eq!(count_table_files(&data, &table_name), 2);
+    let row_count = count_rows_when_visible(&catalog_url, &data_url, &table_name).await;
+    assert_eq!(row_count, 3);
+    assert_eq!(count_table_files_async(&data, &table_name).await, 2);
 }
 
 /// Losing connection-local accepted rows must require a clean table reset and
@@ -1082,15 +1203,27 @@ async fn buffered_copy_restart_recopies_without_loss_or_duplicates() {
     .unwrap();
     write_table_rows_with_status(&restarted, &replicated_table_schema, Vec::new()).await.unwrap();
 
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 2);
-    let distinct_ids: i64 = conn
-        .query_row(
-            &format!("select count(distinct id) from {}", qualified_lake_table_name(&table_name)),
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let (row_count, distinct_ids) = query_lake_when_tables_visible(
+        &catalog_url,
+        &data_url,
+        vec![table_name],
+        |conn, table_names| {
+            let table_name = &table_names[0];
+            let distinct_ids: i64 = conn
+                .query_row(
+                    &format!(
+                        "select count(distinct id) from {}",
+                        qualified_lake_table_name(table_name)
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (count_rows(conn, table_name), distinct_ids)
+        },
+    )
+    .await;
+    assert_eq!(row_count, 2);
     assert_eq!(distinct_ids, 2);
 }
 
@@ -1137,9 +1270,8 @@ async fn buffered_copy_ambiguous_commit_requires_full_recopy() {
             .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
 
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 1);
-    drop(conn);
+    let row_count = count_rows_when_visible(&catalog_url, &data_url, &table_name).await;
+    assert_eq!(row_count, 1);
 
     arm_fail_drop_table_for_copy_once_for_tests();
     let error =
@@ -1157,11 +1289,20 @@ async fn buffered_copy_ambiguous_commit_requires_full_recopy() {
     write_table_rows_with_status(&destination, &replicated_table_schema, vec![row]).await.unwrap();
     write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
 
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 1);
+    let (row_count, copy_batch_count) = query_lake_when_tables_visible(
+        &catalog_url,
+        &data_url,
+        vec![table_name],
+        |conn, table_names| {
+            let table_name = &table_names[0];
+            (count_rows(conn, table_name), count_applied_batches(conn, table_name, "copy"))
+        },
+    )
+    .await;
+    assert_eq!(row_count, 1);
     // Applied markers retain one entry per replay epoch; physical table rows do
     // not.
-    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 2);
+    assert_eq!(copy_batch_count, 2);
     reset_ducklake_test_hooks();
     reset_drop_table_for_copy_failure_for_tests();
 }

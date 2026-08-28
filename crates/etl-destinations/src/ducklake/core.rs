@@ -2478,14 +2478,13 @@ where
             Err(TryAcquireError::NoPermits) => {}
         }
 
-        let staged_bytes = handle.accumulator.lock().staged_bytes();
-        if staged_bytes > 0 {
-            if let Err(error) = self.flush_copy_buffer(handle, None).await {
-                self.invalidate_copy_buffer(table_name);
-                return Err(error);
-            }
-            handle.reservations.lock().clear();
+        // This may wait for a cancelled caller's detached append. Both that
+        // wait and the conditional DuckDB flush must stay on the blocking pool.
+        if let Err(error) = self.flush_copy_buffer(handle, None).await {
+            self.invalidate_copy_buffer(table_name);
+            return Err(error);
         }
+        handle.reservations.lock().clear();
 
         let reservation = Arc::clone(&self.copy_buffer_capacity)
             .acquire_many_owned(permits)

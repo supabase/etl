@@ -311,14 +311,17 @@ impl DuckLakeCopyBufferConfig {
     /// Default process-wide byte limit for accepted DuckLake copy rows: 1 GiB.
     pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 
+    /// Returns whether buffered initial-copy writes are enabled by default.
     const fn default_enabled() -> bool {
         true
     }
 
+    /// Returns the default staged byte target for one buffered commit.
     const fn default_target_bytes() -> u64 {
         Self::DEFAULT_TARGET_BYTES
     }
 
+    /// Returns the default process-wide byte limit for buffered copy rows.
     const fn default_max_total_bytes() -> u64 {
         Self::DEFAULT_MAX_TOTAL_BYTES
     }

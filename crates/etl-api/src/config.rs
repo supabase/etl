@@ -5,7 +5,7 @@ use etl_config::{
     Config,
     shared::{
         DestinationKind, DuckLakeCopyBufferConfig, PgConnectionConfig, SentryConfig, TlsConfig,
-        Validate,
+        Validate, ValidationError,
     },
 };
 use serde::{
@@ -63,6 +63,23 @@ pub struct ApiConfig {
     /// If provided, enables ConfigCat feature flag evaluation.
     /// If `None`, the API operates without feature flag support.
     pub configcat_sdk_key: Option<String>,
+}
+
+/// Errors produced while validating ETL API service configuration.
+#[derive(Debug, Error)]
+pub enum ApiConfigValidationError {
+    /// An existing API-specific validation check failed.
+    #[error("{0}")]
+    InvalidValue(String),
+    /// Shared replicator configuration validation failed.
+    #[error(transparent)]
+    Replicator(#[from] ValidationError),
+}
+
+impl From<String> for ApiConfigValidationError {
+    fn from(error: String) -> Self {
+        Self::InvalidValue(error)
+    }
 }
 
 /// Defaults applied to generated replicator configurations.
@@ -273,16 +290,11 @@ pub struct DefaultVectorResourcesConfig {
 
 impl ApiConfig {
     /// Validates API service configuration.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), ApiConfigValidationError> {
         self.k8s.replicator_resources.validate()?;
         self.k8s.replicator_autoscaling.validate()?;
         self.k8s.vector_resources.validate()?;
-        self.replicator
-            .destination_defaults
-            .ducklake
-            .copy_buffer
-            .validate()
-            .map_err(|error| error.to_string())?;
+        self.replicator.destination_defaults.ducklake.copy_buffer.validate()?;
 
         Ok(())
     }
