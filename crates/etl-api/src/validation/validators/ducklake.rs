@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use etl::store::MemoryStore;
 use etl_config::{parse_ducklake_s3_data_path, parse_ducklake_url};
-use etl_destinations::ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config};
+use etl_destinations::ducklake::{
+    DuckLakeDestination, DuckLakeWriterConfig, S3Config as DucklakeS3Config,
+};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use url::Url;
 
@@ -21,6 +23,8 @@ pub(super) struct DucklakeValidator {
     s3_use_ssl: Option<bool>,
     metadata_schema: Option<String>,
     maintenance_target_file_size: Option<String>,
+    parquet_row_group_size_bytes: Option<String>,
+    parquet_row_group_size: Option<String>,
     expire_snapshots_older_than: Option<String>,
 }
 
@@ -38,6 +42,8 @@ impl DucklakeValidator {
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
         maintenance_target_file_size: Option<String>,
+        parquet_row_group_size_bytes: Option<String>,
+        parquet_row_group_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
     ) -> Self {
         Self {
@@ -52,6 +58,8 @@ impl DucklakeValidator {
             s3_use_ssl,
             metadata_schema,
             maintenance_target_file_size,
+            parquet_row_group_size_bytes,
+            parquet_row_group_size,
             expire_snapshots_older_than,
         }
     }
@@ -128,13 +136,18 @@ impl Validator for DucklakeValidator {
             use_ssl: self.s3_use_ssl.unwrap_or(false),
         });
 
-        match DuckLakeDestination::new(
+        let writer_config = DuckLakeWriterConfig::new(
+            self.maintenance_target_file_size.clone(),
+            self.parquet_row_group_size_bytes.clone(),
+            self.parquet_row_group_size.clone(),
+        );
+        match DuckLakeDestination::new_with_writer_config(
             catalog_url,
             data_path,
             self.pool_size,
             s3_config,
             self.metadata_schema.clone(),
-            self.maintenance_target_file_size.clone(),
+            writer_config,
             self.expire_snapshots_older_than.clone(),
             MemoryStore::new(),
         )
@@ -267,6 +280,8 @@ mod tests {
             None,
             Some("path".to_owned()),
             Some(false),
+            None,
+            None,
             None,
             None,
             None,

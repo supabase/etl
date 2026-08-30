@@ -5,7 +5,10 @@ use std::{env, error::Error, process::ExitCode};
 use etl_config::{
     default_ducklake_s3_url_style, default_ducklake_s3_use_ssl, load_config,
     parse_ducklake_s3_data_path, parse_ducklake_url,
-    shared::{DestinationConfig, ReplicatorConfig, Validate},
+    shared::{
+        DEFAULT_DUCKLAKE_TARGET_FILE_SIZE, DestinationConfig, DuckLakeWriterConfig,
+        ReplicatorConfig, Validate,
+    },
 };
 use etl_maintenance::ducklake::{
     CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, ExpireSnapshotsMaintenanceConfig,
@@ -53,6 +56,8 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         s3_use_ssl,
         metadata_schema,
         maintenance_target_file_size,
+        parquet_row_group_size_bytes,
+        parquet_row_group_size,
         expire_snapshots_older_than,
         ..
     } = config.destination
@@ -79,12 +84,21 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         }
     };
 
+    let target_file_size = maintenance_target_file_size.unwrap_or_else(|| {
+        env::var("ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__TARGET_FILE_SIZE")
+            .unwrap_or_else(|_| DEFAULT_DUCKLAKE_TARGET_FILE_SIZE.to_owned())
+    });
+    let writer_config = DuckLakeWriterConfig::new(
+        Some(target_file_size.clone()),
+        parquet_row_group_size_bytes,
+        parquet_row_group_size,
+    );
     let maintenance_config = DuckLakeMaintenanceConfig {
         catalog_url: parse_ducklake_url(catalog_url.expose_secret())?,
         data_path: parse_ducklake_s3_data_path(&data_path)?,
         s3,
         metadata_schema,
-        maintenance_target_file_size,
+        writer_config,
         inline_flush: InlineFlushMaintenanceConfig {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__INLINE_FLUSH__ENABLED", true),
             min_inlined_bytes: env_u64(
@@ -102,10 +116,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
                 "ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__MAX_TABLES_PER_RUN",
                 8,
             )?,
-            target_file_size: env::var(
-                "ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__TARGET_FILE_SIZE",
-            )
-            .unwrap_or_else(|_| "500MB".to_owned()),
+            target_file_size,
         },
         rewrite_data_files: RewriteDataFilesMaintenanceConfig {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__REWRITE_DATA_FILES__ENABLED", true),

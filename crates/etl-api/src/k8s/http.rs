@@ -2948,6 +2948,7 @@ mod tests {
             pipeline: PipelineConfig {
                 id: 42,
                 publication_name: "all-pub".to_owned(),
+                replication_slot: Default::default(),
                 pg_connection: PgConnectionConfig {
                     host: "localhost".to_owned(),
                     hostaddr: Some("1a02:d034:3b7:f202:1803:84ed:98f8:131c".parse().unwrap()),
@@ -3028,7 +3029,7 @@ mod tests {
                     min_inlined_bytes: 10_000_000,
                     max_compacted_files: 40,
                     max_tables_per_run: 8,
-                    target_file_size: "500MB".to_owned(),
+                    target_file_size: "256MiB".to_owned(),
                     delete_threshold: 0.5,
                     min_active_data_files: 40,
                     cpu_request_millicores: 1000,

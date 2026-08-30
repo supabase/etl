@@ -34,6 +34,7 @@ pub(super) async fn create_validation_context_with_source()
 pub(super) fn create_pipeline_config(publication_name: &str) -> ApiPipelineConfig {
     ApiPipelineConfig {
         publication_name: publication_name.to_owned(),
+        replication_slot: None,
         batch: Some(BatchConfig {
             max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
             memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,

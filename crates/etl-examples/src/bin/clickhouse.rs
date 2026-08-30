@@ -216,6 +216,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         id: pipeline_id,
         publication_name: args.publication,
         run_source_migrations: true,
+        replication_slot: Default::default(),
         pg_connection: pg_connection_config,
         store_pg_connection: None,
         batch: BatchConfig {

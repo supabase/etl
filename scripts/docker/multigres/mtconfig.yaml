@@ -1,0 +1,4 @@
+# Enable persistent logical slots and their failover synchronization in both
+# multigateway and multipooler. The upstream compatibility image leaves this
+# dynamic feature disabled by default.
+enable-slot-based-replication: true

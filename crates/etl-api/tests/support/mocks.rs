@@ -89,6 +89,8 @@ pub(crate) mod destinations {
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
+            parquet_row_group_size_bytes: Some("5MB".to_owned()),
+            parquet_row_group_size: Some("100000".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
             table_sorting: Default::default(),
@@ -296,6 +298,7 @@ pub(crate) mod pipelines {
     pub(crate) fn new_pipeline_config() -> ApiPipelineConfig {
         ApiPipelineConfig {
             publication_name: "publication".to_owned(),
+            replication_slot: None,
             batch: Some(BatchConfig {
                 max_fill_ms: 5,
                 memory_budget_ratio: 0.2,
@@ -320,6 +323,7 @@ pub(crate) mod pipelines {
     pub(crate) fn updated_pipeline_config() -> ApiPipelineConfig {
         ApiPipelineConfig {
             publication_name: "updated_publication".to_owned(),
+            replication_slot: None,
             batch: Some(BatchConfig {
                 max_fill_ms: 10,
                 memory_budget_ratio: 0.2,

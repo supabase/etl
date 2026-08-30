@@ -40,7 +40,7 @@ expression: "serde_json::to_string_pretty(&ducklake_maintenance_json).unwrap()"
         "enabled": true,
         "maxCompactedFiles": 40,
         "maxTablesPerRun": 8,
-        "targetFileSize": "500MB"
+        "targetFileSize": "256MiB"
       },
       "rewriteDataFiles": {
         "deleteThreshold": 0.5,

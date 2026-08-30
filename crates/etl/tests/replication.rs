@@ -15,7 +15,7 @@ use etl_postgres::{
     below_version,
     tokio::test_utils::{TableModification, id_column_schema},
     type_utils::convert_type_oid_to_type,
-    version::POSTGRES_15,
+    version::{POSTGRES_15, POSTGRES_17},
 };
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
@@ -545,7 +545,7 @@ async fn run_raw_replica_identity_scenario(
 
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("raw_replica_identity_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
+    let slot = client.create_slot(&slot_name, false).await.unwrap();
     let stream = client
         .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
         .await
@@ -608,7 +608,7 @@ async fn replication_client_creates_slot() {
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let slot_name = test_slot_name("my_slot");
-    let create_slot = client.create_slot(&slot_name).await.unwrap();
+    let create_slot = client.create_slot(&slot_name, false).await.unwrap();
     assert!(!create_slot.consistent_point.to_string().is_empty());
 
     let get_slot = client.get_slot(&slot_name).await.unwrap();
@@ -617,6 +617,25 @@ async fn replication_client_creates_slot() {
     // Since we did not do anything with the slot, we expect the consistent point to
     // be the same as the confirmed flush lsn.
     assert_eq!(create_slot.consistent_point, get_slot.confirmed_flush_lsn);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replication_client_rejects_failover_slot_before_postgres_17() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    if !below_version!(database.server_version(), POSTGRES_17) {
+        return;
+    }
+
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("unsupported_failover_slot");
+
+    let error = client.create_slot(&slot_name, true).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::ConfigError);
+    assert!(matches!(
+        client.get_slot(&slot_name).await,
+        Err(ref error) if error.kind() == ErrorKind::ReplicationSlotNotFound
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -629,7 +648,7 @@ async fn create_and_delete_slot() {
     let slot_name = test_slot_name("my_slot");
 
     // Create the slot and verify it exists
-    let create_slot = client.create_slot(&slot_name).await.unwrap();
+    let create_slot = client.create_slot(&slot_name, false).await.unwrap();
     assert!(!create_slot.consistent_point.to_string().is_empty());
 
     let get_slot = client.get_slot(&slot_name).await.unwrap();
@@ -665,7 +684,7 @@ async fn delete_slot_if_exists_deletes_existing_slot() {
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let slot_name = test_slot_name("delete_if_exists_slot");
-    client.create_slot(&slot_name).await.unwrap();
+    client.create_slot(&slot_name, false).await.unwrap();
 
     client.delete_slot_if_exists(&slot_name).await.unwrap();
 
@@ -692,9 +711,9 @@ async fn replication_client_doesnt_recreate_slot() {
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let slot_name = test_slot_name("my_slot");
-    assert!(client.create_slot(&slot_name).await.is_ok());
+    assert!(client.create_slot(&slot_name, false).await.is_ok());
     assert!(matches!(
-        client.create_slot(&slot_name).await,
+        client.create_slot(&slot_name, false).await,
         Err(ref err) if err.kind() == ErrorKind::ReplicationSlotAlreadyExists
     ));
 }
@@ -727,7 +746,7 @@ async fn table_schema_copy_is_consistent() {
 
     // We create the slot when the database schema contains only 'table_1'.
     let (transaction, _) =
-        client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+        client.create_slot_with_transaction(&test_slot_name("my_slot"), false).await.unwrap();
 
     // We use the transaction to consistently read the table schemas.
     let table_1_schema = transaction.get_table_schema(table_1_id).await.unwrap();
@@ -755,7 +774,7 @@ async fn table_schema_copy_across_multiple_connections() {
 
     // We create the slot when the database schema contains only 'table_1'.
     let (transaction, _) =
-        first_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+        first_client.create_slot_with_transaction(&test_slot_name("my_slot"), false).await.unwrap();
 
     // We use the transaction to consistently read the table schemas.
     let table_1_schema = transaction.get_table_schema(table_1_id).await.unwrap();
@@ -779,8 +798,10 @@ async fn table_schema_copy_across_multiple_connections() {
 
     // We create the slot when the database schema contains both 'table_1' and
     // 'table_2'.
-    let (transaction, _) =
-        second_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+    let (transaction, _) = second_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"), false)
+        .await
+        .unwrap();
 
     // We use the transaction to consistently read the table schemas.
     let table_1_schema = transaction.get_table_schema(table_1_id).await.unwrap();
@@ -818,8 +839,10 @@ async fn table_schema_preserves_primary_key_constraint_order() {
 
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    let (transaction, _) =
-        client.create_slot_with_transaction(&test_slot_name("composite_pk_order")).await.unwrap();
+    let (transaction, _) = client
+        .create_slot_with_transaction(&test_slot_name("composite_pk_order"), false)
+        .await
+        .unwrap();
 
     let table_id = database
         .client
@@ -887,7 +910,7 @@ async fn ddl_message_primary_key_order_matches_loaded_table_schema() {
 
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_composite_pk_order_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
+    let slot = client.create_slot(&slot_name, false).await.unwrap();
     let stream = client
         .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
         .await
@@ -915,7 +938,7 @@ async fn ddl_message_primary_key_order_matches_loaded_table_schema() {
     let mut introspection_client =
         PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = introspection_client
-        .create_slot_with_transaction(&test_slot_name("ddl_composite_pk_order_read"))
+        .create_slot_with_transaction(&test_slot_name("ddl_composite_pk_order_read"), false)
         .await
         .unwrap();
     let table_schema = transaction.get_table_schema(table_id).await.unwrap();
@@ -952,8 +975,10 @@ async fn table_copy_stream_is_consistent() {
         .unwrap();
 
     // We create the slot when the database schema contains only 'table_1' data.
-    let (transaction, _) =
-        parent_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"), false)
+        .await
+        .unwrap();
 
     // We create a transaction to copy the table data consistently.
     let column_schemas = [test_column("age", Type::INT4, 2, true, false)];
@@ -984,7 +1009,7 @@ async fn plan_ctid_partitions_returns_correct_partitions() {
     database.insert_generate_series(test_table_name("table_1"), &["age"], 1, 100, 1).await.unwrap();
 
     let (transaction, _) =
-        client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+        client.create_slot_with_transaction(&test_slot_name("my_slot"), false).await.unwrap();
 
     let estimate = transaction.get_table_copy_planning_estimate(table_id).await.unwrap();
     let partitions = estimate.plan_ctid_partitions(4).unwrap();
@@ -1047,7 +1072,7 @@ async fn plan_ctid_partitions_returns_empty_for_empty_table() {
         .unwrap();
 
     let (transaction, _) =
-        client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+        client.create_slot_with_transaction(&test_slot_name("my_slot"), false).await.unwrap();
 
     let estimate = transaction.get_table_copy_planning_estimate(table_id).await.unwrap();
     let partitions = estimate.plan_ctid_partitions(4).unwrap();
@@ -1076,7 +1101,7 @@ async fn table_copy_stream_with_ctid_partition() {
         .unwrap();
 
     let (transaction, _) =
-        client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+        client.create_slot_with_transaction(&test_slot_name("my_slot"), false).await.unwrap();
 
     let column_schemas = [test_column("age", Type::INT4, 2, true, false)];
     let estimate = transaction.get_table_copy_planning_estimate(table_id).await.unwrap();
@@ -1162,8 +1187,10 @@ async fn table_copy_stream_respects_row_filter() {
         .unwrap();
 
     // We create the slot when the database schema contains only 'table_1' data.
-    let (transaction, _) =
-        parent_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"), false)
+        .await
+        .unwrap();
 
     // We create a transaction to copy the table data consistently.
     let column_schemas = [test_column("age", Type::INT4, 2, true, false)];
@@ -1241,8 +1268,10 @@ async fn get_replicated_column_names_respects_column_filter() {
         .unwrap();
 
     // Create the slot when the database schema contains the test data.
-    let (transaction, _) =
-        parent_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"), false)
+        .await
+        .unwrap();
 
     // Get table schema without publication filter - should include ALL columns.
     let table_schema = transaction.get_table_schema(test_table_id).await.unwrap();
@@ -1315,8 +1344,10 @@ async fn get_replicated_column_names_for_all_tables_publication() {
 
     let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    let (transaction, _) =
-        parent_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"), false)
+        .await
+        .unwrap();
 
     // Get table schema.
     let table_schema = transaction.get_table_schema(test_table_id).await.unwrap();
@@ -1377,8 +1408,10 @@ async fn get_replicated_column_names_for_tables_in_schema_publication() {
 
     let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    let (transaction, _) =
-        parent_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"), false)
+        .await
+        .unwrap();
 
     // Get table schema.
     let table_schema = transaction.get_table_schema(test_table_id).await.unwrap();
@@ -1434,8 +1467,10 @@ async fn get_replicated_column_names_errors_when_table_not_in_publication() {
 
     let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    let (transaction, _) =
-        parent_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"), false)
+        .await
+        .unwrap();
 
     // Get table schema for the table NOT in the publication.
     let table_schema = transaction.get_table_schema(table_1_id).await.unwrap();
@@ -1510,8 +1545,10 @@ async fn table_copy_stream_no_row_filter() {
         .unwrap();
 
     // We create the slot when the database schema contains only 'table_1' data.
-    let (transaction, _) =
-        parent_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"), false)
+        .await
+        .unwrap();
 
     // We create a transaction to copy the table data consistently.
     let column_schemas = [test_column("age", Type::INT4, 2, true, false)];
@@ -1680,7 +1717,7 @@ async fn start_logical_replication() {
 
     // We create a slot which is going to replicate data before we insert the data.
     let slot_name = test_slot_name("my_slot");
-    let slot = parent_client.create_slot(&slot_name).await.unwrap();
+    let slot = parent_client.create_slot(&slot_name, false).await.unwrap();
 
     // We create a table with a publication and 10 entries.
     database.create_table(test_table_name("table_1"), true, &[("age", "integer")]).await.unwrap();
@@ -1739,7 +1776,7 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
 
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_message_payload_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
+    let slot = client.create_slot(&slot_name, false).await.unwrap();
     let stream = client
         .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
         .await
@@ -1907,7 +1944,7 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
 
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_default_payload_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
+    let slot = client.create_slot(&slot_name, false).await.unwrap();
     let stream = client
         .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
         .await
@@ -1964,7 +2001,7 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
     let mut introspection_client =
         PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = introspection_client
-        .create_slot_with_transaction(&test_slot_name("ddl_default_payload_read"))
+        .create_slot_with_transaction(&test_slot_name("ddl_default_payload_read"), false)
         .await
         .unwrap();
     let table_schema = transaction.get_table_schema(table_id).await.unwrap();
@@ -1998,7 +2035,7 @@ async fn schema_change_messages_skip_unpublished_and_temporary_tables() {
 
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_filter_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
+    let slot = client.create_slot(&slot_name, false).await.unwrap();
     let stream = client
         .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
         .await
@@ -2059,7 +2096,7 @@ async fn schema_change_messages_allow_alter_table_from_table_owner_role() {
 
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_table_owner_role_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
+    let slot = client.create_slot(&slot_name, false).await.unwrap();
     let stream = client
         .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
         .await
@@ -2098,7 +2135,7 @@ async fn single_alter_table_statement_with_multiple_subcommands_emits_one_ddl_me
 
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_multi_subcommand_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
+    let slot = client.create_slot(&slot_name, false).await.unwrap();
     let stream = client
         .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
         .await
@@ -2152,7 +2189,7 @@ async fn schema_change_messages_respect_skip_ddl_log_setting() {
 
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_skip_log_slot");
-    let slot = client.create_slot(&slot_name).await.unwrap();
+    let slot = client.create_slot(&slot_name, false).await.unwrap();
     let stream = client
         .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
         .await
@@ -2183,7 +2220,7 @@ async fn get_slot_state_returns_not_invalidated_for_healthy_slot() {
 
     // Create a slot
     let slot_name = test_slot_name("healthy_slot");
-    client.create_slot(&slot_name).await.unwrap();
+    client.create_slot(&slot_name, false).await.unwrap();
 
     // Check that PostgreSQL has not reported the slot as invalidated.
     let slot_state = client.get_slot_state(&slot_name).await.unwrap();
@@ -2215,7 +2252,7 @@ async fn exclusive_get_slot_state_returns_invalidated_for_lost_slot() {
 
     // Create a slot
     let slot_name = test_slot_name("invalidated_slot");
-    client.create_slot(&slot_name).await.unwrap();
+    client.create_slot(&slot_name, false).await.unwrap();
 
     // Verify the slot has not initially been reported as invalidated.
     let slot_state = client.get_slot_state(&slot_name).await.unwrap();

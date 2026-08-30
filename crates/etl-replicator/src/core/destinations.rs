@@ -187,7 +187,7 @@ mod ducklake {
     };
     use etl_destinations::ducklake::{
         DuckLakeDestination, DuckLakeExternalMaintenanceConfig, DuckLakeMaintenanceMode,
-        S3Config as DucklakeS3Config,
+        DuckLakeWriterConfig, S3Config as DucklakeS3Config,
     };
     use secrecy::ExposeSecret;
 
@@ -213,6 +213,8 @@ mod ducklake {
             s3_use_ssl,
             metadata_schema,
             maintenance_target_file_size,
+            parquet_row_group_size_bytes,
+            parquet_row_group_size,
             expire_snapshots_older_than,
             maintenance_mode,
             table_sorting,
@@ -248,19 +250,25 @@ mod ducklake {
         let external_maintenance =
             DuckLakeExternalMaintenanceConfig { mode: maintenance_mode, pipeline_id };
 
-        let destination = DuckLakeDestination::new_with_table_sorting_and_external_maintenance(
-            parse_ducklake_url(catalog_url.expose_secret()).map_err(ReplicatorError::config)?,
-            parse_ducklake_s3_data_path(data_path).map_err(ReplicatorError::config)?,
-            *pool_size,
-            s3_config,
-            metadata_schema.clone(),
+        let writer_config = DuckLakeWriterConfig::new(
             maintenance_target_file_size.clone(),
-            expire_snapshots_older_than.clone(),
-            table_sorting.clone(),
-            external_maintenance,
-            store.clone(),
-        )
-        .await?;
+            parquet_row_group_size_bytes.clone(),
+            parquet_row_group_size.clone(),
+        );
+        let destination =
+            DuckLakeDestination::new_with_writer_config_and_table_sorting_and_external_maintenance(
+                parse_ducklake_url(catalog_url.expose_secret()).map_err(ReplicatorError::config)?,
+                parse_ducklake_s3_data_path(data_path).map_err(ReplicatorError::config)?,
+                *pool_size,
+                s3_config,
+                metadata_schema.clone(),
+                writer_config,
+                expire_snapshots_older_than.clone(),
+                table_sorting.clone(),
+                external_maintenance,
+                store.clone(),
+            )
+            .await?;
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
         pipeline::start(pipeline).await

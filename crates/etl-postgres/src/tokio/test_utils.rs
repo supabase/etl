@@ -610,6 +610,20 @@ impl PgDatabase<Client> {
         Self { config, client: Some(client.0), server_version: client.1, destroy_on_drop: true }
     }
 
+    /// Tries to connect to an existing database without taking ownership of it.
+    ///
+    /// The database is not dropped when this instance is dropped.
+    pub async fn try_connect(config: PgConnectionConfig) -> Result<Self, String> {
+        let client = try_connect_to_pg_database(&config).await?;
+
+        Ok(Self {
+            config,
+            client: Some(client.0),
+            server_version: client.1,
+            destroy_on_drop: false,
+        })
+    }
+
     /// Creates a duplicate connection to the same database.
     ///
     /// Establishes an additional client connection to the existing database
