@@ -13,8 +13,8 @@ use tracing::{debug, info, warn};
 
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{
-    START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_PAUSE_ENTERED_FP,
-    START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, etl_fail_point,
+    START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
+    etl_fail_point,
 };
 use crate::{
     bail,
@@ -391,10 +391,7 @@ where
             }
 
             #[cfg(feature = "failpoints")]
-            {
-                fail_point!(START_TABLE_SYNC_AFTER_FINISHED_COPY_PAUSE_ENTERED_FP);
-                fail_point!(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
-            }
+            fail_point!(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
             (slot.consistent_point, replicated_table_schema)
         }

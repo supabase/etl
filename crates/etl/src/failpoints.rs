@@ -15,9 +15,6 @@ pub const START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP: &str =
     "start_table_sync.before_data_sync_slot_creation_fp";
 pub const START_TABLE_SYNC_DURING_DATA_SYNC_FP: &str = "start_table_sync.during_data_sync_fp";
 pub const START_TABLE_SYNC_AFTER_FINISHED_COPY_FP: &str = "start_table_sync.after_finished_copy_fp";
-/// Signals that table sync reached the post-copy pause.
-pub const START_TABLE_SYNC_AFTER_FINISHED_COPY_PAUSE_ENTERED_FP: &str =
-    "start_table_sync.after_finished_copy_pause_entered_fp";
 pub const TABLE_SYNC_WORKER_BEFORE_STREAMING_FP: &str = "table_sync_worker.before_streaming_fp";
 pub const SEND_STATUS_UPDATE_FP: &str = "send_status_update_fp";
 pub const STORE_REPLICATION_CHECKPOINT_FP: &str = "store_replication_checkpoint_fp";

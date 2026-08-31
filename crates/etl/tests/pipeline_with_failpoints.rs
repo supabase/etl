@@ -1,6 +1,6 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use etl::{
     data::{Cell, TableRow},
@@ -12,7 +12,6 @@ use etl::{
     event::{Event, EventType, InsertEvent},
     failpoints::{
         SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
-        START_TABLE_SYNC_AFTER_FINISHED_COPY_PAUSE_ENTERED_FP,
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
         STORE_REPLICATION_CHECKPOINT_FP, TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
     },
@@ -27,7 +26,6 @@ use etl::{
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::FaultyOp,
         memory_destination::MemoryDestination,
-        notify::TimedNotify,
         notifying_store::NotifyingStore,
         pipeline::{
             PipelineBuilder, create_database_and_sync_done_pipeline_with_table, create_pipeline,
@@ -54,7 +52,7 @@ use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use pg_escape::quote_identifier;
 use rand::random;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 use tokio_postgres::{
     Client,
     types::{PgLsn, Type},
@@ -907,17 +905,11 @@ async fn tx_ordinals_follow_wal_order_across_table_sync_and_apply_workers() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     let _scenario = FailScenario::setup();
-    let pause_entered = Arc::new(Notify::new());
-    let pause_entered_notify = TimedNotify::new(Arc::clone(&pause_entered));
-    fail::cfg_callback(START_TABLE_SYNC_AFTER_FINISHED_COPY_PAUSE_ENTERED_FP, move || {
-        pause_entered.notify_one();
-    })
-    .unwrap();
     fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
 
     init_test_tracing();
 
-    let mut database = spawn_source_database().await;
+    let database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let users_schema = database_schema.users_schema();
     let table_id = users_schema.id;
@@ -937,44 +929,25 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
         store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
     pipeline.start().await.unwrap();
     finished_copy_notify.notified().await;
-    pause_entered_notify.notified().await;
 
     // Advance the physical schema while both logical connections are alive,
     // but emit no DML that would make pgoutput send a new Relation. The DDL
     // event trigger emits a transactional logical message. Keep the table-sync
-    // worker paused until the destination records a commit at or after that
-    // message, so its later catchup target must include the DDL.
-    let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
-    let transaction = database.client.as_mut().unwrap().transaction().await.unwrap();
-    transaction
-        .execute(
-            &format!(
-                "alter table {} add column handover_value integer not null default 0",
-                users_schema.name.as_quoted_identifier()
-            ),
-            &[],
-        )
+    // pause armed until the apply slot confirms a WAL frontier after that
+    // transaction, so the later catchup target must include the DDL.
+    database
+        .run_sql(&format!(
+            "alter table {} add column handover_value integer not null default 0",
+            users_schema.name.as_quoted_identifier()
+        ))
         .await
         .unwrap();
-    let ddl_message_lsn: PgLsn =
-        transaction.query_one("select pg_current_wal_insert_lsn()", &[]).await.unwrap().get(0);
-    let apply_commit_notify = destination
-        .notify_on_events(move |events| {
-            events.iter().any(|event| {
-                matches!(
-                    event,
-                    Event::Commit(commit) if commit.commit_lsn >= ddl_message_lsn
-                )
-            })
-        })
-        .await;
-    transaction.commit().await.unwrap();
-    apply_commit_notify.notified().await;
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
 
     let errored_notify = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
-    schema_stored_notify.notified().await;
     errored_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
