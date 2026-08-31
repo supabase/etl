@@ -609,6 +609,9 @@ where
     ///
     /// When using an `https://` URL, TLS is handled automatically by the `rustls-tls`
     /// feature using webpki root certificates.
+    ///
+    /// This constructor permits trusted local destinations. Use
+    /// [`Self::new_public`] for untrusted HTTPS configuration.
     pub fn new(
         url: Url,
         user: impl Into<String>,
@@ -618,14 +621,39 @@ where
         client_config: ClickHouseClientConfig,
         store: S,
     ) -> EtlResult<Self> {
+        let client = ClickHouseClient::new(url, user, password, database, client_config);
+        Ok(Self::from_client(client, inserter_config, store))
+    }
+
+    /// Creates a destination that connects only to public HTTPS addresses.
+    pub async fn new_public(
+        url: Url,
+        user: impl Into<String>,
+        password: Option<String>,
+        database: impl Into<String>,
+        inserter_config: ClickHouseInserterConfig,
+        client_config: ClickHouseClientConfig,
+        store: S,
+    ) -> EtlResult<Self> {
+        let client =
+            ClickHouseClient::new_public(url, user, password, database, client_config).await?;
+        Ok(Self::from_client(client, inserter_config, store))
+    }
+
+    /// Creates a destination from a configured ClickHouse client.
+    fn from_client(
+        client: ClickHouseClient,
+        inserter_config: ClickHouseInserterConfig,
+        store: S,
+    ) -> Self {
         register_metrics();
-        Ok(Self {
-            client: ClickHouseClient::new(url, user, password, database, client_config),
+        Self {
+            client,
             inserter_config,
             store: Arc::new(store),
             table_cache: Arc::new(RwLock::new(HashMap::new())),
             create_locks: Arc::new(Mutex::new(HashMap::new())),
-        })
+        }
     }
 
     /// Probes the server version and rejects unsupported engine/version pairs.
