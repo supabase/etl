@@ -110,9 +110,8 @@ async fn collect_stream_markers(
                         continue;
                     }
 
-                    let content = message.content().expect("Message content should decode");
-                    let json: JsonValue =
-                        serde_json::from_str(content).expect("DDL message should be valid JSON");
+                    let json: JsonValue = serde_json::from_slice(message.content())
+                        .expect("DDL message should be valid JSON");
                     let table_id = json["oid"]
                         .as_u64()
                         .and_then(|oid| u32::try_from(oid).ok())
