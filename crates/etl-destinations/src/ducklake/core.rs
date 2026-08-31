@@ -5345,6 +5345,10 @@ mod tests {
                 )
                 .await
                 .expect("failed to write row");
+            destination
+                .write_table_rows(&replicated_table_schema, None, Vec::new())
+                .await
+                .expect("failed to finish table copy");
 
             let pending_replay_epoch = destination
                 .begin_table_replay_epoch_transition(&table_name)
@@ -5428,6 +5432,10 @@ mod tests {
                 )
                 .await
                 .expect("failed to write rows");
+            destination
+                .write_table_rows(&replicated_table_schema, None, Vec::new())
+                .await
+                .expect("failed to finish table copy");
 
             let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
             let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
@@ -5495,6 +5503,10 @@ mod tests {
                 )
                 .await
                 .expect("failed to write rows");
+            destination
+                .write_table_rows(&replicated_table_schema, None, Vec::new())
+                .await
+                .expect("failed to finish table copy");
 
             let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
             let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
@@ -5556,6 +5568,10 @@ mod tests {
                 )
                 .await
                 .expect("failed to write rows");
+            destination
+                .write_table_rows(&replicated_table_schema, None, Vec::new())
+                .await
+                .expect("failed to finish table copy");
             destination
                 .truncate_table(&replicated_table_schema)
                 .await

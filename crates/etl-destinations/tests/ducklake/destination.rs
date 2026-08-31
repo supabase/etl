@@ -51,7 +51,7 @@ use etl::{
 };
 use etl_config::shared::DuckLakeCopyBufferConfig;
 use etl_destinations::ducklake::{
-    DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
+    DuckLakeDestination, DuckLakeTableName, S3Config, table_name_to_ducklake_table_name,
 };
 #[cfg(feature = "test-utils")]
 use etl_destinations::ducklake::{
@@ -350,7 +350,7 @@ async fn new_test_destination(
     data_url: &Url,
     store: MemoryStore,
 ) -> DuckLakeDestination<MemoryStore> {
-    DuckLakeDestination::new(
+    new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -362,6 +362,47 @@ async fn new_test_destination(
     )
     .await
     .unwrap()
+}
+
+/// Creates a destination with the legacy immediate-copy policy used by tests
+/// that do not exercise deferred buffering.
+#[allow(clippy::too_many_arguments)]
+async fn new_unbuffered_destination<S>(
+    catalog_url: Url,
+    data_url: Url,
+    pool_size: u32,
+    s3: Option<S3Config>,
+    metadata_schema: Option<String>,
+    maintenance_target_file_size: Option<String>,
+    expire_snapshots_older_than: Option<String>,
+    store: S,
+) -> EtlResult<DuckLakeDestination<S>>
+where
+    S: DestinationStore,
+{
+    DuckLakeDestination::builder(catalog_url, data_url, pool_size, store)
+        .s3(s3)
+        .metadata_schema(metadata_schema)
+        .maintenance_target_file_size(maintenance_target_file_size)
+        .expire_snapshots_older_than(expire_snapshots_older_than)
+        .copy_buffer(DuckLakeCopyBufferConfig {
+            enabled: false,
+            ..DuckLakeCopyBufferConfig::default()
+        })
+        .build()
+        .await
+}
+
+/// Waits for concurrent destination work without allowing a regression to
+/// occupy a CI shard indefinitely.
+async fn wait_for_concurrent_destination_tasks(tasks: Vec<tokio::task::JoinHandle<EtlResult<()>>>) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+    })
+    .await
+    .unwrap();
 }
 
 fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
@@ -522,7 +563,7 @@ async fn write_table_rows_basic() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -579,7 +620,7 @@ async fn write_table_rows_small_batch_writes_parquet_before_return() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -1350,7 +1391,7 @@ async fn ducklake_rejects_zero_pool_size() {
         .join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
 
-    let err = DuckLakeDestination::new(
+    let err = new_unbuffered_destination(
         Url::parse("postgres://ducklake@localhost/test_catalog").unwrap(),
         path_to_file_url(&data_dir),
         0,
@@ -1384,7 +1425,7 @@ async fn ducklake_rejects_non_postgres_catalog_url() {
         .join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
 
-    let err = DuckLakeDestination::new(
+    let err = new_unbuffered_destination(
         path_to_file_url(&file_catalog),
         path_to_file_url(&data_dir),
         1,
@@ -1407,7 +1448,7 @@ async fn ducklake_rejects_non_postgres_catalog_url() {
 async fn ducklake_rejects_invalid_expire_snapshots_retention() {
     let lake = create_test_lake("ducklake_rejects_invalid_expire_snapshots_retention").await;
 
-    let err = DuckLakeDestination::new(
+    let err = new_unbuffered_destination(
         lake.catalog_url.clone(),
         lake.data_url.clone(),
         1,
@@ -1435,7 +1476,7 @@ async fn ducklake_rejects_destructive_expire_snapshots_retention() {
     let lake = create_test_lake("ducklake_rejects_destructive_expire_snapshots_retention").await;
 
     for retention in ["0 seconds", "-1 day", "23 hours"] {
-        let err = DuckLakeDestination::new(
+        let err = new_unbuffered_destination(
             lake.catalog_url.clone(),
             lake.data_url.clone(),
             1,
@@ -1475,7 +1516,7 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -1532,7 +1573,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -1591,7 +1632,7 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -1637,7 +1678,7 @@ async fn write_table_rows_preserves_distinct_identical_batches() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -1679,7 +1720,7 @@ async fn write_table_rows_deduplicates_redelivered_batch_id() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -1727,7 +1768,7 @@ async fn concurrent_same_table_copy_batches_complete() {
     store.store_table_schema(schema).await.unwrap();
 
     let destination = Arc::new(
-        DuckLakeDestination::new(
+        new_unbuffered_destination(
             catalog_url.clone(),
             data_url.clone(),
             1,
@@ -1775,8 +1816,7 @@ async fn concurrent_same_table_copy_batches_complete() {
         })
     };
 
-    task_a.await.unwrap().unwrap();
-    task_b.await.unwrap().unwrap();
+    wait_for_concurrent_destination_tasks(vec![task_a, task_b]).await;
 
     destination.shutdown().await.unwrap();
     drop(destination);
@@ -1875,7 +1915,7 @@ async fn write_table_rows_empty_creates_table() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -1908,7 +1948,7 @@ async fn truncate_clears_rows() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -1968,7 +2008,7 @@ async fn truncate_rotates_replay_state_for_recopy() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -2015,7 +2055,7 @@ async fn write_events() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -2100,7 +2140,7 @@ async fn write_events_splits_same_table_batch_by_replicated_schema() {
     store.store_table_schema(old_schema).await.unwrap();
     store.store_table_schema(new_schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -2188,7 +2228,7 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
     store.store_table_schema(old_schema.clone()).await.unwrap();
     store.store_table_schema(new_schema.clone()).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -2289,7 +2329,7 @@ async fn write_events_rejects_mismatched_relation_before_applying_recovery() {
     store.store_table_schema(old_schema.clone()).await.unwrap();
     store.store_table_schema(target_schema.clone()).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -2360,7 +2400,7 @@ async fn write_events_skips_applied_stale_prefix_and_rejects_pending_stale_row()
     store.store_table_schema(old_schema.clone()).await.unwrap();
     store.store_table_schema(new_schema.clone()).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -2489,7 +2529,7 @@ async fn write_events_applies_defaulted_schema_change() {
     store.store_table_schema(old_schema.clone()).await.unwrap();
     store.store_table_schema(new_schema.clone()).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -2613,7 +2653,7 @@ async fn write_events_reveals_publication_column_nullable_without_default() {
     store.store_table_schema(old_schema.clone()).await.unwrap();
     store.store_table_schema(new_schema.clone()).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -2725,7 +2765,7 @@ async fn write_events_does_not_reconcile_missing_columns_after_applied_metadata(
     store.store_table_schema(old_schema.clone()).await.unwrap();
     store.store_table_schema(new_schema.clone()).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -3522,7 +3562,7 @@ async fn write_events_small_batch_stays_inlined_after_return() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -3576,7 +3616,7 @@ async fn write_events_with_old_row_update() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -3646,7 +3686,7 @@ async fn write_events_with_partial_updates() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -3732,7 +3772,7 @@ async fn write_events_without_replica_identity_rejects_mutations() {
     let store = MemoryStore::new();
     store.store_table_schema(table_schema.as_ref().clone()).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -3816,7 +3856,7 @@ async fn write_events_replay_is_idempotent() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -3903,7 +3943,7 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -3974,7 +4014,7 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -4014,7 +4054,7 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -4089,7 +4129,7 @@ async fn external_inline_flush_retries_pool_refresh_before_replication_resumes()
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -4328,7 +4368,7 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -4409,7 +4449,7 @@ async fn copy_writes_table_parquet_and_inlines_applied_batch() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -4465,7 +4505,7 @@ async fn write_events_mixed_multi_table_batches() {
     store.store_table_schema(schema_a).await.unwrap();
     store.store_table_schema(schema_b).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         4,
@@ -4588,7 +4628,7 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -4679,7 +4719,7 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
@@ -4774,7 +4814,7 @@ async fn concurrent_writes_with_single_slot_complete() {
     store.store_table_schema(schema_b).await.unwrap();
 
     let destination = Arc::new(
-        DuckLakeDestination::new(
+        new_unbuffered_destination(
             catalog_url.clone(),
             data_url.clone(),
             1,
@@ -4810,8 +4850,7 @@ async fn concurrent_writes_with_single_slot_complete() {
         })
     };
 
-    task_a.await.unwrap().unwrap();
-    task_b.await.unwrap().unwrap();
+    wait_for_concurrent_destination_tasks(vec![task_a, task_b]).await;
 
     let conn = open_lake_conn_when_tables_visible(
         &catalog_url,
@@ -4847,7 +4886,7 @@ async fn concurrent_first_writes_with_default_pool_complete() {
     }
 
     let destination = Arc::new(
-        DuckLakeDestination::new(
+        new_unbuffered_destination(
             catalog_url.clone(),
             data_url.clone(),
             4,
@@ -4878,9 +4917,7 @@ async fn concurrent_first_writes_with_default_pool_complete() {
         }));
     }
 
-    for task in tasks {
-        task.await.unwrap().unwrap();
-    }
+    wait_for_concurrent_destination_tasks(tasks).await;
 
     let visible_table_names = table_names.iter().collect::<Vec<_>>();
     let conn =
@@ -4915,7 +4952,7 @@ async fn concurrent_truncates_with_default_pool_complete() {
     }
 
     let destination = Arc::new(
-        DuckLakeDestination::new(
+        new_unbuffered_destination(
             catalog_url.clone(),
             data_url.clone(),
             4,
@@ -4956,9 +4993,7 @@ async fn concurrent_truncates_with_default_pool_complete() {
         }));
     }
 
-    for task in tasks {
-        task.await.unwrap().unwrap();
-    }
+    wait_for_concurrent_destination_tasks(tasks).await;
 }
 
 /// Verifies that common Postgres types survive the write → read cycle.
@@ -4976,7 +5011,7 @@ async fn type_mapping_round_trip() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
+    let destination = new_unbuffered_destination(
         catalog_url.clone(),
         data_url.clone(),
         1,
