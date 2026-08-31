@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -80,6 +80,9 @@ pub struct RunArgs {
     /// Write a machine-readable JSON report to this path.
     #[arg(long)]
     report_path: Option<PathBuf>,
+    /// Keep the initialized destination idle before starting the pipeline.
+    #[arg(long, default_value_t = 0)]
+    destination_settle_ms: u64,
     /// Run one local DuckLake adjacent-file compaction after the copy.
     #[arg(long, default_value_t = false)]
     ducklake_compact_after_copy: bool,
@@ -98,6 +101,8 @@ struct TableCopyReport {
     estimated_copied_bytes: u64,
     estimated_copied_mib: f64,
     table_count: usize,
+    destination_init_ms: u128,
+    destination_settle_ms: u64,
     pipeline_start_ms: u128,
     copy_wait_ms: u128,
     shutdown_ms: u128,
@@ -166,8 +171,13 @@ async fn run(args: RunArgs) -> Result<()> {
     run_etl_migrations(&args.pg).await?;
 
     let store = NotifyingStore::new();
+    let destination_started = Instant::now();
     let destination =
         BenchDestination::new(&args.destination, args.pipeline_id, store.clone()).await?;
+    let destination_init_ms = duration_millis(destination_started.elapsed());
+    if args.destination_settle_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(args.destination_settle_ms)).await;
+    }
     let config = pipeline_config(
         args.pipeline_id,
         args.publication_name.clone(),
@@ -237,6 +247,8 @@ async fn run(args: RunArgs) -> Result<()> {
         estimated_copied_bytes: copied_bytes,
         estimated_copied_mib: bytes_to_mib(copied_bytes),
         table_count,
+        destination_init_ms,
+        destination_settle_ms: args.destination_settle_ms,
         pipeline_start_ms,
         copy_wait_ms: duration_millis(copy_wait_duration),
         shutdown_ms,

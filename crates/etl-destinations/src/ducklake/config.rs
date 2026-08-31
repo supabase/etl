@@ -108,6 +108,16 @@ impl DuckLakeSetupPlan {
         &self.steps
     }
 
+    /// Returns setup steps that must run for every connection cloned from one
+    /// initialized DuckDB database.
+    ///
+    /// Extension loading, object-store secrets, DuckLake attachment, and
+    /// catalog options belong to the shared database instance. Writer session
+    /// settings remain connection-local.
+    pub(super) fn connection_steps(&self) -> impl Iterator<Item = &DuckLakeSetupStep> {
+        self.steps.iter().filter(|step| step.label == "configure_writer_session")
+    }
+
     /// Builds a setup plan from explicit setup steps.
     #[cfg(test)]
     pub(super) fn from_steps(steps: Vec<DuckLakeSetupStep>) -> Self {

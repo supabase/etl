@@ -155,7 +155,10 @@ async fn acquire_ducklake_test_hook_guard() -> OwnedSemaphorePermit {
 
 /// Direct-call convenience for DuckLake destination tests.
 trait DuckLakeDestinationTestExt {
-    /// Sends one identified copy batch or finish marker through the trait API.
+    /// Sends one copy batch through the trait API and waits for durability.
+    ///
+    /// Buffer-specific tests use [`write_table_rows_with_status`] directly when
+    /// they need to observe accepted-but-not-durable rows.
     async fn write_table_rows_for_tests(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -172,7 +175,11 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        let copy_complete = table_rows.is_empty();
         write_table_rows_with_status(self, replicated_table_schema, table_rows).await?;
+        if !copy_complete {
+            write_table_rows_with_status(self, replicated_table_schema, Vec::new()).await?;
+        }
 
         Ok(())
     }
@@ -362,6 +369,23 @@ async fn new_test_destination(
     )
     .await
     .unwrap()
+}
+
+/// Creates a destination whose COPY calls are durable without a terminal
+/// barrier.
+async fn new_unbuffered_test_destination(
+    catalog_url: &Url,
+    data_url: &Url,
+    store: MemoryStore,
+) -> DuckLakeDestination<MemoryStore> {
+    DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
+        .copy_buffer(DuckLakeCopyBufferConfig {
+            enabled: false,
+            ..DuckLakeCopyBufferConfig::default()
+        })
+        .build()
+        .await
+        .unwrap()
 }
 
 fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
@@ -561,6 +585,52 @@ async fn write_table_rows_basic() {
         .unwrap();
     assert_eq!(id, 1);
     assert_eq!(name.as_deref(), Some("Alice"));
+}
+
+/// COPY connections should retain direct-to-Parquet behavior while sharing the
+/// catalog.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_writes_parquet_and_reuses_attached_catalog() {
+    use etl::event::InsertEvent;
+
+    let lake = create_test_lake("shared_instance_copy_writes_parquet").await;
+    let schema = make_schema(10_620, "public", "shared_copy");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+    let destination =
+        DuckLakeDestination::builder(lake.catalog_url.clone(), lake.data_url.clone(), 2, store)
+            .build()
+            .await
+            .unwrap();
+
+    let status = write_table_rows_with_status(
+        &destination,
+        &replicated_table_schema,
+        vec![TableRow::new(vec![Cell::I32(1), Cell::String("shared".to_owned())])],
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, DestinationWriteStatus::Accepted);
+    let status = write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(status, DestinationWriteStatus::Durable);
+    destination
+        .write_events(vec![Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(10_620_u64),
+            tx_ordinal: 0,
+            replicated_table_schema: replicated_table_schema.clone(),
+            table_row: TableRow::new(vec![Cell::I32(2), Cell::String("streamed".to_owned())]),
+        })])
+        .await
+        .unwrap();
+
+    let conn =
+        open_lake_conn_when_tables_visible(&lake.catalog_url, &lake.data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 2);
+    assert_eq!(count_table_files(&lake.data_dir, &table_name), 1);
 }
 
 /// Small copy batches should write a Parquet file before the caller returns.
@@ -1532,18 +1602,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
-        catalog_url.clone(),
-        data_url.clone(),
-        1,
-        None,
-        None,
-        None,
-        None,
-        store,
-    )
-    .await
-    .unwrap();
+    let destination = new_unbuffered_test_destination(&catalog_url, &data_url, store).await;
 
     assert_eq!(destination.copy_connection_open_count_for_tests(), 1);
 
@@ -1591,18 +1650,7 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
-        catalog_url.clone(),
-        data_url.clone(),
-        1,
-        None,
-        None,
-        None,
-        None,
-        store,
-    )
-    .await
-    .unwrap();
+    let destination = new_unbuffered_test_destination(&catalog_url, &data_url, store).await;
 
     arm_fail_after_copy_batch_commit_once_for_tests(&table_name.id());
     destination
@@ -1703,6 +1751,7 @@ async fn write_table_rows_deduplicates_redelivered_batch_id() {
         .await
         .unwrap();
     }
+    write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
@@ -1727,18 +1776,14 @@ async fn concurrent_same_table_copy_batches_complete() {
     store.store_table_schema(schema).await.unwrap();
 
     let destination = Arc::new(
-        DuckLakeDestination::new(
-            catalog_url.clone(),
-            data_url.clone(),
-            1,
-            None,
-            None,
-            None,
-            None,
-            store,
-        )
-        .await
-        .unwrap(),
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
+            .copy_buffer(DuckLakeCopyBufferConfig {
+                enabled: false,
+                ..DuckLakeCopyBufferConfig::default()
+            })
+            .build()
+            .await
+            .unwrap(),
     );
 
     // Create the replay marker table ahead of the concurrent scenario so this
@@ -1930,7 +1975,6 @@ async fn truncate_clears_rows() {
         )
         .await
         .unwrap();
-
     destination.truncate_table(&replicated_table_schema).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
@@ -2015,18 +2059,10 @@ async fn write_events() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
-        catalog_url.clone(),
-        data_url.clone(),
-        1,
-        None,
-        None,
-        None,
-        None,
-        store,
-    )
-    .await
-    .unwrap();
+    let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 4, store)
+        .build()
+        .await
+        .unwrap();
 
     let lsn = PgLsn::from(100u64);
     destination
@@ -3081,7 +3117,8 @@ async fn startup_after_restart_does_not_reconcile_applied_metadata_missing_colum
     destination.shutdown().await.unwrap();
     drop(destination);
 
-    let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    let restarted_destination =
+        new_unbuffered_test_destination(&catalog_url, &data_url, store.clone()).await;
     restarted_destination.startup().await.unwrap();
     let error = restarted_destination
         .write_table_rows_for_tests(
@@ -3492,7 +3529,7 @@ async fn startup_after_restart_does_not_recreate_missing_applied_table() {
         .await
         .unwrap();
 
-    let destination = new_test_destination(&catalog_url, &data_url, store).await;
+    let destination = new_unbuffered_test_destination(&catalog_url, &data_url, store).await;
     destination.startup().await.unwrap();
     let error = destination
         .write_table_rows_for_tests(
@@ -4089,18 +4126,10 @@ async fn external_inline_flush_retries_pool_refresh_before_replication_resumes()
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(
-        catalog_url.clone(),
-        data_url.clone(),
-        1,
-        None,
-        None,
-        None,
-        None,
-        store,
-    )
-    .await
-    .unwrap();
+    let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
+        .build()
+        .await
+        .unwrap();
 
     destination
         .write_events(
@@ -4774,18 +4803,14 @@ async fn concurrent_writes_with_single_slot_complete() {
     store.store_table_schema(schema_b).await.unwrap();
 
     let destination = Arc::new(
-        DuckLakeDestination::new(
-            catalog_url.clone(),
-            data_url.clone(),
-            1,
-            None,
-            None,
-            None,
-            None,
-            store,
-        )
-        .await
-        .unwrap(),
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
+            .copy_buffer(DuckLakeCopyBufferConfig {
+                enabled: false,
+                ..DuckLakeCopyBufferConfig::default()
+            })
+            .build()
+            .await
+            .unwrap(),
     );
 
     let rows_a: Vec<TableRow> = (0..50)
@@ -4847,18 +4872,14 @@ async fn concurrent_first_writes_with_default_pool_complete() {
     }
 
     let destination = Arc::new(
-        DuckLakeDestination::new(
-            catalog_url.clone(),
-            data_url.clone(),
-            4,
-            None,
-            None,
-            None,
-            None,
-            store,
-        )
-        .await
-        .unwrap(),
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 4, store)
+            .copy_buffer(DuckLakeCopyBufferConfig {
+                enabled: false,
+                ..DuckLakeCopyBufferConfig::default()
+            })
+            .build()
+            .await
+            .unwrap(),
     );
 
     let mut tasks = Vec::new();
@@ -4878,9 +4899,13 @@ async fn concurrent_first_writes_with_default_pool_complete() {
         }));
     }
 
-    for task in tasks {
-        task.await.unwrap().unwrap();
-    }
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+    })
+    .await
+    .unwrap();
 
     let visible_table_names = table_names.iter().collect::<Vec<_>>();
     let conn =
