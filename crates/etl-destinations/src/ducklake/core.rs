@@ -5451,6 +5451,10 @@ mod tests {
                 )
                 .await
                 .expect("failed to write row");
+            destination
+                .write_table_rows(&replicated_table_schema, None, Vec::new())
+                .await
+                .expect("failed to finish table copy");
 
             let pending_replay_epoch = destination
                 .begin_table_replay_epoch_transition(&table_name)
@@ -5670,6 +5674,10 @@ mod tests {
                 )
                 .await
                 .expect("failed to write rows");
+            destination
+                .write_table_rows(&replicated_table_schema, None, Vec::new())
+                .await
+                .expect("failed to finish table copy");
             destination
                 .truncate_table(&replicated_table_schema)
                 .await
