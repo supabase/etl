@@ -5,8 +5,8 @@ use std::time::Duration;
 use etl::{
     data::{Cell, TableRow},
     destination::{
-        Destination, DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        Destination, DestinationWriteStatus, DropTableForCopyResult, TableCopyBatchId,
+        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     event::{Event, EventType, InsertEvent},
@@ -103,6 +103,7 @@ impl Destination for DeferredEventsDestination {
     async fn write_table_rows(
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
+        _batch_id: Option<TableCopyBatchId>,
         _table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
@@ -669,8 +670,8 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
     sync_done_notify.notified().await;
 
     // Make the first apply-owned table event a no-op DDL. ETL stores a new
-    // snapshot for its transactional DDL message, but PostgreSQL keeps the
-    // warmed pgoutput relation cache and therefore emits no new Relation.
+    // schema snapshot for its transactional DDL message, but pgoutput keeps
+    // the warmed relation cache and therefore emits no protocol relation.
     let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
 
     database
@@ -685,9 +686,9 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
 
     // The apply connection already saw and skipped its copy of the relation
     // used by table sync. Because the no-op DDL does not invalidate that
-    // connection's pgoutput cache, this row arrives without another Relation.
-    // It can only be decoded by carrying the masks stored in SyncDone into the
-    // pending DDL snapshot.
+    // connection's relation cache, pgoutput sends no protocol relation. Apply
+    // still emits a destination schema barrier before decoding the row with the
+    // SyncDone masks and the pending schema snapshot.
     let post_handover_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(
             EventType::Insert,
@@ -715,11 +716,11 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
 
-    // The only destination-visible Relation came from table-sync streaming.
-    // Apply consumed its pre-handoff copy only to advance WAL, and pgoutput did
-    // not send another one after the no-op DDL.
+    // Table-sync streaming emitted the first relation event. pgoutput did not
+    // send another after the no-op DDL, so apply emits a destination schema
+    // barrier before the first apply-owned row at the new snapshot.
     let relation_events = grouped_events.get(&(EventType::Relation, table_id)).unwrap();
-    assert_eq!(relation_events.len(), 1);
+    assert_eq!(relation_events.len(), 2);
 
     let catchup_events = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
     let expected_catchup_events = build_expected_users_inserts(
@@ -729,36 +730,51 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
     );
     assert_events_equal(catchup_events, &expected_catchup_events);
 
-    let Event::Relation(relation) = &relation_events[0] else {
+    let Event::Relation(table_sync_relation) = &relation_events[0] else {
+        unreachable!("grouped relation event should be a relation");
+    };
+    let Event::Relation(pending_relation) = &relation_events[1] else {
         unreachable!("grouped relation event should be a relation");
     };
     let Event::Insert(post_handoff_insert) = catchup_events.last().unwrap() else {
         unreachable!("grouped insert event should be an insert");
     };
 
-    // The relation-less row must use the new schema snapshot stored for the
-    // no-op DDL, rather than the older snapshot attached to the table-sync
-    // Relation event.
+    // The row after the no-op DDL must use the new schema snapshot stored for
+    // that DDL, and the destination-visible relation barrier must carry the
+    // same snapshot before that row.
     let latest_table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(
         post_handoff_insert.replicated_table_schema.inner(),
         latest_table_schemas.get(&table_id).unwrap()
     );
+    assert_eq!(
+        post_handoff_insert.replicated_table_schema.inner().snapshot_id,
+        pending_relation.replicated_table_schema.inner().snapshot_id
+    );
     assert_ne!(
         post_handoff_insert.replicated_table_schema.inner().snapshot_id,
-        relation.replicated_table_schema.inner().snapshot_id
+        table_sync_relation.replicated_table_schema.inner().snapshot_id
     );
 
-    // Only the snapshot changed. Since PostgreSQL sent no replacement
-    // Relation, both positional masks must come from the decoder persisted in
-    // SyncDone, which was built from the table-sync Relation above.
+    // Only the snapshot changed. Since pgoutput sent no replacement protocol
+    // relation, both positional masks must come from the decoder persisted in
+    // SyncDone, which was built from the table-sync relation above.
     assert_eq!(
         post_handoff_insert.replicated_table_schema.replication_mask(),
-        relation.replicated_table_schema.replication_mask()
+        pending_relation.replicated_table_schema.replication_mask()
     );
     assert_eq!(
         post_handoff_insert.replicated_table_schema.identity_mask(),
-        relation.replicated_table_schema.identity_mask()
+        pending_relation.replicated_table_schema.identity_mask()
+    );
+    assert_eq!(
+        pending_relation.replicated_table_schema.replication_mask(),
+        table_sync_relation.replicated_table_schema.replication_mask()
+    );
+    assert_eq!(
+        pending_relation.replicated_table_schema.identity_mask(),
+        table_sync_relation.replicated_table_schema.identity_mask()
     );
 }
 

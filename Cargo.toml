@@ -109,7 +109,7 @@ parse-size = { version = "1.1.0", default-features = false }
 pg_escape = { version = "0.1.1", default-features = false }
 pin-project-lite = { version = "0.2.16", default-features = false }
 pkcs8 = { version = "0.11", default-features = false, features = ["pem", "encryption"] }
-postgres-replication = { git = "https://github.com/iambriccardo/rust-postgres", default-features = false, rev = "fcaef5e53e7873fe79838a49af0fa116141f530f" }
+postgres-replication = { git = "https://github.com/iambriccardo/rust-postgres", default-features = false, rev = "fa49356fc16f2442a9924963baee9d9d9085c073" }
 proptest = { version = "1.7.0", default-features = false, features = ["std"] }
 prost = { version = "0.14.1", default-features = false }
 r2d2 = { version = "0.8", default-features = false }
@@ -131,7 +131,7 @@ thiserror = "2.0.12"
 tikv-jemalloc-ctl = { version = "0.6.0", default-features = false, features = ["stats"] }
 tikv-jemallocator = { version = "0.6.1", default-features = false, features = ["background_threads_runtime_support", "unprefixed_malloc_on_supported_platforms"] }
 tokio = { version = "1.47.0", default-features = false }
-tokio-postgres = { git = "https://github.com/iambriccardo/rust-postgres", default-features = false, rev = "fcaef5e53e7873fe79838a49af0fa116141f530f" }
+tokio-postgres = { git = "https://github.com/iambriccardo/rust-postgres", default-features = false, rev = "fa49356fc16f2442a9924963baee9d9d9085c073" }
 tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = { version = "0.1.18", default-features = false, features = ["sync"] }
 tonic = { version = "0.14.2", default-features = false }

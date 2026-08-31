@@ -90,7 +90,7 @@ snowflake = [
 ]
 # We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only
 # put here the extra dependencies needed.
-test-utils = ["dep:uuid"]
+test-utils = ["dep:async-trait", "dep:uuid"]
 
 [dependencies]
 

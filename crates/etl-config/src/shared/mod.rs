@@ -14,14 +14,16 @@ pub use connection::{
 };
 pub use destination::{
     BigQueryPartitionBy, BigQueryTableOptions, BigQueryTableOptionsConfig,
-    BigQueryTimePartitionGranularity, ClickHouseEngine, DestinationConfig,
-    DestinationConfigWithoutSecrets, DestinationKind, DuckLakeMaintenanceMode, DuckLakeSortBy,
-    DuckLakeSortColumn, DuckLakeSortDirection, DuckLakeSortNulls, DuckLakeTableSortConfig,
-    DuckLakeTableSortingConfig, IcebergConfig, IcebergConfigWithoutSecrets,
+    BigQueryTimePartitionGranularity, ClickHouseEngine, DEFAULT_DUCKLAKE_PARQUET_ROW_GROUP_SIZE,
+    DEFAULT_DUCKLAKE_PARQUET_ROW_GROUP_SIZE_BYTES, DEFAULT_DUCKLAKE_TARGET_FILE_SIZE,
+    DestinationConfig, DestinationConfigWithoutSecrets, DestinationKind, DuckLakeCopyBufferConfig,
+    DuckLakeMaintenanceMode, DuckLakeSortBy, DuckLakeSortColumn, DuckLakeSortDirection,
+    DuckLakeSortNulls, DuckLakeTableSortConfig, DuckLakeTableSortingConfig, DuckLakeWriterConfig,
+    IcebergConfig, IcebergConfigWithoutSecrets,
 };
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,
-    PipelineConfigWithoutSecrets, TableSyncCopyConfig,
+    PipelineConfigWithoutSecrets, ReplicationSlotConfig, TableSyncCopyConfig,
 };
 pub use replicator::{ReplicatorConfig, ReplicatorConfigWithoutSecrets};
 pub use sentry::SentryConfig;

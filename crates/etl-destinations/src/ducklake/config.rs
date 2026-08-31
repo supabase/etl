@@ -9,7 +9,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
 };
-use etl_config::libpq_tcp_host;
+use etl_config::{libpq_tcp_host, shared::DuckLakeWriterConfig};
 use pg_escape::{quote_identifier, quote_literal};
 use tokio_postgres::{
     Config as PgConfig,
@@ -26,14 +26,13 @@ const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 pub(super) const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
-pub(super) const MAINTENANCE_TARGET_FILE_SIZE: &str = "500MB";
 pub(super) const EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "7 days";
 /// Minimum snapshot-retention interval accepted for DuckLake maintenance.
 pub(super) const MIN_EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "1 day";
 const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
 const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
 const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
-const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE: &str = "20MB";
+const PARQUET_ROW_GROUP_SIZE_OPTION_NAME: &str = "parquet_row_group_size";
 const PARQUET_VERSION_OPTION_NAME: &str = "parquet_version";
 const PARQUET_VERSION_OPTION_VALUE: u8 = 2;
 const PRESERVE_INSERTION_ORDER_OPTION_NAME: &str = "preserve_insertion_order";
@@ -44,34 +43,28 @@ fn configure_writer_session_sql() -> String {
 }
 
 /// Builds the SQL that configures DuckLake's global Parquet writer settings.
-fn configure_parquet_settings_sql() -> String {
+fn configure_parquet_settings_sql(writer_config: &DuckLakeWriterConfig) -> String {
     format!(
         "CALL {LAKE_CATALOG}.set_option({}, {}); CALL {LAKE_CATALOG}.set_option({}, {}); CALL \
-         {LAKE_CATALOG}.set_option({}, {});",
+         {LAKE_CATALOG}.set_option({}, {}); CALL {LAKE_CATALOG}.set_option({}, {});",
         quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
         quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
         quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
-        quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE),
+        quote_literal(writer_config.parquet_row_group_size_bytes()),
+        quote_literal(PARQUET_ROW_GROUP_SIZE_OPTION_NAME),
+        quote_literal(writer_config.parquet_row_group_size()),
         quote_literal(PARQUET_VERSION_OPTION_NAME),
         PARQUET_VERSION_OPTION_VALUE,
     )
 }
 
-/// Resolves the configured maintenance target file size or falls back to the
-/// default.
-fn resolve_maintenance_target_file_size(maintenance_target_file_size: Option<&str>) -> &str {
-    maintenance_target_file_size.unwrap_or(MAINTENANCE_TARGET_FILE_SIZE)
-}
-
 /// Builds the SQL that sets DuckLake's maintenance target file size.
-pub(super) fn maintenance_target_file_size_sql(
-    maintenance_target_file_size: Option<&str>,
-) -> String {
+pub(super) fn maintenance_target_file_size_sql(target_file_size: &str) -> String {
     format!(
         "CALL ducklake_set_option({}, {}, {});",
         quote_literal(LAKE_CATALOG),
         quote_literal(TARGET_FILE_SIZE_OPTION_NAME),
-        quote_literal(resolve_maintenance_target_file_size(maintenance_target_file_size,)),
+        quote_literal(target_file_size),
     )
 }
 
@@ -132,6 +125,15 @@ impl DuckLakeSetupPlan {
 pub(super) enum DuckDbExtensionStrategy {
     VendoredLocal { platform_dir: &'static str },
     InstallFromRepository,
+}
+
+/// Resolved extension-loading inputs for one setup plan.
+#[derive(Debug, Clone, Copy)]
+struct DuckDbExtensionSetup<'a> {
+    /// Strategy used to load DuckDB extensions.
+    strategy: DuckDbExtensionStrategy,
+    /// Vendored extension root required by local-loading strategies.
+    vendored_root: Option<&'a Path>,
 }
 
 impl DuckDbExtensionStrategy {
@@ -579,6 +581,7 @@ pub(super) fn build_setup_sql(
         data_path,
         s3,
         metadata_schema,
+        &DuckLakeWriterConfig::default(),
         super::ATTACH_DATA_INLINING_ROW_LIMIT,
     )?
     .combined_sql())
@@ -590,6 +593,7 @@ pub(super) fn build_setup_plan(
     data_path: &Url,
     s3: Option<&S3Config>,
     metadata_schema: Option<&str>,
+    writer_config: &DuckLakeWriterConfig,
     data_inlining_row_limit: u64,
 ) -> EtlResult<DuckLakeSetupPlan> {
     let strategy = current_duckdb_extension_strategy()?;
@@ -609,8 +613,8 @@ pub(super) fn build_setup_plan(
         data_path,
         s3,
         metadata_schema,
-        strategy,
-        vendored_root.as_deref(),
+        writer_config,
+        DuckDbExtensionSetup { strategy, vendored_root: vendored_root.as_deref() },
         data_inlining_row_limit,
     )
 }
@@ -629,8 +633,8 @@ fn build_setup_sql_with_strategy(
         data_path,
         s3,
         metadata_schema,
-        strategy,
-        vendored_root,
+        &DuckLakeWriterConfig::default(),
+        DuckDbExtensionSetup { strategy, vendored_root },
         super::ATTACH_DATA_INLINING_ROW_LIMIT,
     )?
     .combined_sql())
@@ -641,8 +645,8 @@ fn build_setup_plan_with_strategy(
     data_path: &Url,
     s3: Option<&S3Config>,
     metadata_schema: Option<&str>,
-    strategy: DuckDbExtensionStrategy,
-    vendored_root: Option<&Path>,
+    writer_config: &DuckLakeWriterConfig,
+    extension_setup: DuckDbExtensionSetup<'_>,
     data_inlining_row_limit: u64,
 ) -> EtlResult<DuckLakeSetupPlan> {
     let catalog_target = catalog_attach_target(catalog_url)?;
@@ -664,9 +668,9 @@ fn build_setup_plan_with_strategy(
         ("URL_STYLE", quote_literal(s3.map(|s| s.url_style.as_str()).unwrap_or_default())),
     ]);
 
-    let extension_sql = match strategy {
+    let extension_sql = match extension_setup.strategy {
         DuckDbExtensionStrategy::VendoredLocal { .. } => {
-            let extension_root = vendored_root.ok_or_else(|| {
+            let extension_root = extension_setup.vendored_root.ok_or_else(|| {
                 etl_error!(
                     ErrorKind::ConfigError,
                     "Vendored DuckDB extensions not found",
@@ -739,7 +743,7 @@ fn build_setup_plan_with_strategy(
     });
     steps.push(DuckLakeSetupStep {
         label: "configure_parquet",
-        sql: configure_parquet_settings_sql(),
+        sql: configure_parquet_settings_sql(writer_config),
     });
 
     Ok(DuckLakeSetupPlan { steps })
@@ -1087,7 +1091,7 @@ mod tests {
         assert!(sql.contains(&format!(
             "CALL {LAKE_CATALOG}.set_option({}, {});",
             quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
-            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE),
+            quote_literal(DuckLakeWriterConfig::default().parquet_row_group_size_bytes()),
         )));
         assert!(sql.contains(&format!(
             "CALL {LAKE_CATALOG}.set_option({}, {});",
@@ -1133,7 +1137,7 @@ mod tests {
         assert!(sql.contains(&format!(
             "CALL {LAKE_CATALOG}.set_option({}, {});",
             quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
-            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE),
+            quote_literal(DuckLakeWriterConfig::default().parquet_row_group_size_bytes()),
         )));
         assert!(sql.contains(&format!(
             "CALL {LAKE_CATALOG}.set_option({}, {});",
@@ -1170,7 +1174,7 @@ mod tests {
         assert!(sql.contains(&format!(
             "CALL {LAKE_CATALOG}.set_option({}, {});",
             quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
-            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE),
+            quote_literal(DuckLakeWriterConfig::default().parquet_row_group_size_bytes()),
         )));
         assert!(sql.contains(&format!(
             "CALL {LAKE_CATALOG}.set_option({}, {});",
@@ -1216,7 +1220,7 @@ mod tests {
         assert!(sql.contains(&format!(
             "CALL {LAKE_CATALOG}.set_option({}, {});",
             quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
-            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE),
+            quote_literal(DuckLakeWriterConfig::default().parquet_row_group_size_bytes()),
         )));
         assert!(sql.contains(&format!(
             "CALL {LAKE_CATALOG}.set_option({}, {});",
@@ -1251,8 +1255,11 @@ mod tests {
             &data_url,
             Some(&s3),
             Some("ducklake"),
-            DuckDbExtensionStrategy::VendoredLocal { platform_dir: "linux_arm64" },
-            Some(&extension_dir),
+            &DuckLakeWriterConfig::default(),
+            DuckDbExtensionSetup {
+                strategy: DuckDbExtensionStrategy::VendoredLocal { platform_dir: "linux_arm64" },
+                vendored_root: Some(&extension_dir),
+            },
             crate::ducklake::COPY_DATA_INLINING_ROW_LIMIT,
         )
         .unwrap();
@@ -1275,7 +1282,40 @@ mod tests {
         assert!(plan.steps()[2].sql.contains("URL_COMPATIBILITY_MODE true"));
         assert!(plan.steps()[3].sql.contains("ATTACH"));
         assert!(plan.steps()[3].sql.contains("METADATA_SCHEMA 'ducklake'"));
-        assert_eq!(plan.steps()[4].sql, configure_parquet_settings_sql());
+        assert_eq!(
+            plan.steps()[4].sql,
+            configure_parquet_settings_sql(&DuckLakeWriterConfig::default())
+        );
+    }
+
+    #[test]
+    fn ducklake_writer_settings_use_recommended_defaults() {
+        let writer_config = DuckLakeWriterConfig::default();
+        let parquet_sql = configure_parquet_settings_sql(&writer_config);
+
+        assert!(parquet_sql.contains("'parquet_row_group_size_bytes', '128MiB'"));
+        assert!(parquet_sql.contains("'parquet_row_group_size', '2500000'"));
+        assert_eq!(
+            maintenance_target_file_size_sql(writer_config.target_file_size()),
+            "CALL ducklake_set_option('lake', 'target_file_size', '256MiB');"
+        );
+    }
+
+    #[test]
+    fn ducklake_writer_settings_use_configured_overrides() {
+        let writer_config = DuckLakeWriterConfig::new(
+            Some("64MB".to_owned()),
+            Some("32MB".to_owned()),
+            Some("500000".to_owned()),
+        );
+        let parquet_sql = configure_parquet_settings_sql(&writer_config);
+
+        assert!(parquet_sql.contains("'parquet_row_group_size_bytes', '32MB'"));
+        assert!(parquet_sql.contains("'parquet_row_group_size', '500000'"));
+        assert_eq!(
+            maintenance_target_file_size_sql(writer_config.target_file_size()),
+            "CALL ducklake_set_option('lake', 'target_file_size', '64MB');"
+        );
     }
 
     #[test]

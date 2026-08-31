@@ -246,8 +246,9 @@ where
             // If a slot already exists at this point, we could delete it and try to
             // recover, but it means that the state was somehow reset without
             // the slot being deleted, and we want to surface this.
-            let (replication_transaction, slot) =
-                replication_client.create_slot_with_transaction(&slot_name).await?;
+            let (replication_transaction, slot) = replication_client
+                .create_slot_with_transaction(&slot_name, config.replication_slot.failover)
+                .await?;
 
             // We copy the table schema and write it both to the state store and
             // destination.
@@ -361,7 +362,7 @@ where
             if total_table_copy_rows == 0 || table_copy_barrier_required {
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
                 destination
-                    .write_table_rows(&replicated_table_schema, vec![], flush_result)
+                    .write_table_rows(&replicated_table_schema, None, Vec::new(), flush_result)
                     .await?;
                 let ShutdownResult::Ok(completed_flush_result) =
                     pending_flush_result.with_shutdown(&mut shutdown_rx).await

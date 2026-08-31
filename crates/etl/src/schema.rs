@@ -66,6 +66,18 @@ fn build_mask_bytes(table_schema: &TableSchema, column_names: &HashSet<String>) 
         .collect()
 }
 
+/// Writes mask bytes as `(0,1,1)` for log and error display.
+fn write_mask_bytes(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+    write!(f, "(")?;
+    for (i, &value) in bytes.iter().enumerate() {
+        if i > 0 {
+            write!(f, ",")?;
+        }
+        write!(f, "{value}")?;
+    }
+    write!(f, ")")
+}
+
 /// A bitmask indicating which columns are being replicated.
 ///
 /// Each element is either 0 (not replicated) or 1 (replicated), with indices
@@ -76,14 +88,7 @@ pub struct ReplicationMask(Arc<Vec<u8>>);
 
 impl fmt::Display for ReplicationMask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(")?;
-        for (i, &v) in self.0.iter().enumerate() {
-            if i > 0 {
-                write!(f, ",")?;
-            }
-            write!(f, "{v}")?;
-        }
-        write!(f, ")")
+        write_mask_bytes(f, &self.0)
     }
 }
 
@@ -211,6 +216,12 @@ impl ReplicationMask {
 /// from schema metadata or raw bytes, then inspect the resulting bit pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityMask(Arc<Vec<u8>>);
+
+impl fmt::Display for IdentityMask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_mask_bytes(f, &self.0)
+    }
+}
 
 impl IdentityMask {
     /// Tries to create a new [`IdentityMask`] from a table schema and column

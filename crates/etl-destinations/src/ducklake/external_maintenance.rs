@@ -51,6 +51,8 @@ struct HeldPause {
     operations: ExternalMaintenanceOperations,
     quiesced_at: DateTime<Utc>,
     quiesced_reported: bool,
+    /// Whether fresh pools must be installed before releasing this pause.
+    pool_refresh_required: bool,
     _pause: DuckLakeExternalMaintenancePause,
 }
 
@@ -129,21 +131,40 @@ where
         match time::timeout(config.store_timeout, store.load_state()).await {
             Ok(Ok(state)) => {
                 if !state.exists {
-                    release_missing_state_pause(&store, &mut held_pause).await;
+                    if let Err(error) =
+                        release_missing_state_pause(&store, &destination, &mut held_pause).await
+                    {
+                        warn!(
+                            error = %error,
+                            "failed to refresh ducklake pools after maintenance state disappeared; \
+                             keeping foreground mutations paused"
+                        );
+                    }
                     time::sleep(config.poll_interval).await;
                     continue;
                 }
 
                 expire_snapshots_gate.initialize_from_state_once(&state);
-                reconcile_pause(&store, &config, &destination, &mut held_pause, &state).await;
-                maybe_request_operations(
-                    &store,
-                    &destination,
-                    &state,
-                    &config,
-                    &mut expire_snapshots_gate,
-                )
-                .await;
+                match reconcile_pause(&store, &config, &destination, &mut held_pause, &state).await
+                {
+                    Ok(()) => {
+                        maybe_request_operations(
+                            &store,
+                            &destination,
+                            &state,
+                            &config,
+                            &mut expire_snapshots_gate,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "failed to refresh ducklake pools after external maintenance; keeping \
+                             foreground mutations paused for retry"
+                        );
+                    }
+                }
             }
             Ok(Err(error)) => {
                 warn!(
@@ -151,14 +172,32 @@ where
                     timeout_ms = config.store_timeout.as_millis() as u64,
                     "failed to read ducklake external maintenance state"
                 );
-                release_expired_pause_if_needed(&store, &config, &mut held_pause).await;
+                if let Err(error) =
+                    release_expired_pause_if_needed(&store, &config, &destination, &mut held_pause)
+                        .await
+                {
+                    warn!(
+                        error = %error,
+                        "failed to refresh ducklake pools after maintenance pause expired; keeping \
+                         foreground mutations paused for retry"
+                    );
+                }
             }
             Err(_) => {
                 warn!(
                     timeout_ms = config.store_timeout.as_millis() as u64,
                     "timed out reading ducklake external maintenance state"
                 );
-                release_expired_pause_if_needed(&store, &config, &mut held_pause).await;
+                if let Err(error) =
+                    release_expired_pause_if_needed(&store, &config, &destination, &mut held_pause)
+                        .await
+                {
+                    warn!(
+                        error = %error,
+                        "failed to refresh ducklake pools after maintenance pause expired; keeping \
+                         foreground mutations paused for retry"
+                    );
+                }
             }
         }
 
@@ -166,10 +205,19 @@ where
     }
 }
 
-async fn release_missing_state_pause<M>(store: &M, held_pause: &mut Option<HeldPause>)
+async fn release_missing_state_pause<S, M>(
+    store: &M,
+    destination: &DuckLakeDestination<S>,
+    held_pause: &mut Option<HeldPause>,
+) -> EtlResult<()>
 where
+    S: DestinationStore,
     M: ExternalMaintenanceStore,
 {
+    if let Some(held) = held_pause.as_mut() {
+        refresh_pools_if_required(destination, held).await?;
+    }
+
     if let Some(held) = held_pause.take() {
         info!(
             run_id = %held.run_id,
@@ -183,6 +231,30 @@ where
             );
         }
     }
+
+    Ok(())
+}
+
+/// Recreates connection pools while retaining one held maintenance pause.
+async fn refresh_pools_if_required<S>(
+    destination: &DuckLakeDestination<S>,
+    held: &mut HeldPause,
+) -> EtlResult<()>
+where
+    S: DestinationStore,
+{
+    if !held.pool_refresh_required {
+        return Ok(());
+    }
+
+    info!(
+        run_id = %held.run_id,
+        "recreating ducklake connection pools before resuming foreground mutations"
+    );
+    destination.recreate_pools_after_external_maintenance().await?;
+    held.pool_refresh_required = false;
+
+    Ok(())
 }
 
 async fn reconcile_pause<S, M>(
@@ -191,12 +263,22 @@ async fn reconcile_pause<S, M>(
     destination: &DuckLakeDestination<S>,
     held_pause: &mut Option<HeldPause>,
     state: &ExternalMaintenanceState,
-) where
+) -> EtlResult<()>
+where
     S: DestinationStore,
     M: ExternalMaintenanceStore,
 {
+    if let Some(held) = held_pause.as_mut()
+        && successful_maintenance_run(state, &held.run_id, held.operations, held.quiesced_at)
+    {
+        held.pool_refresh_required = true;
+    }
+
     let active_pause = bounded_active_pause_request(state, Utc::now());
     let Some(pause) = active_pause else {
+        if let Some(held) = held_pause.as_mut() {
+            refresh_pools_if_required(destination, held).await?;
+        }
         if let Some(held) = held_pause.take() {
             info!(
                 run_id = %held.run_id,
@@ -205,7 +287,7 @@ async fn reconcile_pause<S, M>(
             release_held_pause(held, "cleared");
             report_running(store, config.store_timeout).await;
         }
-        return;
+        return Ok(());
     };
 
     if let Some(held) = held_pause.as_mut()
@@ -222,10 +304,12 @@ async fn reconcile_pause<S, M>(
         {
             held.quiesced_reported = true;
         }
-        return;
+        return Ok(());
     }
 
+    let mut pool_refresh_required = false;
     if let Some(held) = held_pause.take() {
+        pool_refresh_required = held.pool_refresh_required;
         info!(
             previous_run_id = %held.run_id,
             next_run_id = %pause.run_id,
@@ -244,7 +328,21 @@ async fn reconcile_pause<S, M>(
     let operations = active_pause_operations(state, &pause);
     record_external_maintenance_pause_active(operations, true);
 
-    let external_pause = destination.acquire_external_maintenance_pause().await;
+    let pause_wait_timeout =
+        pause.expires_at.signed_duration_since(Utc::now()).to_std().unwrap_or(Duration::ZERO);
+    let Ok(external_pause) =
+        time::timeout(pause_wait_timeout, destination.acquire_external_maintenance_pause()).await
+    else {
+        info!(
+            run_id = %pause.run_id,
+            expires_at = %pause.expires_at.to_rfc3339(),
+            "ducklake external maintenance pause expired while waiting for foreground mutations \
+             to drain"
+        );
+        record_external_maintenance_pause_active(operations, false);
+        report_running(store, config.store_timeout).await;
+        return Ok(());
+    };
     if pause.expires_at <= Utc::now() {
         info!(
             run_id = %pause.run_id,
@@ -259,12 +357,13 @@ async fn reconcile_pause<S, M>(
                 operations,
                 quiesced_at: Utc::now(),
                 quiesced_reported: false,
+                pool_refresh_required: false,
                 _pause: external_pause,
             },
             "expired",
         );
         report_running(store, config.store_timeout).await;
-        return;
+        return Ok(());
     }
 
     let quiesced_at = Utc::now();
@@ -292,30 +391,45 @@ async fn reconcile_pause<S, M>(
         operations,
         quiesced_at,
         quiesced_reported,
+        pool_refresh_required,
         _pause: external_pause,
     });
+
+    Ok(())
 }
 
-async fn release_expired_pause_if_needed<M>(
+async fn release_expired_pause_if_needed<S, M>(
     store: &M,
     config: &ExternalMaintenanceWatcherConfig,
+    destination: &DuckLakeDestination<S>,
     held_pause: &mut Option<HeldPause>,
-) where
+) -> EtlResult<()>
+where
+    S: DestinationStore,
     M: ExternalMaintenanceStore,
 {
     if held_pause.as_ref().is_none_or(|pause| pause.expires_at > Utc::now()) {
-        return;
+        return Ok(());
+    }
+
+    if let Some(expired) = held_pause.as_mut() {
+        warn!(
+            run_id = %expired.run_id,
+            "ducklake maintenance pause expired while external maintenance store was unavailable"
+        );
+        // The maintenance outcome cannot be verified while the store is
+        // unavailable, so conservatively require fresh connections.
+        expired.pool_refresh_required = true;
+        refresh_pools_if_required(destination, expired).await?;
     }
 
     let Some(expired) = held_pause.take() else {
-        return;
+        return Ok(());
     };
-    warn!(
-        run_id = %expired.run_id,
-        "ducklake maintenance pause expired while external maintenance store was unavailable"
-    );
     release_held_pause(expired, "expired");
     report_running(store, config.store_timeout).await;
+
+    Ok(())
 }
 
 fn release_held_pause(held: HeldPause, outcome: &'static str) {
@@ -349,6 +463,34 @@ fn active_pause_operations(
         .operation_request
         .as_ref()
         .map_or(ExternalMaintenanceOperations::default(), |request| request.operations)
+}
+
+/// Returns whether one paused run successfully completed any selected
+/// operation.
+fn successful_maintenance_run(
+    state: &ExternalMaintenanceState,
+    held_run_id: &str,
+    held_operations: ExternalMaintenanceOperations,
+    quiesced_at: DateTime<Utc>,
+) -> bool {
+    let completed_for_held_run = |run: Option<&ExternalMaintenanceOperationRun>| {
+        run.is_some_and(|run| {
+            run.run_id
+                .as_deref()
+                .map_or(run.completed_at >= quiesced_at, |run_id| run_id == held_run_id)
+        })
+    };
+    let successful = &state.last_successful_operations;
+
+    (held_operations.inline_flush && completed_for_held_run(successful.inline_flush.as_ref()))
+        || (held_operations.merge_adjacent_files
+            && completed_for_held_run(successful.merge_adjacent_files.as_ref()))
+        || (held_operations.rewrite_data_files
+            && completed_for_held_run(successful.rewrite_data_files.as_ref()))
+        || (held_operations.expire_snapshots
+            && completed_for_held_run(successful.expire_snapshots.as_ref()))
+        || (held_operations.cleanup_old_files
+            && completed_for_held_run(successful.cleanup_old_files.as_ref()))
 }
 
 /// Returns a pause request whose expiry is bounded by trusted policy.
@@ -728,7 +870,7 @@ mod tests {
         ExternalMaintenancePausePolicy, ExternalMaintenanceRun, ExternalMaintenanceState,
         OPERATION_EXPIRE_SNAPSHOTS, OPERATION_INLINE_FLUSH, OPERATION_REWRITE_DATA_FILES,
         OPERATION_UNKNOWN, active_pause_operations, bounded_active_pause_request,
-        record_external_maintenance_pause_active,
+        record_external_maintenance_pause_active, successful_maintenance_run,
     };
     use crate::ducklake::metrics::{
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE, register_metrics,
@@ -871,6 +1013,72 @@ mod tests {
         };
 
         assert_eq!(active_pause_operations(&state, &pause), request_operations);
+    }
+
+    #[test]
+    fn successful_maintenance_run_accepts_each_matching_selected_operation() {
+        let quiesced_at = Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap();
+        let successful_run = ExternalMaintenanceOperationRun {
+            run_id: Some("run-1".to_owned()),
+            completed_at: quiesced_at + chrono::Duration::minutes(1),
+        };
+        let mut state = ExternalMaintenanceState::present();
+        state.last_successful_operations.inline_flush = Some(successful_run.clone());
+        state.last_successful_operations.merge_adjacent_files = Some(successful_run.clone());
+        state.last_successful_operations.rewrite_data_files = Some(successful_run.clone());
+        state.last_successful_operations.expire_snapshots = Some(successful_run.clone());
+        state.last_successful_operations.cleanup_old_files = Some(successful_run);
+
+        let operation_cases = [
+            ExternalMaintenanceOperations {
+                inline_flush: true,
+                ..ExternalMaintenanceOperations::default()
+            },
+            ExternalMaintenanceOperations {
+                merge_adjacent_files: true,
+                ..ExternalMaintenanceOperations::default()
+            },
+            ExternalMaintenanceOperations {
+                rewrite_data_files: true,
+                ..ExternalMaintenanceOperations::default()
+            },
+            ExternalMaintenanceOperations {
+                expire_snapshots: true,
+                ..ExternalMaintenanceOperations::default()
+            },
+            ExternalMaintenanceOperations {
+                cleanup_old_files: true,
+                ..ExternalMaintenanceOperations::default()
+            },
+        ];
+
+        for operations in operation_cases {
+            assert!(successful_maintenance_run(&state, "run-1", operations, quiesced_at));
+            assert!(!successful_maintenance_run(&state, "run-2", operations, quiesced_at));
+        }
+        assert!(!successful_maintenance_run(
+            &state,
+            "run-1",
+            ExternalMaintenanceOperations::default(),
+            quiesced_at,
+        ));
+    }
+
+    #[test]
+    fn successful_maintenance_run_ignores_unselected_operation_success() {
+        let quiesced_at = Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap();
+        let operations = ExternalMaintenanceOperations {
+            rewrite_data_files: true,
+            ..ExternalMaintenanceOperations::default()
+        };
+        let mut state = ExternalMaintenanceState::present();
+        state.last_successful_operations.cleanup_old_files =
+            Some(ExternalMaintenanceOperationRun {
+                run_id: Some("run-1".to_owned()),
+                completed_at: quiesced_at + chrono::Duration::minutes(1),
+            });
+
+        assert!(!successful_maintenance_run(&state, "run-1", operations, quiesced_at));
     }
 
     #[test]

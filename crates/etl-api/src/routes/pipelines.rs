@@ -1028,6 +1028,7 @@ pub(crate) async fn start_pipeline(
         source,
         destination,
         api_config.supabase_api_url.as_deref(),
+        api_config.replicator.destination_defaults.ducklake.copy_buffer,
         tls_config,
     )
     .await?;

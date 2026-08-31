@@ -209,7 +209,7 @@ max_wal_senders = 20
 For the physical replication link between the primary and the read replica, use a [physical replication slot](https://www.postgresql.org/docs/16/warm-standby.html#STREAMING-REPLICATION-SLOTS) and enable standby feedback:
 
 ```ini title="postgresql.conf (standby)"
-primary_conninfo = 'host=primary.example.com port=5432 dbname=postgres user=replicator password=...'
+primary_conninfo = 'host=primary.example.com port=5432 dbname=postgres user=replicator password=placeholder-password'
 primary_slot_name = 'etl_read_replica'
 hot_standby = on
 hot_standby_feedback = on
@@ -230,7 +230,90 @@ This is only a setup-time nudge for slot creation. ETL uses the regular
 PostgreSQL logical replication protocol for keepalives and status updates after
 ongoing replication starts.
 
-PostgreSQL 17+ also has logical failover slot synchronization, where failover-enabled logical slots on the primary are synchronized to standbys. That is a separate high-availability feature for resuming logical replication after promoting a standby. It is not required for ETL to read from a current read replica, and synchronized standby slots cannot be consumed on the standby while they are marked as synced.
+PostgreSQL 17+ also supports synchronizing logical slots from a primary to its
+standbys for failover. This is separate from reading directly from a current
+read replica. Configure it as described in [Failover Slots](#failover-slots)
+when ETL must continue through a primary promotion.
+
+## Failover Slots
+
+PostgreSQL 17 or newer can synchronize a primary's logical replication slots
+to physical standbys. After a synchronized standby is promoted, ETL can resume
+from the same apply-worker slot instead of creating a new WAL lineage and
+resynchronizing tables. See the PostgreSQL documentation on [replication slot
+synchronization](https://www.postgresql.org/docs/17/logicaldecoding-explanation.html#LOGICALDECODING-REPLICATION-SLOTS-SYNCHRONIZATION).
+
+Failover support is disabled by default. Enable it only when the source and
+every intended failover target run PostgreSQL 17 or newer.
+
+Enable the feature in the ETL pipeline configuration:
+
+```yaml title="replicator.yaml"
+pipeline:
+  replication_slot:
+    failover: true
+```
+
+For API-managed pipelines, set the same field in the pipeline configuration:
+
+```text
+{
+  "publication_name": "my_publication",
+  "replication_slot": {
+    "failover": true
+  }
+}
+```
+
+ETL then creates its apply-worker and short-lived table-sync logical slots with
+the PostgreSQL `FAILOVER` option. If the apply-worker slot already exists from
+an earlier run, startup checks `pg_replication_slots.failover` and enables the
+option only when repair is needed. Disabling the setting affects newly created
+slots but does not downgrade an existing failover-enabled apply slot.
+
+The ETL setting only makes slots eligible for synchronization. PostgreSQL must
+also be configured to copy and retain them. Use PostgreSQL 17 or newer on the
+primary and every failover target, create a physical replication slot for each
+standby, and configure the corresponding standby with a valid database name:
+
+```ini title="postgresql.conf (standby)"
+primary_conninfo = 'host=primary.example.com port=5432 dbname=postgres user=replicator password=placeholder-password'
+primary_slot_name = 'etl_failover_standby_1'
+hot_standby_feedback = on
+sync_replication_slots = on
+```
+
+On the primary, list that physical slot in `synchronized_standby_slots`:
+
+```ini title="postgresql.conf (primary)"
+synchronized_standby_slots = 'etl_failover_standby_1'
+```
+
+This prevents ETL's logical consumer from advancing beyond WAL that the named
+standby has flushed. Logical replication will stop if a listed physical slot is
+missing or invalidated, so monitor both the physical link and the synchronized
+logical slots. `hot_standby_feedback` is required for slot synchronization and
+can increase vacuum retention on the primary.
+
+Slot synchronization is asynchronous. Before a planned promotion, verify on
+the target standby that every ETL slot required by the pipeline exists and is
+ready:
+
+```sql
+SELECT slot_name,
+       synced AND NOT temporary AND invalidation_reason IS NULL AS failover_ready
+FROM pg_replication_slots
+WHERE slot_name LIKE 'supabase\_etl\_apply\_%' ESCAPE '\'
+   OR slot_name LIKE 'supabase\_etl\_table\_sync\_%' ESCAPE '\';
+```
+
+Do not promote that standby for the pipeline until every required slot reports
+`failover_ready = true`. A synchronized slot cannot be consumed while the
+server remains in recovery; it becomes usable after promotion. The pipeline's
+source connection must then reach the promoted primary, either through a
+stable HA endpoint or after the orchestrator updates the endpoint and restarts
+the replicator. ETL may deliver recent events again after a crash or failover,
+so destinations must remain idempotent.
 
 ## Publications
 

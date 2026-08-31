@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use commands::{
     BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
-    FixArgs, FixPipelineArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, NextestArgs,
+    FixArgs, FixPipelineArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, MultigresArgs, NextestArgs,
     PgFillTableArgs, PostgresArgs, RotateEncryptionKeyArgs, SeedArgs, TestArgs, TestClickhouseArgs,
     TestSnowflakeArgs, VendorDuckdbArgs,
 };
@@ -47,6 +47,8 @@ enum Command {
     /// Verify MSRV consistency across Cargo.toml, rust-toolchain.toml, and
     /// cargo-msrv.
     Msrv(MsrvArgs),
+    /// Manage the local Multigres compatibility cluster.
+    Multigres(MultigresArgs),
     /// Run tests via nextest, sharded across multiple Postgres clusters.
     Nextest(NextestArgs),
     /// Fill one Postgres table to a target size using parallel COPY workers.
@@ -91,6 +93,7 @@ async fn main() -> Result<()> {
         Command::Migrate(cmd) => cmd.run(),
         Command::FixPipeline(cmd) => cmd.run().await,
         Command::Msrv(cmd) => cmd.run(),
+        Command::Multigres(cmd) => cmd.run(),
         Command::Nextest(cmd) => cmd.run(),
         Command::PgFillTable(cmd) => cmd.run(),
         Command::Postgres(cmd) => cmd.run(),

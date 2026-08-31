@@ -9,7 +9,7 @@ use aws_lc_rs::{
 use base64::prelude::*;
 use etl_api::{
     config::{
-        ApiConfig, ApplicationSettings, DefaultReplicatorResourcesConfig,
+        ApiConfig, ApiReplicatorConfig, ApplicationSettings, DefaultReplicatorResourcesConfig,
         DefaultVectorResourcesConfig, EncryptionKeyConfig as ConfigEncryptionKey, K8sConfig,
         SourceConfig,
     },
@@ -215,6 +215,116 @@ impl TestApp {
             .send()
             .await
             .expect("failed to execute request")
+    }
+
+    pub(crate) async fn read_source_schemas_v2(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!("{}/v2/sources/{source_id}/schemas", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
+    }
+
+    pub(crate) async fn read_source_tables_v2(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        schema: Option<&str>,
+    ) -> reqwest::Response {
+        let request = self
+            .get_authenticated(format!("{}/v2/sources/{source_id}/tables", &self.address))
+            .header("tenant_id", tenant_id);
+        let request = match schema {
+            Some(schema) => request.query(&[("schema", schema)]),
+            None => request,
+        };
+
+        request.send().await.expect("failed to execute request")
+    }
+
+    pub(crate) async fn read_source_columns_v2(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        table_id: u32,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!(
+            "{}/v2/sources/{source_id}/tables/{table_id}/columns",
+            &self.address
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub(crate) async fn read_source_publications_v2(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!("{}/v2/sources/{source_id}/publications", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
+    }
+
+    pub(crate) async fn read_source_publication_v2(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication_name: &str,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!(
+            "{}/v2/sources/{source_id}/publications/{publication_name}",
+            &self.address
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub(crate) async fn create_source_publication_v2<T>(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication_name: &str,
+        config: &T,
+    ) -> reqwest::Response
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        self.put_authenticated(format!(
+            "{}/v2/sources/{source_id}/publications/{publication_name}",
+            &self.address
+        ))
+        .header("tenant_id", tenant_id)
+        .json(config)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub(crate) async fn delete_source_publication_v2(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication_name: &str,
+    ) -> reqwest::Response {
+        self.delete_authenticated(format!(
+            "{}/v2/sources/{source_id}/publications/{publication_name}",
+            &self.address
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
     }
 
     pub(crate) async fn validate_source(
@@ -704,6 +814,7 @@ async fn spawn_test_app_with_services(
                 cpu_request_millicores: 75,
             },
         },
+        replicator: ApiReplicatorConfig::default(),
         encryption_keys: vec![ConfigEncryptionKey {
             id: 0,
             key: BASE64_STANDARD.encode(key_bytes),

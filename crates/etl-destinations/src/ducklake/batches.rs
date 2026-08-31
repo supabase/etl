@@ -1,16 +1,16 @@
 //! Table batches are the atomic per-table write units used by DuckLake writes.
-//! Copy, mutation, and truncate inputs are normalized into deterministic
-//! batches so each attempt can replay the same SQL and replay bookkeeping.
-//! Copy batches persist ids in the applied-marker table, while streaming
-//! mutation and truncate batches advance a per-table progress watermark.
+//! Copy, mutation, and truncate inputs are normalized into prepared batches so
+//! each attempt can replay the same SQL and replay bookkeeping. Copy batches
+//! receive opaque upstream ids and retain them across destination-local
+//! retries. Streaming mutation and truncate batches advance a per-table
+//! progress watermark.
 //! Bounded batch sizes preserve table-local ordering without letting one
 //! transaction grow unbounded.
 
 #[cfg(feature = "test-utils")]
-use std::collections::HashMap;
-#[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
 use std::{
+    collections::HashMap,
     error, fmt,
     hash::{Hash, Hasher},
     sync::{
@@ -21,7 +21,8 @@ use std::{
 };
 
 use etl::{
-    data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
+    data::{Cell, OldTableRow, PartialTableRow, SizeHint, TableRow, UpdatedTableRow},
+    destination::TableCopyBatchId,
     error::{ErrorKind, EtlResult},
     etl_error,
     event::EventSequenceKey,
@@ -339,6 +340,68 @@ pub(super) struct PreparedDuckLakeTableBatch {
     last_sequence_key: Option<EventSequenceKey>,
     insert_column_names: Vec<String>,
     action: PreparedDuckLakeTableBatchAction,
+}
+
+/// Compact durable marker retained while COPY rows remain staged.
+struct PreparedDuckLakeBatchMarker {
+    batch_kind: DuckLakeTableBatchKind,
+    first_start_lsn: Option<PgLsn>,
+    last_commit_lsn: Option<PgLsn>,
+}
+
+/// Prepared initial-copy rows with a lightweight size estimate for buffering.
+pub(super) struct PreparedDuckLakeCopyBatch {
+    batch: PreparedDuckLakeTableBatch,
+    estimated_bytes: u64,
+}
+
+impl PreparedDuckLakeCopyBatch {
+    /// Returns the approximate decoded bytes owned by this row batch.
+    pub(super) fn estimated_bytes(&self) -> u64 {
+        self.estimated_bytes
+    }
+
+    /// Converts this prepared copy payload into the existing atomic-batch path.
+    pub(super) fn into_atomic_batch(self) -> PreparedDuckLakeTableBatch {
+        self.batch
+    }
+
+    /// Separates staged row data from its durable applied-batch marker.
+    fn into_buffer_parts(
+        mut self,
+    ) -> EtlResult<(String, PreparedDuckLakeBatchMarker, PreparedRows)> {
+        let PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) = &mut self.batch.action
+        else {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake buffered copy batch is not a mutation"
+            ));
+        };
+        if prepared_mutations.len() != 1 {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake buffered copy batch has an invalid mutation count",
+                format!("Expected 1 mutation, got {}", prepared_mutations.len())
+            ));
+        }
+        let prepared_mutation = prepared_mutations.pop().ok_or_else(|| {
+            etl_error!(ErrorKind::InvalidState, "DuckLake buffered copy mutation is missing")
+        })?;
+        let PreparedTableMutation::Upsert(prepared_rows) = prepared_mutation else {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake buffered copy mutation is not an upsert"
+            ));
+        };
+
+        let marker = PreparedDuckLakeBatchMarker {
+            batch_kind: self.batch.batch_kind,
+            first_start_lsn: self.batch.first_start_lsn,
+            last_commit_lsn: self.batch.last_commit_lsn,
+        };
+
+        Ok((self.batch.batch_id, marker, prepared_rows))
+    }
 }
 
 impl PreparedDuckLakeTableBatch {
@@ -763,22 +826,30 @@ pub(super) fn prepare_copy_table_batch(
     replicated_table_schema: &ReplicatedTableSchema,
     table_name: DuckLakeTableName,
     replay_epoch: String,
+    batch_id: TableCopyBatchId,
     table_rows: Vec<TableRow>,
-) -> EtlResult<PreparedDuckLakeTableBatch> {
-    let identity = build_copy_batch_identity(&table_name, replicated_table_schema, &table_rows)?;
-    Ok(PreparedDuckLakeTableBatch {
-        table_name,
-        replay_epoch,
-        batch_id: identity.batch_id,
-        batch_kind: DuckLakeTableBatchKind::Copy,
-        first_start_lsn: identity.first_start_lsn,
-        last_commit_lsn: identity.last_commit_lsn,
-        first_sequence_key: None,
-        last_sequence_key: None,
-        insert_column_names: replicated_column_names(replicated_table_schema),
-        action: PreparedDuckLakeTableBatchAction::Mutation(vec![PreparedTableMutation::Upsert(
-            prepare_copy_rows(replicated_table_schema, table_rows)?,
-        )]),
+) -> EtlResult<PreparedDuckLakeCopyBatch> {
+    let estimated_bytes =
+        table_rows.iter().map(SizeHint::size_hint).fold(0usize, usize::saturating_add);
+    Ok(PreparedDuckLakeCopyBatch {
+        batch: PreparedDuckLakeTableBatch {
+            table_name,
+            replay_epoch,
+            batch_id: batch_id.to_string(),
+            batch_kind: DuckLakeTableBatchKind::Copy,
+            first_start_lsn: None,
+            last_commit_lsn: None,
+            first_sequence_key: None,
+            last_sequence_key: None,
+            insert_column_names: replicated_column_names(replicated_table_schema),
+            action: PreparedDuckLakeTableBatchAction::Mutation(vec![
+                PreparedTableMutation::Upsert(prepare_copy_rows(
+                    replicated_table_schema,
+                    table_rows,
+                )?),
+            ]),
+        },
+        estimated_bytes: u64::try_from(estimated_bytes).unwrap_or(u64::MAX),
     })
 }
 
@@ -1448,24 +1519,6 @@ fn build_mutation_batch_identity(
     ))
 }
 
-/// Builds a deterministic identity for one ordered table-copy batch.
-fn build_copy_batch_identity(
-    table_name: &DuckLakeTableName,
-    replicated_table_schema: &ReplicatedTableSchema,
-    table_rows: &[TableRow],
-) -> EtlResult<DuckLakeBatchIdentity> {
-    let mut hasher = BatchIdHasher::new();
-    "copy".hash(&mut hasher);
-    table_name.id().hash(&mut hasher);
-
-    for row in table_rows {
-        delete_predicate_from_copy_row(replicated_table_schema, row)?.hash(&mut hasher);
-        hash_table_row_ref(&mut hasher, row);
-    }
-
-    Ok(build_batch_identity(DuckLakeTableBatchKind::Copy, None, None, hasher.finish()))
-}
-
 /// Builds the deterministic identity shared by retries of a copy barrier.
 fn build_copy_complete_batch_identity(table_name: &DuckLakeTableName) -> DuckLakeBatchIdentity {
     let mut hasher = BatchIdHasher::new();
@@ -1473,44 +1526,6 @@ fn build_copy_complete_batch_identity(table_name: &DuckLakeTableName) -> DuckLak
     table_name.id().hash(&mut hasher);
 
     build_batch_identity(DuckLakeTableBatchKind::CopyComplete, None, None, hasher.finish())
-}
-
-/// Builds a delete predicate for a full copied row using the source primary
-/// key.
-fn delete_predicate_from_copy_row(
-    replicated_table_schema: &ReplicatedTableSchema,
-    row: &TableRow,
-) -> EtlResult<String> {
-    let replicated_column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
-    if row.values().len() != replicated_column_schemas.len() {
-        return Err(etl_error!(
-            ErrorKind::InvalidState,
-            "DuckLake copy row shape does not match schema",
-            format!(
-                "Expected {} values for table '{}', got {}",
-                replicated_column_schemas.len(),
-                replicated_table_schema.name(),
-                row.values().len()
-            )
-        ));
-    }
-
-    let mut predicates = Vec::new();
-    for (column_schema, value) in replicated_column_schemas.iter().zip(row.values()) {
-        if !column_schema.primary_key() {
-            continue;
-        }
-
-        let quoted_column =
-            quote_identifier(&DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column_schema.name));
-        let predicate = match value {
-            Cell::Null => format!("{quoted_column} IS NULL"),
-            _ => format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)),
-        };
-        predicates.push(predicate);
-    }
-
-    Ok(predicates.join(" AND "))
 }
 
 /// Builds a deterministic identity for one ordered truncate batch.
@@ -1602,7 +1617,17 @@ fn applied_batch_marker_exists(
     conn: &duckdb::Connection,
     batch: &PreparedDuckLakeTableBatch,
 ) -> EtlResult<bool> {
-    let table_id = batch.table_name.id();
+    applied_batch_marker_id_exists(conn, &batch.table_name, &batch.replay_epoch, &batch.batch_id)
+}
+
+/// Returns whether one marker identity already exists.
+fn applied_batch_marker_id_exists(
+    conn: &duckdb::Connection,
+    table_name: &DuckLakeTableName,
+    replay_epoch: &str,
+    batch_id: &str,
+) -> EtlResult<bool> {
+    let table_id = table_name.id();
     let sql = format!(
         r#"SELECT 1 FROM {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}"
          WHERE table_name = {}
@@ -1611,8 +1636,8 @@ fn applied_batch_marker_exists(
          LIMIT 1;"#,
         quote_literal(&table_id),
         quote_literal(LEGACY_REPLAY_EPOCH),
-        quote_literal(&batch.replay_epoch),
-        quote_literal(&batch.batch_id)
+        quote_literal(replay_epoch),
+        quote_literal(batch_id)
     );
     let mut statement = conn.prepare(&sql).map_err(|err| {
         etl_error!(
@@ -1646,17 +1671,39 @@ fn insert_applied_batch_marker(
     conn: &duckdb::Connection,
     batch: &PreparedDuckLakeTableBatch,
 ) -> EtlResult<()> {
-    let table_id = batch.table_name.id();
+    let marker = PreparedDuckLakeBatchMarker {
+        batch_kind: batch.batch_kind,
+        first_start_lsn: batch.first_start_lsn,
+        last_commit_lsn: batch.last_commit_lsn,
+    };
+    insert_applied_batch_marker_fields(
+        conn,
+        &batch.table_name,
+        &batch.replay_epoch,
+        &batch.batch_id,
+        &marker,
+    )
+}
+
+/// Inserts one compact marker inside the open DuckLake transaction.
+fn insert_applied_batch_marker_fields(
+    conn: &duckdb::Connection,
+    table_name: &DuckLakeTableName,
+    replay_epoch: &str,
+    batch_id: &str,
+    marker: &PreparedDuckLakeBatchMarker,
+) -> EtlResult<()> {
+    let table_id = table_name.id();
     let sql = format!(
         r#"INSERT INTO {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}"
          (table_name, replay_epoch, batch_id, batch_kind, first_start_lsn, last_commit_lsn, applied_at)
          VALUES ({}, {}, {}, {}, {}, {}, current_timestamp);"#,
         quote_literal(&table_id),
-        quote_literal(&batch.replay_epoch),
-        quote_literal(&batch.batch_id),
-        quote_literal(batch.batch_kind.as_str()),
-        optional_lsn_to_sql_literal(batch.first_start_lsn),
-        optional_lsn_to_sql_literal(batch.last_commit_lsn),
+        quote_literal(replay_epoch),
+        quote_literal(batch_id),
+        quote_literal(marker.batch_kind.as_str()),
+        optional_lsn_to_sql_literal(marker.first_start_lsn),
+        optional_lsn_to_sql_literal(marker.last_commit_lsn),
     );
     conn.execute_batch(&sql).map_err(|err| {
         etl_error!(
@@ -1740,23 +1787,7 @@ impl ReusableStagingTable {
     ) -> EtlResult<()> {
         self.prepare(conn)?;
         self.load_rows(conn, prepared_rows)?;
-
-        let column_list = quoted_column_list(&self.insert_column_names);
-        let target_table = qualified_lake_table_name(&self.table_name);
-        let staging_table = quote_identifier(&self.staging_name);
-        let sql = format!(
-            "insert into {target_table} ({column_list}) select {column_list} from {staging_table};"
-        );
-        conn.execute_batch(&sql).map_err(|err| {
-            tracing::error!(error = %err, "error inserting rows");
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake INSERT SELECT failed",
-                format_query_error_detail(&sql),
-                source: err
-            )
-        })?;
-        Ok(())
+        self.insert_staged_rows(conn)
     }
 
     /// Drops the temp staging table after the batch finishes.
@@ -1773,17 +1804,16 @@ impl ReusableStagingTable {
 
     /// Creates the temp table once, then clears it before each reuse.
     fn prepare(&mut self, conn: &duckdb::Connection) -> EtlResult<()> {
-        let staging_table = quote_identifier(&self.staging_name);
         if self.created {
-            let sql = format!("truncate table {staging_table};");
-            conn.execute_batch(&sql).map_err(|error| {
-                tracing::error!(error = %error, "error clear staging");
-                etl_error!(
-                    ErrorKind::DestinationQueryFailed,
-                    "DuckLake staging table clear failed",
-                    source: error
-                )
-            })?;
+            return self.clear(conn);
+        }
+
+        self.ensure_created(conn)
+    }
+
+    /// Creates the temporary staging table without clearing existing rows.
+    fn ensure_created(&mut self, conn: &duckdb::Connection) -> EtlResult<()> {
+        if self.created {
             return Ok(());
         }
 
@@ -1793,6 +1823,7 @@ impl ReusableStagingTable {
             *counts.entry(self.table_name.id()).or_default() += 1;
         }
 
+        let staging_table = quote_identifier(&self.staging_name);
         let column_list = quoted_column_list(&self.insert_column_names);
         let target_table = qualified_lake_table_name(&self.table_name);
         conn.execute_batch(&format!(
@@ -1809,6 +1840,45 @@ impl ReusableStagingTable {
             )
         })?;
         self.created = true;
+        Ok(())
+    }
+
+    /// Inserts every currently staged row into the destination table.
+    fn insert_staged_rows(&self, conn: &duckdb::Connection) -> EtlResult<()> {
+        let column_list = quoted_column_list(&self.insert_column_names);
+        let target_table = qualified_lake_table_name(&self.table_name);
+        let staging_table = quote_identifier(&self.staging_name);
+        let sql = format!(
+            "insert into {target_table} ({column_list}) select {column_list} from {staging_table};"
+        );
+        conn.execute_batch(&sql).map_err(|error| {
+            tracing::error!(error = %error, "error inserting rows");
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake INSERT SELECT failed",
+                format_query_error_detail(&sql),
+                source: error
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Clears all rows from an existing temporary staging table.
+    fn clear(&self, conn: &duckdb::Connection) -> EtlResult<()> {
+        if !self.created {
+            return Ok(());
+        }
+
+        let staging_table = quote_identifier(&self.staging_name);
+        let sql = format!("truncate table {staging_table};");
+        conn.execute_batch(&sql).map_err(|error| {
+            tracing::error!(error = %error, "error clear staging");
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake staging table clear failed",
+                source: error
+            )
+        })?;
         Ok(())
     }
 
@@ -1879,6 +1949,178 @@ impl ReusableStagingTable {
                 )?;
             }
         }
+        Ok(())
+    }
+}
+
+/// Connection-local accumulator for one table-copy replay epoch.
+pub(super) struct DuckLakeCopyAccumulator {
+    table_name: DuckLakeTableName,
+    replay_epoch: String,
+    staging: ReusableStagingTable,
+    pending_markers: HashMap<String, PreparedDuckLakeBatchMarker>,
+    staged_bytes: u64,
+}
+
+impl DuckLakeCopyAccumulator {
+    /// Creates an empty accumulator shaped from its first prepared batch.
+    pub(super) fn new(batch: &PreparedDuckLakeCopyBatch) -> Self {
+        Self {
+            table_name: batch.batch.table_name.clone(),
+            replay_epoch: batch.batch.replay_epoch.clone(),
+            staging: ReusableStagingTable::new(
+                &batch.batch.table_name,
+                batch.batch.insert_column_names.clone(),
+            ),
+            pending_markers: HashMap::new(),
+            staged_bytes: 0,
+        }
+    }
+
+    /// Returns the approximate decoded bytes awaiting a durable flush.
+    pub(super) fn staged_bytes(&self) -> u64 {
+        self.staged_bytes
+    }
+
+    /// Appends one prepared copy batch to the connection-local staging table.
+    ///
+    /// Returns `false` when the deterministic batch marker proves that this
+    /// batch was already committed during the same replay epoch.
+    pub(super) fn append(
+        &mut self,
+        conn: &duckdb::Connection,
+        batch: PreparedDuckLakeCopyBatch,
+    ) -> EtlResult<bool> {
+        if batch.batch.table_name != self.table_name
+            || batch.batch.replay_epoch != self.replay_epoch
+            || batch.batch.insert_column_names != self.staging.insert_column_names
+        {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake buffered copy batch does not match its staging session",
+                format!("table={}", self.table_name)
+            ));
+        }
+
+        if self.pending_markers.contains_key(&batch.batch.batch_id)
+            || applied_batch_marker_exists(conn, &batch.batch)?
+        {
+            record_replayed_batch_skip(&batch.batch);
+            return Ok(false);
+        }
+
+        let estimated_bytes = batch.estimated_bytes;
+        let (batch_id, marker, prepared_rows) = batch.into_buffer_parts()?;
+        self.staging.ensure_created(conn)?;
+        self.staging.load_rows(conn, &prepared_rows)?;
+        self.pending_markers.insert(batch_id, marker);
+        self.staged_bytes = self.staged_bytes.saturating_add(estimated_bytes);
+
+        Ok(true)
+    }
+
+    /// Commits all staged rows and their markers as one DuckLake change.
+    ///
+    /// When supplied, `copy_complete` is committed in the same transaction as
+    /// the final staged window. A failure before `COMMIT` is rolled back. A
+    /// `COMMIT` failure has an ambiguous outcome, so the dedicated connection
+    /// and complete table-copy attempt are invalidated instead of retried.
+    /// Staging is cleared only after `COMMIT` succeeds.
+    pub(super) fn flush(
+        &mut self,
+        conn: &duckdb::Connection,
+        copy_complete: Option<PreparedDuckLakeTableBatch>,
+    ) -> EtlResult<()> {
+        if self.pending_markers.is_empty() && copy_complete.is_none() {
+            return Ok(());
+        }
+
+        let started = Instant::now();
+        conn.execute_batch("begin transaction").map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake buffered copy BEGIN TRANSACTION failed",
+                source: error
+            )
+        })?;
+
+        let result = (|| -> EtlResult<()> {
+            if !self.pending_markers.is_empty() {
+                self.staging.insert_staged_rows(conn)?;
+                for (batch_id, marker) in &self.pending_markers {
+                    insert_applied_batch_marker_fields(
+                        conn,
+                        &self.table_name,
+                        &self.replay_epoch,
+                        batch_id,
+                        marker,
+                    )?;
+                }
+            }
+
+            if let Some(copy_complete) = &copy_complete {
+                if copy_complete.table_name != self.table_name
+                    || copy_complete.replay_epoch != self.replay_epoch
+                {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "DuckLake copy-complete marker does not match its buffered session",
+                        format!("table={}", self.table_name)
+                    ));
+                }
+                if !applied_batch_marker_exists(conn, copy_complete)? {
+                    insert_applied_batch_marker(conn, copy_complete)?;
+                }
+            }
+
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            if let Err(rollback_error) = conn.execute_batch("rollback") {
+                tracing::error!(error = %rollback_error, "error rollback buffered copy");
+            }
+            return Err(error);
+        }
+
+        // A COMMIT error does not prove whether DuckLake committed. Returning
+        // the error makes the shared runner mark this connection broken; the
+        // owner then fences the buffer until recovery drops and recopies the
+        // complete table instead of retrying an ambiguous transaction.
+        conn.execute_batch("commit").map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake buffered copy COMMIT failed",
+                source: error
+            )
+        })?;
+
+        #[cfg(feature = "test-utils")]
+        maybe_fail_after_committed_batch_for_tests(DuckLakeTableBatchKind::Copy, &self.table_name)?;
+
+        self.staging.clear(conn)?;
+        histogram!(
+            ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,
+            BATCH_KIND_LABEL => DuckLakeTableBatchKind::Copy.as_str(),
+            SUB_BATCH_KIND_LABEL => "buffered_insert",
+        )
+        .record(started.elapsed().as_secs_f64());
+        histogram!(
+            ETL_DUCKLAKE_BATCH_PREPARED_MUTATIONS,
+            BATCH_KIND_LABEL => DuckLakeTableBatchKind::Copy.as_str(),
+            SUB_BATCH_KIND_LABEL => "buffered_insert",
+        )
+        .record(self.pending_markers.len() as f64);
+        trace!(
+            table = %self.table_name,
+            copy_batch_count = self.pending_markers.len(),
+            staged_bytes = self.staged_bytes,
+            copy_complete = copy_complete.is_some(),
+            "ducklake buffered copy committed"
+        );
+        self.pending_markers.clear();
+        self.staged_bytes = 0;
+
         Ok(())
     }
 }
@@ -2319,6 +2561,7 @@ mod tests {
 
     use etl::{
         data::{OldTableRow, PartialTableRow, UpdatedTableRow},
+        destination::TableCopyAttemptId,
         schema::{
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
             TableSchema, Type as PgType,
@@ -3274,6 +3517,23 @@ mod tests {
         assert_eq!(retained.len(), 2);
         assert_eq!(retained[0].sequence_key(), EventSequenceKey::new(PgLsn::from(200), 1));
         assert_eq!(retained[1].sequence_key(), EventSequenceKey::new(PgLsn::from(210), 0));
+    }
+
+    #[test]
+    fn prepare_copy_table_batch_uses_propagated_id() {
+        let replicated_table_schema = make_replicated_schema();
+        let batch_id = TableCopyBatchId::new(TableCopyAttemptId::from_u128(1), 2);
+        let expected_batch_id = batch_id.to_string();
+        let prepared = prepare_copy_table_batch(
+            &replicated_table_schema,
+            ducklake_table_name(),
+            LEGACY_REPLAY_EPOCH.to_owned(),
+            batch_id,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("identical".to_owned())])],
+        )
+        .unwrap();
+
+        assert_eq!(prepared.batch.batch_id, expected_batch_id);
     }
 
     #[test]
