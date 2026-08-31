@@ -131,6 +131,7 @@ async fn set_ducklake_maintenance_mode(
             parquet_row_group_size,
             expire_snapshots_older_than,
             maintenance_mode: _,
+            copy_buffer,
             table_sorting,
         } => StoredDestinationConfig::Ducklake {
             catalog_url,
@@ -149,6 +150,7 @@ async fn set_ducklake_maintenance_mode(
             parquet_row_group_size,
             expire_snapshots_older_than,
             maintenance_mode: mode,
+            copy_buffer,
             table_sorting,
         },
         _ => unreachable!(),

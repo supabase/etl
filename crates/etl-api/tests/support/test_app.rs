@@ -9,7 +9,7 @@ use aws_lc_rs::{
 use base64::prelude::*;
 use etl_api::{
     config::{
-        ApiConfig, ApplicationSettings, DefaultReplicatorResourcesConfig,
+        ApiConfig, ApiReplicatorConfig, ApplicationSettings, DefaultReplicatorResourcesConfig,
         DefaultVectorResourcesConfig, EncryptionKeyConfig as ConfigEncryptionKey, K8sConfig,
         SourceConfig,
     },
@@ -814,6 +814,7 @@ async fn spawn_test_app_with_services(
                 cpu_request_millicores: 75,
             },
         },
+        replicator: ApiReplicatorConfig::default(),
         encryption_keys: vec![ConfigEncryptionKey {
             id: 0,
             key: BASE64_STANDARD.encode(key_bytes),
