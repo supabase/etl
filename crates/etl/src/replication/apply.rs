@@ -2414,7 +2414,7 @@ where
             );
         };
 
-        let content = message.content()?;
+        let content = std::str::from_utf8(message.content())?;
         let schema_change_message = match SchemaChangeMessage::from_str(content) {
             Ok(schema_change_message) => schema_change_message,
             Err(err) => {
