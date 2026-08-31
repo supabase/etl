@@ -40,6 +40,7 @@ enum StreamMarker {
     DdlMessage(PgLsn, u32, Option<String>, Vec<String>),
     Relation(u32, Vec<String>),
     Insert(u32),
+    Truncate(Vec<u32>),
     Commit(PgLsn),
 }
 
@@ -50,6 +51,7 @@ enum ExpectedStreamMarker {
     DdlMessage(u32, Option<String>, Vec<String>),
     Relation(u32, Vec<String>),
     Insert(u32),
+    Truncate(Vec<u32>),
     Commit,
 }
 
@@ -69,6 +71,7 @@ impl StreamMarker {
                 ExpectedStreamMarker::Relation(*table_id, columns.clone())
             }
             Self::Insert(table_id) => ExpectedStreamMarker::Insert(*table_id),
+            Self::Truncate(table_ids) => ExpectedStreamMarker::Truncate(table_ids.clone()),
             Self::Commit(_) => ExpectedStreamMarker::Commit,
         }
     }
@@ -107,9 +110,8 @@ async fn collect_stream_markers(
                         continue;
                     }
 
-                    let content = message.content().expect("Message content should decode");
-                    let json: JsonValue =
-                        serde_json::from_str(content).expect("DDL message should be valid JSON");
+                    let json: JsonValue = serde_json::from_slice(message.content())
+                        .expect("DDL message should be valid JSON");
                     let table_id = json["oid"]
                         .as_u64()
                         .and_then(|oid| u32::try_from(oid).ok())
@@ -148,6 +150,9 @@ async fn collect_stream_markers(
                 }
                 LogicalReplicationMessage::Insert(insert) => {
                     markers.push(StreamMarker::Insert(insert.rel_id()));
+                }
+                LogicalReplicationMessage::Truncate(truncate) => {
+                    markers.push(StreamMarker::Truncate(truncate.rel_ids().to_vec()));
                 }
                 _ => {}
             }
@@ -1573,6 +1578,117 @@ async fn logical_replication_omits_relation_after_noop_alter_table_commands() {
         ExpectedStreamMarker::Insert(table_id.into_inner()),
         ExpectedStreamMarker::Commit,
     ]);
+
+    assert_stream_markers_and_replay(
+        client,
+        initial_stream,
+        &database,
+        publication_name,
+        &slot_name,
+        start_lsn,
+        &expected,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_emits_relation_before_truncate() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let first_table_name = test_table_name("truncate_relation_first");
+    let second_table_name = test_table_name("truncate_relation_second");
+    let first_quoted = first_table_name.as_quoted_identifier();
+    let second_quoted = second_table_name.as_quoted_identifier();
+    let first_table_id = database
+        .create_table(
+            first_table_name.clone(),
+            true,
+            &[("name", "text not null"), ("age", "integer")],
+        )
+        .await
+        .unwrap();
+    let second_table_id = database
+        .create_table(
+            second_table_name.clone(),
+            true,
+            &[("name", "text not null"), ("age", "integer")],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = "truncate_relation_pub";
+    database
+        .create_publication(
+            publication_name,
+            &[first_table_name.clone(), second_table_name.clone()],
+        )
+        .await
+        .unwrap();
+
+    let (client, initial_stream, slot_name, start_lsn) =
+        start_replayable_stream(&database, publication_name, "truncate_relation_slot").await;
+
+    // Warm pgoutput's relation cache for both tables.
+    database
+        .insert_values(first_table_name.clone(), &["name", "age"], &[&"before", &1])
+        .await
+        .unwrap();
+    database
+        .insert_values(second_table_name.clone(), &["name", "age"], &[&"before", &1])
+        .await
+        .unwrap();
+
+    // No-op DDL stores a new schema snapshot without invalidating pgoutput's
+    // relation cache. Truncate still emits a protocol relation per table
+    // before the truncate message, unlike a later insert.
+    database.run_sql(&format!("alter table {first_quoted} owner to current_user")).await.unwrap();
+    database.run_sql(&format!("alter table {second_quoted} owner to current_user")).await.unwrap();
+    database.run_sql(&format!("truncate table {first_quoted}, {second_quoted}")).await.unwrap();
+
+    // A schema change that adds a column invalidates the relation cache.
+    // Truncate still emits a protocol relation, now including the new column.
+    database.run_sql(&format!("alter table {first_quoted} add column email text")).await.unwrap();
+    database.truncate_table(first_table_name).await.unwrap();
+
+    let columns = vec!["id".to_owned(), "name".to_owned(), "age".to_owned()];
+    let columns_with_email =
+        vec!["id".to_owned(), "name".to_owned(), "age".to_owned(), "email".to_owned()];
+    let expected = vec![
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(first_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Insert(first_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(second_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Insert(second_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(first_table_id.into_inner(), None, columns.clone()),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(second_table_id.into_inner(), None, columns.clone()),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(first_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Relation(second_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Truncate(vec![
+            first_table_id.into_inner(),
+            second_table_id.into_inner(),
+        ]),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            first_table_id.into_inner(),
+            None,
+            columns_with_email.clone(),
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(first_table_id.into_inner(), columns_with_email),
+        ExpectedStreamMarker::Truncate(vec![first_table_id.into_inner()]),
+        ExpectedStreamMarker::Commit,
+    ];
 
     assert_stream_markers_and_replay(
         client,

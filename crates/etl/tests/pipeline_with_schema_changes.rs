@@ -41,6 +41,65 @@ fn get_last_insert_event(events: &[Event], table_id: TableId) -> &Event {
         .expect("no insert events for table")
 }
 
+/// Returns the nearest preceding relation for `table_id` before `index`.
+fn get_relation_before_index(events: &[Event], table_id: TableId, index: usize) -> &Event {
+    events[..index]
+        .iter()
+        .rev()
+        .find(|event| {
+            matches!(
+                event,
+                Event::Relation(relation) if relation.replicated_table_schema.id() == table_id
+            )
+        })
+        .expect("no relation event before the target event")
+}
+
+/// Returns the nearest preceding relation for `table_id` before its last
+/// insert.
+fn get_relation_before_last_insert(events: &[Event], table_id: TableId) -> &Event {
+    let last_insert_index = events
+        .iter()
+        .rposition(|event| {
+            matches!(event, Event::Insert(insert) if insert.replicated_table_schema.id() == table_id)
+        })
+        .expect("no insert events for table");
+
+    get_relation_before_index(events, table_id, last_insert_index)
+}
+
+/// Returns the last truncate event that includes `table_id`.
+fn get_last_truncate_event(events: &[Event], table_id: TableId) -> &Event {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            matches!(
+                event,
+                Event::Truncate(truncate)
+                    if truncate.truncated_tables.iter().any(|schema| schema.id() == table_id)
+            )
+        })
+        .expect("no truncate events for table")
+}
+
+/// Returns the nearest preceding relation for `table_id` before its last
+/// truncate.
+fn get_relation_before_last_truncate(events: &[Event], table_id: TableId) -> &Event {
+    let last_truncate_index = events
+        .iter()
+        .rposition(|event| {
+            matches!(
+                event,
+                Event::Truncate(truncate)
+                    if truncate.truncated_tables.iter().any(|schema| schema.id() == table_id)
+            )
+        })
+        .expect("no truncate events for table");
+
+    get_relation_before_index(events, table_id, last_truncate_index)
+}
+
 fn assert_column_default_contains<'a>(
     columns: impl IntoIterator<Item = &'a ColumnSchema>,
     column_name: &str,
@@ -322,8 +381,9 @@ async fn relationless_noop_schema_changes_reuse_previous_relation_masks() {
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;
 
-    // Both commands succeed and reach ddl_command_end, but neither changes a
-    // catalog tuple which invalidates pgoutput's cached relation state.
+    // Both commands are no-op DDL: they store schema snapshots but do not
+    // invalidate pgoutput's relation cache, so the following insert has no
+    // protocol relation.
     database
         .run_sql(&format!(
             "alter table {} owner to current_user",
@@ -338,47 +398,113 @@ async fn relationless_noop_schema_changes_reuse_previous_relation_masks() {
         ))
         .await
         .unwrap();
-    database.insert_values(table_name, &["name", "age"], &[&"Alice", &25]).await.unwrap();
+    database.insert_values(table_name.clone(), &["name", "age"], &[&"Alice", &25]).await.unwrap();
 
     schemas_stored_notify.notified().await;
     insert_notify.notified().await;
+
+    // Truncate after no-op DDL still needs a destination schema barrier.
+    // pgoutput emits a protocol relation before truncate, unlike insert.
+    let truncate_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Truncate, table_id, 1)])
+        .await;
+
+    database
+        .run_sql(&format!(
+            "alter table {} owner to current_user",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database.truncate_table(table_name).await.unwrap();
+
+    truncate_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
-    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
+    let relations = grouped.get(&(EventType::Relation, table_id)).unwrap();
+    assert_eq!(relations.len(), 3);
     assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 2);
+    assert_eq!(grouped.get(&(EventType::Truncate, table_id)).unwrap().len(), 1);
 
     let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
-    let Event::Relation(relation) = get_last_relation_event(&events, table_id) else {
-        panic!("expected relation event");
+    let Event::Truncate(truncate) = get_last_truncate_event(&events, table_id) else {
+        panic!("expected truncate event");
+    };
+    let Event::Relation(warm_relation) = &relations[0] else {
+        panic!("expected warm relation event");
+    };
+    let Event::Relation(insert_relation) = get_relation_before_last_insert(&events, table_id)
+    else {
+        panic!("expected relation event before last insert");
+    };
+    let Event::Relation(truncate_relation) = get_relation_before_last_truncate(&events, table_id)
+    else {
+        panic!("expected relation event before last truncate");
     };
     assert_eq!(insert.table_row.values()[1], Cell::String("Alice".to_owned()));
     assert_eq!(insert.table_row.values()[2], Cell::I32(25));
+    assert_eq!(truncate.truncated_tables.len(), 1);
+    assert_eq!(truncate.truncated_tables[0].id(), table_id);
+
+    // Insert after no-op DDL has no protocol relation, so apply emits the
+    // relation event from the pending schema snapshot. Truncate after no-op
+    // DDL receives a protocol relation first; apply does not synthesize one.
+    assert_eq!(
+        insert.replicated_table_schema.inner().snapshot_id,
+        insert_relation.replicated_table_schema.inner().snapshot_id
+    );
+    assert_eq!(
+        truncate.truncated_tables[0].inner().snapshot_id,
+        truncate_relation.replicated_table_schema.inner().snapshot_id
+    );
+    assert!(
+        insert.replicated_table_schema.inner().snapshot_id
+            > warm_relation.replicated_table_schema.inner().snapshot_id
+    );
+    assert!(
+        truncate.truncated_tables[0].inner().snapshot_id
+            > insert.replicated_table_schema.inner().snapshot_id
+    );
     assert_eq!(
         insert.replicated_table_schema.replication_mask(),
-        relation.replicated_table_schema.replication_mask()
+        insert_relation.replicated_table_schema.replication_mask()
     );
     assert_eq!(
         insert.replicated_table_schema.identity_mask(),
-        relation.replicated_table_schema.identity_mask()
+        insert_relation.replicated_table_schema.identity_mask()
+    );
+    assert_eq!(
+        truncate.truncated_tables[0].replication_mask(),
+        truncate_relation.replicated_table_schema.replication_mask()
+    );
+    assert_eq!(
+        truncate.truncated_tables[0].identity_mask(),
+        truncate_relation.replicated_table_schema.identity_mask()
+    );
+    assert_eq!(
+        insert_relation.replicated_table_schema.replication_mask(),
+        warm_relation.replicated_table_schema.replication_mask()
+    );
+    assert_eq!(
+        truncate_relation.replicated_table_schema.replication_mask(),
+        warm_relation.replicated_table_schema.replication_mask()
     );
 
     let table_schemas = store.get_table_schemas().await;
-    let (_, newest_table_schema) = table_schemas
-        .get(&table_id)
-        .unwrap()
-        .iter()
-        .max_by_key(|(snapshot_id, _)| *snapshot_id)
-        .unwrap();
-    assert_eq!(insert.replicated_table_schema.inner(), newest_table_schema);
-    assert_ne!(
-        insert.replicated_table_schema.inner().snapshot_id,
-        relation.replicated_table_schema.inner().snapshot_id
+    let snapshots = table_schemas.get(&table_id).unwrap();
+    let (_, newest_table_schema) =
+        snapshots.iter().max_by_key(|(snapshot_id, _)| *snapshot_id).unwrap();
+    assert_eq!(
+        insert.replicated_table_schema.inner(),
+        insert_relation.replicated_table_schema.inner()
     );
+    assert_eq!(truncate.truncated_tables[0].inner(), newest_table_schema);
+    assert_eq!(truncate_relation.replicated_table_schema.inner(), newest_table_schema);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -11,15 +11,18 @@
 //!
 //! - [`TableDecodingState::WithSchema`] is a complete decoder and can decode a
 //!   row immediately.
-//! - [`TableDecodingState::PendingRelation`] records a DDL snapshot while ETL
-//!   waits to see whether pgoutput sends replacement relation metadata. When a
-//!   previous complete decoder exists, the pending state retains both of its
-//!   relation masks as a fallback. A new `RELATION` replaces those masks. If a
-//!   row arrives first, ETL combines the fallback masks with the stored schema
-//!   at the pending snapshot and transitions to `WithSchema`. Without locally
-//!   retained fallback masks, the apply worker can still resolve them from an
-//!   applicable complete `SyncDone` decoder; otherwise rows cannot be decoded
-//!   until a `RELATION` arrives.
+//! - [`TableDecodingState::PendingRelation`] records a schema snapshot while
+//!   ETL waits to see whether pgoutput sends replacement relation metadata.
+//!   When a previous complete decoder exists, the pending state retains both of
+//!   its relation masks as a fallback. A new protocol relation replaces those
+//!   masks. If a row arrives first, ETL combines the fallback masks with the
+//!   stored schema at the pending snapshot, transitions to `WithSchema`, and
+//!   emits a [`crate::event::RelationEvent`] so destinations apply that
+//!   snapshot before the row. Truncate does not use this fallback: pgoutput
+//!   emits a protocol relation first. Without locally retained fallback masks,
+//!   the apply worker can still resolve them from an applicable complete
+//!   `SyncDone` decoder; otherwise rows cannot be decoded until a protocol
+//!   relation arrives.
 //!
 //! An absent map entry is not another [`TableDecodingState`]: it means this
 //! connection has not established any state for the table. After table-sync

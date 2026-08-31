@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{
     data::TableRow,
     destination::{
-        Destination, DestinationWriteStatus, TableCopyAttemptId, TableCopyBatchId,
-        WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        Destination, DestinationWriteStatus, DropTableForCopyResult, TableCopyAttemptId,
+        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -17,6 +17,17 @@ use crate::{
 static NEXT_TABLE_COPY_BATCH_ID: AtomicU64 = AtomicU64::new(0);
 /// Shared attempt ID for independent table-copy writes in tests.
 const TEST_TABLE_COPY_ATTEMPT_ID: TableCopyAttemptId = TableCopyAttemptId::from_u128(1);
+
+/// Invokes [`Destination::drop_table_for_copy`] and waits for its completion.
+pub async fn drop_table_for_copy<D: Destination>(
+    destination: &D,
+    schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    let (async_result, pending_result) = DropTableForCopyResult::new(());
+    Destination::drop_table_for_copy(destination, schema, async_result).await?;
+
+    pending_result.await.into_result()
+}
 
 /// Invokes [`Destination::write_events`] and waits for its completion.
 ///

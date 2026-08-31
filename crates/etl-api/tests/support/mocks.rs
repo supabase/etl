@@ -89,8 +89,11 @@ pub(crate) mod destinations {
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
+            parquet_row_group_size_bytes: Some("5MB".to_owned()),
+            parquet_row_group_size: Some("100000".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer: Default::default(),
             table_sorting: Default::default(),
         }
     }

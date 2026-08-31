@@ -1,6 +1,7 @@
 use etl_config::shared::{
-    BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, ReplicationSlotConfig, TableSyncCopyConfig,
+    BatchConfig, DEFAULT_DUCKLAKE_TARGET_FILE_SIZE, InvalidatedSlotBehavior,
+    MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig,
+    TableSyncCopyConfig,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -150,7 +151,7 @@ pub struct DuckLakeMaintenanceConfig {
     #[serde(default = "default_ducklake_maintenance_max_tables_per_run")]
     pub max_tables_per_run: u32,
     /// DuckLake target file size used for compaction.
-    #[schema(example = "500MB")]
+    #[schema(example = "256MiB")]
     #[serde(default = "default_ducklake_maintenance_target_file_size")]
     pub target_file_size: String,
     /// Deleted-row fraction that triggers data file rewrite.
@@ -614,7 +615,7 @@ fn default_ducklake_maintenance_max_tables_per_run() -> u32 {
 }
 
 fn default_ducklake_maintenance_target_file_size() -> String {
-    "500MB".to_owned()
+    DEFAULT_DUCKLAKE_TARGET_FILE_SIZE.to_owned()
 }
 
 fn default_ducklake_maintenance_delete_threshold() -> f64 {
