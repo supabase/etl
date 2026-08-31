@@ -1502,6 +1502,24 @@ fn missing_replicated_columns_ducklake(
         .collect()
 }
 
+/// Classifies a COPY inlining transition failure for the runtime retry policy.
+fn classify_copy_data_inlining_error(
+    table_name: &DuckLakeTableName,
+    row_limit: u64,
+    error: etl::error::EtlError,
+) -> etl::error::EtlError {
+    if is_ducklake_shutdown_requested_error(&error) {
+        return error;
+    }
+
+    etl_error!(
+        ErrorKind::DestinationAtomicBatchRetryable,
+        "DuckLake COPY data inlining configuration failed",
+        format!("table={table_name}, row_limit={row_limit}"),
+        source: error
+    )
+}
+
 impl<S> DuckLakeDestination<S>
 where
     S: DestinationStore,
@@ -2227,20 +2245,7 @@ where
             return Ok(());
         }
 
-        if let Err(error) =
-            self.set_table_data_inlining_row_limit(table_name, COPY_DATA_INLINING_ROW_LIMIT).await
-        {
-            if is_ducklake_shutdown_requested_error(&error) {
-                return Err(error);
-            }
-
-            return Err(etl_error!(
-                ErrorKind::DestinationAtomicBatchRetryable,
-                "DuckLake COPY data inlining configuration failed",
-                format!("table={table_name}"),
-                source: error
-            ));
-        }
+        self.set_copy_data_inlining_row_limit(table_name, COPY_DATA_INLINING_ROW_LIMIT).await?;
         self.copy_direct_to_parquet_tables.lock().insert(table_name.clone());
         Ok(())
     }
@@ -2251,9 +2256,21 @@ where
         &self,
         table_name: &DuckLakeTableName,
     ) -> EtlResult<()> {
-        self.set_table_data_inlining_row_limit(table_name, ATTACH_DATA_INLINING_ROW_LIMIT).await?;
+        self.set_copy_data_inlining_row_limit(table_name, ATTACH_DATA_INLINING_ROW_LIMIT).await?;
         self.copy_direct_to_parquet_tables.lock().remove(table_name);
         Ok(())
+    }
+
+    /// Sets one table's COPY-related inlining threshold with retryable error
+    /// classification.
+    async fn set_copy_data_inlining_row_limit(
+        &self,
+        table_name: &DuckLakeTableName,
+        row_limit: u64,
+    ) -> EtlResult<()> {
+        self.set_table_data_inlining_row_limit(table_name, row_limit)
+            .await
+            .map_err(|error| classify_copy_data_inlining_error(table_name, row_limit, error))
     }
 
     /// Sets one DuckLake table's data-inlining threshold.
@@ -4343,6 +4360,20 @@ mod tests {
         TableCopyBatchId::new(TableCopyAttemptId::from_u128(1), batch_id)
     }
 
+    #[test]
+    fn copy_data_inlining_errors_are_retryable_except_during_shutdown() {
+        let table_name = DuckLakeTableName::new("public", "users");
+        let query_error =
+            etl_error!(ErrorKind::DestinationQueryFailed, "Synthetic DuckLake inlining failure");
+
+        let error = classify_copy_data_inlining_error(&table_name, 1_000_000, query_error);
+        assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+
+        let shutdown_error = crate::ducklake::client::ducklake_shutdown_requested_error();
+        let error = classify_copy_data_inlining_error(&table_name, 1_000_000, shutdown_error);
+        assert!(is_ducklake_shutdown_requested_error(&error));
+    }
+
     /// Keeps compaction from competing with batches that are creating Parquet
     /// files during an initial copy.
     #[test]
@@ -5503,6 +5534,10 @@ mod tests {
                 )
                 .await
                 .expect("failed to write rows");
+            destination
+                .write_table_rows(&replicated_table_schema, None, Vec::new())
+                .await
+                .expect("failed to finish table copy");
 
             let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
             let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
@@ -5570,6 +5605,10 @@ mod tests {
                 )
                 .await
                 .expect("failed to write rows");
+            destination
+                .write_table_rows(&replicated_table_schema, None, Vec::new())
+                .await
+                .expect("failed to finish table copy");
 
             let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
             let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
