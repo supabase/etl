@@ -322,6 +322,7 @@ fn destination_label(destination: DestinationType) -> &'static str {
         DestinationType::Null => "null",
         DestinationType::BigQuery => "bigquery",
         DestinationType::ClickHouse => "clickhouse",
+        DestinationType::DuckLake => "ducklake",
         DestinationType::Snowflake => "snowflake",
     }
 }

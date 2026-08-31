@@ -285,6 +285,90 @@ pub enum DuckLakeMaintenanceMode {
     Postgres,
 }
 
+/// Experimental buffering configuration for DuckLake initial-copy writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct DuckLakeCopyBufferConfig {
+    /// Whether initial-copy batches are staged before being committed.
+    #[serde(default = "DuckLakeCopyBufferConfig::default_enabled")]
+    pub enabled: bool,
+    /// Approximate staged row bytes that trigger one DuckLake commit.
+    ///
+    /// The default is 256 MiB (268,435,456 bytes).
+    #[serde(default = "DuckLakeCopyBufferConfig::default_target_bytes")]
+    pub target_bytes: u64,
+    /// Maximum approximate staged row bytes accepted across all copied tables.
+    ///
+    /// The default is 1 GiB (1,073,741,824 bytes). The hard maximum is one
+    /// byte below 4 GiB because byte reservations use a `u32` permit count.
+    #[serde(default = "DuckLakeCopyBufferConfig::default_max_total_bytes")]
+    pub max_total_bytes: u64,
+}
+
+impl DuckLakeCopyBufferConfig {
+    /// Default staged byte target for one buffered DuckLake commit: 256 MiB.
+    pub const DEFAULT_TARGET_BYTES: u64 = 256 * 1024 * 1024;
+    /// Default process-wide byte limit for accepted DuckLake copy rows: 1 GiB.
+    pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+
+    /// Returns whether buffered initial-copy writes are enabled by default.
+    const fn default_enabled() -> bool {
+        true
+    }
+
+    /// Returns the default staged byte target for one buffered commit.
+    const fn default_target_bytes() -> u64 {
+        Self::DEFAULT_TARGET_BYTES
+    }
+
+    /// Returns the default process-wide byte limit for buffered copy rows.
+    const fn default_max_total_bytes() -> u64 {
+        Self::DEFAULT_MAX_TOTAL_BYTES
+    }
+
+    /// Returns whether this configuration matches the default policy.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl Default for DuckLakeCopyBufferConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            target_bytes: Self::DEFAULT_TARGET_BYTES,
+            max_total_bytes: Self::DEFAULT_MAX_TOTAL_BYTES,
+        }
+    }
+}
+
+impl Validate for DuckLakeCopyBufferConfig {
+    fn validate(&self) -> Result<(), ValidationError> {
+        if self.target_bytes == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "copy_buffer.target_bytes".to_owned(),
+                constraint: "must be greater than zero".to_owned(),
+            });
+        }
+
+        if self.max_total_bytes < self.target_bytes {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "copy_buffer.max_total_bytes".to_owned(),
+                constraint: "must be greater than or equal to copy_buffer.target_bytes".to_owned(),
+            });
+        }
+
+        if self.max_total_bytes > u64::from(u32::MAX) {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "copy_buffer.max_total_bytes".to_owned(),
+                constraint: format!("must be less than or equal to {}", u32::MAX),
+            });
+        }
+
+        Ok(())
+    }
+}
+
 /// Per-table sort-order configuration for DuckLake destinations.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -514,6 +598,9 @@ pub enum DestinationConfig {
         /// External maintenance coordination backend.
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
+        /// Experimental initial-copy buffering configuration.
+        #[serde(default, skip_serializing_if = "DuckLakeCopyBufferConfig::is_default")]
+        copy_buffer: DuckLakeCopyBufferConfig,
         /// Optional per-table sort orders applied during DuckLake maintenance.
         #[serde(default, skip_serializing_if = "DuckLakeTableSortingConfig::is_empty")]
         table_sorting: DuckLakeTableSortingConfig,
@@ -559,7 +646,10 @@ impl Validate for DestinationConfig {
         match self {
             DestinationConfig::BigQuery { table_options, .. } => table_options.validate(),
             DestinationConfig::Iceberg { config } => config.validate(),
-            DestinationConfig::Ducklake { table_sorting, .. } => table_sorting.validate(),
+            DestinationConfig::Ducklake { copy_buffer, table_sorting, .. } => {
+                copy_buffer.validate()?;
+                table_sorting.validate()
+            }
             DestinationConfig::ClickHouse { .. } | DestinationConfig::Snowflake { .. } => Ok(()),
         }
     }
@@ -765,6 +855,9 @@ pub enum DestinationConfigWithoutSecrets {
         /// External maintenance coordination backend.
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
+        /// Experimental initial-copy buffering configuration.
+        #[serde(default, skip_serializing_if = "DuckLakeCopyBufferConfig::is_default")]
+        copy_buffer: DuckLakeCopyBufferConfig,
         /// Optional per-table sort orders applied during DuckLake maintenance.
         #[serde(default, skip_serializing_if = "DuckLakeTableSortingConfig::is_empty")]
         table_sorting: DuckLakeTableSortingConfig,
@@ -791,7 +884,8 @@ impl Validate for DestinationConfigWithoutSecrets {
                 table_options.validate()
             }
             DestinationConfigWithoutSecrets::Iceberg { config } => config.validate(),
-            DestinationConfigWithoutSecrets::Ducklake { table_sorting, .. } => {
+            DestinationConfigWithoutSecrets::Ducklake { copy_buffer, table_sorting, .. } => {
+                copy_buffer.validate()?;
                 table_sorting.validate()
             }
             DestinationConfigWithoutSecrets::ClickHouse { .. }
@@ -839,6 +933,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             } => DestinationConfigWithoutSecrets::Ducklake {
                 data_path,
@@ -853,6 +948,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 parquet_row_group_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+                copy_buffer,
                 table_sorting,
             },
             DestinationConfig::Snowflake {
@@ -913,6 +1009,7 @@ mod tests {
             parquet_row_group_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer: DuckLakeCopyBufferConfig::default(),
             table_sorting: DuckLakeTableSortingConfig {
                 tables: vec![DuckLakeTableSortConfig {
                     schema: "public".to_owned(),
@@ -975,6 +1072,43 @@ mod tests {
         assert_eq!(columns[1].direction, DuckLakeSortDirection::Desc);
         assert_eq!(columns[1].nulls, Some(DuckLakeSortNulls::First));
         assert_eq!(config.tables[1].sort_by, DuckLakeSortBy::PrimaryKey);
+    }
+
+    #[test]
+    fn ducklake_copy_buffer_is_enabled_by_default() {
+        let config: DuckLakeCopyBufferConfig =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+
+        assert_eq!(config, DuckLakeCopyBufferConfig::default());
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn ducklake_copy_buffer_validates_bounds() {
+        DuckLakeCopyBufferConfig { enabled: true, target_bytes: 256, max_total_bytes: 1024 }
+            .validate()
+            .unwrap();
+
+        let ValidationError::InvalidFieldValue { field, .. } =
+            (DuckLakeCopyBufferConfig { enabled: true, target_bytes: 0, max_total_bytes: 256 })
+                .validate()
+                .unwrap_err();
+        assert_eq!(field, "copy_buffer.target_bytes");
+
+        let ValidationError::InvalidFieldValue { field, .. } =
+            (DuckLakeCopyBufferConfig { enabled: true, target_bytes: 1024, max_total_bytes: 256 })
+                .validate()
+                .unwrap_err();
+        assert_eq!(field, "copy_buffer.max_total_bytes");
+
+        let ValidationError::InvalidFieldValue { field, .. } = DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes: 1,
+            max_total_bytes: u64::from(u32::MAX) + 1,
+        }
+        .validate()
+        .unwrap_err();
+        assert_eq!(field, "copy_buffer.max_total_bytes");
     }
 
     #[test]

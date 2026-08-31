@@ -93,6 +93,7 @@ pub(crate) mod destinations {
             parquet_row_group_size: Some("100000".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer: Default::default(),
             table_sorting: Default::default(),
         }
     }
