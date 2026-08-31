@@ -239,23 +239,25 @@ Read patterns:
 
 #### MergeTree
 
-Each replicated table is created as `MergeTree() ORDER BY tuple()` with two CDC metadata
-columns appended to every row:
+Each replicated table is created as `MergeTree() ORDER BY tuple()` with three CDC
+metadata columns appended to every row:
 
 - `cdc_operation`: `INSERT`, `UPDATE`, or `DELETE`
 - `cdc_lsn`: the Postgres commit LSN at the time of the change
+- `cdc_tx_ordinal`: the zero-based event position within the Postgres transaction
 
 Read patterns:
 
-- Current state per primary key: take the latest event by `cdc_lsn` with `LIMIT 1 BY`,
-  then filter out tombstones. Example:
+- Current state per primary key: take the latest event by `cdc_lsn` and
+  `cdc_tx_ordinal` with `LIMIT 1 BY`, then filter out tombstones. Example:
 
   ```sql
-  SELECT <user columns> FROM (
-      SELECT * FROM "public_orders"
-      ORDER BY cdc_lsn DESC LIMIT 1 BY (id)
+  select <user columns> from (
+      select * from "public_orders"
+      order by cdc_lsn desc, cdc_tx_ordinal desc
+      limit 1 by (id)
   )
-  WHERE cdc_operation != 'DELETE'
+  where cdc_operation != 'DELETE'
   ```
 
 - Event log queries: read the table directly; every CDC event is preserved.

@@ -931,13 +931,10 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     finished_copy_notify.notified().await;
 
     // Advance the physical schema while both logical connections are alive,
-    // but emit no DML that would make pgoutput send a new Relation. The DDL
-    // event trigger emits a transactional logical message, so its transaction
-    // has a commit event on every supported PostgreSQL version. Keep the
-    // table-sync worker paused until the apply worker has passed that commit,
-    // so its later catchup target must include the DDL.
-    let apply_commit_notify =
-        destination.wait_for_events(vec![EventCondition::AnyCount(EventType::Commit, 1)]).await;
+    // but emit no DML that would make pgoutput send a new Relation. Keep the
+    // table-sync worker paused until the apply worker reports a source position
+    // at or beyond the DDL commit, so its later catchup target must include the
+    // DDL.
     let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
     database
         .run_sql(&format!(
@@ -946,7 +943,8 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
         ))
         .await
         .unwrap();
-    apply_commit_notify.notified().await;
+    let ddl_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id, ddl_lsn).await;
 
     let errored_notify = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
