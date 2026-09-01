@@ -47,9 +47,9 @@ use crate::{
         },
     },
     runtime::{
-        BatchBudgetController, MemoryMonitor,
+        BatchMemoryGovernor, MemoryMonitor,
         concurrency::{
-            ShutdownResult, ShutdownRx, TryBatchBackpressureStream,
+            MemoryTrackedBatch, MemoryTrackedBatchStream, ShutdownResult, ShutdownRx,
             table_sync_worker_copy_stream_id,
         },
     },
@@ -135,7 +135,7 @@ impl TableCopyBatchIdGenerator {
     fn next_batch_id(&self) -> EtlResult<TableCopyBatchId> {
         let sequence = self
             .next_sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| sequence.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| sequence.checked_add(1))
             .map_err(|_| {
                 etl_error!(ErrorKind::InvalidState, "Table copy batch sequence overflowed")
             })?;
@@ -241,7 +241,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     destination: D,
     memory_monitor: MemoryMonitor,
-    batch_budget: BatchBudgetController,
+    batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<TableCopyResult> {
     run_table_copy(
         replication_transaction,
@@ -257,7 +257,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
         shutdown_rx,
         destination,
         memory_monitor,
-        batch_budget,
+        batch_memory_governor,
     )
     .await
 }
@@ -279,7 +279,7 @@ async fn run_table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     destination: D,
     memory_monitor: MemoryMonitor,
-    batch_budget: BatchBudgetController,
+    batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
     let copy_partitions =
@@ -349,7 +349,7 @@ async fn run_table_copy<D: Destination + Clone + Send + 'static>(
         let shutdown_rx = shutdown_rx.clone();
         let destination = destination.clone();
         let memory_monitor = memory_monitor.clone();
-        let batch_budget = batch_budget.clone();
+        let batch_memory_governor = batch_memory_governor.clone();
 
         join_set.spawn(async move {
             table_copy_worker(
@@ -365,7 +365,7 @@ async fn run_table_copy<D: Destination + Clone + Send + 'static>(
                 shutdown_rx,
                 destination,
                 memory_monitor,
-                batch_budget,
+                batch_memory_governor,
             )
             .await
         });
@@ -568,7 +568,7 @@ async fn table_copy_worker<D>(
     shutdown_rx: ShutdownRx,
     destination: D,
     memory_monitor: MemoryMonitor,
-    batch_budget: BatchBudgetController,
+    batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<TableCopyWorkerOutcome>
 where
     D: Destination + Clone + Send + 'static,
@@ -604,7 +604,7 @@ where
             shutdown_rx.clone(),
             destination.clone(),
             memory_monitor.clone(),
-            batch_budget.clone(),
+            batch_memory_governor.clone(),
         )
         .await?
         {
@@ -629,7 +629,7 @@ async fn table_copy_partition_rows<D>(
     shutdown_rx: ShutdownRx,
     destination: D,
     memory_monitor: MemoryMonitor,
-    batch_budget: BatchBudgetController,
+    batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<ShutdownResult<TableCopyProgress, TableCopyProgress>>
 where
     D: Destination + Clone + Send + 'static,
@@ -660,15 +660,17 @@ where
 
     let table_copy_stream = TableCopyStream::wrap(copy_stream, replicated_column_schemas);
     let connection_updates_rx = child_replication_transaction.connection_updates_rx();
-    let _table_copy_stream_guard = batch_budget.register_stream_load(1);
-    let cached_batch_budget = batch_budget.cached();
+    // A copy partition waits for destination acknowledgement before polling the
+    // next source batch, so it retains at most one batch at a time.
+    let _table_copy_batch_slot = batch_memory_governor.register_batch_slots(1);
+    let cached_batch_memory_limit = batch_memory_governor.cached_limit();
     let stream_id = table_sync_worker_copy_stream_id(table_id);
-    let table_copy_stream = TryBatchBackpressureStream::wrap(
+    let table_copy_stream = MemoryTrackedBatchStream::wrap(
         table_copy_stream,
         stream_id,
         batch_config,
         memory_monitor.subscribe(),
-        cached_batch_budget,
+        cached_batch_memory_limit,
     );
     pin!(table_copy_stream);
 
@@ -716,7 +718,7 @@ async fn table_copy_rows_from_stream<D, S>(
 ) -> EtlResult<ShutdownResult<TableCopyProgress, TableCopyProgress>>
 where
     D: Destination + Clone + Send + 'static,
-    S: Stream<Item = EtlResult<Vec<TableCopyRow>>>,
+    S: Stream<Item = EtlResult<MemoryTrackedBatch<TableCopyRow>>>,
 {
     let mut progress = TableCopyProgress::default();
 
@@ -762,6 +764,7 @@ where
 
                 let table_copy_rows = table_rows?;
                 let row_count = table_copy_rows.len() as u64;
+                let (table_copy_rows, batch_memory_reservation) = table_copy_rows.into_parts();
                 let mut table_copy_batch_metadata = TableCopyPayloadMetadata::default();
                 let table_rows = table_copy_rows
                     .into_iter()
@@ -782,7 +785,8 @@ where
                 .increment(row_count);
 
                 let dispatched_at = Instant::now();
-                let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
+                let (flush_result, pending_flush_result) =
+                    WriteTableRowsResult::new(batch_memory_reservation);
                 let batch_id = batch_id_generator.next_batch_id()?;
 
                 destination
@@ -799,7 +803,13 @@ where
                 else {
                     return Ok(ShutdownResult::Shutdown(progress));
                 };
-                let (_, completed_at, result) = completed_flush_result.into_parts_with_completion();
+                let (batch_memory_reservation, completed_at, result) =
+                    completed_flush_result.into_parts_with_completion();
+
+                // Destination acknowledgement ends ETL's ownership of this decoded
+                // table-copy batch. Any destination-retained allocation remains visible
+                // to the next whole-process or cgroup memory sample.
+                drop(batch_memory_reservation);
                 let write_status = result?;
 
                 table_copy_batch_metadata.record_processed(D::name());

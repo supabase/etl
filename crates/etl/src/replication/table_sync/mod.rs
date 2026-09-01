@@ -28,7 +28,7 @@ use crate::{
     postgres::{OutOfBandSourcePool, client::PgReplicationClient},
     replication::state::{TableState, TableStateType},
     runtime::{
-        BatchBudgetController, MemoryMonitor, TableSyncWorkerState,
+        BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerState,
         concurrency::{ShutdownResult, ShutdownRx},
     },
     schema::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
@@ -106,7 +106,7 @@ pub(crate) async fn start_table_sync<S, D>(
     out_of_band_source_pool: OutOfBandSourcePool,
     mut shutdown_rx: ShutdownRx,
     memory_monitor: MemoryMonitor,
-    batch_budget: BatchBudgetController,
+    batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<TableSyncResult>
 where
     S: PipelineStore,
@@ -323,7 +323,7 @@ where
                     shutdown_rx.clone(),
                     destination.clone(),
                     memory_monitor.clone(),
-                    batch_budget.clone(),
+                    batch_memory_governor.clone(),
                 )
                 .await?;
 

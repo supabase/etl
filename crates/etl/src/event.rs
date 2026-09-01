@@ -295,21 +295,24 @@ impl SizeHint for Event {
         match self {
             Self::Begin(_) => size_of::<BeginEvent>(),
             Self::Commit(_) => size_of::<CommitEvent>(),
-            Self::Insert(event) => size_of::<InsertEvent>() + event.table_row.size_hint(),
+            Self::Insert(event) => {
+                size_of::<InsertEvent>().saturating_add(event.table_row.size_hint())
+            }
             Self::Update(event) => {
                 let old_row_size =
                     event.old_table_row.as_ref().map(SizeHint::size_hint).unwrap_or_default();
-                size_of::<UpdateEvent>() + event.updated_table_row.size_hint() + old_row_size
+                size_of::<UpdateEvent>()
+                    .saturating_add(event.updated_table_row.size_hint())
+                    .saturating_add(old_row_size)
             }
             Self::Delete(event) => {
                 let old_row_size =
                     event.old_table_row.as_ref().map(SizeHint::size_hint).unwrap_or_default();
-                size_of::<DeleteEvent>() + old_row_size
+                size_of::<DeleteEvent>().saturating_add(old_row_size)
             }
-            Self::Truncate(event) => {
-                size_of::<TruncateEvent>()
-                    + event.truncated_tables.len() * size_of::<ReplicatedTableSchema>()
-            }
+            Self::Truncate(event) => size_of::<TruncateEvent>().saturating_add(
+                event.truncated_tables.len().saturating_mul(size_of::<ReplicatedTableSchema>()),
+            ),
             Self::Relation(_) => size_of::<RelationEvent>(),
             Self::Unsupported => 0,
         }

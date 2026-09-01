@@ -100,7 +100,7 @@ pub(crate) struct BenchmarkArgs {
     /// Maximum batch fill time in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     batch_max_fill_ms: u64,
-    /// Ratio of process memory reserved for stream batch bytes.
+    /// Maximum ratio of detected memory available to decoded batches.
     #[arg(long, default_value_t = 0.2)]
     memory_budget_ratio: f32,
     /// Maximum table sync workers.

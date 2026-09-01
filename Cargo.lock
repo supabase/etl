@@ -4713,7 +4713,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.12"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=fa49356fc16f2442a9924963baee9d9d9085c073#fa49356fc16f2442a9924963baee9d9d9085c073"
+source = "git+https://github.com/iambriccardo/rust-postgres?rev=c4b8de06aaa99f71800126bedcca6e623d368357#c4b8de06aaa99f71800126bedcca6e623d368357"
 dependencies = [
  "base64 0.23.1",
  "byteorder",
@@ -4730,7 +4730,7 @@ dependencies = [
 [[package]]
 name = "postgres-replication"
 version = "0.6.7"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=fa49356fc16f2442a9924963baee9d9d9085c073#fa49356fc16f2442a9924963baee9d9d9085c073"
+source = "git+https://github.com/iambriccardo/rust-postgres?rev=c4b8de06aaa99f71800126bedcca6e623d368357#c4b8de06aaa99f71800126bedcca6e623d368357"
 dependencies = [
  "byteorder",
  "bytes",
@@ -4745,7 +4745,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.14"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=fa49356fc16f2442a9924963baee9d9d9085c073#fa49356fc16f2442a9924963baee9d9d9085c073"
+source = "git+https://github.com/iambriccardo/rust-postgres?rev=c4b8de06aaa99f71800126bedcca6e623d368357#c4b8de06aaa99f71800126bedcca6e623d368357"
 dependencies = [
  "bytes",
  "chrono",
@@ -6484,9 +6484,9 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.38.4"
+version = "0.39.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92ab6a2f8bfe508deb3c6406578252e491d299cbbf3bc0529ecc3313aee4a52f"
+checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
 dependencies = [
  "libc",
  "memchr",
@@ -6752,7 +6752,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.18"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=fa49356fc16f2442a9924963baee9d9d9085c073#fa49356fc16f2442a9924963baee9d9d9085c073"
+source = "git+https://github.com/iambriccardo/rust-postgres?rev=c4b8de06aaa99f71800126bedcca6e623d368357#c4b8de06aaa99f71800126bedcca6e623d368357"
 dependencies = [
  "async-trait",
  "byteorder",

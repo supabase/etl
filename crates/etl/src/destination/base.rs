@@ -122,6 +122,13 @@ pub trait Destination {
     /// bound its accepted-but-not-durable work and delay reporting
     /// [`crate::destination::DestinationWriteStatus::Accepted`] until it has
     /// reserved ownership and capacity for the batch.
+    ///
+    /// Completing `async_result` is also the decoded-batch memory-accounting
+    /// boundary. ETL releases its reservation after observing the result. If
+    /// the destination retains the rows or derived buffers beyond that point,
+    /// their memory remains covered by whole-process or cgroup measurement and
+    /// is treated as non-batch usage on the next sample, which may reduce later
+    /// batch sizes.
     fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -194,6 +201,13 @@ pub trait Destination {
     /// at most once and only after it has stopped submitting new work. If
     /// the apply loop has already gone away, sending the result will fail
     /// and may be treated as an implicit cancellation.
+    ///
+    /// Completing `async_result` is also the decoded-batch memory-accounting
+    /// boundary. ETL releases its reservation after observing the result. If
+    /// the destination retains the events or derived buffers beyond that point,
+    /// their memory remains covered by whole-process or cgroup measurement and
+    /// is treated as non-batch usage on the next sample, which may reduce later
+    /// batch sizes.
     ///
     /// During the initial copy stage, transaction boundaries are not a stable
     /// global invariant across all tables. A source transaction may be

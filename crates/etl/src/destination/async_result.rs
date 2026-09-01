@@ -14,7 +14,10 @@ use tracing::debug;
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    runtime::concurrency::{ShutdownResult, ShutdownRx},
+    runtime::{
+        BatchMemoryReservation,
+        concurrency::{ShutdownResult, ShutdownRx},
+    },
     schema::TableId,
     source_payload_metadata::StreamingPayloadMetadata,
 };
@@ -127,7 +130,7 @@ pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 
 /// Metadata carried by apply-loop event write completions.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Commit end LSN associated with the dispatched batch, if any.
     ///
@@ -151,6 +154,13 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     pub relation_table_ids: HashSet<TableId>,
     /// PostgreSQL tuple bytes accumulated for the dispatched event batch.
     pub streaming_payload_metadata: StreamingPayloadMetadata,
+    /// Decoded bytes retained until the destination acknowledges this batch.
+    ///
+    /// The apply loop explicitly takes and drops this reservation immediately
+    /// after observing completion. Dropping pending metadata remains the error
+    /// and cancellation safety net. Destination-retained memory remains visible
+    /// to sampled whole-process or cgroup usage after this attribution ends.
+    pub batch_memory_reservation: Option<BatchMemoryReservation>,
     /// Instant at which the event batch was handed off to the destination.
     pub dispatched_at: Instant,
 }
@@ -266,7 +276,30 @@ impl<T, M> CompletedAsyncResult<T, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::concurrency::create_shutdown_channel;
+    use crate::runtime::{
+        BatchMemoryGovernor, MemoryMonitor, concurrency::create_shutdown_channel,
+    };
+
+    #[tokio::test]
+    async fn completed_result_retains_batch_memory_until_metadata_is_dropped() {
+        let memory_monitor = MemoryMonitor::new_for_test();
+        memory_monitor.set_memory_snapshot_for_test(7_500, 10_000);
+        let governor = BatchMemoryGovernor::new(1, memory_monitor, 1.0, 10_000);
+        let mut reservation = governor.reservation();
+        reservation.grow(100);
+        let (result_tx, pending_result) = WriteTableRowsResult::new(reservation);
+
+        result_tx.send(Ok(DestinationWriteStatus::Durable));
+        let completed_result = pending_result.await;
+        assert_eq!(governor.batch_size_limit_bytes(), 600);
+
+        let (reservation, _, result) = completed_result.into_parts_with_completion();
+        assert_eq!(result.unwrap(), DestinationWriteStatus::Durable);
+        assert_eq!(governor.batch_size_limit_bytes(), 600);
+
+        drop(reservation);
+        assert_eq!(governor.batch_size_limit_bytes(), 500);
+    }
 
     #[tokio::test]
     async fn async_result_round_trips_success() {
@@ -276,6 +309,7 @@ mod tests {
             event_count: 1,
             relation_table_ids: HashSet::from([TableId::new(7)]),
             streaming_payload_metadata: StreamingPayloadMetadata::insert(7),
+            batch_memory_reservation: None,
             dispatched_at: Instant::now(),
         };
         let (result_tx, pending_result) = WriteEventsResult::new(metadata);

@@ -26,28 +26,43 @@ pub struct BatchConfig {
     #[serde(default = "default_batch_max_fill_ms")]
     #[cfg_attr(feature = "utoipa", schema(example = 0))]
     pub max_fill_ms: u64,
-    /// Ratio of process memory reserved for incoming stream batch bytes.
+    /// Maximum ratio of memory capacity assigned to decoded source batches.
     ///
     /// This value is expressed as a ratio in the `(0.0, 1.0]` interval.
-    /// The configured memory is divided by the number of active streams at
-    /// runtime, so each stream gets only a per-stream share of the global
-    /// memory budget.
+    /// The resulting global quota includes batches being accumulated and
+    /// batches retained by asynchronous destination writes. When memory
+    /// backpressure is configured, current system or cgroup usage can reduce
+    /// this quota further as usage approaches the midpoint between the
+    /// resume and activation thresholds. The effective quota is divided
+    /// across potential concurrently retained batches.
     ///
     /// Together with [`Self::max_fill_ms`], this controls stream flushes:
     /// batches flush either when their accumulated size estimate reaches
-    /// the per-stream byte budget or when the fill timeout elapses,
+    /// the per-batch byte limit or when the fill timeout elapses,
     /// whichever happens first.
     ///
-    /// The goal is to preserve headroom for allocations beyond incoming rows,
-    /// such as destination batch building and serialization buffers.
+    /// The goal is to adapt batch sizes as available memory changes while
+    /// preserving headroom for allocations beyond incoming rows, such as
+    /// destination batch building and serialization buffers.
+    ///
+    /// ETL accounts a decoded batch until the corresponding destination async
+    /// result completes. Completion is an ownership boundary, not a guarantee
+    /// that the allocator has returned physical memory. If a destination keeps
+    /// the input or derived buffers after completion, the next system or cgroup
+    /// sample still observes that memory and classifies it as non-batch usage,
+    /// which can make later batches smaller.
     #[serde(default = "default_memory_budget_ratio")]
     #[cfg_attr(feature = "utoipa", schema(example = 0.2))]
     pub memory_budget_ratio: f32,
-    /// Maximum preferred byte size for one source batch per active stream.
+    /// Maximum preferred byte size for one source batch.
     ///
-    /// This is a ceiling, not a target. The runtime still chooses the smaller
-    /// value between this limit and the memory-ratio budget computed from
-    /// [`Self::memory_budget_ratio`].
+    /// This bounds multi-row accumulation within one memory sampling interval,
+    /// even when a large pod has enough headroom to derive a much larger
+    /// dynamic limit. It also limits destination batch latency and
+    /// serialization work. The runtime chooses the smaller value between this
+    /// ceiling and the limit computed from [`Self::memory_budget_ratio`]. A
+    /// single source row may exceed it because rows cannot be split safely
+    /// after decoding.
     #[serde(default = "default_batch_max_bytes")]
     #[cfg_attr(feature = "utoipa", schema(example = 8388608))]
     pub max_bytes: usize,
@@ -57,18 +72,19 @@ impl BatchConfig {
     /// Default maximum fill time in milliseconds.
     pub const DEFAULT_MAX_FILL_MS: u64 = 10000;
 
-    /// Default percentage of total memory used for batch bytes budgeting.
+    /// Default fraction used for batch byte budgeting.
     ///
-    /// This was empirically found to be a good value to avoid OOMs, but it's
-    /// highly dependent on how we measure the stream batches impacts on
-    /// memory.
+    /// The governor targets at most 20% of the current system capacity or
+    /// cgroup memory limit for decoded batches, and may assign less when other
+    /// allocations consume the normal operating headroom. An indivisible row
+    /// can exceed the target after it has already been decoded.
     pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.2;
 
     /// Default maximum preferred source batch size in bytes.
     ///
-    /// The 8 MiB cap bounds a single stream's burst before reactive memory
+    /// The 8 MiB cap bounds multi-row accumulation before reactive memory
     /// backpressure can observe new allocations, while still fitting thousands
-    /// of typical CDC rows and staying near common streaming request limits.
+    /// of typical CDC rows. An indivisible source row can exceed the cap.
     pub const DEFAULT_MAX_BYTES: usize = 8 * 1024 * 1024;
 }
 
@@ -209,15 +225,30 @@ impl Validate for TableSyncCopyConfig {
     }
 }
 
-/// Memory-based backpressure configuration.
+/// Emergency memory backpressure configuration.
+///
+/// Dynamic batch sizing normally reduces ETL-owned decoded memory before this
+/// signal activates. The signal remains a whole-workload safety boundary for
+/// memory outside that accounting, an oversized source row, or a cgroup limit
+/// reduction. Its resume threshold provides recovery headroom before source
+/// polling restarts.
+///
+/// Activating backpressure stops source polling but does not cancel destination
+/// work or prevent already buffered ETL batches from being flushed. This lets
+/// governed memory drain without introducing a lock cycle. If measured usage
+/// remains at or above the resume threshold after every ETL-owned batch has
+/// drained, polling intentionally remains paused: allocator-retained pages,
+/// destination work, database-driver queues, page cache, or another part of the
+/// measured memory domain is still consuming the recovery headroom. Resuming
+/// speculatively in that state would weaken the OOM safety boundary.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct MemoryBackpressureConfig {
-    /// Memory usage ratio above which backpressure is activated.
+    /// Memory usage ratio at or above which source polling is paused.
     ///
     /// Valid range is `(0.0, 1.0]`.
     pub activate_threshold: f32,
-    /// Memory usage ratio below which backpressure is released.
+    /// Memory usage ratio below which source polling resumes.
     ///
     /// Valid range is `[0.0, 1.0)`, and this value must be lower than
     /// [`Self::activate_threshold`].
@@ -226,8 +257,16 @@ pub struct MemoryBackpressureConfig {
 
 impl MemoryBackpressureConfig {
     /// Default memory usage ratio to activate backpressure.
+    ///
+    /// The normal batch-sizing target is the midpoint between the default
+    /// thresholds (80%). Activating at 85% leaves a 5% margin for allocations
+    /// that have not yet appeared in a sample or decoded-batch reservation.
     pub const DEFAULT_ACTIVATE_THRESHOLD: f32 = 0.85;
     /// Default memory usage ratio to release backpressure.
+    ///
+    /// Resuming below 75% restores a 5% margin below the normal batch-sizing
+    /// target. The resulting 10% hysteresis absorbs allocator lag and unbounded
+    /// allocations that are not represented by a decoded-batch reservation.
     pub const DEFAULT_RESUME_THRESHOLD: f32 = 0.75;
 }
 
@@ -339,7 +378,11 @@ pub struct PipelineConfig {
     /// workers can pull new ranges as they finish.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
-    /// Number of milliseconds between one memory usage refresh and another.
+    /// Number of milliseconds between coherent memory snapshots.
+    ///
+    /// One shared sampler drives dynamic batch limits and emergency
+    /// backpressure. Batch hot paths reuse each snapshot instead of reading
+    /// operating-system or cgroup files per row.
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.
@@ -388,7 +431,10 @@ impl PipelineConfig {
     /// Default maximum worker connections per table during initial copy.
     pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 4;
 
-    /// Default interval in milliseconds between one memory refresh and another.
+    /// Default interval in milliseconds between coherent memory snapshots.
+    ///
+    /// A 100 ms interval reacts quickly to allocation bursts and cgroup limit
+    /// changes without moving operating-system reads into per-row hot paths.
     pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
 
     /// Default interval in milliseconds between periodic replication monitor

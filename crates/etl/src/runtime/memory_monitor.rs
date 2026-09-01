@@ -1,7 +1,32 @@
+//! Coherent system and cgroup memory sampling with emergency backpressure.
+//!
+//! On Linux, the monitor prefers the current process's memory cgroup when it
+//! imposes a tighter capacity than the host. The sampled capacity and headroom
+//! include every limiting ancestor, so nested Kubernetes cgroups cannot hide
+//! pressure imposed above the pod or container. An unconstrained Linux process
+//! instead uses host-wide memory, avoiding a misleading ratio based only on the
+//! process's leaf-cgroup charge divided by all host RAM.
+//! The full cgroup charge is used instead of resident set size because the
+//! kernel's memory controller also accounts for page cache, socket buffers,
+//! and kernel memory that contribute to the enforced limit. If a previously
+//! available cgroup read fails transiently, the last cgroup snapshot is kept
+//! rather than falling back to a potentially larger host limit.
+//!
+//! Platforms without Linux memory cgroups, including macOS, use sysinfo's
+//! system-wide used and total memory readings. One shared sampler performs
+//! these reads; batch hot paths consume the published snapshot without reading
+//! operating-system files themselves.
+//!
+//! Emergency backpressure pauses new source polling while destination results
+//! and already-owned batches continue to drain. Resume is deliberately based
+//! on the same full-domain measurement. If non-batch memory keeps that domain
+//! above the resume threshold, the pipeline stays paused rather than probing
+//! with more source data and risking an OOM kill.
+
 use std::{
     pin::Pin,
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Mutex, PoisonError, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -23,25 +48,130 @@ use crate::{
     observability::{
         DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
         ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
+        ETL_MEMORY_TOTAL_BYTES, ETL_MEMORY_USED_BYTES, MEMORY_SOURCE_LABEL,
     },
     runtime::concurrency::ShutdownRx,
 };
-/// Represents a memory snapshot.
-#[derive(Debug, Clone, Copy)]
+
+/// Identifies the memory domain represented by a [`MemorySnapshot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemorySnapshotSource {
+    /// Current process cgroup, including its limiting ancestors.
+    ProcessCgroup,
+    /// Root cgroup visible to the process.
+    RootCgroup,
+    /// Host-wide operating-system memory.
+    System,
+}
+
+impl MemorySnapshotSource {
+    /// Returns the stable diagnostic name for the memory source.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessCgroup => "process_cgroup",
+            Self::RootCgroup => "root_cgroup",
+            Self::System => "system",
+        }
+    }
+}
+
+/// Represents one coherent memory-domain snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MemorySnapshot {
+    /// Effective memory usage within the selected domain.
     used: u64,
+    /// Effective system capacity or cgroup memory limit.
     total: u64,
+    /// Domain from which the snapshot was read.
+    source: MemorySnapshotSource,
 }
 
 impl MemorySnapshot {
-    /// Refreshes memory readings from the operating system.
-    fn from_system(system: &mut sysinfo::System) -> Self {
+    /// Refreshes the most specific enforceable memory domain available.
+    fn refresh(
+        system: &mut sysinfo::System,
+        current_pid: Option<sysinfo::Pid>,
+        previous: Option<Self>,
+    ) -> Self {
+        // Host memory distinguishes a genuinely constrained cgroup from the
+        // effectively unlimited cgroups used by ordinary Linux processes. It is
+        // also the fallback on platforms without memory cgroups.
         system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+        let system_snapshot = Self {
+            used: system.used_memory(),
+            total: system.total_memory(),
+            source: MemorySnapshotSource::System,
+        };
 
-        match system.cgroup_limits() {
-            Some(cgroup) => MemorySnapshot { used: cgroup.rss, total: cgroup.total_memory },
-            None => MemorySnapshot { used: system.used_memory(), total: system.total_memory() },
+        if let Some(cgroup) = current_pid
+            .and_then(|pid| system.process(pid))
+            .and_then(sysinfo::Process::cgroup_limits)
+        {
+            return Self::constrained_cgroup_snapshot(
+                &cgroup,
+                MemorySnapshotSource::ProcessCgroup,
+                system_snapshot,
+            )
+            .unwrap_or(system_snapshot);
         }
+
+        // Once the process cgroup has been observed, a missing read is treated as
+        // transient. Falling back to host memory could momentarily expand the batch
+        // budget far beyond the pod's actual limit.
+        if let Some(previous @ Self { source: MemorySnapshotSource::ProcessCgroup, .. }) = previous
+        {
+            trace!(
+                memory_source = previous.source.as_str(),
+                "failed to refresh process cgroup memory; retaining previous snapshot"
+            );
+
+            return previous;
+        }
+
+        if let Some(cgroup) = system.cgroup_limits() {
+            return Self::constrained_cgroup_snapshot(
+                &cgroup,
+                MemorySnapshotSource::RootCgroup,
+                system_snapshot,
+            )
+            .unwrap_or(system_snapshot);
+        }
+
+        if let Some(previous @ Self { source: MemorySnapshotSource::RootCgroup, .. }) = previous {
+            trace!(
+                memory_source = previous.source.as_str(),
+                "failed to refresh root cgroup memory; retaining previous snapshot"
+            );
+
+            return previous;
+        }
+
+        system_snapshot
+    }
+
+    /// Builds a snapshot from effective cgroup capacity and headroom.
+    fn from_cgroup_limits(cgroup: &sysinfo::CGroupLimits, source: MemorySnapshotSource) -> Self {
+        // sysinfo takes the minimum headroom across the leaf and all limiting
+        // ancestors. Expressing that headroom as `total - free` gives an effective
+        // usage value relative to the tightest capacity; it is not necessarily the
+        // literal `memory.current` of the leaf cgroup. `rss` only contains anonymous
+        // resident memory and misses other charges enforced by the memory controller.
+        Self {
+            used: cgroup.total_memory.saturating_sub(cgroup.free_memory),
+            total: cgroup.total_memory,
+            source,
+        }
+    }
+
+    /// Returns a cgroup snapshot only when it constrains host capacity.
+    fn constrained_cgroup_snapshot(
+        cgroup: &sysinfo::CGroupLimits,
+        source: MemorySnapshotSource,
+        system_snapshot: Self,
+    ) -> Option<Self> {
+        let snapshot = Self::from_cgroup_limits(cgroup, source);
+
+        (snapshot.total < system_snapshot.total).then_some(snapshot)
     }
 
     /// Returns the memory usage percentage in the range `[0.0, 1.0]`.
@@ -62,8 +192,10 @@ struct MemoryMonitorInner {
     refresh_task: Mutex<Option<JoinHandle<()>>>,
     /// Optional backpressure state derived from memory snapshots.
     backpressure: Option<BackpressureMonitorInner>,
-    /// Latest total memory snapshot in bytes.
-    total_memory_bytes: AtomicU64,
+    /// Latest coherent used and total memory snapshot.
+    snapshot: RwLock<MemorySnapshot>,
+    /// Revision incremented after each complete snapshot update.
+    snapshot_revision: AtomicU64,
     /// Interval between memory refreshes in milliseconds.
     memory_refresh_interval_ms: u64,
 }
@@ -71,7 +203,9 @@ struct MemoryMonitorInner {
 /// Shared backpressure state that exists only when backpressure is configured.
 #[derive(Debug)]
 struct BackpressureMonitorInner {
+    /// Latest emergency backpressure state and notification channel.
     active_tx: watch::Sender<bool>,
+    /// Validated activation and resume thresholds.
     config: MemoryBackpressureConfig,
 }
 
@@ -93,12 +227,21 @@ impl MemoryMonitor {
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
         memory_refresh_interval_ms: u64,
     ) -> Self {
-        // sysinfo docs suggest to use a single instance of `System` across the program.
+        // sysinfo docs suggest using a single `System` instance across the program.
         let mut system = sysinfo::System::new();
+        let current_pid = sysinfo::get_current_pid().ok();
+        if let Some(current_pid) = current_pid {
+            system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[current_pid]),
+                false,
+                sysinfo::ProcessRefreshKind::nothing(),
+            );
+        }
 
         // Initialize from a real memory snapshot so startup state reflects current
         // pressure.
-        let startup_snapshot = MemorySnapshot::from_system(&mut system);
+        let startup_snapshot = MemorySnapshot::refresh(&mut system, current_pid, None);
+        emit_memory_snapshot_metrics(startup_snapshot, None);
         let backpressure = memory_backpressure_config.map(|config| {
             let startup_backpressure_active = compute_next_backpressure_active(
                 false,
@@ -118,7 +261,8 @@ impl MemoryMonitor {
             inner: Arc::new(MemoryMonitorInner {
                 refresh_task: Mutex::new(None),
                 backpressure,
-                total_memory_bytes: AtomicU64::new(startup_snapshot.total),
+                snapshot: RwLock::new(startup_snapshot),
+                snapshot_revision: AtomicU64::new(0),
                 memory_refresh_interval_ms,
             }),
         };
@@ -145,11 +289,13 @@ impl MemoryMonitor {
                     }
 
                     _ = ticker.tick() => {
-                        let snapshot = MemorySnapshot::from_system(&mut system);
-                        this_clone
-                            .inner
-                            .total_memory_bytes
-                            .store(snapshot.total, Ordering::Relaxed);
+                        let previous_snapshot = this_clone.current_snapshot();
+                        let snapshot = MemorySnapshot::refresh(
+                            &mut system,
+                            current_pid,
+                            Some(previous_snapshot),
+                        );
+                        this_clone.publish_snapshot(snapshot);
 
                         if let Some(backpressure) = this_clone.inner.backpressure.as_ref() {
                             let used_percent = snapshot.used_percent();
@@ -163,6 +309,7 @@ impl MemoryMonitor {
                             trace!(
                                 used_memory_bytes = snapshot.used,
                                 total_memory_bytes = snapshot.total,
+                                memory_source = snapshot.source.as_str(),
                                 used_percent,
                                 backpressure_active = currently_backpressure_active,
                                 next_backpressure_active,
@@ -193,6 +340,7 @@ impl MemoryMonitor {
                             trace!(
                                 used_memory_bytes = snapshot.used,
                                 total_memory_bytes = snapshot.total,
+                                memory_source = snapshot.source.as_str(),
                                 "memory monitor refreshed memory snapshot without backpressure"
                             );
                         }
@@ -229,9 +377,34 @@ impl MemoryMonitor {
         Some(MemoryMonitorSubscription { current_rx: rx, updates })
     }
 
-    /// Returns the shared atomic that stores total memory in bytes.
-    pub(crate) fn total_memory_bytes(&self) -> u64 {
-        self.inner.total_memory_bytes.load(Ordering::Relaxed)
+    /// Returns a coherent memory capacity snapshot for batch governance.
+    ///
+    /// The used and total values always come from the same operating-system or
+    /// cgroup read, including while vertical pod autoscaling changes the memory
+    /// limit. The normal target is the midpoint between the configured resume
+    /// and activation thresholds, leaving equal operating margins on both
+    /// sides. It is [`None`] when backpressure is disabled.
+    pub(crate) fn capacity_snapshot(&self) -> MemoryCapacitySnapshot {
+        let snapshot = self.current_snapshot();
+        let normal_memory_target_bytes = self.inner.backpressure.as_ref().map(|backpressure| {
+            let resume_threshold = f64::from(backpressure.config.resume_threshold);
+            let activation_threshold = f64::from(backpressure.config.activate_threshold);
+            let normal_target_threshold =
+                resume_threshold + (activation_threshold - resume_threshold) / 2.0;
+
+            (snapshot.total as f64 * normal_target_threshold) as u64
+        });
+
+        MemoryCapacitySnapshot {
+            used_memory_bytes: snapshot.used,
+            total_memory_bytes: snapshot.total,
+            normal_memory_target_bytes,
+        }
+    }
+
+    /// Returns the revision of the latest complete memory snapshot.
+    pub(crate) fn snapshot_revision(&self) -> u64 {
+        self.inner.snapshot_revision.load(Ordering::Acquire)
     }
 
     /// Waits for the refresh task to finish after shutdown.
@@ -263,6 +436,27 @@ impl MemoryMonitor {
             true
         });
     }
+
+    /// Returns the latest complete memory snapshot.
+    fn current_snapshot(&self) -> MemorySnapshot {
+        *self.inner.snapshot.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Publishes one coherent memory snapshot and advances its wrapping
+    /// revision.
+    fn publish_snapshot(&self, snapshot: MemorySnapshot) {
+        let previous_source = {
+            let mut current = self.inner.snapshot.write().unwrap_or_else(PoisonError::into_inner);
+            let previous_source = current.source;
+            *current = snapshot;
+            previous_source
+        };
+
+        // Wrapping is intentional. Cached readers compare revisions for inequality,
+        // so `u64::MAX -> 0` still denotes a new snapshot.
+        self.inner.snapshot_revision.fetch_add(1, Ordering::Release);
+        emit_memory_snapshot_metrics(snapshot, Some(previous_source));
+    }
 }
 
 /// Computes the next backpressure active state given the current state and
@@ -284,6 +478,36 @@ fn emit_backpressure_active_metric(backpressure_active: bool) {
     gauge!(ETL_MEMORY_BACKPRESSURE_ACTIVE).set(if backpressure_active { 1.0 } else { 0.0 });
 }
 
+/// Emits one coherent used/capacity pair and clears stale source series.
+fn emit_memory_snapshot_metrics(
+    snapshot: MemorySnapshot,
+    previous_source: Option<MemorySnapshotSource>,
+) {
+    if let Some(previous_source) = previous_source.filter(|source| *source != snapshot.source) {
+        gauge!(
+            ETL_MEMORY_USED_BYTES,
+            MEMORY_SOURCE_LABEL => previous_source.as_str()
+        )
+        .set(0.0);
+        gauge!(
+            ETL_MEMORY_TOTAL_BYTES,
+            MEMORY_SOURCE_LABEL => previous_source.as_str()
+        )
+        .set(0.0);
+    }
+
+    gauge!(
+        ETL_MEMORY_USED_BYTES,
+        MEMORY_SOURCE_LABEL => snapshot.source.as_str()
+    )
+    .set(snapshot.used as f64);
+    gauge!(
+        ETL_MEMORY_TOTAL_BYTES,
+        MEMORY_SOURCE_LABEL => snapshot.source.as_str()
+    )
+    .set(snapshot.total as f64);
+}
+
 fn emit_transition_metric(backpressure_active: bool) {
     counter!(
         ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
@@ -301,14 +525,24 @@ impl MemoryMonitor {
     /// Creates a new memory backpressure controller without spawning a refresh
     /// task.
     pub(crate) fn new_for_test() -> Self {
+        Self::new_for_test_with_backpressure(Some(MemoryBackpressureConfig::default()))
+    }
+
+    /// Creates a memory controller with configurable backpressure for tests.
+    pub(crate) fn new_for_test_with_backpressure(config: Option<MemoryBackpressureConfig>) -> Self {
         Self {
             inner: Arc::new(MemoryMonitorInner {
                 refresh_task: Mutex::new(None),
-                backpressure: Some(BackpressureMonitorInner {
+                backpressure: config.map(|config| BackpressureMonitorInner {
                     active_tx: watch::channel(false).0,
-                    config: MemoryBackpressureConfig::default(),
+                    config,
                 }),
-                total_memory_bytes: AtomicU64::new(0),
+                snapshot: RwLock::new(MemorySnapshot {
+                    used: 0,
+                    total: 0,
+                    source: MemorySnapshotSource::System,
+                }),
+                snapshot_revision: AtomicU64::new(0),
                 memory_refresh_interval_ms: 100,
             }),
         }
@@ -321,8 +555,39 @@ impl MemoryMonitor {
 
     /// Updates the total memory snapshot in bytes for tests.
     pub(crate) fn set_total_memory_bytes_for_test(&self, total_memory_bytes: u64) {
-        self.inner.total_memory_bytes.store(total_memory_bytes, Ordering::Relaxed);
+        let mut snapshot = *self.inner.snapshot.read().unwrap_or_else(PoisonError::into_inner);
+        snapshot.total = total_memory_bytes;
+        self.publish_snapshot(snapshot);
     }
+
+    /// Updates the used memory in tests.
+    pub(crate) fn set_used_memory_bytes_for_test(&self, used_memory_bytes: u64) {
+        let mut snapshot = *self.inner.snapshot.read().unwrap_or_else(PoisonError::into_inner);
+        snapshot.used = used_memory_bytes;
+        self.publish_snapshot(snapshot);
+    }
+
+    /// Replaces the coherent memory snapshot in tests.
+    pub(crate) fn set_memory_snapshot_for_test(&self, used: u64, total: u64) {
+        self.publish_snapshot(MemorySnapshot { used, total, source: MemorySnapshotSource::System });
+    }
+
+    /// Sets the snapshot revision directly for wrapping tests.
+    pub(crate) fn set_snapshot_revision_for_test(&self, revision: u64) {
+        self.inner.snapshot_revision.store(revision, Ordering::Release);
+    }
+}
+
+/// Coherent system or cgroup memory capacity used for batch governance.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MemoryCapacitySnapshot {
+    /// Latest system or cgroup memory usage in bytes.
+    pub(crate) used_memory_bytes: u64,
+    /// Latest system or cgroup memory capacity in bytes.
+    pub(crate) total_memory_bytes: u64,
+    /// Normal system- or cgroup-memory target in bytes, when backpressure is
+    /// configured.
+    pub(crate) normal_memory_target_bytes: Option<u64>,
 }
 
 /// Subscription to memory backpressure updates.
@@ -359,16 +624,230 @@ impl Stream for MemoryMonitorSubscription {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use metrics::{
+        Counter, Gauge, GaugeFn, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
+        with_local_recorder,
+    };
+
     use super::*;
 
-    #[test]
-    fn memory_used_percent_handles_regular_and_zero_totals() {
-        assert_eq!(MemorySnapshot { used: 50, total: 100 }.used_percent(), 0.5);
-        assert_eq!(MemorySnapshot { used: 100, total: 0 }.used_percent(), 1.0);
+    /// One captured gauge assignment.
+    #[derive(Debug, PartialEq)]
+    struct GaugeAssignment {
+        /// Metric name.
+        metric: String,
+        /// Memory source label.
+        source: String,
+        /// Assigned gauge value.
+        value: f64,
+    }
+
+    impl GaugeAssignment {
+        /// Creates an expected gauge assignment.
+        fn new(metric: &str, source: &str, value: f64) -> Self {
+            Self { metric: metric.to_owned(), source: source.to_owned(), value }
+        }
+    }
+
+    /// Gauge handle that captures assignments for assertions.
+    struct CapturingGauge {
+        /// Metric name.
+        metric: String,
+        /// Memory source label.
+        source: String,
+        /// Shared captured assignments.
+        assignments: Arc<Mutex<Vec<GaugeAssignment>>>,
+    }
+
+    impl GaugeFn for CapturingGauge {
+        fn increment(&self, _value: f64) {}
+
+        fn decrement(&self, _value: f64) {}
+
+        fn set(&self, value: f64) {
+            self.assignments.lock().unwrap().push(GaugeAssignment {
+                metric: self.metric.clone(),
+                source: self.source.clone(),
+                value,
+            });
+        }
+    }
+
+    /// Recorder that captures gauge assignments.
+    #[derive(Default)]
+    struct CapturingRecorder {
+        /// Shared captured assignments.
+        assignments: Arc<Mutex<Vec<GaugeAssignment>>>,
+    }
+
+    impl Recorder for CapturingRecorder {
+        fn describe_counter(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {
+        }
+
+        fn describe_gauge(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
+
+        fn describe_histogram(
+            &self,
+            _key: KeyName,
+            _unit: Option<Unit>,
+            _description: SharedString,
+        ) {
+        }
+
+        fn register_counter(&self, _key: &Key, _metadata: &Metadata<'_>) -> Counter {
+            Counter::noop()
+        }
+
+        fn register_gauge(&self, key: &Key, _metadata: &Metadata<'_>) -> Gauge {
+            let source = key
+                .labels()
+                .find(|label| label.key() == MEMORY_SOURCE_LABEL)
+                .map(|label| label.value().to_owned())
+                .unwrap_or_default();
+            Gauge::from_arc(Arc::new(CapturingGauge {
+                metric: key.name().to_owned(),
+                source,
+                assignments: Arc::clone(&self.assignments),
+            }))
+        }
+
+        fn register_histogram(&self, _key: &Key, _metadata: &Metadata<'_>) -> Histogram {
+            Histogram::noop()
+        }
     }
 
     #[test]
-    fn threshold_hysteresis_blocks_and_releases() {
+    fn memory_metrics_label_coherent_readings_and_clear_the_previous_source() {
+        let recorder = CapturingRecorder::default();
+
+        with_local_recorder(&recorder, || {
+            emit_memory_snapshot_metrics(
+                MemorySnapshot { used: 600, total: 1_000, source: MemorySnapshotSource::System },
+                None,
+            );
+            emit_memory_snapshot_metrics(
+                MemorySnapshot {
+                    used: 300,
+                    total: 500,
+                    source: MemorySnapshotSource::ProcessCgroup,
+                },
+                Some(MemorySnapshotSource::System),
+            );
+            emit_memory_snapshot_metrics(
+                MemorySnapshot {
+                    used: 350,
+                    total: 500,
+                    source: MemorySnapshotSource::ProcessCgroup,
+                },
+                Some(MemorySnapshotSource::ProcessCgroup),
+            );
+        });
+
+        assert_eq!(
+            *recorder.assignments.lock().unwrap(),
+            [
+                GaugeAssignment::new(ETL_MEMORY_USED_BYTES, "system", 600.0),
+                GaugeAssignment::new(ETL_MEMORY_TOTAL_BYTES, "system", 1_000.0),
+                GaugeAssignment::new(ETL_MEMORY_USED_BYTES, "system", 0.0),
+                GaugeAssignment::new(ETL_MEMORY_TOTAL_BYTES, "system", 0.0),
+                GaugeAssignment::new(ETL_MEMORY_USED_BYTES, "process_cgroup", 300.0),
+                GaugeAssignment::new(ETL_MEMORY_TOTAL_BYTES, "process_cgroup", 500.0),
+                GaugeAssignment::new(ETL_MEMORY_USED_BYTES, "process_cgroup", 350.0),
+                GaugeAssignment::new(ETL_MEMORY_TOTAL_BYTES, "process_cgroup", 500.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn live_memory_snapshot_is_nonzero_and_bounded() {
+        let mut system = sysinfo::System::new();
+        let current_pid = sysinfo::get_current_pid().unwrap();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[current_pid]),
+            false,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+
+        let snapshot = MemorySnapshot::refresh(&mut system, Some(current_pid), None);
+
+        assert!(snapshot.total > 0);
+        assert!(snapshot.used <= snapshot.total);
+
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(snapshot.source, MemorySnapshotSource::System);
+    }
+
+    #[test]
+    fn memory_used_percent_handles_regular_and_zero_totals() {
+        assert_eq!(
+            MemorySnapshot { used: 50, total: 100, source: MemorySnapshotSource::System }
+                .used_percent(),
+            0.5
+        );
+        assert_eq!(
+            MemorySnapshot { used: 100, total: 0, source: MemorySnapshotSource::System }
+                .used_percent(),
+            1.0
+        );
+    }
+
+    #[test]
+    fn cgroup_snapshot_uses_the_full_memory_charge_instead_of_rss() {
+        let cgroup =
+            sysinfo::CGroupLimits { total_memory: 100, free_memory: 25, free_swap: 0, rss: 10 };
+
+        let snapshot =
+            MemorySnapshot::from_cgroup_limits(&cgroup, MemorySnapshotSource::ProcessCgroup);
+
+        assert_eq!(snapshot.used, 75);
+        assert_eq!(snapshot.total, 100);
+
+        let inconsistent_cgroup = sysinfo::CGroupLimits { free_memory: 125, ..cgroup };
+        assert_eq!(
+            MemorySnapshot::from_cgroup_limits(
+                &inconsistent_cgroup,
+                MemorySnapshotSource::ProcessCgroup,
+            )
+            .used,
+            0
+        );
+    }
+
+    #[test]
+    fn cgroup_snapshot_is_selected_only_for_a_tighter_capacity() {
+        let system_snapshot =
+            MemorySnapshot { used: 500, total: 1_000, source: MemorySnapshotSource::System };
+        let constrained =
+            sysinfo::CGroupLimits { total_memory: 600, free_memory: 200, free_swap: 0, rss: 100 };
+        let unconstrained =
+            sysinfo::CGroupLimits { total_memory: 1_000, free_memory: 900, ..constrained };
+
+        assert_eq!(
+            MemorySnapshot::constrained_cgroup_snapshot(
+                &constrained,
+                MemorySnapshotSource::ProcessCgroup,
+                system_snapshot,
+            ),
+            Some(MemorySnapshot {
+                used: 400,
+                total: 600,
+                source: MemorySnapshotSource::ProcessCgroup,
+            })
+        );
+        assert_eq!(
+            MemorySnapshot::constrained_cgroup_snapshot(
+                &unconstrained,
+                MemorySnapshotSource::ProcessCgroup,
+                system_snapshot,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn threshold_hysteresis_uses_inclusive_activation_and_exclusive_resume() {
         let activate_threshold = 0.85;
         let resume_threshold = 0.75;
         assert!(!compute_next_backpressure_active(
@@ -379,13 +858,13 @@ mod tests {
         ));
         assert!(compute_next_backpressure_active(
             false,
-            activate_threshold + 0.01,
+            activate_threshold,
             activate_threshold,
             resume_threshold
         ));
         assert!(compute_next_backpressure_active(
             true,
-            resume_threshold + 0.01,
+            resume_threshold,
             activate_threshold,
             resume_threshold
         ));
@@ -395,6 +874,65 @@ mod tests {
             activate_threshold,
             resume_threshold
         ));
+    }
+
+    #[test]
+    fn threshold_hysteresis_is_stable_across_a_pressure_trajectory() {
+        let mut active = false;
+        let trajectory = [0.70, 0.80, 0.849, 0.85, 0.82, 0.75, 0.749, 0.80];
+        let expected = [false, false, false, true, true, true, false, false];
+
+        for (used_percent, expected_active) in trajectory.into_iter().zip(expected) {
+            active = compute_next_backpressure_active(active, used_percent, 0.85, 0.75);
+            assert_eq!(active, expected_active);
+        }
+    }
+
+    #[test]
+    fn computes_normal_memory_target_between_hysteresis_thresholds() {
+        let memory_monitor =
+            MemoryMonitor::new_for_test_with_backpressure(Some(MemoryBackpressureConfig {
+                activate_threshold: 0.9,
+                resume_threshold: 0.4,
+            }));
+        memory_monitor.set_total_memory_bytes_for_test(10_000);
+
+        // Ratios are floored to whole bytes, so the f32 representation of 0.9
+        // and 0.4 produces the conservative value one byte below 65%.
+        assert_eq!(memory_monitor.capacity_snapshot().normal_memory_target_bytes, Some(6_499));
+    }
+
+    #[test]
+    fn omits_available_memory_when_backpressure_is_disabled() {
+        let memory_monitor = MemoryMonitor::new_for_test_with_backpressure(None);
+        memory_monitor.set_total_memory_bytes_for_test(10_000);
+        memory_monitor.set_used_memory_bytes_for_test(7_500);
+
+        assert_eq!(memory_monitor.capacity_snapshot().normal_memory_target_bytes, None);
+    }
+
+    #[test]
+    fn capacity_snapshot_keeps_vpa_usage_and_limit_coherent() {
+        let memory_monitor = MemoryMonitor::new_for_test();
+        memory_monitor.set_memory_snapshot_for_test(4_000, 6_000);
+
+        let snapshot = memory_monitor.capacity_snapshot();
+
+        assert_eq!(snapshot.used_memory_bytes, 4_000);
+        assert_eq!(snapshot.total_memory_bytes, 6_000);
+        assert_eq!(snapshot.normal_memory_target_bytes, Some(4_800));
+    }
+
+    #[test]
+    fn snapshot_revision_wraps_without_losing_the_update() {
+        let memory_monitor = MemoryMonitor::new_for_test();
+        memory_monitor.set_snapshot_revision_for_test(u64::MAX);
+
+        memory_monitor.set_memory_snapshot_for_test(4_000, 6_000);
+
+        assert_eq!(memory_monitor.snapshot_revision(), 0);
+        assert_eq!(memory_monitor.capacity_snapshot().used_memory_bytes, 4_000);
+        assert_eq!(memory_monitor.capacity_snapshot().total_memory_bytes, 6_000);
     }
 
     #[tokio::test]
