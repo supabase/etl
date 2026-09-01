@@ -1,9 +1,24 @@
 //! Coherent system and cgroup memory sampling with emergency backpressure.
 //!
-//! On Linux, the monitor prefers the current process's memory cgroup when it
-//! imposes a tighter capacity than the host. The sampled capacity and headroom
-//! include every limiting ancestor, so nested Kubernetes cgroups cannot hide
-//! pressure imposed above the pod or container. An unconstrained Linux process
+//! On Linux, the monitor starts at the current process's cgroup, found through
+//! `/proc/<pid>/cgroup`, when that hierarchy imposes a tighter capacity than
+//! the host. [`sysinfo::Process::cgroup_limits`] reads the process leaf and
+//! walks the ancestors visible in the process's cgroup namespace, independently
+//! retaining the smallest finite capacity and the smallest remaining headroom
+//! (`memory.max - memory.current`). A charge must fit at both the leaf and
+//! every ancestor, so the smallest visible headroom represents the earliest
+//! boundary this process can observe that could reject its next charge.
+//!
+//! Kubernetes normally applies each container's memory limit to an independent
+//! leaf cgroup, so a sibling container's usage does not consume the process
+//! leaf's allowance. A tighter ancestor affects the snapshot only when that
+//! ancestor is visible in the process's cgroup namespace. Container runtimes
+//! commonly use a private cgroup namespace, where `/proc/<pid>/cgroup` reports
+//! `/` and `/sys/fs/cgroup` is rooted at the container leaf. Host-side pod and
+//! QoS ancestors still enforce their limits but are not observable from that
+//! namespace, so this monitor cannot include them. The monitor therefore
+//! controls against the container leaf in that arrangement and accounts for
+//! ancestors only when the runtime exposes them. An unconstrained Linux process
 //! instead uses host-wide memory, avoiding a misleading ratio based only on the
 //! process's leaf-cgroup charge divided by all host RAM.
 //! The full cgroup charge is used instead of resident set size because the
@@ -56,7 +71,7 @@ use crate::{
 /// Identifies the memory domain represented by a [`MemorySnapshot`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MemorySnapshotSource {
-    /// Current process cgroup, including its limiting ancestors.
+    /// Current process leaf cgroup, with visible ancestor constraints applied.
     ProcessCgroup,
     /// Root cgroup visible to the process.
     RootCgroup,
@@ -177,13 +192,17 @@ impl MemorySnapshot {
         MemoryRefresh::fresh(system_snapshot)
     }
 
-    /// Builds a snapshot from effective cgroup capacity and headroom.
+    /// Builds a snapshot from effective hierarchical cgroup capacity and
+    /// headroom.
+    ///
+    /// `sysinfo` minimizes capacity and headroom independently across the
+    /// process leaf and the ancestors visible in its cgroup namespace.
+    /// Consequently, `total - free` is a conservative pressure value for the
+    /// visible hierarchy and is not necessarily the literal `memory.current` of
+    /// any one cgroup.
     fn from_cgroup_limits(cgroup: &sysinfo::CGroupLimits, source: MemorySnapshotSource) -> Self {
-        // sysinfo takes the minimum headroom across the leaf and all limiting
-        // ancestors. Expressing that headroom as `total - free` gives an effective
-        // usage value relative to the tightest capacity; it is not necessarily the
-        // literal `memory.current` of the leaf cgroup. `rss` only contains anonymous
-        // resident memory and misses other charges enforced by the memory controller.
+        // `rss` only contains anonymous resident memory and misses other charges
+        // enforced by the memory controller.
         Self {
             used: cgroup.total_memory.saturating_sub(cgroup.free_memory),
             total: cgroup.total_memory,
