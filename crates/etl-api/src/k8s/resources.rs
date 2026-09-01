@@ -265,8 +265,6 @@ mod tests {
         let overrides = PipelineReplicatorResourceOverrideConfig {
             cpu_request_millicores: Some(900),
             memory_request_mib: None,
-            cpu_limit_millicores: Some(1_200),
-            memory_limit_mib: Some(2_048),
         };
         let config = test_k8s_config();
 
@@ -288,12 +286,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_limits_neither_size_the_workload_nor_pin_vpa() {
-        let overrides = PipelineReplicatorResourceOverrideConfig {
-            cpu_limit_millicores: Some(1_200),
-            memory_limit_mib: Some(2_048),
-            ..Default::default()
-        };
+    fn removed_persisted_limits_neither_size_the_workload_nor_pin_vpa() {
+        let overrides: PipelineReplicatorResourceOverrideConfig = serde_json::from_value(
+            serde_json::json!({
+                "cpu_limit_millicores": 1_200,
+                "memory_limit_mib": 2_048
+            }),
+        )
+        .unwrap();
         let config = test_k8s_config();
 
         let resources = ReplicatorStatefulSetResourceRequirements::resolve(

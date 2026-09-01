@@ -3258,9 +3258,7 @@ mod tests {
         let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
         let resource_override = PipelineReplicatorResourceOverrideConfig {
             cpu_request_millicores: Some(500),
-            cpu_limit_millicores: Some(1_000),
             memory_request_mib: Some(16_384),
-            memory_limit_mib: None,
         };
         let autoscaler = create_replicator_vertical_pod_autoscaler_json(
             &default_k8s_config(),
@@ -3274,8 +3272,7 @@ mod tests {
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();
 
-        // Request overrides pin independently of legacy limits and the global
-        // autoscaling range.
+        // Request overrides pin independently of the global autoscaling range.
         assert_eq!(
             autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/minAllowed"),
             Some(&json!({"cpu": "500m", "memory": "16384Mi"}))

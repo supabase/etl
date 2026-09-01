@@ -88,22 +88,6 @@ pub struct PipelineReplicatorResourceOverrideConfig {
     #[schema(example = 2000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_request_mib: Option<i32>,
-    /// CPU limit for the replicator container, in millicores.
-    ///
-    /// Retained for compatibility with persisted pipeline configurations. The
-    /// generated limit always equals the resolved CPU request, so this value no
-    /// longer affects workload sizing.
-    #[schema(example = 1000)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cpu_limit_millicores: Option<i32>,
-    /// Memory limit for the replicator container, in MiB.
-    ///
-    /// Retained for compatibility with persisted pipeline configurations. The
-    /// generated limit always equals the resolved memory request, so this value
-    /// no longer affects workload sizing.
-    #[schema(example = 2400)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub memory_limit_mib: Option<i32>,
 }
 
 impl PipelineReplicatorResourceOverrideConfig {
@@ -119,18 +103,6 @@ impl PipelineReplicatorResourceOverrideConfig {
             && memory_request_mib <= 0
         {
             return Err("Replicator memory request must be greater than 0".to_owned());
-        }
-
-        if let Some(cpu_limit_millicores) = self.cpu_limit_millicores
-            && cpu_limit_millicores <= 0
-        {
-            return Err("Replicator cpu limit must be greater than 0".to_owned());
-        }
-
-        if let Some(memory_limit_mib) = self.memory_limit_mib
-            && memory_limit_mib <= 0
-        {
-            return Err("Replicator memory limit must be greater than 0".to_owned());
         }
 
         Ok(())
@@ -986,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_resource_override_preserves_persisted_keys() {
+    fn pipeline_resource_override_ignores_removed_persisted_limit_keys() {
         let persisted = serde_json::json!({
             "cpu_request_millicores": 500,
             "memory_request_mib": 2000,
@@ -995,8 +967,14 @@ mod tests {
         });
 
         let config: PipelineReplicatorResourceOverrideConfig =
-            serde_json::from_value(persisted.clone()).unwrap();
+            serde_json::from_value(persisted).unwrap();
 
-        assert_eq!(serde_json::to_value(config).unwrap(), persisted);
+        assert_eq!(
+            serde_json::to_value(config).unwrap(),
+            serde_json::json!({
+                "cpu_request_millicores": 500,
+                "memory_request_mib": 2000
+            })
+        );
     }
 }

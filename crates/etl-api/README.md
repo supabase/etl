@@ -156,9 +156,8 @@ precedence, from highest to lowest:
 
 The generated CPU and memory limits always equal their resolved requests, for
 both the replicator and Vector containers, so every generated Pod has
-Kubernetes Guaranteed QoS. The historical pipeline keys
-`cpu_limit_millicores` and `memory_limit_mib` remain accepted for persisted
-configuration compatibility but no longer affect workload sizing.
+Kubernetes Guaranteed QoS. Limits are derived from requests and are not
+independently configurable.
 
 The API always creates a VPA, and its CPU and memory bounds also resolve
 independently:
