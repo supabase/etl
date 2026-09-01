@@ -15,7 +15,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     runtime::{
-        BatchMemoryReservation,
+        BatchMemoryTracker,
         concurrency::{ShutdownResult, ShutdownRx},
     },
     schema::TableId,
@@ -156,11 +156,11 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     pub streaming_payload_metadata: StreamingPayloadMetadata,
     /// Decoded bytes retained until the destination acknowledges this batch.
     ///
-    /// The apply loop explicitly takes and drops this reservation immediately
+    /// The apply loop explicitly takes and drops this tracker immediately
     /// after observing completion. Dropping pending metadata remains the error
     /// and cancellation safety net. Destination-retained memory remains visible
     /// to sampled whole-process or cgroup usage after this attribution ends.
-    pub batch_memory_reservation: Option<BatchMemoryReservation>,
+    pub batch_memory_tracker: Option<BatchMemoryTracker>,
     /// Instant at which the event batch was handed off to the destination.
     pub dispatched_at: Instant,
 }
@@ -284,21 +284,23 @@ mod tests {
     async fn completed_result_retains_batch_memory_until_metadata_is_dropped() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(7_500, 10_000);
-        let governor = BatchMemoryGovernor::new(1, memory_monitor, 1.0, 10_000);
-        let mut reservation = governor.reservation();
-        reservation.grow(100);
-        let (result_tx, pending_result) = WriteTableRowsResult::new(reservation);
+        let governor = BatchMemoryGovernor::new(1, memory_monitor.clone(), 1.0, 10_000);
+        let mut tracker = governor.batch_memory_tracker();
+        tracker.grow(100);
+        let (result_tx, pending_result) = WriteTableRowsResult::new(tracker);
 
         result_tx.send(Ok(DestinationWriteStatus::Durable));
         let completed_result = pending_result.await;
-        assert_eq!(governor.batch_size_limit_bytes(), 600);
+        memory_monitor.set_memory_snapshot_for_test(7_500, 10_000);
+        assert_eq!(governor.batch_size_target_bytes(), 600);
 
-        let (reservation, _, result) = completed_result.into_parts_with_completion();
+        let (tracker, _, result) = completed_result.into_parts_with_completion();
         assert_eq!(result.unwrap(), DestinationWriteStatus::Durable);
-        assert_eq!(governor.batch_size_limit_bytes(), 600);
+        assert_eq!(governor.batch_size_target_bytes(), 600);
 
-        drop(reservation);
-        assert_eq!(governor.batch_size_limit_bytes(), 500);
+        drop(tracker);
+        memory_monitor.set_memory_snapshot_for_test(7_500, 10_000);
+        assert_eq!(governor.batch_size_target_bytes(), 500);
     }
 
     #[tokio::test]
@@ -309,7 +311,7 @@ mod tests {
             event_count: 1,
             relation_table_ids: HashSet::from([TableId::new(7)]),
             streaming_payload_metadata: StreamingPayloadMetadata::insert(7),
-            batch_memory_reservation: None,
+            batch_memory_tracker: None,
             dispatched_at: Instant::now(),
         };
         let (result_tx, pending_result) = WriteEventsResult::new(metadata);

@@ -202,8 +202,7 @@ async fn large_row_1mib_replacing_merge_tree() {
     large_row_inner(ClickHouseEngine::ReplacingMergeTree, 512 * KIB).await;
 }
 
-/// 16 MiB exceeds `BatchConfig::DEFAULT_MAX_BYTES` (8 MiB), so the batch
-/// stream must flush a single oversized row on its own.
+/// Validates a 16 MiB row through both initial-copy and streaming paths.
 #[tokio::test(flavor = "multi_thread")]
 async fn large_row_16mib_merge_tree() {
     large_row_inner(ClickHouseEngine::MergeTree, 8 * MIB).await;

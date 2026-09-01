@@ -21,29 +21,36 @@ pub struct BatchConfig {
     /// if byte/row targets were not met.
     ///
     /// In practice, flush happens on the first trigger between this timeout and
-    /// the memory-based byte budget driven by
+    /// the memory-based byte target driven by
     /// [`Self::memory_budget_ratio`].
     #[serde(default = "default_batch_max_fill_ms")]
     #[cfg_attr(feature = "utoipa", schema(example = 0))]
     pub max_fill_ms: u64,
-    /// Maximum ratio of memory capacity assigned to decoded source batches.
+    /// Maximum ratio of memory capacity targeted for decoded source batches.
     ///
     /// This value is expressed as a ratio in the `(0.0, 1.0]` interval.
-    /// The resulting global quota includes batches being accumulated and
-    /// batches retained by asynchronous destination writes. When memory
+    /// The resulting advisory global target includes batches being accumulated
+    /// and batches retained by asynchronous destination writes. When memory
     /// backpressure is configured, current system or cgroup usage can reduce
-    /// this quota further as usage approaches the midpoint between the
-    /// resume and activation thresholds. The effective quota is divided
+    /// this target further as usage approaches the midpoint between the
+    /// resume and activation thresholds. The effective target is divided
     /// across potential concurrently retained batches.
     ///
     /// Together with [`Self::max_fill_ms`], this controls stream flushes:
     /// batches flush either when their accumulated size estimate reaches
-    /// the per-batch byte limit or when the fill timeout elapses,
+    /// the advisory per-batch byte target or when the fill timeout elapses,
     /// whichever happens first.
     ///
-    /// The goal is to adapt batch sizes as available memory changes while
-    /// preserving headroom for allocations beyond incoming rows, such as
-    /// destination batch building and serialization buffers.
+    /// This is a batching heuristic, not a memory allocator or a hard bound.
+    /// ETL compares decoded size estimates with the target after each item, so
+    /// actual allocations can differ and one indivisible item can overshoot it.
+    /// System memory and tracked batch bytes are sampled separately, so the
+    /// derived target may also contain temporal sampling skew. ETL freezes that
+    /// approximate global target for each memory-snapshot revision; changes in
+    /// active batch slots only repartition it until the next revision.
+    /// The goal is to keep batches approximately below the target as available
+    /// memory changes while preserving headroom for allocations beyond incoming
+    /// rows, such as destination batch building and serialization buffers.
     ///
     /// ETL accounts a decoded batch until the corresponding destination async
     /// result completes. Completion is an ownership boundary, not a guarantee
@@ -58,13 +65,13 @@ pub struct BatchConfig {
     ///
     /// This bounds multi-row accumulation within one memory sampling interval,
     /// even when a large pod has enough headroom to derive a much larger
-    /// dynamic limit. It also limits destination batch latency and
+    /// dynamic target. It also limits destination batch latency and
     /// serialization work. The runtime chooses the smaller value between this
-    /// ceiling and the limit computed from [`Self::memory_budget_ratio`]. A
+    /// ceiling and the target computed from [`Self::memory_budget_ratio`]. A
     /// single source row may exceed it because rows cannot be split safely
     /// after decoding.
     #[serde(default = "default_batch_max_bytes")]
-    #[cfg_attr(feature = "utoipa", schema(example = 8388608))]
+    #[cfg_attr(feature = "utoipa", schema(example = 33554432))]
     pub max_bytes: usize,
 }
 
@@ -75,17 +82,17 @@ impl BatchConfig {
     /// Default fraction used for batch byte budgeting.
     ///
     /// The governor targets at most 20% of the current system capacity or
-    /// cgroup memory limit for decoded batches, and may assign less when other
+    /// cgroup memory limit for decoded batches, and may target less when other
     /// allocations consume the normal operating headroom. An indivisible row
     /// can exceed the target after it has already been decoded.
     pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.2;
 
     /// Default maximum preferred source batch size in bytes.
     ///
-    /// The 8 MiB cap bounds multi-row accumulation before reactive memory
-    /// backpressure can observe new allocations, while still fitting thousands
-    /// of typical CDC rows. An indivisible source row can exceed the cap.
-    pub const DEFAULT_MAX_BYTES: usize = 8 * 1024 * 1024;
+    /// The 32 MiB cap supplies substantial destination work while bounding
+    /// multi-row accumulation before reactive memory backpressure can observe
+    /// new allocations. An indivisible source row can exceed the cap.
+    pub const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
 }
 
 impl Validate for BatchConfig {
@@ -260,13 +267,13 @@ impl MemoryBackpressureConfig {
     ///
     /// The normal batch-sizing target is the midpoint between the default
     /// thresholds (80%). Activating at 85% leaves a 5% margin for allocations
-    /// that have not yet appeared in a sample or decoded-batch reservation.
+    /// that have not yet appeared in a sample or decoded-batch accounting.
     pub const DEFAULT_ACTIVATE_THRESHOLD: f32 = 0.85;
     /// Default memory usage ratio to release backpressure.
     ///
     /// Resuming below 75% restores a 5% margin below the normal batch-sizing
     /// target. The resulting 10% hysteresis absorbs allocator lag and unbounded
-    /// allocations that are not represented by a decoded-batch reservation.
+    /// allocations that are not represented by decoded-batch accounting.
     pub const DEFAULT_RESUME_THRESHOLD: f32 = 0.75;
 }
 
@@ -380,7 +387,7 @@ pub struct PipelineConfig {
     pub max_copy_connections_per_table: u16,
     /// Number of milliseconds between coherent memory snapshots.
     ///
-    /// One shared sampler drives dynamic batch limits and emergency
+    /// One shared sampler drives dynamic batch targets and emergency
     /// backpressure. Batch hot paths reuse each snapshot instead of reading
     /// operating-system or cgroup files per row.
     #[serde(default = "default_memory_refresh_interval_ms")]

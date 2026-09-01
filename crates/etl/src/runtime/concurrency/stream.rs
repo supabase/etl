@@ -11,7 +11,7 @@ use tracing::info;
 
 use crate::{
     data::SizeHint,
-    runtime::{BatchMemoryReservation, CachedBatchMemoryLimit, MemoryMonitorSubscription},
+    runtime::{BatchMemoryGovernor, BatchMemoryTracker, MemoryMonitorSubscription},
     schema::TableId,
 };
 
@@ -30,23 +30,23 @@ pub(crate) fn apply_worker_apply_stream_id() -> String {
     "apply_worker_apply_stream".to_owned()
 }
 
-/// A decoded batch paired with the reservation that accounts for its memory.
+/// A decoded batch paired with the tracker that accounts for its memory.
 ///
-/// Consumers move the reservation into destination-result ownership with the
-/// items. Dropping the batch before that transfer releases the reservation.
+/// Consumers move the tracker into destination-result ownership with the items.
+/// Dropping the batch before that transfer releases the tracked bytes.
 #[derive(Debug)]
 pub(crate) struct MemoryTrackedBatch<T> {
     /// Decoded items emitted by the batching stream.
     items: Vec<T>,
     /// Reservation covering the decoded items through destination
     /// acknowledgement.
-    memory_reservation: BatchMemoryReservation,
+    memory_tracker: BatchMemoryTracker,
 }
 
 impl<T> MemoryTrackedBatch<T> {
-    /// Creates a tracked batch from decoded items and their reservation.
-    fn new(items: Vec<T>, memory_reservation: BatchMemoryReservation) -> Self {
-        Self { items, memory_reservation }
+    /// Creates a tracked batch from decoded items and their tracker.
+    fn new(items: Vec<T>, memory_tracker: BatchMemoryTracker) -> Self {
+        Self { items, memory_tracker }
     }
 
     /// Returns the number of decoded items in the batch.
@@ -54,19 +54,19 @@ impl<T> MemoryTrackedBatch<T> {
         self.items.len()
     }
 
-    /// Splits the batch so its reservation can follow the items through
+    /// Splits the batch so its tracker can follow the items through
     /// destination acknowledgement.
-    pub(crate) fn into_parts(self) -> (Vec<T>, BatchMemoryReservation) {
-        (self.items, self.memory_reservation)
+    pub(crate) fn into_parts(self) -> (Vec<T>, BatchMemoryTracker) {
+        (self.items, self.memory_tracker)
     }
 }
 
 /// Moves decoded items and their accounting into an emitted batch.
 fn take_memory_tracked_batch<T>(
     items: Vec<T>,
-    memory_reservation: &mut BatchMemoryReservation,
+    memory_tracker: &mut BatchMemoryTracker,
 ) -> MemoryTrackedBatch<T> {
-    MemoryTrackedBatch::new(items, memory_reservation.take())
+    MemoryTrackedBatch::new(items, memory_tracker.take())
 }
 
 pin_project! {
@@ -158,7 +158,7 @@ impl<S: Stream> Stream for MemoryBackpressureStream<S> {
 }
 
 pin_project! {
-    /// A stream adapter that batches fallible items based on size limits and timeouts.
+    /// A stream adapter that batches fallible items based on a size target and timeout.
     ///
     /// This stream buffers successful values and yields [`MemoryTrackedBatch`] values whose
     /// decoded memory remains accounted after emission. It avoids buffering `Result<B, E>`
@@ -177,9 +177,9 @@ pin_project! {
         // Successfully decoded items in the current batch.
         items: Vec<B>,
         // Bytes retained by the currently accumulating batch.
-        batch_memory_reservation: BatchMemoryReservation,
-        // Limit cached for the latest memory snapshot and slot count.
-        cached_batch_memory_limit: CachedBatchMemoryLimit,
+        batch_memory_tracker: BatchMemoryTracker,
+        // Governor supplying the shared advisory batch-size target.
+        batch_memory_governor: BatchMemoryGovernor,
         // Batch configuration supplying the fill timeout.
         batch_config: BatchConfig,
         // Whether the next item should start a new fill deadline.
@@ -203,17 +203,17 @@ where
         stream_id: impl Into<String>,
         batch_config: BatchConfig,
         memory_subscription: Option<MemoryMonitorSubscription>,
-        cached_batch_memory_limit: CachedBatchMemoryLimit,
+        batch_memory_governor: BatchMemoryGovernor,
     ) -> Self {
-        let batch_memory_reservation = cached_batch_memory_limit.reservation();
+        let batch_memory_tracker = batch_memory_governor.batch_memory_tracker();
 
         Self {
             stream,
             stream_id: stream_id.into(),
             deadline: None,
             items: Vec::new(),
-            batch_memory_reservation,
-            cached_batch_memory_limit,
+            batch_memory_tracker,
+            batch_memory_governor,
             batch_config,
             reset_timer: true,
             inner_stream_ended: false,
@@ -230,7 +230,7 @@ where
     type Item = Result<MemoryTrackedBatch<B>, E>;
 
     /// Polls the stream for the next batch of successful values while
-    /// preserving backpressure, timeout behavior, byte budget checks, and
+    /// preserving backpressure, timeout behavior, byte-target checks, and
     /// immediate error propagation.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
@@ -304,7 +304,7 @@ where
                 info!(
                     stream_id = %this.stream_id,
                     buffered_items = this.items.len(),
-                    buffered_size_hint_bytes = this.batch_memory_reservation.size_hint_bytes(),
+                    buffered_size_hint_bytes = this.batch_memory_tracker.size_hint_bytes(),
                     "backpressure active, flushing buffered batch"
                 );
                 *this.reset_timer = true;
@@ -312,7 +312,7 @@ where
                 // If we are paused for memory, we don't want to reallocate a batch of the same
                 // size as before, to avoid increasing memory usage even more.
                 let items = std::mem::take(this.items);
-                let batch = take_memory_tracked_batch(items, this.batch_memory_reservation);
+                let batch = take_memory_tracked_batch(items, this.batch_memory_tracker);
 
                 return Poll::Ready(Some(Ok(batch)));
             }
@@ -336,7 +336,7 @@ where
 
                     // Add the new item to the batch and track its size.
                     let item_size_hint_bytes = item.size_hint();
-                    this.batch_memory_reservation.grow(item_size_hint_bytes);
+                    this.batch_memory_tracker.grow(item_size_hint_bytes);
                     this.items.push(item);
 
                     // If backpressure activated while the source was ready, flush the
@@ -351,17 +351,17 @@ where
                         // same size as before, to avoid increasing memory
                         // usage even more.
                         let items = std::mem::take(this.items);
-                        let batch = take_memory_tracked_batch(items, this.batch_memory_reservation);
+                        let batch = take_memory_tracked_batch(items, this.batch_memory_tracker);
 
                         return Poll::Ready(Some(Ok(batch)));
                     }
 
-                    // Consult the cached budget after every decoded item. A PostgreSQL COPY
+                    // Consult the shared target after every decoded item. A PostgreSQL COPY
                     // stream can yield many ready rows during one outer poll, so checking only
                     // once per poll would delay adaptation to a changed cgroup limit or active
                     // stream count.
-                    if this.batch_memory_reservation.size_hint_bytes()
-                        >= this.cached_batch_memory_limit.current_batch_size_limit_bytes()
+                    if this.batch_memory_tracker.size_hint_bytes()
+                        >= this.batch_memory_governor.batch_size_target_bytes()
                     {
                         *this.reset_timer = true;
 
@@ -369,7 +369,7 @@ where
                         // again, so retaining another full outer-vector allocation
                         // here would violate the stream's one-batch-slot model.
                         let items = std::mem::take(this.items);
-                        let batch = take_memory_tracked_batch(items, this.batch_memory_reservation);
+                        let batch = take_memory_tracked_batch(items, this.batch_memory_tracker);
 
                         return Poll::Ready(Some(Ok(batch)));
                     }
@@ -380,10 +380,10 @@ where
                     this.deadline.set(None);
 
                     // Successful values buffered before the error will never be
-                    // emitted. Drop them and transfer the reservation into an explicit
+                    // emitted. Drop them and transfer the tracker into an explicit
                     // drop instead of retaining either until the stream is dropped.
                     drop(std::mem::take(this.items));
-                    drop(this.batch_memory_reservation.take());
+                    drop(this.batch_memory_tracker.take());
 
                     return Poll::Ready(Some(Err(err)));
                 }
@@ -398,7 +398,7 @@ where
                         // buffer with `Vec::new()`, which keeps zero capacity
                         // and avoids allocating a replacement vector.
                         let items = std::mem::take(this.items);
-                        let batch = take_memory_tracked_batch(items, this.batch_memory_reservation);
+                        let batch = take_memory_tracked_batch(items, this.batch_memory_tracker);
 
                         Some(Ok(batch))
                     };
@@ -424,7 +424,7 @@ where
             // Do not preallocate the next outer row buffer while this batch is
             // still awaiting destination acknowledgement.
             let items = std::mem::take(this.items);
-            let batch = take_memory_tracked_batch(items, this.batch_memory_reservation);
+            let batch = take_memory_tracked_batch(items, this.batch_memory_tracker);
 
             return Poll::Ready(Some(Ok(batch)));
         }
@@ -531,7 +531,7 @@ mod tests {
                 0 => SizedToken { value: 1, bytes: 400 },
                 1 => {
                     self.memory.set_total_memory_bytes_for_test(500);
-                    // Publishing a new coherent memory snapshot must refresh the cached limit
+                    // Publishing a new coherent memory snapshot must refresh the shared target
                     // while the outer poll continues draining ready rows.
                     SizedToken { value: 2, bytes: 100 }
                 }
@@ -563,30 +563,18 @@ mod tests {
         }
     }
 
-    /// Returns a cached budget with a very high limit so byte-based flushes do
+    /// Returns a governor with a very high target so byte-based flushes do
     /// not interfere.
-    fn test_cached_memory_limit(memory_monitor: &MemoryMonitor) -> CachedBatchMemoryLimit {
+    fn test_batch_memory_governor(memory_monitor: &MemoryMonitor) -> BatchMemoryGovernor {
         memory_monitor.set_total_memory_bytes_for_test(10_000_000_000);
 
-        BatchMemoryGovernor::new(1, memory_monitor.clone(), 0.2, 8 * 1024 * 1024).cached_limit()
+        BatchMemoryGovernor::new(1, memory_monitor.clone(), 0.2, 8 * 1024 * 1024)
     }
 
-    /// Returns a cached budget and the computed byte limit for assertions in
-    /// byte-based tests.
-    fn test_cached_memory_limit_with_value(
-        memory_monitor: &MemoryMonitor,
-    ) -> (CachedBatchMemoryLimit, usize) {
+    /// Returns a governor derived from a small synthetic memory capacity.
+    fn test_small_batch_memory_governor(memory_monitor: &MemoryMonitor) -> BatchMemoryGovernor {
         memory_monitor.set_total_memory_bytes_for_test(10_000);
-        let mut cached_limit = BatchMemoryGovernor::new(
-            1,
-            memory_monitor.clone(),
-            0.2,
-            BatchConfig::DEFAULT_MAX_BYTES,
-        )
-        .cached_limit();
-        let limit = cached_limit.current_batch_size_limit_bytes();
-
-        (cached_limit, limit)
+        BatchMemoryGovernor::new(1, memory_monitor.clone(), 0.2, BatchConfig::DEFAULT_MAX_BYTES)
     }
 
     /// Returns a test batch config with the supplied fill timeout.
@@ -717,7 +705,7 @@ mod tests {
             "test_stream",
             batch_config,
             memory_sub,
-            test_cached_memory_limit(&memory),
+            test_batch_memory_governor(&memory),
         ));
 
         // First the first poll, we are pending since we are waiting for 10 elements but
@@ -747,7 +735,7 @@ mod tests {
             "test_stream",
             test_batch_config(100),
             memory.subscribe(),
-            governor.cached_limit(),
+            governor.clone(),
         ));
 
         tx.send(Ok::<_, &'static str>(SizedToken { value: 1, bytes: 100 })).await.unwrap();
@@ -760,9 +748,10 @@ mod tests {
         memory.set_backpressure_active_for_test(true);
         let batch = stream.next().await.unwrap().unwrap();
         assert_eq!(batch.items, vec![SizedToken { value: 1, bytes: 100 }]);
-        assert_eq!(governor.batch_size_limit_bytes(), 600);
+        memory.set_memory_snapshot_for_test(7_500, 10_000);
+        assert_eq!(governor.batch_size_target_bytes(), 600);
 
-        // Destination acknowledgement drops the emitted batch and its reservation.
+        // Destination acknowledgement drops the emitted batch and its tracker.
         // The stream itself remains paused without owning those emitted bytes.
         drop(batch);
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
@@ -770,7 +759,8 @@ mod tests {
             _ => panic!("expected source intake to remain paused"),
         })
         .await;
-        assert_eq!(governor.batch_size_limit_bytes(), 500);
+        memory.set_memory_snapshot_for_test(7_500, 10_000);
+        assert_eq!(governor.batch_size_target_bytes(), 500);
 
         memory.set_backpressure_active_for_test(false);
         tx.send(Ok(SizedToken { value: 2, bytes: 100 })).await.unwrap();
@@ -799,7 +789,7 @@ mod tests {
             "test_stream",
             batch_config,
             memory_sub,
-            test_cached_memory_limit(&memory),
+            test_batch_memory_governor(&memory),
         ));
 
         let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
@@ -824,7 +814,7 @@ mod tests {
             "test_stream",
             batch_config,
             memory_sub,
-            test_cached_memory_limit(&memory),
+            test_batch_memory_governor(&memory),
         ));
 
         // Memory is full, so we block any poll.
@@ -852,7 +842,7 @@ mod tests {
             "test_stream",
             batch_config,
             memory_sub,
-            test_cached_memory_limit(&memory),
+            test_batch_memory_governor(&memory),
         );
 
         // Set blocked before first poll so the first poll observes an immediate update.
@@ -885,7 +875,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn does_not_flush_before_timeout_when_bytes_limit_not_reached() {
+    async fn does_not_flush_before_timeout_when_byte_target_is_not_reached() {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
@@ -895,7 +885,7 @@ mod tests {
             "test_stream",
             batch_config,
             memory_sub,
-            test_cached_memory_limit(&memory),
+            test_batch_memory_governor(&memory),
         ));
 
         // Even with two buffered items, we do not flush by item count.
@@ -916,8 +906,9 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = test_batch_config(10_000);
-        let (cached_limit, byte_limit) = test_cached_memory_limit_with_value(&memory);
-        let byte_size = (byte_limit / 2).max(1);
+        let governor = test_small_batch_memory_governor(&memory);
+        let byte_target = governor.batch_size_target_bytes();
+        let byte_size = (byte_target / 2).max(1);
         let items = vec![
             SizedToken { value: 1, bytes: byte_size },
             SizedToken { value: 2, bytes: byte_size },
@@ -928,7 +919,7 @@ mod tests {
             "test_stream",
             batch_config,
             memory_sub,
-            cached_limit,
+            governor,
         ));
 
         let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
@@ -944,10 +935,11 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = test_batch_config(10_000);
-        let (cached_limit, byte_limit) = test_cached_memory_limit_with_value(&memory);
-        let first = (byte_limit / 4).max(1);
-        let second = (byte_limit / 4).max(1);
-        let third = byte_limit.saturating_sub(first.saturating_add(second)).max(1);
+        let governor = test_small_batch_memory_governor(&memory);
+        let byte_target = governor.batch_size_target_bytes();
+        let first = (byte_target / 4).max(1);
+        let second = (byte_target / 4).max(1);
+        let third = byte_target.saturating_sub(first.saturating_add(second)).max(1);
         let items = vec![
             SizedToken { value: 1, bytes: first },
             SizedToken { value: 2, bytes: second },
@@ -958,7 +950,7 @@ mod tests {
             "test_stream",
             batch_config,
             memory_sub,
-            cached_limit,
+            governor,
         ));
 
         let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
@@ -966,22 +958,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refreshes_cached_limit_between_ready_items() {
+    async fn refreshes_shared_target_between_ready_items() {
         let memory = MemoryMonitor::new_for_test();
         memory.set_total_memory_bytes_for_test(5_000);
-        let cached_limit = BatchMemoryGovernor::new(1, memory.clone(), 0.2, 10_000).cached_limit();
+        let governor = BatchMemoryGovernor::new(1, memory.clone(), 0.2, 10_000);
         let batch_config = test_batch_config(10_000);
         let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
             ShrinksMemoryBetweenReadyItems::new(memory),
             "test_stream",
             batch_config,
             None,
-            cached_limit,
+            governor,
         ));
 
-        // The initial global quota is 1,000 bytes. While the same outer poll
+        // The initial global target is 1,000 bytes. While the same outer poll
         // drains ready rows, total memory shrinks to 500 bytes. The refreshed
-        // global quota is 100 bytes, so the second row immediately flushes the
+        // global target is 100 bytes, so the second row immediately flushes the
         // already oversized batch and the third row remains unread.
         let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         assert_eq!(
@@ -998,8 +990,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         memory.set_total_memory_bytes_for_test(10_000);
         memory.set_used_memory_bytes_for_test(7_500);
-        let governor = BatchMemoryGovernor::new(1, memory, 1.0, 10_000);
-        let cached_limit = governor.cached_limit();
+        let governor = BatchMemoryGovernor::new(1, memory.clone(), 1.0, 10_000);
         let batch_config = test_batch_config(10_000);
         let input =
             futures::stream::iter([Ok::<_, &'static str>(SizedToken { value: 1, bytes: 100 })]);
@@ -1008,25 +999,27 @@ mod tests {
             "test_stream",
             batch_config,
             None,
-            cached_limit,
+            governor.clone(),
         ));
 
         let batch = stream.next().await.unwrap().unwrap();
-        assert_eq!(governor.batch_size_limit_bytes(), 600);
+        memory.set_memory_snapshot_for_test(7_500, 10_000);
+        assert_eq!(governor.batch_size_target_bytes(), 600);
 
         // Polling the source again does not release an emitted batch's memory.
         assert!(stream.next().await.is_none());
-        assert_eq!(governor.batch_size_limit_bytes(), 600);
+        assert_eq!(governor.batch_size_target_bytes(), 600);
 
         drop(batch);
-        assert_eq!(governor.batch_size_limit_bytes(), 500);
+        memory.set_memory_snapshot_for_test(7_500, 10_000);
+        assert_eq!(governor.batch_size_target_bytes(), 500);
     }
 
     #[tokio::test]
     async fn source_error_releases_buffered_batch_memory() {
         let memory = MemoryMonitor::new_for_test();
         memory.set_memory_snapshot_for_test(7_500, 10_000);
-        let governor = BatchMemoryGovernor::new(1, memory, 1.0, 10_000);
+        let governor = BatchMemoryGovernor::new(1, memory.clone(), 1.0, 10_000);
         let input =
             futures::stream::iter([Ok(SizedToken { value: 1, bytes: 100 }), Err("source error")]);
         let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
@@ -1034,11 +1027,12 @@ mod tests {
             "test_stream",
             test_batch_config(10_000),
             None,
-            governor.cached_limit(),
+            governor.clone(),
         ));
 
         assert_eq!(into_batch_items(stream.next().await), Some(Err("source error")));
-        assert_eq!(governor.batch_size_limit_bytes(), 500);
+        memory.set_memory_snapshot_for_test(7_500, 10_000);
+        assert_eq!(governor.batch_size_target_bytes(), 500);
         assert!(stream.next().await.is_none());
     }
 
@@ -1053,10 +1047,10 @@ mod tests {
             "test_stream",
             batch_config,
             memory_sub,
-            test_cached_memory_limit(&memory),
+            test_batch_memory_governor(&memory),
         ));
 
-        // The stream has buffered items but not enough to reach byte budget, so it
+        // The stream has buffered items but not enough to reach its byte target, so it
         // should wait.
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
@@ -1085,7 +1079,7 @@ mod tests {
             "test_stream",
             batch_config,
             memory_sub,
-            test_cached_memory_limit(&memory),
+            test_batch_memory_governor(&memory),
         ));
 
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
@@ -1119,7 +1113,7 @@ mod tests {
             "test_stream",
             batch_config,
             memory_sub,
-            test_cached_memory_limit(&memory),
+            test_batch_memory_governor(&memory),
         ));
 
         // End-of-stream with buffered items must emit one final batch before
@@ -1144,7 +1138,7 @@ mod tests {
             "test_stream",
             batch_config,
             memory_sub,
-            test_cached_memory_limit(&memory),
+            test_batch_memory_governor(&memory),
         ));
 
         // Empty streams should complete immediately without emitting empty batches.

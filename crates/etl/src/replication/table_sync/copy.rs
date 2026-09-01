@@ -663,14 +663,13 @@ where
     // A copy partition waits for destination acknowledgement before polling the
     // next source batch, so it retains at most one batch at a time.
     let _table_copy_batch_slot = batch_memory_governor.register_batch_slots(1);
-    let cached_batch_memory_limit = batch_memory_governor.cached_limit();
     let stream_id = table_sync_worker_copy_stream_id(table_id);
     let table_copy_stream = MemoryTrackedBatchStream::wrap(
         table_copy_stream,
         stream_id,
         batch_config,
         memory_monitor.subscribe(),
-        cached_batch_memory_limit,
+        batch_memory_governor,
     );
     pin!(table_copy_stream);
 
@@ -764,7 +763,7 @@ where
 
                 let table_copy_rows = table_rows?;
                 let row_count = table_copy_rows.len() as u64;
-                let (table_copy_rows, batch_memory_reservation) = table_copy_rows.into_parts();
+                let (table_copy_rows, batch_memory_tracker) = table_copy_rows.into_parts();
                 let mut table_copy_batch_metadata = TableCopyPayloadMetadata::default();
                 let table_rows = table_copy_rows
                     .into_iter()
@@ -786,7 +785,7 @@ where
 
                 let dispatched_at = Instant::now();
                 let (flush_result, pending_flush_result) =
-                    WriteTableRowsResult::new(batch_memory_reservation);
+                    WriteTableRowsResult::new(batch_memory_tracker);
                 let batch_id = batch_id_generator.next_batch_id()?;
 
                 destination
@@ -803,13 +802,13 @@ where
                 else {
                     return Ok(ShutdownResult::Shutdown(progress));
                 };
-                let (batch_memory_reservation, completed_at, result) =
+                let (batch_memory_tracker, completed_at, result) =
                     completed_flush_result.into_parts_with_completion();
 
                 // Destination acknowledgement ends ETL's ownership of this decoded
                 // table-copy batch. Any destination-retained allocation remains visible
                 // to the next whole-process or cgroup memory sample.
-                drop(batch_memory_reservation);
+                drop(batch_memory_tracker);
                 let write_status = result?;
 
                 table_copy_batch_metadata.record_processed(D::name());

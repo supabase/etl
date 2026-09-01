@@ -191,7 +191,7 @@ struct MemoryMonitorInner {
     /// Handle for the task that refreshes memory snapshots.
     refresh_task: Mutex<Option<JoinHandle<()>>>,
     /// Optional backpressure state derived from memory snapshots.
-    backpressure: Option<BackpressureMonitorInner>,
+    backpressure: Option<BackpressureMonitor>,
     /// Latest coherent used and total memory snapshot.
     snapshot: RwLock<MemorySnapshot>,
     /// Revision incremented after each complete snapshot update.
@@ -202,7 +202,7 @@ struct MemoryMonitorInner {
 
 /// Shared backpressure state that exists only when backpressure is configured.
 #[derive(Debug)]
-struct BackpressureMonitorInner {
+struct BackpressureMonitor {
     /// Latest emergency backpressure state and notification channel.
     active_tx: watch::Sender<bool>,
     /// Validated activation and resume thresholds.
@@ -251,10 +251,7 @@ impl MemoryMonitor {
             );
             emit_backpressure_active_metric(startup_backpressure_active);
 
-            BackpressureMonitorInner {
-                active_tx: watch::channel(startup_backpressure_active).0,
-                config,
-            }
+            BackpressureMonitor { active_tx: watch::channel(startup_backpressure_active).0, config }
         });
 
         let this = Self {
@@ -384,8 +381,13 @@ impl MemoryMonitor {
     /// limit. The normal target is the midpoint between the configured resume
     /// and activation thresholds, leaving equal operating margins on both
     /// sides. It is [`None`] when backpressure is disabled.
+    ///
+    /// This snapshot intentionally does not include the governor's tracked
+    /// batch bytes. The governor reads that separate estimate when it first
+    /// observes this revision, so the two measurements may have a small
+    /// temporal skew.
     pub(crate) fn capacity_snapshot(&self) -> MemoryCapacitySnapshot {
-        let snapshot = self.current_snapshot();
+        let snapshot = self.inner.snapshot.read().unwrap_or_else(PoisonError::into_inner);
         let normal_memory_target_bytes = self.inner.backpressure.as_ref().map(|backpressure| {
             let resume_threshold = f64::from(backpressure.config.resume_threshold);
             let activation_threshold = f64::from(backpressure.config.activate_threshold);
@@ -396,6 +398,7 @@ impl MemoryMonitor {
         });
 
         MemoryCapacitySnapshot {
+            revision: self.inner.snapshot_revision.load(Ordering::Acquire),
             used_memory_bytes: snapshot.used,
             total_memory_bytes: snapshot.total,
             normal_memory_target_bytes,
@@ -449,12 +452,16 @@ impl MemoryMonitor {
             let mut current = self.inner.snapshot.write().unwrap_or_else(PoisonError::into_inner);
             let previous_source = current.source;
             *current = snapshot;
+
+            // Wrapping is intentional. Governor readers compare revisions for
+            // inequality, so `u64::MAX -> 0` still denotes a new snapshot. Update
+            // it while the snapshot is write-locked so readers cannot pair this
+            // snapshot with the preceding revision.
+            self.inner.snapshot_revision.fetch_add(1, Ordering::Release);
+
             previous_source
         };
 
-        // Wrapping is intentional. Cached readers compare revisions for inequality,
-        // so `u64::MAX -> 0` still denotes a new snapshot.
-        self.inner.snapshot_revision.fetch_add(1, Ordering::Release);
         emit_memory_snapshot_metrics(snapshot, Some(previous_source));
     }
 }
@@ -533,7 +540,7 @@ impl MemoryMonitor {
         Self {
             inner: Arc::new(MemoryMonitorInner {
                 refresh_task: Mutex::new(None),
-                backpressure: config.map(|config| BackpressureMonitorInner {
+                backpressure: config.map(|config| BackpressureMonitor {
                     active_tx: watch::channel(false).0,
                     config,
                 }),
@@ -581,6 +588,8 @@ impl MemoryMonitor {
 /// Coherent system or cgroup memory capacity used for batch governance.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MemoryCapacitySnapshot {
+    /// Revision identifying this exact coherent snapshot.
+    pub(crate) revision: u64,
     /// Latest system or cgroup memory usage in bytes.
     pub(crate) used_memory_bytes: u64,
     /// Latest system or cgroup memory capacity in bytes.
@@ -918,6 +927,7 @@ mod tests {
 
         let snapshot = memory_monitor.capacity_snapshot();
 
+        assert_eq!(snapshot.revision, memory_monitor.snapshot_revision());
         assert_eq!(snapshot.used_memory_bytes, 4_000);
         assert_eq!(snapshot.total_memory_bytes, 6_000);
         assert_eq!(snapshot.normal_memory_target_bytes, Some(4_800));
@@ -930,9 +940,11 @@ mod tests {
 
         memory_monitor.set_memory_snapshot_for_test(4_000, 6_000);
 
-        assert_eq!(memory_monitor.snapshot_revision(), 0);
-        assert_eq!(memory_monitor.capacity_snapshot().used_memory_bytes, 4_000);
-        assert_eq!(memory_monitor.capacity_snapshot().total_memory_bytes, 6_000);
+        let snapshot = memory_monitor.capacity_snapshot();
+
+        assert_eq!(snapshot.revision, 0);
+        assert_eq!(snapshot.used_memory_bytes, 4_000);
+        assert_eq!(snapshot.total_memory_bytes, 6_000);
     }
 
     #[tokio::test]

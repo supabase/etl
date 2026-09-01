@@ -387,7 +387,7 @@ where
                 event_count: events.len(),
                 relation_table_ids: Default::default(),
                 streaming_payload_metadata: Default::default(),
-                batch_memory_reservation: None,
+                batch_memory_tracker: None,
                 dispatched_at: Instant::now(),
             });
         destination.write_events(events.clone(), durability, wrapped_flush_result).await?;

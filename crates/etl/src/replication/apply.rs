@@ -79,8 +79,8 @@ use crate::{
         state::{TableState, TableStateType},
     },
     runtime::{
-        BatchMemoryGovernor, BatchMemoryReservation, CachedBatchMemoryLimit, MemoryMonitor,
-        MemoryMonitorSubscription, TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState,
+        BatchMemoryGovernor, BatchMemoryTracker, MemoryMonitor, MemoryMonitorSubscription,
+        TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState,
         concurrency::{
             MemoryBackpressureStream, ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
             table_sync_worker_apply_stream_id,
@@ -120,7 +120,7 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 ///
 /// One batch may be owned by a pending destination result while the apply loop
 /// accumulates the next batch. Registering both potential owners keeps their
-/// combined reservations within the governor's global decoded-batch pool.
+/// combined tracked bytes within the governor's global decoded-batch target.
 const APPLY_LOOP_BATCH_SLOTS: usize = 2;
 /// Maximum number of table schema cleanups buffered per apply loop.
 ///
@@ -733,9 +733,9 @@ struct EventBatch {
     events: Vec<Event>,
     /// Tables whose schemas are communicated by relation events in the batch.
     relation_table_ids: HashSet<TableId>,
-    /// Reservation that accounts for decoded events until destination
+    /// Tracker that accounts for decoded events until destination
     /// acknowledgement.
-    memory_reservation: Option<BatchMemoryReservation>,
+    memory_tracker: Option<BatchMemoryTracker>,
     /// PostgreSQL tuple bytes used for source metrics and usage accounting.
     ///
     /// These are independent from the decoded [`SizeHint`] used to determine
@@ -749,7 +749,7 @@ impl EventBatch {
         Self {
             events: Vec::with_capacity(capacity),
             relation_table_ids: HashSet::new(),
-            memory_reservation: None,
+            memory_tracker: None,
             streaming_payload_metadata: StreamingPayloadMetadata::default(),
         }
     }
@@ -759,15 +759,15 @@ impl EventBatch {
         &mut self,
         event: Event,
         streaming_payload_metadata: StreamingPayloadMetadata,
-        cached_batch_memory_limit: &CachedBatchMemoryLimit,
+        batch_memory_governor: &BatchMemoryGovernor,
     ) {
         if let Event::Relation(relation) = &event {
             self.relation_table_ids.insert(relation.replicated_table_schema.id());
         }
 
         let event_size_hint_bytes = event.size_hint();
-        self.memory_reservation
-            .get_or_insert_with(|| cached_batch_memory_limit.reservation())
+        self.memory_tracker
+            .get_or_insert_with(|| batch_memory_governor.batch_memory_tracker())
             .grow(event_size_hint_bytes);
         self.streaming_payload_metadata.merge(streaming_payload_metadata);
         self.events.push(event);
@@ -785,7 +785,7 @@ impl EventBatch {
 
     /// Returns the decoded in-memory size estimate for the batch.
     fn size_hint_bytes(&self) -> usize {
-        self.memory_reservation.as_ref().map_or(0, BatchMemoryReservation::size_hint_bytes)
+        self.memory_tracker.as_ref().map_or(0, BatchMemoryTracker::size_hint_bytes)
     }
 
     /// Takes the current batch and leaves one with the same event capacity.
@@ -1171,8 +1171,8 @@ pub(crate) struct ApplyLoop<S, D> {
     worker_context: WorkerContext<S, D>,
     /// Shared memory backpressure controller.
     memory_monitor: MemoryMonitor,
-    /// Cached dynamic batch memory limit used to decide flushes by bytes.
-    cached_batch_memory_limit: CachedBatchMemoryLimit,
+    /// Governor supplying the shared advisory batch-size target.
+    batch_memory_governor: BatchMemoryGovernor,
     /// Maximum duration to wait before forcibly flushing a batch.
     max_batch_fill_duration: Duration,
     /// Deadline duration used before proactively sending a periodic status
@@ -1278,7 +1278,7 @@ where
 
         // Slot registration belongs to the apply loop because its state machine
         // determines how many decoded batches can coexist. Keep the guard alive
-        // until the loop exits so every cached limit includes both potential owners.
+        // until the loop exits so the shared target includes both potential owners.
         let _batch_slot_guard = batch_memory_governor.register_batch_slots(APPLY_LOOP_BATCH_SLOTS);
         let mut apply_loop = Self {
             config: Arc::clone(&config),
@@ -1288,7 +1288,7 @@ where
             shutdown_rx,
             worker_context,
             memory_monitor,
-            cached_batch_memory_limit: batch_memory_governor.cached_limit(),
+            batch_memory_governor,
             max_batch_fill_duration: Duration::from_millis(config.batch.max_fill_ms),
             keep_alive_deadline_duration,
             tasks,
@@ -1951,11 +1951,11 @@ where
         let (mut metadata, completed_at, result) = flush_result.into_parts_with_completion();
 
         // The destination has acknowledged the write, successfully or otherwise, so
-        // ETL's decoded-input ownership has ended. Release its reservation before any
+        // ETL's decoded-input ownership has ended. Release its tracker before any
         // checkpoint or schema-cleanup work awaits further I/O. Destination-retained
         // allocations remain visible as non-batch memory in the next system sample.
         if let Some(metadata) = metadata.as_mut() {
-            drop(metadata.batch_memory_reservation.take());
+            drop(metadata.batch_memory_tracker.take());
         }
 
         // If there was an error in the flushing, we return it immediately.
@@ -2189,7 +2189,7 @@ where
                 self.state.event_batch.push(
                     Event::Relation(relation),
                     StreamingPayloadMetadata::default(),
-                    &self.cached_batch_memory_limit,
+                    &self.batch_memory_governor,
                 );
             }
 
@@ -2197,7 +2197,7 @@ where
             self.state.event_batch.push(
                 event,
                 result.streaming_payload_metadata,
-                &self.cached_batch_memory_limit,
+                &self.batch_memory_governor,
             );
 
             // We update the last end lsn of the commit that we encountered, if any.
@@ -2211,7 +2211,7 @@ where
         // We check for the batch flushing conditions before deciding whether to flush
         // or not.
         let batch_size_hint_bytes_reached = self.state.event_batch.size_hint_bytes()
-            >= self.cached_batch_memory_limit.current_batch_size_limit_bytes();
+            >= self.batch_memory_governor.batch_size_target_bytes();
         let early_flush_requested = result.end_batch;
         let should_flush = batch_size_hint_bytes_reached || early_flush_requested;
 
@@ -2264,7 +2264,7 @@ where
             events,
             relation_table_ids,
             streaming_payload_metadata,
-            memory_reservation: batch_memory_reservation,
+            memory_tracker: batch_memory_tracker,
         } = event_batch;
         let event_count = events.len();
 
@@ -2290,7 +2290,7 @@ where
             event_count,
             relation_table_ids,
             streaming_payload_metadata,
-            batch_memory_reservation,
+            batch_memory_tracker,
             dispatched_at: Instant::now(),
         };
 
