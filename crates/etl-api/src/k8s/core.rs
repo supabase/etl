@@ -27,7 +27,7 @@ use crate::{
     },
     k8s::{
         DestinationType, K8sClient, K8sError, KubernetesMaintenanceMaterializer,
-        PipelineRuntimeIdentity, PodStatus, ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
+        PipelineRuntimeIdentity, PodStatus, ReplicatorConfigMapFile, ReplicatorWorkloadConfig,
         ducklake_maintenance_policy_from_config,
     },
 };
@@ -151,7 +151,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
     };
 
     let log_level = pipeline.config.log_level.clone().unwrap_or_default();
-    let replicator_resources = pipeline.config.replicator_resources.clone();
+    let replicator_resource_override = pipeline.config.replicator_resources.clone();
     let ducklake_maintenance = pipeline.config.ducklake_maintenance.clone();
     let replicator_config = build_replicator_config_without_secrets(
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
@@ -200,9 +200,9 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         k8s_client,
         &resource_prefix,
         &identity,
-        ReplicatorStatefulSetConfig {
+        ReplicatorWorkloadConfig {
             replicator_image,
-            replicator_resources,
+            replicator_resource_override,
             destination_type,
             ducklake_maintenance: ducklake_maintenance_for_kubernetes,
             log_level,
@@ -545,9 +545,11 @@ async fn create_or_update_replicator_stateful_set(
     k8s_client: &dyn K8sClient,
     resource_prefix: &str,
     identity: &PipelineRuntimeIdentity,
-    config: ReplicatorStatefulSetConfig,
+    workload_config: &ReplicatorWorkloadConfig,
 ) -> Result<(), K8sCoreError> {
-    k8s_client.create_or_update_replicator_stateful_set(resource_prefix, identity, config).await?;
+    k8s_client
+        .create_or_update_replicator_stateful_set(resource_prefix, identity, workload_config)
+        .await?;
 
     Ok(())
 }
@@ -556,13 +558,23 @@ async fn create_or_update_replicator_workload(
     k8s_client: &dyn K8sClient,
     resource_prefix: &str,
     identity: &PipelineRuntimeIdentity,
-    config: ReplicatorStatefulSetConfig,
+    workload_config: ReplicatorWorkloadConfig,
 ) -> Result<(), K8sCoreError> {
     // Apply the VPA first so newly admitted Pods observe its intended update mode.
     k8s_client
-        .create_or_update_replicator_vertical_pod_autoscaler(resource_prefix, identity)
+        .create_or_update_replicator_vertical_pod_autoscaler(
+            resource_prefix,
+            identity,
+            &workload_config,
+        )
         .await?;
-    create_or_update_replicator_stateful_set(k8s_client, resource_prefix, identity, config).await
+    create_or_update_replicator_stateful_set(
+        k8s_client,
+        resource_prefix,
+        identity,
+        &workload_config,
+    )
+    .await
 }
 
 /// Creates, updates, or deletes the DuckLake maintenance CR.
@@ -957,7 +969,7 @@ mod tests {
             &self,
             resource_prefix: &str,
             _identity: &PipelineRuntimeIdentity,
-            _config: ReplicatorStatefulSetConfig,
+            _workload_config: &ReplicatorWorkloadConfig,
         ) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("stateful-set:{resource_prefix}"));
             Ok(())
@@ -967,6 +979,7 @@ mod tests {
             &self,
             resource_prefix: &str,
             _identity: &PipelineRuntimeIdentity,
+            _workload_config: &ReplicatorWorkloadConfig,
         ) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("vpa:{resource_prefix}"));
             Ok(())
@@ -1073,9 +1086,9 @@ mod tests {
             &client,
             "tenant-42",
             &pipeline_runtime_identity(),
-            ReplicatorStatefulSetConfig {
+            ReplicatorWorkloadConfig {
                 replicator_image: "etl-replicator:test".to_owned(),
-                replicator_resources: None,
+                replicator_resource_override: None,
                 destination_type: DestinationType::ClickHouse { password_secret_required: false },
                 ducklake_maintenance: None,
                 log_level: Default::default(),

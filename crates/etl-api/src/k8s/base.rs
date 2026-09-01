@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::configs::{
     destination::StoredDestinationConfig,
     log::LogLevel,
-    pipeline::{DuckLakeMaintenanceConfig, ReplicatorResourcesConfig},
+    pipeline::{DuckLakeMaintenanceConfig, PipelineReplicatorResourceOverrideConfig},
 };
 
 /// Errors from Kubernetes operations.
@@ -73,13 +73,13 @@ pub struct DuckLakeMaintenanceResourceConfig {
     pub policy: DuckLakeMaintenancePolicy,
 }
 
-/// Replicator StatefulSet materialization input.
+/// Input shared by the replicator StatefulSet and VPA materializers.
 #[derive(Debug, Clone)]
-pub struct ReplicatorStatefulSetConfig {
+pub struct ReplicatorWorkloadConfig {
     /// Image for the replicator container.
     pub replicator_image: String,
-    /// Optional resource overrides.
-    pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    /// Optional pipeline-level replicator resource override.
+    pub replicator_resource_override: Option<PipelineReplicatorResourceOverrideConfig>,
     /// Destination type used to select destination-specific env/secrets.
     pub destination_type: DestinationType,
     /// DuckLake maintenance policy.
@@ -333,15 +333,21 @@ pub trait K8sClient: Send + Sync {
         &self,
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
-        config: ReplicatorStatefulSetConfig,
+        workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError>;
 
     /// Creates or updates the Vertical Pod Autoscaler for the replicator
     /// `StatefulSet`.
+    ///
+    /// CPU and memory resolve independently. A pipeline request override pins
+    /// the corresponding VPA resource to that value. Without an override, the
+    /// configured autoscaling interval is used; when autoscaling is omitted,
+    /// the StatefulSet startup allocation is used as both VPA bounds.
     async fn create_or_update_replicator_vertical_pod_autoscaler(
         &self,
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
+        workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError>;
 
     /// Deletes the replicator `StatefulSet`.

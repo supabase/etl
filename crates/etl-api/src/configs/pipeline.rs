@@ -64,38 +64,49 @@ fn default_replication_slot() -> ReplicationSlotConfig {
     ReplicationSlotConfig::default()
 }
 
+/// Optional pipeline-level overrides for replicator CPU and memory.
+///
+/// Requests inherit from the destination-aware API defaults when omitted. A
+/// request override also pins that resource to the same value in the pipeline
+/// VPA. The generated StatefulSet always copies its resolved requests into its
+/// limits to preserve Guaranteed QoS.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
-pub struct ReplicatorResourcesConfig {
+pub struct PipelineReplicatorResourceOverrideConfig {
     /// CPU request for the replicator container, in millicores.
     ///
     /// When unset, the replicator uses the default request from the ETL API
-    /// service configuration.
+    /// service configuration. When set, the resolved CPU allocation is also
+    /// pinned as both the minimum and maximum in the pipeline's VPA.
     #[schema(example = 500)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_request_millicores: Option<i32>,
     /// Memory request for the replicator container, in MiB.
     ///
     /// When unset, the replicator uses the default request from the ETL API
-    /// service configuration.
+    /// service configuration. When set, the resolved memory allocation is also
+    /// pinned as both the minimum and maximum in the pipeline's VPA.
     #[schema(example = 2000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_request_mib: Option<i32>,
     /// CPU limit for the replicator container, in millicores.
     ///
-    /// When unset, the ETL API uses the final CPU request as the CPU limit.
+    /// Retained for compatibility with persisted pipeline configurations. The
+    /// generated limit always equals the resolved CPU request, so this value no
+    /// longer affects workload sizing.
     #[schema(example = 1000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_limit_millicores: Option<i32>,
     /// Memory limit for the replicator container, in MiB.
     ///
-    /// When unset, the ETL API uses the final memory request as the memory
-    /// limit.
+    /// Retained for compatibility with persisted pipeline configurations. The
+    /// generated limit always equals the resolved memory request, so this value
+    /// no longer affects workload sizing.
     #[schema(example = 2400)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_limit_mib: Option<i32>,
 }
 
-impl ReplicatorResourcesConfig {
+impl PipelineReplicatorResourceOverrideConfig {
     /// Validates that configured resource overrides are positive.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(cpu_request_millicores) = self.cpu_request_millicores
@@ -271,7 +282,7 @@ pub struct ApiPipelineConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invalidated_slot_behavior: Option<InvalidatedSlotBehavior>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    pub replicator_resources: Option<PipelineReplicatorResourceOverrideConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,7 +343,7 @@ pub struct UpdateApiPipelineConfig {
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub invalidated_slot_behavior: UpdateField<InvalidatedSlotBehavior>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
-    pub replicator_resources: UpdateField<ReplicatorResourcesConfig>,
+    pub replicator_resources: UpdateField<PipelineReplicatorResourceOverrideConfig>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub ducklake_maintenance: UpdateField<DuckLakeMaintenanceConfig>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
@@ -508,7 +519,7 @@ pub struct StoredPipelineConfig {
     #[serde(default = "default_invalidated_slot_behavior")]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    pub replicator_resources: Option<PipelineReplicatorResourceOverrideConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -665,10 +676,10 @@ mod tests {
                 resume_threshold: 0.7,
             }),
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
-            replicator_resources: Some(ReplicatorResourcesConfig {
+            replicator_resources: Some(PipelineReplicatorResourceOverrideConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
-                ..ReplicatorResourcesConfig::default()
+                ..PipelineReplicatorResourceOverrideConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: None,
@@ -707,10 +718,10 @@ mod tests {
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
-            replicator_resources: Some(ReplicatorResourcesConfig {
+            replicator_resources: Some(PipelineReplicatorResourceOverrideConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
-                ..ReplicatorResourcesConfig::default()
+                ..PipelineReplicatorResourceOverrideConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: Some(LogLevel::Debug),
@@ -803,7 +814,7 @@ mod tests {
             }),
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
-            replicator_resources: Some(ReplicatorResourcesConfig::default()),
+            replicator_resources: Some(PipelineReplicatorResourceOverrideConfig::default()),
             ducklake_maintenance: Some(DuckLakeMaintenanceConfig::default()),
             log_level: Some(LogLevel::Info),
         };
@@ -957,10 +968,10 @@ mod tests {
                 resume_threshold: 0.7,
             }),
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
-            replicator_resources: Some(ReplicatorResourcesConfig {
+            replicator_resources: Some(PipelineReplicatorResourceOverrideConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
-                ..ReplicatorResourcesConfig::default()
+                ..PipelineReplicatorResourceOverrideConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: None,
@@ -972,5 +983,20 @@ mod tests {
         let deserialized: StoredPipelineConfig = serde_json::from_value(json).unwrap();
 
         assert_eq!(deserialized.replicator_resources, None);
+    }
+
+    #[test]
+    fn pipeline_resource_override_preserves_persisted_keys() {
+        let persisted = serde_json::json!({
+            "cpu_request_millicores": 500,
+            "memory_request_mib": 2000,
+            "cpu_limit_millicores": 1000,
+            "memory_limit_mib": 2400
+        });
+
+        let config: PipelineReplicatorResourceOverrideConfig =
+            serde_json::from_value(persisted.clone()).unwrap();
+
+        assert_eq!(serde_json::to_value(config).unwrap(), persisted);
     }
 }

@@ -22,14 +22,6 @@ const DEFAULT_NAME: &str = "local-replicator";
 const DEFAULT_IMAGE: &str = "etl-replicator:local";
 /// Default application environment loaded by the replicator.
 const DEFAULT_APP_ENVIRONMENT: &str = "dev";
-/// Default CPU request for the local replicator pod.
-const DEFAULT_CPU_REQUEST: &str = "125m";
-/// Default CPU limit for the local replicator pod.
-const DEFAULT_CPU_LIMIT: &str = DEFAULT_CPU_REQUEST;
-/// Default memory request for the local replicator pod.
-const DEFAULT_MEMORY_REQUEST: &str = "250Mi";
-/// Default memory limit for the local replicator pod.
-const DEFAULT_MEMORY_LIMIT: &str = DEFAULT_MEMORY_REQUEST;
 /// Default log filter used by the local replicator.
 const DEFAULT_RUST_LOG: &str = "info";
 /// Default tracing flag used by the local replicator.
@@ -89,20 +81,12 @@ pub(crate) struct DeployLocalArgs {
     /// Application environment (defaults to APP_ENVIRONMENT or dev).
     #[arg(long, value_name = "ENV")]
     app_environment: Option<String>,
-    /// CPU request (defaults to CPU_REQUEST, MAC_CPU_REQUEST, or 125m).
-    #[arg(long, value_name = "VALUE")]
-    cpu_request: Option<String>,
-    /// CPU limit (defaults to CPU_LIMIT, MAC_CPU_LIMIT, or the CPU request).
-    #[arg(long, value_name = "VALUE")]
-    cpu_limit: Option<String>,
-    /// Memory request (defaults to MEMORY_REQUEST, MAC_MEMORY_REQUEST, or
-    /// 250Mi).
-    #[arg(long, value_name = "VALUE")]
-    memory_request: Option<String>,
-    /// Memory limit (defaults to MEMORY_LIMIT, MAC_MEMORY_LIMIT, or the memory
-    /// request).
-    #[arg(long, value_name = "VALUE")]
-    memory_limit: Option<String>,
+    /// CPU request and matching limit (or set CPU_REQUEST).
+    #[arg(long, env = "CPU_REQUEST", value_name = "VALUE")]
+    cpu_request: String,
+    /// Memory request and matching limit (or set MEMORY_REQUEST).
+    #[arg(long, env = "MEMORY_REQUEST", value_name = "VALUE")]
+    memory_request: String,
     /// Skip the local Docker image build.
     #[arg(long)]
     skip_build: bool,
@@ -165,12 +149,8 @@ struct DeployLocalConfig {
     enable_tracing: String,
     /// Pod CPU request.
     cpu_request: String,
-    /// Pod CPU limit.
-    cpu_limit: String,
     /// Pod memory request.
     memory_request: String,
-    /// Pod memory limit.
-    memory_limit: String,
     /// Whether to skip Docker image building.
     skip_build: bool,
     /// Whether to skip rollout waiting.
@@ -215,18 +195,8 @@ impl DeployLocalConfig {
                 .unwrap_or_else(|| env_or("APP_ENVIRONMENT", DEFAULT_APP_ENVIRONMENT)),
             rust_log: env_or("RUST_LOG", DEFAULT_RUST_LOG),
             enable_tracing: env_or("ENABLE_TRACING", DEFAULT_ENABLE_TRACING),
-            cpu_request: args.cpu_request.unwrap_or_else(|| {
-                env_or_with_fallback("CPU_REQUEST", "MAC_CPU_REQUEST", DEFAULT_CPU_REQUEST)
-            }),
-            cpu_limit: args.cpu_limit.unwrap_or_else(|| {
-                env_or_with_fallback("CPU_LIMIT", "MAC_CPU_LIMIT", DEFAULT_CPU_LIMIT)
-            }),
-            memory_request: args.memory_request.unwrap_or_else(|| {
-                env_or_with_fallback("MEMORY_REQUEST", "MAC_MEMORY_REQUEST", DEFAULT_MEMORY_REQUEST)
-            }),
-            memory_limit: args.memory_limit.unwrap_or_else(|| {
-                env_or_with_fallback("MEMORY_LIMIT", "MAC_MEMORY_LIMIT", DEFAULT_MEMORY_LIMIT)
-            }),
+            cpu_request: args.cpu_request,
+            memory_request: args.memory_request,
             skip_build: args.skip_build,
             skip_wait: args.skip_wait,
             allow_non_local_context: args.allow_non_local_context,
@@ -598,12 +568,6 @@ where
     value.parse().map_err(|error| anyhow::anyhow!("Failed to parse {key} value `{value}`: {error}"))
 }
 
-/// Returns an environment variable, a fallback environment variable, or a
-/// default.
-fn env_or_with_fallback(key: &str, fallback_key: &str, default: &str) -> String {
-    optional_env(key).or_else(|| optional_env(fallback_key)).unwrap_or_else(|| default.to_owned())
-}
-
 /// Returns a non-empty environment variable.
 fn optional_env(key: &str) -> Option<String> {
     env::var(key).ok().filter(|value| !value.is_empty())
@@ -691,8 +655,8 @@ spec:
             cpu: "{cpu_request}"
             memory: "{memory_request}"
           limits:
-            cpu: "{cpu_limit}"
-            memory: "{memory_limit}"
+            cpu: "{cpu_request}"
+            memory: "{memory_request}"
         volumeMounts:
         - name: replicator-config
           mountPath: /etc/etl/replicator-config
@@ -703,12 +667,10 @@ spec:
           name: {config_map_name}
 "#,
         config_map_name = config.config_map_name(),
-        cpu_limit = config.cpu_limit,
         cpu_request = config.cpu_request,
         env_config_map_name = config.env_config_map_name(),
         headless_service_name = config.headless_service_name(),
         image = config.image,
-        memory_limit = config.memory_limit,
         memory_request = config.memory_request,
         name = config.name,
         stateful_set_name = config.stateful_set_name(),

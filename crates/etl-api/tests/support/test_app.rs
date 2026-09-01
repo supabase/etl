@@ -9,9 +9,9 @@ use aws_lc_rs::{
 use base64::prelude::*;
 use etl_api::{
     config::{
-        ApiConfig, ApiReplicatorConfig, ApplicationSettings, DefaultReplicatorResourcesConfig,
-        DefaultVectorResourcesConfig, EncryptionKeyConfig as ConfigEncryptionKey, K8sConfig,
-        SourceConfig,
+        ApiConfig, ApiReplicatorConfig, ApplicationSettings,
+        EncryptionKeyConfig as ConfigEncryptionKey, K8sConfig, ReplicatorResourceDefaultsConfig,
+        SourceConfig, VectorResourceDefaultsConfig,
     },
     configs::encryption,
     k8s::{K8sClient, SourceTlsConfig},
@@ -802,14 +802,14 @@ async fn spawn_test_app_with_services(
             replicator_service_account_name: "etl-replicator".to_owned(),
             replicator_node_selectors: Default::default(),
             replicator_tolerations: Default::default(),
-            replicator_resources: DefaultReplicatorResourcesConfig {
+            replicator_resources: ReplicatorResourceDefaultsConfig {
                 memory_request_mib: 250,
                 cpu_request_millicores: 125,
                 destinations: Default::default(),
             },
-            replicator_autoscaling: Default::default(),
+            replicator_autoscaling: None,
             vector_image: "timberio/vector:0.55.0-distroless-libc".to_owned(),
-            vector_resources: DefaultVectorResourcesConfig {
+            vector_resources: VectorResourceDefaultsConfig {
                 memory_request_mib: 192,
                 cpu_request_millicores: 75,
             },
