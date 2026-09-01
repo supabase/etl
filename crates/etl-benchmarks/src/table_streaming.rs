@@ -79,6 +79,9 @@ pub struct RunArgs {
     /// Write a machine-readable JSON report to this path.
     #[arg(long)]
     report_path: Option<PathBuf>,
+    /// Keep the initialized destination idle before starting the pipeline.
+    #[arg(long, default_value_t = 0)]
+    destination_settle_ms: u64,
 }
 
 /// Machine-readable table-streaming benchmark report.
@@ -104,6 +107,8 @@ struct TableStreamingReport {
     tpcc_threads: u16,
     drain_quiet_ms: u64,
     drain_poll_ms: u64,
+    destination_init_ms: u128,
+    destination_settle_ms: u64,
     pipeline_start_ms: u128,
     ready_wait_ms: u128,
     producer_ms: u128,
@@ -145,8 +150,13 @@ async fn run(args: RunArgs) -> Result<()> {
     run_etl_migrations(&args.pg).await?;
     let table_ids = args.table_ids.clone();
     let store = NotifyingStore::new();
+    let destination_started = Instant::now();
     let destination =
         BenchDestination::new(&args.destination, args.pipeline_id, store.clone()).await?;
+    let destination_init_ms = duration_millis(destination_started.elapsed());
+    if args.destination_settle_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(args.destination_settle_ms)).await;
+    }
 
     let notifications = register_table_sync_notifications(&store, &table_ids).await?;
 
@@ -223,6 +233,8 @@ async fn run(args: RunArgs) -> Result<()> {
         tpcc_threads: args.tpcc_threads,
         drain_quiet_ms: args.drain_quiet_ms,
         drain_poll_ms: args.drain_poll_ms,
+        destination_init_ms,
+        destination_settle_ms: args.destination_settle_ms,
         pipeline_start_ms,
         ready_wait_ms,
         producer_ms: duration_millis(producer_duration),

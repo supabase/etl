@@ -1,5 +1,3 @@
-#[cfg(feature = "test-utils")]
-use std::sync::atomic::AtomicUsize;
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -65,7 +63,8 @@ use crate::{
         },
         client::{
             DuckLakeConnectionManager, DuckLakeDedicatedConnection, DuckLakeInterruptRegistry,
-            build_warm_ducklake_pool, format_query_error_detail, run_duckdb_blocking,
+            build_warm_ducklake_pool, format_query_error_detail,
+            is_ducklake_shutdown_requested_error, run_duckdb_blocking,
             run_duckdb_dedicated_blocking_with_context,
         },
         config::{
@@ -548,6 +547,8 @@ pub struct DuckLakeDestination<S> {
     copy_buffers: Arc<Mutex<HashMap<DuckLakeTableName, Arc<DuckLakeCopyBufferHandle>>>>,
     /// Attempts invalidated by a staging or flush failure until table reset.
     failed_copy_buffers: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    /// Shared-instance tables currently forced to write COPY rows to Parquet.
+    copy_direct_to_parquet_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     store: S,
     /// Applied ETL-owned tables used by the background metrics sampler.
     ///
@@ -829,6 +830,7 @@ where
         );
         self.copy_buffers.lock().clear();
         self.failed_copy_buffers.lock().clear();
+        self.copy_direct_to_parquet_tables.lock().clear();
         self.tasks.shutdown().await?;
         self.shutdown_metrics_sampler().await?;
 
@@ -1500,6 +1502,24 @@ fn missing_replicated_columns_ducklake(
         .collect()
 }
 
+/// Classifies a COPY inlining transition failure for the runtime retry policy.
+fn classify_copy_data_inlining_error(
+    table_name: &DuckLakeTableName,
+    row_limit: u64,
+    error: etl::error::EtlError,
+) -> etl::error::EtlError {
+    if is_ducklake_shutdown_requested_error(&error) {
+        return error;
+    }
+
+    etl_error!(
+        ErrorKind::DestinationAtomicBatchRetryable,
+        "DuckLake COPY data inlining configuration failed",
+        format!("table={table_name}, row_limit={row_limit}"),
+        source: error
+    )
+}
+
 impl<S> DuckLakeDestination<S>
 where
     S: DestinationStore,
@@ -1847,33 +1867,18 @@ where
             &writer_config,
             ATTACH_DATA_INLINING_ROW_LIMIT,
         )?);
-        let copy_setup_plan = Arc::new(build_setup_plan(
-            &catalog_url,
-            &data_path,
-            s3.as_ref(),
-            metadata_schema.as_deref(),
-            &writer_config,
-            COPY_DATA_INLINING_ROW_LIMIT,
-        )?);
 
         let interrupt_registry = Arc::new(DuckLakeInterruptRegistry::default());
         let shutdown_requested = Arc::new(AtomicBool::new(false));
-        let manager = Arc::new(DuckLakeConnectionManager {
-            setup_plan: Arc::clone(&setup_plan),
-            disable_extension_autoload,
-            interrupt_registry: Arc::clone(&interrupt_registry),
-            shutdown_requested: Arc::clone(&shutdown_requested),
-            #[cfg(feature = "test-utils")]
-            open_count: Arc::new(AtomicUsize::new(0)),
-        });
-        let copy_manager = DuckLakeConnectionManager {
-            setup_plan: copy_setup_plan,
+        let manager = DuckLakeConnectionManager::new(
+            setup_plan,
             disable_extension_autoload,
             interrupt_registry,
             shutdown_requested,
-            #[cfg(feature = "test-utils")]
-            open_count: Arc::new(AtomicUsize::new(0)),
-        };
+        )
+        .await?;
+        let copy_manager = manager.new_pool_manager();
+        let manager = Arc::new(manager);
         let pool =
             Arc::new(build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?);
         let blocking_slots = Arc::new(Semaphore::new(pool_size as usize));
@@ -1973,9 +1978,9 @@ where
         })?;
 
         // Persist helper-table inlining options before warming COPY
-        // connections. The COPY pool remains attached with inlining disabled,
-        // while the more specific helper-table options keep only ETL metadata
-        // rows inline.
+        // connections. Actively copied user tables temporarily override the
+        // shared attachment's default, while these more specific options keep
+        // ETL metadata rows inline.
         ensure_applied_batches_table_exists(
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
@@ -2021,6 +2026,7 @@ where
             copy_session_slots: Arc::new(Semaphore::new(copy_session_permits)),
             copy_buffers: Arc::new(Mutex::new(HashMap::with_capacity(copy_session_permits))),
             failed_copy_buffers: Arc::default(),
+            copy_direct_to_parquet_tables: Arc::default(),
             store,
             applied_tables: Arc::clone(&applied_tables),
             applied_batches_table_created,
@@ -2224,8 +2230,76 @@ where
 
         self.applied_tables.lock().remove(&table_name);
         self.failed_copy_buffers.lock().remove(&table_name);
+        self.copy_direct_to_parquet_tables.lock().remove(&table_name);
 
         Ok(())
+    }
+
+    /// Forces one shared-instance table to materialize initial-copy rows as
+    /// Parquet instead of inheriting the streaming attachment's inline limit.
+    async fn ensure_copy_writes_direct_to_parquet(
+        &self,
+        table_name: &DuckLakeTableName,
+    ) -> EtlResult<()> {
+        if self.copy_direct_to_parquet_tables.lock().contains(table_name) {
+            return Ok(());
+        }
+
+        self.set_copy_data_inlining_row_limit(table_name, COPY_DATA_INLINING_ROW_LIMIT).await?;
+        self.copy_direct_to_parquet_tables.lock().insert(table_name.clone());
+        Ok(())
+    }
+
+    /// Restores the streaming inline limit after a shared-instance copy reaches
+    /// its terminal durability barrier.
+    async fn restore_streaming_data_inlining(
+        &self,
+        table_name: &DuckLakeTableName,
+    ) -> EtlResult<()> {
+        self.set_copy_data_inlining_row_limit(table_name, ATTACH_DATA_INLINING_ROW_LIMIT).await?;
+        self.copy_direct_to_parquet_tables.lock().remove(table_name);
+        Ok(())
+    }
+
+    /// Sets one table's COPY-related inlining threshold with retryable error
+    /// classification.
+    async fn set_copy_data_inlining_row_limit(
+        &self,
+        table_name: &DuckLakeTableName,
+        row_limit: u64,
+    ) -> EtlResult<()> {
+        self.set_table_data_inlining_row_limit(table_name, row_limit)
+            .await
+            .map_err(|error| classify_copy_data_inlining_error(table_name, row_limit, error))
+    }
+
+    /// Sets one DuckLake table's data-inlining threshold.
+    async fn set_table_data_inlining_row_limit(
+        &self,
+        table_name: &DuckLakeTableName,
+        row_limit: u64,
+    ) -> EtlResult<()> {
+        let sql = format!(
+            "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {row_limit}, schema => {}, \
+             table_name => {});",
+            quote_literal(table_name.schema()),
+            quote_literal(table_name.table()),
+        );
+        let table_name = table_name.clone();
+        self.run_duckdb_blocking(move |conn| {
+            debug!(table = %table_name, row_limit, "ducklake table data inlining configuration begin");
+            conn.execute_batch(&sql).map_err(|error| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake table data inlining configuration failed",
+                    format_query_error_detail(&sql),
+                    source: error
+                )
+            })?;
+            debug!(table = %table_name, row_limit, "ducklake table data inlining configuration finished");
+            Ok(())
+        })
+        .await
     }
 
     /// Bulk-inserts rows into the destination table inside a single
@@ -2263,23 +2337,27 @@ where
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let table_name = self.prepare_table_for_writes(replicated_table_schema).await?;
+        let copy_complete = table_rows.is_empty();
 
         // Copy batches for the same table must still serialize so concurrent
         // callers do not race each other inside DuckDB.
         self.ensure_applied_batches_table_exists().await?;
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
-        let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
-        let prepared_batch = match (batch_id, table_rows.is_empty()) {
+        if !copy_complete {
+            self.ensure_copy_writes_direct_to_parquet(&table_name).await?;
+        }
+        let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
+        let prepared_batch = match (batch_id, copy_complete) {
             (Some(batch_id), false) => prepare_copy_table_batch(
                 replicated_table_schema,
-                table_name,
+                table_name.clone(),
                 replay_epoch,
                 batch_id,
                 table_rows,
             )?
             .into_atomic_batch(),
-            (None, true) => prepare_copy_complete_table_batch(table_name, replay_epoch),
+            (None, true) => prepare_copy_complete_table_batch(table_name.clone(), replay_epoch),
             _ => {
                 return Err(etl_error!(
                     ErrorKind::InvalidState,
@@ -2293,6 +2371,9 @@ where
             prepared_batch,
         )
         .await?;
+        if copy_complete {
+            self.restore_streaming_data_inlining(&table_name).await?;
+        }
 
         Ok(())
     }
@@ -2308,6 +2389,10 @@ where
         let table_name = self.prepare_table_for_writes(replicated_table_schema).await?;
         self.ensure_applied_batches_table_exists().await?;
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+        if !table_rows.is_empty() {
+            let _checkpoint_guard = self.acquire_mutation_guard().await;
+            self.ensure_copy_writes_direct_to_parquet(&table_name).await?;
+        }
         let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
 
         if self.failed_copy_buffers.lock().contains(&table_name) {
@@ -2331,6 +2416,7 @@ where
                     copy_complete,
                 )
                 .await?;
+                self.restore_streaming_data_inlining(&table_name).await?;
                 return Ok(());
             };
 
@@ -2338,6 +2424,7 @@ where
                 self.invalidate_copy_buffer(&table_name);
                 return Err(error);
             }
+            self.restore_streaming_data_inlining(&table_name).await?;
             handle.reservations.lock().clear();
             self.copy_buffers.lock().remove(&table_name);
             return Ok(());
@@ -3755,6 +3842,11 @@ where
             ));
         }
 
+        if let Err(error) = self.manager.recreate_shared_instance().await {
+            drop(self.pools.invalidate());
+            return Err(error);
+        }
+
         let streaming =
             match build_warm_ducklake_pool(self.manager.as_ref().clone(), self.pool_size, "write")
                 .await
@@ -4266,6 +4358,20 @@ mod tests {
 
         let batch_id = NEXT_BATCH_ID.fetch_add(1, Ordering::Relaxed);
         TableCopyBatchId::new(TableCopyAttemptId::from_u128(1), batch_id)
+    }
+
+    #[test]
+    fn copy_data_inlining_errors_are_retryable_except_during_shutdown() {
+        let table_name = DuckLakeTableName::new("public", "users");
+        let query_error =
+            etl_error!(ErrorKind::DestinationQueryFailed, "Synthetic DuckLake inlining failure");
+
+        let error = classify_copy_data_inlining_error(&table_name, 1_000_000, query_error);
+        assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+
+        let shutdown_error = crate::ducklake::client::ducklake_shutdown_requested_error();
+        let error = classify_copy_data_inlining_error(&table_name, 1_000_000, shutdown_error);
+        assert!(is_ducklake_shutdown_requested_error(&error));
     }
 
     /// Keeps compaction from competing with batches that are creating Parquet
