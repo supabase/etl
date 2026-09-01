@@ -287,13 +287,12 @@ mod tests {
 
     #[test]
     fn removed_persisted_limits_neither_size_the_workload_nor_pin_vpa() {
-        let overrides: PipelineReplicatorResourceOverrideConfig = serde_json::from_value(
-            serde_json::json!({
+        let overrides: PipelineReplicatorResourceOverrideConfig =
+            serde_json::from_value(serde_json::json!({
                 "cpu_limit_millicores": 1_200,
                 "memory_limit_mib": 2_048
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
         let config = test_k8s_config();
 
         let resources = ReplicatorStatefulSetResourceRequirements::resolve(

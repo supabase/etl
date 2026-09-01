@@ -651,7 +651,6 @@ mod tests {
             replicator_resources: Some(PipelineReplicatorResourceOverrideConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
-                ..PipelineReplicatorResourceOverrideConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: None,
@@ -693,7 +692,6 @@ mod tests {
             replicator_resources: Some(PipelineReplicatorResourceOverrideConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
-                ..PipelineReplicatorResourceOverrideConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: Some(LogLevel::Debug),
@@ -943,7 +941,6 @@ mod tests {
             replicator_resources: Some(PipelineReplicatorResourceOverrideConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
-                ..PipelineReplicatorResourceOverrideConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: None,
