@@ -86,13 +86,37 @@ struct MemorySnapshot {
     source: MemorySnapshotSource,
 }
 
+/// Result of attempting to refresh the selected memory domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MemoryRefresh {
+    /// Snapshot to use for backpressure decisions.
+    snapshot: MemorySnapshot,
+    /// Whether the snapshot was read during this refresh attempt.
+    fresh: bool,
+}
+
+impl MemoryRefresh {
+    /// Creates a refresh result from a newly read snapshot.
+    const fn fresh(snapshot: MemorySnapshot) -> Self {
+        Self { snapshot, fresh: true }
+    }
+
+    /// Creates a refresh result that retains the last successful snapshot.
+    const fn retained(snapshot: MemorySnapshot) -> Self {
+        Self { snapshot, fresh: false }
+    }
+}
+
 impl MemorySnapshot {
     /// Refreshes the most specific enforceable memory domain available.
+    ///
+    /// The returned freshness flag is false when a transient cgroup read
+    /// failure requires retaining the previous snapshot.
     fn refresh(
         system: &mut sysinfo::System,
         current_pid: Option<sysinfo::Pid>,
         previous: Option<Self>,
-    ) -> Self {
+    ) -> MemoryRefresh {
         // Host memory distinguishes a genuinely constrained cgroup from the
         // effectively unlimited cgroups used by ordinary Linux processes. It is
         // also the fallback on platforms without memory cgroups.
@@ -107,12 +131,14 @@ impl MemorySnapshot {
             .and_then(|pid| system.process(pid))
             .and_then(sysinfo::Process::cgroup_limits)
         {
-            return Self::constrained_cgroup_snapshot(
+            let snapshot = Self::constrained_cgroup_snapshot(
                 &cgroup,
                 MemorySnapshotSource::ProcessCgroup,
                 system_snapshot,
             )
             .unwrap_or(system_snapshot);
+
+            return MemoryRefresh::fresh(snapshot);
         }
 
         // Once the process cgroup has been observed, a missing read is treated as
@@ -125,16 +151,18 @@ impl MemorySnapshot {
                 "failed to refresh process cgroup memory; retaining previous snapshot"
             );
 
-            return previous;
+            return MemoryRefresh::retained(previous);
         }
 
         if let Some(cgroup) = system.cgroup_limits() {
-            return Self::constrained_cgroup_snapshot(
+            let snapshot = Self::constrained_cgroup_snapshot(
                 &cgroup,
                 MemorySnapshotSource::RootCgroup,
                 system_snapshot,
             )
             .unwrap_or(system_snapshot);
+
+            return MemoryRefresh::fresh(snapshot);
         }
 
         if let Some(previous @ Self { source: MemorySnapshotSource::RootCgroup, .. }) = previous {
@@ -143,10 +171,10 @@ impl MemorySnapshot {
                 "failed to refresh root cgroup memory; retaining previous snapshot"
             );
 
-            return previous;
+            return MemoryRefresh::retained(previous);
         }
 
-        system_snapshot
+        MemoryRefresh::fresh(system_snapshot)
     }
 
     /// Builds a snapshot from effective cgroup capacity and headroom.
@@ -240,7 +268,7 @@ impl MemoryMonitor {
 
         // Initialize from a real memory snapshot so startup state reflects current
         // pressure.
-        let startup_snapshot = MemorySnapshot::refresh(&mut system, current_pid, None);
+        let startup_snapshot = MemorySnapshot::refresh(&mut system, current_pid, None).snapshot;
         emit_memory_snapshot_metrics(startup_snapshot, None);
         let backpressure = memory_backpressure_config.map(|config| {
             let startup_backpressure_active = compute_next_backpressure_active(
@@ -287,12 +315,13 @@ impl MemoryMonitor {
 
                     _ = ticker.tick() => {
                         let previous_snapshot = this_clone.current_snapshot();
-                        let snapshot = MemorySnapshot::refresh(
+                        let refresh = MemorySnapshot::refresh(
                             &mut system,
                             current_pid,
                             Some(previous_snapshot),
                         );
-                        this_clone.publish_snapshot(snapshot);
+                        let snapshot = refresh.snapshot;
+                        this_clone.publish_refresh(refresh);
 
                         if let Some(backpressure) = this_clone.inner.backpressure.as_ref() {
                             let used_percent = snapshot.used_percent();
@@ -443,6 +472,13 @@ impl MemoryMonitor {
     /// Returns the latest complete memory snapshot.
     fn current_snapshot(&self) -> MemorySnapshot {
         *self.inner.snapshot.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Publishes a memory refresh only when it contains a new reading.
+    fn publish_refresh(&self, refresh: MemoryRefresh) {
+        if refresh.fresh {
+            self.publish_snapshot(refresh.snapshot);
+        }
     }
 
     /// Publishes one coherent memory snapshot and advances its wrapping
@@ -641,6 +677,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::runtime::BatchMemoryGovernor;
 
     /// One captured gauge assignment.
     #[derive(Debug, PartialEq)]
@@ -779,7 +816,7 @@ mod tests {
             sysinfo::ProcessRefreshKind::nothing(),
         );
 
-        let snapshot = MemorySnapshot::refresh(&mut system, Some(current_pid), None);
+        let snapshot = MemorySnapshot::refresh(&mut system, Some(current_pid), None).snapshot;
 
         assert!(snapshot.total > 0);
         assert!(snapshot.used <= snapshot.total);
@@ -931,6 +968,29 @@ mod tests {
         assert_eq!(snapshot.used_memory_bytes, 4_000);
         assert_eq!(snapshot.total_memory_bytes, 6_000);
         assert_eq!(snapshot.normal_memory_target_bytes, Some(4_800));
+    }
+
+    #[test]
+    fn retained_snapshot_does_not_recalibrate_the_batch_target() {
+        let memory_monitor = MemoryMonitor::new_for_test();
+        memory_monitor.set_memory_snapshot_for_test(790, 1_000);
+        let governor = BatchMemoryGovernor::new(1, memory_monitor.clone(), 1.0, 1_000);
+        let mut tracker = governor.batch_memory_tracker();
+        tracker.grow(10);
+        let revision = memory_monitor.snapshot_revision();
+        let snapshot = memory_monitor.current_snapshot();
+
+        memory_monitor.publish_refresh(MemoryRefresh::retained(snapshot));
+
+        assert_eq!(memory_monitor.snapshot_revision(), revision);
+        assert_eq!(governor.batch_size_target_bytes(), 10);
+
+        // A genuinely new sample may pair the same measured usage with the
+        // current tracked-byte estimate and therefore recalibrate the target.
+        memory_monitor.publish_refresh(MemoryRefresh::fresh(snapshot));
+
+        assert_eq!(memory_monitor.snapshot_revision(), revision.wrapping_add(1));
+        assert_eq!(governor.batch_size_target_bytes(), 20);
     }
 
     #[test]
