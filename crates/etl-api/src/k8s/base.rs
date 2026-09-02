@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use etl_config::shared::DestinationKind;
 use etl_maintenance::DuckLakeMaintenancePolicy;
 use thiserror::Error;
 
@@ -112,20 +111,6 @@ pub enum DestinationType {
         /// secret entry.
         passphrase_secret_required: bool,
     },
-}
-
-impl DestinationType {
-    /// Returns the product destination kind represented by this Kubernetes
-    /// type.
-    pub const fn kind(self) -> DestinationKind {
-        match self {
-            DestinationType::BigQuery => DestinationKind::BigQuery,
-            DestinationType::Iceberg => DestinationKind::Iceberg,
-            DestinationType::ClickHouse { .. } => DestinationKind::ClickHouse,
-            DestinationType::Ducklake => DestinationKind::Ducklake,
-            DestinationType::Snowflake { .. } => DestinationKind::Snowflake,
-        }
-    }
 }
 
 impl From<&StoredDestinationConfig> for DestinationType {

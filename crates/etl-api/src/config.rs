@@ -1,11 +1,11 @@
-use std::{collections::BTreeMap, fmt, path::PathBuf};
+use std::{fmt, path::PathBuf};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::{
     Config,
     shared::{
-        DestinationKind, DuckLakeCopyBufferConfig, PgConnectionConfig, SentryConfig, TlsConfig,
-        Validate, ValidationError,
+        DuckLakeCopyBufferConfig, PgConnectionConfig, SentryConfig, TlsConfig, Validate,
+        ValidationError,
     },
 };
 use serde::{
@@ -125,8 +125,8 @@ pub struct K8sConfig {
     ///
     /// This key remains `replicator_resources` in API configuration files. It
     /// provides the mandatory baseline CPU and memory requests written to each
-    /// replicator pod template unless a destination-kind default or
-    /// pipeline-level override supplies one of those request values.
+    /// replicator pod template unless a pipeline-level override supplies one
+    /// of those request values.
     pub replicator_resources: ReplicatorResourceDefaultsConfig,
     /// Optional API-wide VPA interval for replicator CPU and memory.
     ///
@@ -146,11 +146,11 @@ pub struct K8sConfig {
 /// API-wide VPA recommendation interval for replicator resources.
 ///
 /// These bounds configure generated VPAs and are independent of the startup
-/// requests in [`ReplicatorResourceDefaultsConfig`]. Global and
-/// destination-specific startup requests are expected to lie within this
-/// interval, but the API does not validate or clamp that relationship. Once
-/// VPA actuation begins, an out-of-range request may be moved inside these
-/// bounds. Pipelines with request overrides do not use a VPA.
+/// requests in [`ReplicatorResourceDefaultsConfig`]. The API-wide startup
+/// requests are expected to lie within this interval, but the API does not
+/// validate or clamp that relationship. Once VPA actuation begins, an
+/// out-of-range request may be moved inside these bounds. Pipelines with
+/// request overrides do not use a VPA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct ReplicatorResourceAutoscalingConfig {
     /// Update mode assigned when a per-pipeline VPA is first created.
@@ -236,44 +236,15 @@ pub struct TolerationConfig {
 
 /// API-wide startup request defaults for replicator workloads.
 ///
-/// The mandatory CPU and memory values are the final fallback for every
-/// destination. Entries in [`Self::destinations`] may replace either request
-/// for one destination kind. Pipeline-level overrides are applied later. For
-/// autoscaled pipelines, these values do not change the configured VPA bounds.
+/// The mandatory CPU and memory values apply to every destination.
+/// Pipeline-level overrides are applied later. For autoscaled pipelines, these
+/// values do not change the configured VPA bounds.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ReplicatorResourceDefaultsConfig {
     /// Replicator startup memory request, in Mi.
     pub memory_request_mib: i32,
     /// Replicator startup CPU request, in millicores.
     pub cpu_request_millicores: i32,
-    /// Partial startup request defaults keyed by destination kind.
-    #[serde(default)]
-    pub destinations: BTreeMap<DestinationKind, DestinationReplicatorResourceDefaultsConfig>,
-}
-
-/// Partial API startup request defaults for one destination kind.
-///
-/// Each omitted request inherits from the API-wide
-/// [`ReplicatorResourceDefaultsConfig`]. These values choose the pod template's
-/// initial allocation and do not define destination-specific VPA bounds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-pub struct DestinationReplicatorResourceDefaultsConfig {
-    /// Optional replicator startup memory request, in Mi.
-    pub memory_request_mib: Option<i32>,
-    /// Optional replicator startup CPU request, in millicores.
-    pub cpu_request_millicores: Option<i32>,
-}
-
-/// Complete API startup request defaults selected for one destination kind.
-///
-/// This is the result of applying destination defaults to the API-wide
-/// fallback. It does not yet include pipeline-level overrides.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ResolvedReplicatorResourceDefaults {
-    /// Replicator memory request, in Mi.
-    pub(crate) memory_request_mib: i32,
-    /// Replicator CPU request, in millicores.
-    pub(crate) cpu_request_millicores: i32,
 }
 
 /// API-wide request defaults for Vector sidecars.
@@ -327,55 +298,11 @@ impl ReplicatorResourceAutoscalingConfig {
     }
 }
 
-impl K8sConfig {
-    /// Resolves API-wide defaults followed by destination-specific defaults.
-    pub(crate) fn resolve_replicator_resource_defaults(
-        &self,
-        destination_kind: DestinationKind,
-    ) -> ResolvedReplicatorResourceDefaults {
-        let destination_defaults = self.replicator_resources.destinations.get(&destination_kind);
-
-        ResolvedReplicatorResourceDefaults {
-            memory_request_mib: destination_defaults
-                .and_then(|defaults| defaults.memory_request_mib)
-                .unwrap_or(self.replicator_resources.memory_request_mib),
-            cpu_request_millicores: destination_defaults
-                .and_then(|defaults| defaults.cpu_request_millicores)
-                .unwrap_or(self.replicator_resources.cpu_request_millicores),
-        }
-    }
-}
-
 impl ReplicatorResourceDefaultsConfig {
     /// Validates that configured request values are positive.
     pub fn validate(&self) -> Result<(), String> {
         validate_positive_request("K8s replicator memory request", self.memory_request_mib)?;
         validate_positive_request("K8s replicator cpu request", self.cpu_request_millicores)?;
-        for (destination_kind, defaults) in &self.destinations {
-            defaults.validate(*destination_kind)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl DestinationReplicatorResourceDefaultsConfig {
-    /// Validates that configured destination defaults are positive.
-    fn validate(&self, destination_kind: DestinationKind) -> Result<(), String> {
-        let destination_kind = destination_kind.as_str();
-
-        if let Some(memory_request_mib) = self.memory_request_mib {
-            validate_positive_request(
-                &format!("K8s {destination_kind} replicator memory request"),
-                memory_request_mib,
-            )?;
-        }
-        if let Some(cpu_request_millicores) = self.cpu_request_millicores {
-            validate_positive_request(
-                &format!("K8s {destination_kind} replicator cpu request"),
-                cpu_request_millicores,
-            )?;
-        }
 
         Ok(())
     }
@@ -601,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn destination_replicator_defaults_replace_selected_global_fields() {
+    fn removed_destination_replicator_defaults_are_ignored() {
         let config: K8sConfig = serde_json::from_value(json!({
             "replicator_resources": {
                 "memory_request_mib": 2000,
@@ -619,44 +546,8 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(
-            config.resolve_replicator_resource_defaults(DestinationKind::Ducklake),
-            ResolvedReplicatorResourceDefaults {
-                memory_request_mib: 4000,
-                cpu_request_millicores: 500,
-            }
-        );
-        assert_eq!(
-            config.resolve_replicator_resource_defaults(DestinationKind::BigQuery),
-            ResolvedReplicatorResourceDefaults {
-                memory_request_mib: 2000,
-                cpu_request_millicores: 500,
-            }
-        );
-    }
-
-    #[test]
-    fn destination_replicator_resources_are_optional() {
-        let config: K8sConfig = serde_json::from_value(json!({
-            "replicator_resources": {
-                "memory_request_mib": 2000,
-                "cpu_request_millicores": 500
-            },
-            "vector_resources": {
-                "memory_request_mib": 192,
-                "cpu_request_millicores": 75
-            }
-        }))
-        .unwrap();
-
-        assert!(config.replicator_resources.destinations.is_empty());
-        assert_eq!(
-            config.resolve_replicator_resource_defaults(DestinationKind::Ducklake),
-            ResolvedReplicatorResourceDefaults {
-                memory_request_mib: 2000,
-                cpu_request_millicores: 500,
-            }
-        );
+        assert_eq!(config.replicator_resources.memory_request_mib, 2000);
+        assert_eq!(config.replicator_resources.cpu_request_millicores, 500);
         assert_eq!(config.replicator_autoscaling, None);
     }
 
@@ -806,18 +697,5 @@ mod tests {
         assert_eq!(configured.replicator_tolerations[0].value, "analytics");
         assert_eq!(configured.replicator_tolerations[0].effect, "CustomEffect");
         assert_eq!(configured.vector_image, "example.com/vector:custom");
-    }
-
-    #[test]
-    fn destination_replicator_defaults_must_be_positive() {
-        let resources = DestinationReplicatorResourceDefaultsConfig {
-            memory_request_mib: Some(0),
-            cpu_request_millicores: None,
-        };
-
-        assert_eq!(
-            resources.validate(DestinationKind::Ducklake),
-            Err("K8s ducklake replicator memory request must be greater than 0".to_owned())
-        );
     }
 }

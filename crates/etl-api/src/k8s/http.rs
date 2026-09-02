@@ -152,7 +152,6 @@ fn test_k8s_config(environment: &Environment) -> K8sConfig {
         replicator_resources: ReplicatorResourceDefaultsConfig {
             memory_request_mib,
             cpu_request_millicores,
-            destinations: Default::default(),
         },
         replicator_autoscaling: Some(ReplicatorResourceAutoscalingConfig {
             initial_update_mode: ReplicatorResourceAutoscalingUpdateMode::Off,
@@ -175,7 +174,7 @@ fn test_resource_requirements(
     environment: &Environment,
 ) -> ReplicatorStatefulSetResourceRequirements {
     let k8s_config = test_k8s_config(environment);
-    ReplicatorStatefulSetResourceRequirements::resolve(&k8s_config, DestinationType::BigQuery, None)
+    ReplicatorStatefulSetResourceRequirements::resolve(&k8s_config, None)
 }
 
 /// HTTP-based implementation of [`K8sClient`].
@@ -742,7 +741,6 @@ impl K8sClient for HttpK8sClient {
         let replicator_image = workload_config.replicator_image.as_str();
         let resource_requirements = ReplicatorStatefulSetResourceRequirements::resolve(
             &self.k8s_config,
-            workload_config.destination_type,
             workload_config.replicator_resource_override.as_ref(),
         );
 
@@ -809,6 +807,14 @@ impl K8sClient for HttpK8sClient {
         identity: &PipelineRuntimeIdentity,
         workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError> {
+        debug_assert!(
+            workload_config
+                .replicator_resource_override
+                .as_ref()
+                .is_none_or(|config| !config.overrides_any_request()),
+            "VPA materialization requires a workload without pipeline resource overrides"
+        );
+
         let name = create_stateful_set_name(resource_prefix);
         let initial_update_mode = self
             .k8s_config
@@ -833,7 +839,6 @@ impl K8sClient for HttpK8sClient {
             identity,
             &name,
             update_mode,
-            workload_config.destination_type,
         )?;
 
         // We are forcing the update since we are the field manager that should own the
@@ -1931,12 +1936,11 @@ fn create_replicator_vertical_pod_autoscaler_json(
     identity: &PipelineRuntimeIdentity,
     stateful_set_name: &str,
     update_mode: &str,
-    destination_type: DestinationType,
 ) -> Result<DynamicObject, serde_json::Error> {
     let replicator_app_name = create_replicator_app_name(prefix);
     let replicator_container_name = create_replicator_container_name(prefix);
     let identity_labels = create_replicator_identity_labels(&replicator_app_name, identity);
-    let policy = ReplicatorVpaResourcePolicy::resolve(k8s_config, destination_type);
+    let policy = ReplicatorVpaResourcePolicy::resolve(k8s_config);
 
     serde_json::from_value(json!({
       "apiVersion": format!("{VERTICAL_POD_AUTOSCALER_GROUP}/{VERTICAL_POD_AUTOSCALER_VERSION}"),
@@ -2340,7 +2344,6 @@ mod tests {
                         &identity,
                         &stateful_set_name,
                         ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
-                        DestinationType::BigQuery,
                     )
                     .unwrap(),
                 )
@@ -3177,7 +3180,6 @@ mod tests {
             &identity,
             "tenant-1-42-replicator",
             ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
-            DestinationType::BigQuery,
         )
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();
@@ -3224,7 +3226,6 @@ mod tests {
             &identity,
             "tenant-1-42-replicator",
             ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
-            DestinationType::BigQuery,
         )
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();
@@ -3255,7 +3256,6 @@ mod tests {
             &identity,
             "tenant-1-42-replicator",
             vpa_update_mode(&live).unwrap(),
-            DestinationType::BigQuery,
         )
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();

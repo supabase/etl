@@ -3,8 +3,7 @@
 //! CPU and memory resolve independently through the same explicit hierarchy:
 //!
 //! 1. A pipeline request override provides the final startup value when set.
-//! 2. Otherwise, a destination-specific API default is used when set.
-//! 3. Otherwise, the mandatory API-wide default provides the fallback.
+//! 2. Otherwise, the mandatory API-wide default provides the value.
 //!
 //! A non-empty pipeline request override disables the VPA for the entire
 //! workload. Otherwise, configured VPA bounds are independent of the
@@ -13,10 +12,7 @@
 //! resolution: Kubernetes materialization uses each resolved request as its
 //! limit to preserve Guaranteed QoS.
 
-use crate::{
-    config::K8sConfig, configs::pipeline::PipelineReplicatorResourceOverrideConfig,
-    k8s::DestinationType,
-};
+use crate::{config::K8sConfig, configs::pipeline::PipelineReplicatorResourceOverrideConfig};
 
 /// CPU and memory allocated to one container.
 #[derive(Debug, PartialEq, Eq)]
@@ -50,14 +46,10 @@ impl ReplicatorStatefulSetResourceRequirements {
     /// override.
     pub(super) fn resolve(
         k8s_config: &K8sConfig,
-        destination_type: DestinationType,
         pipeline_resource_override: Option<&PipelineReplicatorResourceOverrideConfig>,
     ) -> Self {
-        let allocation = resolve_replicator_stateful_set_allocation(
-            k8s_config,
-            destination_type,
-            pipeline_resource_override,
-        );
+        let allocation =
+            resolve_replicator_stateful_set_allocation(k8s_config, pipeline_resource_override);
 
         Self {
             replicator: ContainerResourceAllocation {
@@ -92,7 +84,7 @@ pub(super) struct ReplicatorVpaResourcePolicy {
 
 impl ReplicatorVpaResourcePolicy {
     /// Resolves configured VPA bounds or fixes them to the startup allocation.
-    pub(super) fn resolve(k8s_config: &K8sConfig, destination_type: DestinationType) -> Self {
+    pub(super) fn resolve(k8s_config: &K8sConfig) -> Self {
         if let Some(autoscaling_config) = &k8s_config.replicator_autoscaling {
             return Self {
                 cpu: VpaResourceBounds {
@@ -106,8 +98,7 @@ impl ReplicatorVpaResourcePolicy {
             };
         }
 
-        let startup_allocation =
-            resolve_replicator_stateful_set_allocation(k8s_config, destination_type, None);
+        let startup_allocation = resolve_replicator_stateful_set_allocation(k8s_config, None);
 
         Self {
             cpu: VpaResourceBounds {
@@ -125,32 +116,24 @@ impl ReplicatorVpaResourcePolicy {
 /// Resolves the replicator StatefulSet's startup allocation.
 fn resolve_replicator_stateful_set_allocation(
     k8s_config: &K8sConfig,
-    destination_type: DestinationType,
     pipeline_resource_override: Option<&PipelineReplicatorResourceOverrideConfig>,
 ) -> ReplicatorStatefulSetAllocation {
-    let resolved_api_defaults =
-        k8s_config.resolve_replicator_resource_defaults(destination_type.kind());
-
     ReplicatorStatefulSetAllocation {
         cpu_millicores: pipeline_resource_override
             .and_then(|config| config.cpu_request_millicores)
-            .unwrap_or(resolved_api_defaults.cpu_request_millicores),
+            .unwrap_or(k8s_config.replicator_resources.cpu_request_millicores),
         memory_mib: pipeline_resource_override
             .and_then(|config| config.memory_request_mib)
-            .unwrap_or(resolved_api_defaults.memory_request_mib),
+            .unwrap_or(k8s_config.replicator_resources.memory_request_mib),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use etl_config::shared::DestinationKind;
-
     use super::*;
     use crate::config::{
-        DestinationReplicatorResourceDefaultsConfig, ReplicatorResourceAutoscalingConfig,
-        ReplicatorResourceDefaultsConfig, VectorResourceDefaultsConfig,
+        ReplicatorResourceAutoscalingConfig, ReplicatorResourceDefaultsConfig,
+        VectorResourceDefaultsConfig,
     };
 
     /// Returns a complete Kubernetes configuration for resource resolution.
@@ -163,13 +146,6 @@ mod tests {
             replicator_resources: ReplicatorResourceDefaultsConfig {
                 memory_request_mib: 500,
                 cpu_request_millicores: 300,
-                destinations: BTreeMap::from([(
-                    DestinationKind::Ducklake,
-                    DestinationReplicatorResourceDefaultsConfig {
-                        memory_request_mib: Some(800),
-                        cpu_request_millicores: Some(600),
-                    },
-                )]),
             },
             replicator_autoscaling: Some(ReplicatorResourceAutoscalingConfig {
                 initial_update_mode: Default::default(),
@@ -190,12 +166,8 @@ mod tests {
     fn api_defaults_choose_startup_allocation_independently_of_vpa_bounds() {
         let config = test_k8s_config();
 
-        let resources = ReplicatorStatefulSetResourceRequirements::resolve(
-            &config,
-            DestinationType::BigQuery,
-            None,
-        );
-        let policy = ReplicatorVpaResourcePolicy::resolve(&config, DestinationType::BigQuery);
+        let resources = ReplicatorStatefulSetResourceRequirements::resolve(&config, None);
+        let policy = ReplicatorVpaResourcePolicy::resolve(&config);
 
         assert_eq!(resources.replicator.cpu, "300m");
         assert_eq!(resources.replicator.memory, "500Mi");
@@ -209,31 +181,18 @@ mod tests {
     fn omitted_autoscaling_fixes_vpa_to_startup_allocation() {
         let config = K8sConfig { replicator_autoscaling: None, ..test_k8s_config() };
 
-        let policy = ReplicatorVpaResourcePolicy::resolve(&config, DestinationType::Ducklake);
+        let policy = ReplicatorVpaResourcePolicy::resolve(&config);
 
-        assert_eq!(policy.cpu, VpaResourceBounds { min: 600, max: 600 });
-        assert_eq!(policy.memory, VpaResourceBounds { min: 800, max: 800 });
+        assert_eq!(policy.cpu, VpaResourceBounds { min: 300, max: 300 });
+        assert_eq!(policy.memory, VpaResourceBounds { min: 500, max: 500 });
     }
 
     #[test]
-    fn configured_vpa_bounds_are_independent_of_destination_defaults() {
-        let policy =
-            ReplicatorVpaResourcePolicy::resolve(&test_k8s_config(), DestinationType::Ducklake);
+    fn configured_vpa_bounds_are_independent_of_startup_defaults() {
+        let policy = ReplicatorVpaResourcePolicy::resolve(&test_k8s_config());
 
         assert_eq!(policy.cpu, VpaResourceBounds { min: 250, max: 2_000 });
         assert_eq!(policy.memory, VpaResourceBounds { min: 768, max: 8_192 });
-    }
-
-    #[test]
-    fn destination_defaults_precede_global_defaults() {
-        let resources = ReplicatorStatefulSetResourceRequirements::resolve(
-            &test_k8s_config(),
-            DestinationType::Ducklake,
-            None,
-        );
-
-        assert_eq!(resources.replicator.cpu, "600m");
-        assert_eq!(resources.replicator.memory, "800Mi");
     }
 
     #[test]
@@ -244,14 +203,11 @@ mod tests {
         };
         let config = test_k8s_config();
 
-        let resources = ReplicatorStatefulSetResourceRequirements::resolve(
-            &config,
-            DestinationType::Ducklake,
-            Some(&overrides),
-        );
+        let resources =
+            ReplicatorStatefulSetResourceRequirements::resolve(&config, Some(&overrides));
 
         assert_eq!(resources.replicator.cpu, "900m");
-        assert_eq!(resources.replicator.memory, "800Mi");
+        assert_eq!(resources.replicator.memory, "500Mi");
     }
 
     #[test]
@@ -264,12 +220,9 @@ mod tests {
             .unwrap();
         let config = test_k8s_config();
 
-        let resources = ReplicatorStatefulSetResourceRequirements::resolve(
-            &config,
-            DestinationType::BigQuery,
-            Some(&overrides),
-        );
-        let policy = ReplicatorVpaResourcePolicy::resolve(&config, DestinationType::BigQuery);
+        let resources =
+            ReplicatorStatefulSetResourceRequirements::resolve(&config, Some(&overrides));
+        let policy = ReplicatorVpaResourcePolicy::resolve(&config);
 
         assert_eq!(resources.replicator.cpu, "300m");
         assert_eq!(resources.replicator.memory, "500Mi");

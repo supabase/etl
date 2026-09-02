@@ -805,7 +805,6 @@ async fn spawn_test_app_with_services(
             replicator_resources: ReplicatorResourceDefaultsConfig {
                 memory_request_mib: 250,
                 cpu_request_millicores: 125,
-                destinations: Default::default(),
             },
             replicator_autoscaling: None,
             vector_image: "timberio/vector:0.55.0-distroless-libc".to_owned(),

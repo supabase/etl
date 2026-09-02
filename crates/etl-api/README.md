@@ -133,13 +133,10 @@ available cluster nodes. Replicator tolerations always use Kubernetes'
 `Equal` operator; selector `key` and `value` and toleration `key`, `value`, and
 `effect` are passed through unchanged.
 
-The global replicator and Vector request defaults are mandatory. Replicator
-requests are startup allocations written to the StatefulSet pod template.
-Destination defaults are optional and may replace either replicator startup
-request for `bigquery`, `clickhouse`, `ducklake`, `iceberg`, or `snowflake`.
-They do not define destination-specific autoscaling intervals. Missing
-destination fields inherit the corresponding global replicator default. Vector
-resources are configured only at the API level.
+The API-wide replicator and Vector request defaults are mandatory. Replicator
+requests are startup allocations written to every StatefulSet pod template;
+there are no destination-specific resource defaults. Vector resources are also
+configured only at the API level.
 
 Pipeline configuration may override either replicator request:
 
@@ -153,8 +150,7 @@ CPU and memory resolve independently. StatefulSet startup requests use this
 precedence, from highest to lowest:
 
 1. Pipeline request override.
-2. Destination-specific API default.
-3. Mandatory API-wide default.
+2. Mandatory API-wide default.
 
 The generated CPU and memory limits always equal their resolved requests, for
 both the replicator and Vector containers, so every generated Pod has
@@ -165,7 +161,7 @@ Supplying either pipeline request override makes the entire workload fixed. The
 API removes any existing VPA before applying the StatefulSet and does not create
 a new VPA while the override remains. A partial pipeline override still
 disables VPA for both resources; the resource without an override inherits its
-destination-specific or API-wide request default.
+API-wide request default.
 
 For workloads without pipeline request overrides, the API creates a VPA and its
 CPU and memory bounds resolve independently:
@@ -176,14 +172,13 @@ CPU and memory bounds resolve independently:
 
 The autoscaling interval does not clamp or otherwise change the StatefulSet's
 startup requests, and the API does not validate that they lie within it.
-Operators are expected to keep API-wide and destination-specific startup
-requests inside the configured interval. When the intended startup behavior is
-to use the maximum allowed capacity, set each resolved startup request equal to
-the corresponding VPA maximum; the configuration model still permits these
-values to diverge in the future. Once VPA actuation begins, it may move an
-out-of-range startup request inside `minAllowed` and `maxAllowed`. VPA controls
-both requests and limits, preserving their 1:1 ratio when recommendations are
-applied.
+Operators are expected to keep the API-wide startup requests inside the
+configured interval. When the intended startup behavior is to use the maximum
+allowed capacity, set each startup request equal to the corresponding VPA
+maximum; the configuration model still permits these values to diverge in the
+future. Once VPA actuation begins, it may move an out-of-range startup request
+inside `minAllowed` and `maxAllowed`. VPA controls both requests and limits,
+preserving their 1:1 ratio when recommendations are applied.
 
 "Startup" describes the pod template value, not a guaranteed time window. In
 `off` mode it remains effective until the live VPA mode is changed. With an
