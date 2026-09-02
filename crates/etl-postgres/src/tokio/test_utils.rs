@@ -494,16 +494,14 @@ impl<G: GenericClient> PgDatabase<G> {
     ///
     /// # Panics
     ///
-    /// Panics if querying the replication slot state fails or the slot remains
-    /// active after [`WAIT_FOR_SLOT_INACTIVE_TIMEOUT`].
+    /// Panics if the slot remains active after
+    /// [`WAIT_FOR_SLOT_INACTIVE_TIMEOUT`].
     pub async fn wait_for_slot_inactive(&self, slot_name: &str) {
         tokio::time::timeout(WAIT_FOR_SLOT_INACTIVE_TIMEOUT, async {
-            loop {
-                let slot_state = self.get_replication_slot_state(slot_name).await.unwrap();
-                if !matches!(slot_state, Some(ReplicationSlotState::Active)) {
-                    return;
-                }
-
+            while matches!(
+                self.get_replication_slot_state(slot_name).await,
+                Ok(Some(ReplicationSlotState::Active))
+            ) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
