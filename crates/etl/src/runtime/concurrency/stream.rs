@@ -748,8 +748,9 @@ mod tests {
         memory.set_backpressure_active_for_test(true);
         let batch = stream.next().await.unwrap().unwrap();
         assert_eq!(batch.items, vec![SizedToken { value: 1, bytes: 100 }]);
+        let target_with_batch = 500 + batch.memory_tracker.size_hint_bytes();
         memory.set_memory_snapshot_for_test(7_500, 10_000);
-        assert_eq!(governor.batch_size_target_bytes(), 600);
+        assert_eq!(governor.batch_size_target_bytes(), target_with_batch);
 
         // Dropping the consumer-owned batch also drops its tracker. The stream
         // itself remains paused without owning those emitted bytes.
@@ -977,16 +978,38 @@ mod tests {
         ));
 
         let batch = stream.next().await.unwrap().unwrap();
+        let target_with_batch = 500 + batch.memory_tracker.size_hint_bytes();
         memory.set_memory_snapshot_for_test(7_500, 10_000);
-        assert_eq!(governor.batch_size_target_bytes(), 600);
+        assert_eq!(governor.batch_size_target_bytes(), target_with_batch);
 
         // Polling the source again does not release an emitted batch's memory.
         assert!(stream.next().await.is_none());
-        assert_eq!(governor.batch_size_target_bytes(), 600);
+        assert_eq!(governor.batch_size_target_bytes(), target_with_batch);
 
         drop(batch);
         memory.set_memory_snapshot_for_test(7_500, 10_000);
         assert_eq!(governor.batch_size_target_bytes(), 500);
+    }
+
+    #[tokio::test]
+    async fn tracked_batch_sums_item_size_hints() {
+        let memory = MemoryMonitor::new_for_test();
+        let governor = test_batch_memory_governor(&memory);
+        let input = futures::stream::iter([
+            Ok::<_, &'static str>(SizedToken { value: 1, bytes: 100 }),
+            Ok(SizedToken { value: 2, bytes: 200 }),
+        ]);
+        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+            input,
+            "test_stream",
+            test_batch_config(300),
+            None,
+            governor,
+        ));
+
+        let batch = stream.next().await.unwrap().unwrap();
+
+        assert_eq!(batch.memory_tracker.size_hint_bytes(), 300);
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ use pin_project_lite::pin_project;
 use tokio_postgres::CopyOutStream;
 
 use crate::{
-    data::{SizeHint, TableRow},
+    data::{SizeHint, TableRow, owned_heap_size_hint},
     error::EtlResult,
     postgres::codec::parse_table_row_from_postgres_copy_bytes,
     schema::ColumnSchema,
@@ -38,7 +38,7 @@ impl SizeHint for TableCopyRow {
     /// The PostgreSQL COPY source metadata is retained separately for metrics
     /// and usage accounting.
     fn size_hint(&self) -> usize {
-        self.row.size_hint().saturating_add(size_of::<TableCopyPayloadMetadata>())
+        size_of::<Self>().saturating_add(owned_heap_size_hint(&self.row))
     }
 }
 

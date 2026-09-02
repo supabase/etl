@@ -8,7 +8,7 @@
 use std::{fmt, mem::size_of};
 
 use crate::{
-    data::{OldTableRow, SizeHint, TableRow, UpdatedTableRow},
+    data::{OldTableRow, SizeHint, TableRow, UpdatedTableRow, owned_heap_size_hint},
     schema::{PgLsn, ReplicatedTableSchema, TableId},
 };
 
@@ -292,30 +292,23 @@ impl Event {
 
 impl SizeHint for Event {
     fn size_hint(&self) -> usize {
-        match self {
-            Self::Begin(_) => size_of::<BeginEvent>(),
-            Self::Commit(_) => size_of::<CommitEvent>(),
-            Self::Insert(event) => {
-                size_of::<InsertEvent>().saturating_add(event.table_row.size_hint())
-            }
+        let owned_heap_bytes = match self {
+            Self::Begin(_) | Self::Commit(_) | Self::Relation(_) | Self::Unsupported => 0,
+            Self::Insert(event) => owned_heap_size_hint(&event.table_row),
             Self::Update(event) => {
-                let old_row_size =
-                    event.old_table_row.as_ref().map(SizeHint::size_hint).unwrap_or_default();
-                size_of::<UpdateEvent>()
-                    .saturating_add(event.updated_table_row.size_hint())
-                    .saturating_add(old_row_size)
+                let old_row_heap_bytes =
+                    event.old_table_row.as_ref().map(owned_heap_size_hint).unwrap_or_default();
+                owned_heap_size_hint(&event.updated_table_row).saturating_add(old_row_heap_bytes)
             }
             Self::Delete(event) => {
-                let old_row_size =
-                    event.old_table_row.as_ref().map(SizeHint::size_hint).unwrap_or_default();
-                size_of::<DeleteEvent>().saturating_add(old_row_size)
+                event.old_table_row.as_ref().map(owned_heap_size_hint).unwrap_or_default()
             }
-            Self::Truncate(event) => size_of::<TruncateEvent>().saturating_add(
-                event.truncated_tables.len().saturating_mul(size_of::<ReplicatedTableSchema>()),
-            ),
-            Self::Relation(_) => size_of::<RelationEvent>(),
-            Self::Unsupported => 0,
-        }
+            Self::Truncate(event) => {
+                event.truncated_tables.capacity().saturating_mul(size_of::<ReplicatedTableSchema>())
+            }
+        };
+
+        size_of::<Self>().saturating_add(owned_heap_bytes)
     }
 }
 
@@ -406,5 +399,109 @@ impl From<&Event> for EventType {
 impl From<Event> for EventType {
     fn from(event: Event) -> Self {
         (&event).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio_postgres::types::Type;
+
+    use super::*;
+    use crate::{
+        data::Cell,
+        schema::{ColumnSchema, TableName, TableSchema},
+    };
+
+    /// Creates a shared schema that should not be charged to each event.
+    fn replicated_schema() -> ReplicatedTableSchema {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1)],
+        );
+
+        ReplicatedTableSchema::all(Arc::new(table_schema))
+    }
+
+    #[test]
+    fn event_size_hints_count_only_variant_owned_heap() {
+        let schema = replicated_schema();
+        let mut text = String::with_capacity(257);
+        text.push_str("payload");
+        let row = TableRow::new(vec![Cell::I64(1), Cell::String(text)]);
+
+        let begin = Event::Begin(BeginEvent {
+            commit_lsn: PgLsn::from(1),
+            tx_ordinal: 0,
+            timestamp: 0,
+            xid: 1,
+        });
+        assert_eq!(begin.size_hint(), size_of::<Event>());
+
+        let commit = Event::Commit(CommitEvent {
+            commit_lsn: PgLsn::from(1),
+            tx_ordinal: 1,
+            flags: 0,
+            end_lsn: PgLsn::from(2),
+            timestamp: 0,
+        });
+        assert_eq!(commit.size_hint(), size_of::<Event>());
+
+        let insert = Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(1),
+            tx_ordinal: 2,
+            replicated_table_schema: schema.clone(),
+            table_row: row.clone(),
+        });
+        let Event::Insert(insert_event) = &insert else {
+            unreachable!();
+        };
+        assert_eq!(
+            insert.size_hint(),
+            size_of::<Event>() + owned_heap_size_hint(&insert_event.table_row)
+        );
+
+        let update = Event::Update(UpdateEvent {
+            commit_lsn: PgLsn::from(1),
+            tx_ordinal: 3,
+            replicated_table_schema: schema.clone(),
+            updated_table_row: UpdatedTableRow::Full(row.clone()),
+            old_table_row: Some(OldTableRow::Key(row)),
+        });
+        let Event::Update(update_event) = &update else {
+            unreachable!();
+        };
+        let update_heap_bytes = owned_heap_size_hint(&update_event.updated_table_row)
+            + update_event.old_table_row.as_ref().map(owned_heap_size_hint).unwrap_or_default();
+        assert_eq!(update.size_hint(), size_of::<Event>() + update_heap_bytes);
+
+        let delete_row = TableRow::new(vec![Cell::I64(1), Cell::String("deleted".to_owned())]);
+        let delete_row_heap_bytes = owned_heap_size_hint(&delete_row);
+        let delete = Event::Delete(DeleteEvent {
+            commit_lsn: PgLsn::from(1),
+            tx_ordinal: 4,
+            replicated_table_schema: schema.clone(),
+            old_table_row: Some(OldTableRow::Full(delete_row)),
+        });
+        assert_eq!(delete.size_hint(), size_of::<Event>() + delete_row_heap_bytes);
+
+        let relation = Event::Relation(RelationEvent { replicated_table_schema: schema });
+        assert_eq!(relation.size_hint(), size_of::<Event>());
+        assert_eq!(Event::Unsupported.size_hint(), size_of::<Event>());
+
+        let truncated_tables = Vec::with_capacity(8);
+        let truncated_tables_capacity = truncated_tables.capacity();
+        let truncate = Event::Truncate(TruncateEvent {
+            commit_lsn: PgLsn::from(1),
+            tx_ordinal: 5,
+            options: 0,
+            truncated_tables,
+        });
+        assert_eq!(
+            truncate.size_hint(),
+            size_of::<Event>() + truncated_tables_capacity * size_of::<ReplicatedTableSchema>()
+        );
     }
 }

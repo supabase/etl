@@ -738,8 +738,8 @@ struct EventBatch {
     memory_tracker: Option<BatchMemoryTracker>,
     /// PostgreSQL tuple bytes used for source metrics and usage accounting.
     ///
-    /// These are independent from the decoded [`SizeHint`] used to determine
-    /// when the batch is dispatched.
+    /// These are independent from the decoded [`crate::data::SizeHint`] used
+    /// to determine when the batch is dispatched.
     streaming_payload_metadata: StreamingPayloadMetadata,
 }
 
@@ -766,11 +766,11 @@ impl EventBatch {
         }
 
         let event_size_hint_bytes = event.size_hint();
+        self.streaming_payload_metadata.merge(streaming_payload_metadata);
+        self.events.push(event);
         self.memory_tracker
             .get_or_insert_with(|| batch_memory_governor.batch_memory_tracker())
             .grow(event_size_hint_bytes);
-        self.streaming_payload_metadata.merge(streaming_payload_metadata);
-        self.events.push(event);
     }
 
     /// Returns the number of events in the batch.
@@ -4683,6 +4683,21 @@ mod tests {
             ReplicationMask::from_bytes(vec![1]),
             IdentityMask::from_bytes(vec![1]),
         )
+    }
+
+    #[test]
+    fn event_batch_sums_event_size_hints() {
+        let memory_monitor = MemoryMonitor::new_for_test();
+        memory_monitor.set_total_memory_bytes_for_test(10_000_000);
+        let governor = BatchMemoryGovernor::new(1, memory_monitor, 0.2, 1_000_000);
+        let mut batch = EventBatch::with_capacity(8);
+
+        let event = Event::Unsupported;
+        let event_size_hint_bytes = event.size_hint();
+        batch.push(event, StreamingPayloadMetadata::default(), &governor);
+        batch.push(Event::Unsupported, StreamingPayloadMetadata::default(), &governor);
+
+        assert_eq!(batch.size_hint_bytes(), 2 * event_size_hint_bytes);
     }
 
     /// Returns the complete decoder captured by a test `SyncDone` state.
