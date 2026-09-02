@@ -15,7 +15,7 @@ use thiserror::Error;
 use crate::{
     configs::{
         destination::{StoredDestinationConfig, StoredIcebergConfig},
-        pipeline::{PipelineReplicatorResourceOverrideConfig, StoredPipelineConfig},
+        pipeline::StoredPipelineConfig,
         source::StoredSourceConfig,
     },
     data::{
@@ -112,9 +112,9 @@ pub enum Secrets {
 /// Creates or updates the Kubernetes runtime for a pipeline.
 ///
 /// The runtime currently consists of secrets, configuration, maintenance, the
-/// StatefulSet running the replicator, and autoscaling when the pipeline has no
-/// resource request override. Updating the StatefulSet intentionally forces pod
-/// recreation so the replicator observes the latest runtime configuration.
+/// StatefulSet running the replicator, and its VPA. Updating the StatefulSet
+/// intentionally forces pod recreation so the replicator observes the latest
+/// runtime configuration.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_or_update_pipeline_runtime_in_k8s(
     k8s_client: &dyn K8sClient,
@@ -560,25 +560,15 @@ async fn create_or_update_replicator_workload(
     identity: &PipelineRuntimeIdentity,
     workload_config: ReplicatorWorkloadConfig,
 ) -> Result<(), K8sCoreError> {
-    let has_pipeline_resource_override = workload_config
-        .replicator_resource_override
-        .as_ref()
-        .is_some_and(PipelineReplicatorResourceOverrideConfig::overrides_any_request);
-
-    if has_pipeline_resource_override {
-        // Wait for VPA API-object removal before applying the StatefulSet with
-        // explicitly configured requests.
-        k8s_client.delete_replicator_vertical_pod_autoscaler(resource_prefix).await?;
-    } else {
-        // Apply the VPA first so newly admitted Pods observe its intended update mode.
-        k8s_client
-            .create_or_update_replicator_vertical_pod_autoscaler(
-                resource_prefix,
-                identity,
-                &workload_config,
-            )
-            .await?;
-    }
+    // Apply the VPA first so newly admitted Pods observe its intended update mode
+    // and bounds.
+    k8s_client
+        .create_or_update_replicator_vertical_pod_autoscaler(
+            resource_prefix,
+            identity,
+            &workload_config,
+        )
+        .await?;
 
     create_or_update_replicator_stateful_set(
         k8s_client,
@@ -680,7 +670,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        configs::{destination::StoredDestinationConfig, source::StoredSourceConfig},
+        configs::{
+            destination::StoredDestinationConfig,
+            pipeline::PipelineReplicatorResourceOverrideConfig, source::StoredSourceConfig,
+        },
         k8s::{
             DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodStatus,
             ReplicatorConfigMapFile,
@@ -1113,7 +1106,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_resource_override_removes_vpa_before_applying_stateful_set() {
+    async fn pipeline_resource_override_keeps_vpa_before_stateful_set() {
         let client = RecordingK8sClient::default();
 
         create_or_update_replicator_workload(
@@ -1134,7 +1127,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(client.calls(), vec!["delete-vpa:tenant-42", "stateful-set:tenant-42"]);
+        assert_eq!(client.calls(), vec!["vpa:tenant-42", "stateful-set:tenant-42"]);
     }
 
     #[tokio::test]

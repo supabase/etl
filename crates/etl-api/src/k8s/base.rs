@@ -324,10 +324,10 @@ pub trait K8sClient: Send + Sync {
     /// Creates or updates the Vertical Pod Autoscaler for the replicator
     /// `StatefulSet`.
     ///
-    /// This is called only when neither pipeline resource request is
-    /// overridden. Configured autoscaling bounds are independent of the
-    /// StatefulSet startup allocation. When autoscaling is omitted, the startup
-    /// allocation is used as both VPA bounds.
+    /// A pipeline request override is used as both bounds for that resource.
+    /// Other configured autoscaling bounds are independent of the StatefulSet
+    /// startup allocation. When autoscaling is omitted, the corresponding
+    /// startup allocation is used as both VPA bounds.
     async fn create_or_update_replicator_vertical_pod_autoscaler(
         &self,
         resource_prefix: &str,

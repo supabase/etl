@@ -130,10 +130,11 @@ pub struct K8sConfig {
     pub replicator_resources: ReplicatorResourceDefaultsConfig,
     /// Optional API-wide VPA interval for replicator CPU and memory.
     ///
-    /// Workloads with pipeline request overrides do not use a VPA. For all
-    /// other workloads, omission fixes the VPA bounds to the resolved startup
-    /// requests, while a configured interval defines the allowed range for VPA
-    /// recommendations independently of those startup requests.
+    /// A pipeline request override fixes the corresponding resource's VPA
+    /// bounds to that request. For resources without an override, omission
+    /// fixes the bounds to the resolved startup request, while a configured
+    /// interval defines the allowed recommendation range independently of the
+    /// startup request.
     #[serde(default)]
     pub replicator_autoscaling: Option<ReplicatorResourceAutoscalingConfig>,
     /// Vector image used by the logging sidecar.
@@ -149,8 +150,8 @@ pub struct K8sConfig {
 /// requests in [`ReplicatorResourceDefaultsConfig`]. The API-wide startup
 /// requests are expected to lie within this interval, but the API does not
 /// validate or clamp that relationship. Once VPA actuation begins, an
-/// out-of-range request may be moved inside these bounds. Pipelines with
-/// request overrides do not use a VPA.
+/// out-of-range request may be moved inside these bounds. A pipeline request
+/// override replaces the corresponding interval with a fixed bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct ReplicatorResourceAutoscalingConfig {
     /// Update mode assigned when a per-pipeline VPA is first created.
@@ -168,11 +169,10 @@ pub struct ReplicatorResourceAutoscalingConfig {
 
 /// Initial Kubernetes VPA update mode for a replicator workload.
 ///
-/// The API creates a VPA for replicators without pipeline request overrides.
-/// [`Self::Off`] keeps that VPA in recommendation-only mode; every other mode
-/// allows it to apply resource recommendations. Reconciliation preserves the
-/// update mode already present on a live VPA, so this setting only chooses the
-/// mode at creation time.
+/// The API creates a VPA for every replicator. [`Self::Off`] keeps that VPA in
+/// recommendation-only mode; every other mode allows it to apply resource
+/// recommendations. Reconciliation preserves the update mode already present
+/// on a live VPA, so this setting only chooses the mode at creation time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplicatorResourceAutoscalingUpdateMode {
@@ -237,8 +237,9 @@ pub struct TolerationConfig {
 /// API-wide startup request defaults for replicator workloads.
 ///
 /// The mandatory CPU and memory values apply to every destination.
-/// Pipeline-level overrides are applied later. For autoscaled pipelines, these
-/// values do not change the configured VPA bounds.
+/// Pipeline-level overrides are applied later. A configured autoscaling
+/// interval supplies VPA bounds for resources without an override; otherwise
+/// these defaults are used as fixed bounds.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ReplicatorResourceDefaultsConfig {
     /// Replicator startup memory request, in Mi.

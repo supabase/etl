@@ -5,9 +5,9 @@
 //! 1. A pipeline request override provides the final startup value when set.
 //! 2. Otherwise, the mandatory API-wide default provides the value.
 //!
-//! A non-empty pipeline request override disables the VPA for the entire
-//! workload. Otherwise, configured VPA bounds are independent of the
-//! StatefulSet startup allocation. When autoscaling is omitted, the resolved
+//! A pipeline request override fixes that resource's VPA bounds to the resolved
+//! startup value. Other configured VPA bounds remain independent of the
+//! StatefulSet startup allocation. When autoscaling is omitted, each resolved
 //! startup value is used as both VPA bounds. Container limits have no separate
 //! resolution: Kubernetes materialization uses each resolved request as its
 //! limit to preserve Guaranteed QoS.
@@ -83,34 +83,46 @@ pub(super) struct ReplicatorVpaResourcePolicy {
 }
 
 impl ReplicatorVpaResourcePolicy {
-    /// Resolves configured VPA bounds or fixes them to the startup allocation.
-    pub(super) fn resolve(k8s_config: &K8sConfig) -> Self {
-        if let Some(autoscaling_config) = &k8s_config.replicator_autoscaling {
-            return Self {
-                cpu: VpaResourceBounds {
-                    min: autoscaling_config.min_cpu_millicores,
-                    max: autoscaling_config.max_cpu_millicores,
-                },
-                memory: VpaResourceBounds {
-                    min: autoscaling_config.min_memory_mib,
-                    max: autoscaling_config.max_memory_mib,
-                },
-            };
-        }
-
-        let startup_allocation = resolve_replicator_stateful_set_allocation(k8s_config, None);
+    /// Resolves each VPA bound from pipeline overrides, autoscaling, or startup
+    /// allocation, in that order.
+    pub(super) fn resolve(
+        k8s_config: &K8sConfig,
+        pipeline_resource_override: Option<&PipelineReplicatorResourceOverrideConfig>,
+    ) -> Self {
+        let startup_allocation =
+            resolve_replicator_stateful_set_allocation(k8s_config, pipeline_resource_override);
+        let autoscaling = k8s_config.replicator_autoscaling.as_ref();
 
         Self {
-            cpu: VpaResourceBounds {
-                min: startup_allocation.cpu_millicores,
-                max: startup_allocation.cpu_millicores,
-            },
-            memory: VpaResourceBounds {
-                min: startup_allocation.memory_mib,
-                max: startup_allocation.memory_mib,
-            },
+            cpu: resolve_vpa_resource_bounds(
+                pipeline_resource_override.and_then(|config| config.cpu_request_millicores),
+                autoscaling.map(|config| (config.min_cpu_millicores, config.max_cpu_millicores)),
+                startup_allocation.cpu_millicores,
+            ),
+            memory: resolve_vpa_resource_bounds(
+                pipeline_resource_override.and_then(|config| config.memory_request_mib),
+                autoscaling.map(|config| (config.min_memory_mib, config.max_memory_mib)),
+                startup_allocation.memory_mib,
+            ),
         }
     }
+}
+
+/// Resolves one resource's VPA bounds.
+fn resolve_vpa_resource_bounds(
+    pipeline_override: Option<i32>,
+    autoscaling_bounds: Option<(i32, i32)>,
+    startup_value: i32,
+) -> VpaResourceBounds {
+    if let Some(value) = pipeline_override {
+        return VpaResourceBounds { min: value, max: value };
+    }
+
+    if let Some((min, max)) = autoscaling_bounds {
+        return VpaResourceBounds { min, max };
+    }
+
+    VpaResourceBounds { min: startup_value, max: startup_value }
 }
 
 /// Resolves the replicator StatefulSet's startup allocation.
@@ -167,7 +179,7 @@ mod tests {
         let config = test_k8s_config();
 
         let resources = ReplicatorStatefulSetResourceRequirements::resolve(&config, None);
-        let policy = ReplicatorVpaResourcePolicy::resolve(&config);
+        let policy = ReplicatorVpaResourcePolicy::resolve(&config, None);
 
         assert_eq!(resources.replicator.cpu, "300m");
         assert_eq!(resources.replicator.memory, "500Mi");
@@ -181,7 +193,7 @@ mod tests {
     fn omitted_autoscaling_fixes_vpa_to_startup_allocation() {
         let config = K8sConfig { replicator_autoscaling: None, ..test_k8s_config() };
 
-        let policy = ReplicatorVpaResourcePolicy::resolve(&config);
+        let policy = ReplicatorVpaResourcePolicy::resolve(&config, None);
 
         assert_eq!(policy.cpu, VpaResourceBounds { min: 300, max: 300 });
         assert_eq!(policy.memory, VpaResourceBounds { min: 500, max: 500 });
@@ -189,14 +201,14 @@ mod tests {
 
     #[test]
     fn configured_vpa_bounds_are_independent_of_startup_defaults() {
-        let policy = ReplicatorVpaResourcePolicy::resolve(&test_k8s_config());
+        let policy = ReplicatorVpaResourcePolicy::resolve(&test_k8s_config(), None);
 
         assert_eq!(policy.cpu, VpaResourceBounds { min: 250, max: 2_000 });
         assert_eq!(policy.memory, VpaResourceBounds { min: 768, max: 8_192 });
     }
 
     #[test]
-    fn pipeline_requests_override_stateful_set_startup_allocation_independently() {
+    fn pipeline_requests_fix_corresponding_startup_allocation_and_vpa_bounds() {
         let overrides = PipelineReplicatorResourceOverrideConfig {
             cpu_request_millicores: Some(900),
             memory_request_mib: None,
@@ -205,9 +217,12 @@ mod tests {
 
         let resources =
             ReplicatorStatefulSetResourceRequirements::resolve(&config, Some(&overrides));
+        let policy = ReplicatorVpaResourcePolicy::resolve(&config, Some(&overrides));
 
         assert_eq!(resources.replicator.cpu, "900m");
         assert_eq!(resources.replicator.memory, "500Mi");
+        assert_eq!(policy.cpu, VpaResourceBounds { min: 900, max: 900 });
+        assert_eq!(policy.memory, VpaResourceBounds { min: 768, max: 8_192 });
     }
 
     #[test]
@@ -222,7 +237,7 @@ mod tests {
 
         let resources =
             ReplicatorStatefulSetResourceRequirements::resolve(&config, Some(&overrides));
-        let policy = ReplicatorVpaResourcePolicy::resolve(&config);
+        let policy = ReplicatorVpaResourcePolicy::resolve(&config, Some(&overrides));
 
         assert_eq!(resources.replicator.cpu, "300m");
         assert_eq!(resources.replicator.memory, "500Mi");

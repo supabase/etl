@@ -165,21 +165,22 @@ configuration is serialized again. Likewise, the former
 upgrade; remove it and move any required sizing into the API-wide requests or
 pipeline request overrides.
 
-Supplying either pipeline request override makes the entire workload fixed. The
-API requests deletion of any existing VPA and waits until the Kubernetes API
-reports it absent before applying the StatefulSet. It does not create a new VPA
-while the override remains. A partial pipeline override still disables VPA for
-both resources; the resource without an override inherits its API-wide request
-default. This wait confirms removal from the Kubernetes API; the upstream VPA
-admission controller consumes changes through its own informer cache and may
-observe that removal shortly afterward.
+The API creates a VPA for every replicator. CPU and memory bounds resolve
+independently, from highest to lowest precedence:
 
-For workloads without pipeline request overrides, the API creates a VPA and its
-CPU and memory bounds resolve independently:
+1. A pipeline request override is used as both bounds for that resource.
+2. A supplied `replicator_autoscaling` block provides the resource's interval.
+3. Otherwise, the resolved StatefulSet startup request is used as both bounds.
 
-1. A supplied `replicator_autoscaling` block provides each resource's interval.
-2. If `replicator_autoscaling` is omitted, the resolved StatefulSet startup
-   request is used for both bounds, producing a fixed allocation.
+A partial pipeline override therefore fixes only that resource. The other
+resource retains its configured autoscaling interval, or its fixed API-wide
+request when no interval is configured.
+
+Always creating the VPA is a deliberate design decision. It keeps resource
+materialization uniform and preserves VPA recommendation observability even
+when both bounds are fixed. If fixed pipeline overrides become common enough
+that per-pipeline VPA overhead matters, a future design may allow selected
+pipelines to omit the VPA.
 
 The autoscaling interval does not clamp or otherwise change the StatefulSet's
 startup requests, and the API does not validate that they lie within it.
@@ -209,9 +210,8 @@ and applies only when a VPA is first created:
 
 Subsequent API reconciliation preserves the live update mode, allowing an
 operator or separate Kubernetes controller to manage transitions without the
-API resetting them. The default is `off`; for pipelines without request
-overrides, omitting `replicator_autoscaling` also creates new VPAs in `off`
-mode.
+API resetting them. The default is `off`; omitting `replicator_autoscaling`
+still creates a VPA in `off` mode with fixed bounds.
 `minReplicas: 1` permits disruption-aware recreation for enabled modes that may
 fall back to it. Deployments that start with VPA `Off` may enable updates after
 their chosen observation policy has collected representative usage. Deployments
@@ -220,15 +220,14 @@ that want immediate actuation may configure `in_place_or_recreate` instead.
 Before restarting a running replicator, the API uses durable table state to
 predict whether the restart will repeat an initial table copy. If any table is
 before `SyncDone` and is not stopped in an error state, the API deletes the VPA
-before reconciling the pipeline. For pipelines without resource overrides,
-reconciliation recreates the VPA from the current autoscaling configuration and
-initial update mode. Deleting the VPA resource does not guarantee that a running
-upstream recommender forgets its in-memory usage aggregates. `SyncDone` and
-`Ready` tables keep their destination data across restart and therefore
-preserve the existing VPA and its live update mode. This applies to explicit
-restarts and configuration updates that restart a running replicator. Source
-connection, query, or state-decoding failures preserve the VPA rather than
-making the restart less reliable.
+before reconciling the pipeline. Reconciliation recreates the VPA from the
+current pipeline overrides, autoscaling configuration, and initial update mode.
+Deleting the VPA resource does not guarantee that a running upstream recommender
+forgets its in-memory usage aggregates. `SyncDone` and `Ready` tables keep their
+destination data across restart and therefore preserve the existing VPA and its
+live update mode. This applies to explicit restarts and configuration updates
+that restart a running replicator. Source connection, query, or state-decoding
+failures preserve the VPA rather than making the restart less reliable.
 
 Kubelet container restarts and Kubernetes- or controller-initiated Pod
 replacements do not pass through the API restart path, so they do not delete the
@@ -241,8 +240,7 @@ copy-aware decision at the API boundary. A future Kubernetes controller with
 access to durable table state could own this lifecycle.
 
 Stopping and starting a pipeline still deletes the autoscaler resource: stop
-deletes the StatefulSet and VPA, and start recreates the VPA only when the
-pipeline has no resource override.
+deletes the StatefulSet and VPA, and start always recreates both resources.
 
 ### Encryption Keys
 
