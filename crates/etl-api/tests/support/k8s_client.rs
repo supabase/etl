@@ -7,10 +7,10 @@ use std::sync::{
 
 use async_trait::async_trait;
 use etl_api::{
-    configs::pipeline::ReplicatorResourcesConfig,
+    configs::pipeline::PipelineReplicatorResourceOverrideConfig,
     k8s::{
         DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PipelineRuntimeIdentity, PodStatus,
-        ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
+        ReplicatorConfigMapFile, ReplicatorWorkloadConfig,
     },
 };
 use tokio::sync::RwLock;
@@ -22,7 +22,8 @@ pub(crate) struct MockK8sState {
     vpa_delete_calls: Arc<AtomicUsize>,
     ducklake_maintenance_create_calls: Arc<AtomicUsize>,
     last_replicator_image: Arc<RwLock<Option<String>>>,
-    last_replicator_resources: Arc<RwLock<Option<ReplicatorResourcesConfig>>>,
+    last_replicator_resource_override:
+        Arc<RwLock<Option<PipelineReplicatorResourceOverrideConfig>>>,
 }
 
 impl Default for MockK8sState {
@@ -33,7 +34,7 @@ impl Default for MockK8sState {
             vpa_delete_calls: Arc::new(AtomicUsize::new(0)),
             ducklake_maintenance_create_calls: Arc::new(AtomicUsize::new(0)),
             last_replicator_image: Arc::new(RwLock::new(None)),
-            last_replicator_resources: Arc::new(RwLock::new(None)),
+            last_replicator_resource_override: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -59,8 +60,10 @@ impl MockK8sState {
         self.last_replicator_image.read().await.clone()
     }
 
-    pub(crate) async fn last_replicator_resources(&self) -> Option<ReplicatorResourcesConfig> {
-        self.last_replicator_resources.read().await.clone()
+    pub(crate) async fn last_replicator_resource_override(
+        &self,
+    ) -> Option<PipelineReplicatorResourceOverrideConfig> {
+        self.last_replicator_resource_override.read().await.clone()
     }
 }
 
@@ -77,11 +80,12 @@ impl MockK8sClient {
         self.state.create_calls.fetch_add(1, Ordering::Relaxed);
     }
 
-    async fn set_last_replicator_resources(
+    async fn set_last_replicator_resource_override(
         &self,
-        replicator_resources: Option<&ReplicatorResourcesConfig>,
+        replicator_resource_override: Option<&PipelineReplicatorResourceOverrideConfig>,
     ) {
-        *self.state.last_replicator_resources.write().await = replicator_resources.cloned();
+        *self.state.last_replicator_resource_override.write().await =
+            replicator_resource_override.cloned();
     }
 }
 
@@ -192,10 +196,14 @@ impl K8sClient for MockK8sClient {
         &self,
         _resource_prefix: &str,
         _identity: &PipelineRuntimeIdentity,
-        config: ReplicatorStatefulSetConfig,
+        workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError> {
-        *self.state.last_replicator_image.write().await = Some(config.replicator_image);
-        self.set_last_replicator_resources(config.replicator_resources.as_ref()).await;
+        *self.state.last_replicator_image.write().await =
+            Some(workload_config.replicator_image.clone());
+        self.set_last_replicator_resource_override(
+            workload_config.replicator_resource_override.as_ref(),
+        )
+        .await;
         self.record_create_call();
         Ok(())
     }
@@ -204,6 +212,7 @@ impl K8sClient for MockK8sClient {
         &self,
         _resource_prefix: &str,
         _identity: &PipelineRuntimeIdentity,
+        _workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError> {
         self.record_create_call();
         Ok(())

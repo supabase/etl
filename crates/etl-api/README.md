@@ -133,33 +133,74 @@ available cluster nodes. Replicator tolerations always use Kubernetes'
 `Equal` operator; selector `key` and `value` and toleration `key`, `value`, and
 `effect` are passed through unchanged.
 
-The global replicator and Vector defaults are mandatory and request-only.
-Destination defaults are optional and may override either request field for
-`bigquery`, `clickhouse`, `ducklake`, `iceberg`, or `snowflake`. Missing
-destination fields fall back to the global replicator defaults. Vector
-resources are configured only at the API level; pipeline configuration may
-override replicator resources only.
+The API-wide replicator and Vector request defaults are mandatory. Replicator
+requests are startup allocations written to every StatefulSet pod template;
+there are no destination-specific resource defaults. Vector resources are also
+configured only at the API level.
 
-Pipeline configuration may override any replicator resource field:
+Pipeline configuration may override either replicator request:
 
 ```yaml
 replicator_resources:
   cpu_request_millicores: 750
   memory_request_mib: 1536
-  cpu_limit_millicores: 1500
-  memory_limit_mib: 1843
 ```
 
-All pipeline resource fields are optional. Request precedence is pipeline
-override, destination-kind default, then global default. If a limit is omitted,
-it matches the final request. If a limit is supplied, the larger of the request
-and limit becomes the allocation emitted as both request and limit. The
-allocation is clamped to `replicator_autoscaling` bounds. The same bounds are
-written to the VPA resource policy. CPU/memory requests always equal limits so
-every generated replicator Pod has Kubernetes Guaranteed QoS. VPA controls both
-requests and limits, preserving their initial 1:1 ratio when recommendations
-are enabled. `initial_update_mode` accepts the supported Kubernetes VPA update
-modes below and applies only when a VPA is first created:
+CPU and memory resolve independently. StatefulSet startup requests use this
+precedence, from highest to lowest:
+
+1. Pipeline request override.
+2. Mandatory API-wide default.
+
+The generated CPU and memory limits always equal their resolved requests, for
+both the replicator and Vector containers, so every generated Pod has
+Kubernetes Guaranteed QoS. Limits are derived from requests and are not
+independently configurable.
+
+The former pipeline fields `cpu_limit_millicores` and `memory_limit_mib` are no
+longer used. They are ignored if they remain in stored pipeline configurations
+or appear in create and update requests, and they are omitted when the
+configuration is serialized again. Likewise, the former
+`k8s.replicator_resources.destinations` service configuration is ignored after
+upgrade; remove it and move any required sizing into the API-wide requests or
+pipeline request overrides.
+
+The API creates a VPA for every replicator. CPU and memory bounds resolve
+independently, from highest to lowest precedence:
+
+1. A pipeline request override is used as both bounds for that resource.
+2. A supplied `replicator_autoscaling` block provides the resource's interval.
+3. Otherwise, the resolved StatefulSet startup request is used as both bounds.
+
+A partial pipeline override therefore fixes only that resource. The other
+resource retains its configured autoscaling interval, or its fixed API-wide
+request when no interval is configured.
+
+Always creating the VPA is a deliberate design decision. It keeps resource
+materialization uniform and preserves VPA recommendation observability even
+when both bounds are fixed. If fixed pipeline overrides become common enough
+that per-pipeline VPA overhead matters, a future design may allow selected
+pipelines to omit the VPA.
+
+The autoscaling interval does not clamp or otherwise change the StatefulSet's
+startup requests, and the API does not validate that they lie within it.
+Operators are expected to keep the API-wide startup requests inside the
+configured interval. When the intended startup behavior is to use the maximum
+allowed capacity, set each startup request equal to the corresponding VPA
+maximum; the configuration model still permits these values to diverge in the
+future. Once VPA actuation begins, it may move an out-of-range startup request
+inside `minAllowed` and `maxAllowed`. VPA controls both requests and limits,
+preserving their 1:1 ratio when recommendations are applied.
+
+"Startup" describes the pod template value, not a guaranteed time window. In
+`off` mode it remains effective until the live VPA mode is changed. With an
+enabled update mode, it remains effective until VPA applies a recommendation;
+there is no fixed actuation delay. When a pod is recreated while its existing
+VPA already has a recommendation, admission may replace the template value
+immediately.
+
+`initial_update_mode` accepts the supported Kubernetes VPA update modes below
+and applies only when a VPA is first created:
 
 - `off` publishes recommendations without changing Pods.
 - `initial` applies recommendations only when Pods are created.
@@ -169,36 +210,37 @@ modes below and applies only when a VPA is first created:
 
 Subsequent API reconciliation preserves the live update mode, allowing an
 operator or separate Kubernetes controller to manage transitions without the
-API resetting them. The default is `off`.
+API resetting them. The default is `off`; omitting `replicator_autoscaling`
+still creates a VPA in `off` mode with fixed bounds.
 `minReplicas: 1` permits disruption-aware recreation for enabled modes that may
-fall back to it. The global defaults should normally match the autoscaling
-maximum, so a new replicator begins with the full copy allocation. Explicit
-destination and pipeline overrides remain authoritative.
-
-This max-first behavior is intentional for the current design. A fresh pipeline
-starts oversized to absorb the initial burst of data without an early OOM and
-to give table copy as much throughput as the configured operating envelope
-allows. Deployments that start with VPA `Off` may enable updates after their
-chosen observation policy has collected representative usage. Deployments that
-want immediate actuation may configure `in_place_or_recreate` instead.
+fall back to it. Deployments that start with VPA `Off` may enable updates after
+their chosen observation policy has collected representative usage. Deployments
+that want immediate actuation may configure `in_place_or_recreate` instead.
 
 Before restarting a running replicator, the API uses durable table state to
 predict whether the restart will repeat an initial table copy. If any table is
 before `SyncDone` and is not stopped in an error state, the API deletes the VPA
-before reconciling the pipeline. Reconciliation then recreates the VPA in the
-configured initial update mode, allowing the restarted Pod to begin with the
-initial copy allocation. Deleting the VPA resource does not guarantee that a
-running upstream recommender forgets its in-memory usage aggregates. `SyncDone`
-and `Ready` tables keep their destination data across restart and therefore
-preserve the existing VPA and its live update mode. This applies to
-explicit restarts and configuration updates that restart a running replicator.
-Source connection, query, or state-decoding failures preserve the VPA rather
-than making the restart less reliable.
+before reconciling the pipeline. Reconciliation recreates the VPA from the
+current pipeline overrides, autoscaling configuration, and initial update mode.
+Deleting the VPA resource does not guarantee that a running upstream recommender
+forgets its in-memory usage aggregates. `SyncDone` and `Ready` tables keep their
+destination data across restart and therefore preserve the existing VPA and its
+live update mode. This applies to explicit restarts and configuration updates
+that restart a running replicator. Source connection, query, or state-decoding
+failures preserve the VPA rather than making the restart less reliable.
 
-Kubernetes- or controller-initiated Pod restarts do not pass through the API
-restart path and therefore keep the learned VPA recommendation. Stopping and
-starting a pipeline still deletes the autoscaler resource: stop deletes the
-StatefulSet and VPA, and start recreates both in the configured initial mode.
+Kubelet container restarts and Kubernetes- or controller-initiated Pod
+replacements do not pass through the API restart path, so they do not delete the
+VPA. A container restarted within the same Pod keeps that Pod's current
+resources. A replacement Pod is created from the StatefulSet template, but VPA
+admission may replace those resources with the existing recommendation. If a
+replacement happens while table copy will repeat, the API cannot reset the VPA
+to the initial configuration first. This is a known limitation of keeping the
+copy-aware decision at the API boundary. A future Kubernetes controller with
+access to durable table state could own this lifecycle.
+
+Stopping and starting a pipeline still deletes the autoscaler resource: stop
+deletes the StatefulSet and VPA, and start always recreates both resources.
 
 ### Encryption Keys
 

@@ -5,8 +5,6 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
 use etl_config::Environment;
 #[cfg(test)]
-use etl_config::shared::DestinationKind;
-#[cfg(test)]
 use etl_maintenance::DuckLakeMaintenancePolicy;
 use k8s_openapi::{
     api::{
@@ -25,20 +23,21 @@ use thiserror::Error;
 use tracing::debug;
 
 #[cfg(test)]
-use crate::config::{DefaultReplicatorResourcesConfig, ReplicatorAutoscalingUpdateMode};
+use crate::config::{
+    ReplicatorResourceAutoscalingConfig, ReplicatorResourceDefaultsConfig,
+    VectorResourceDefaultsConfig,
+};
 use crate::{
-    config::{
-        DefaultVectorResourcesConfig, K8sConfig, ReplicatorAutoscalingConfig,
-        ResolvedReplicatorResourcesConfig,
-    },
+    config::{K8sConfig, ReplicatorResourceAutoscalingUpdateMode},
     configs::{
         log::LogLevel,
-        pipeline::{DuckLakeMaintenanceConfig, ReplicatorResourcesConfig},
+        pipeline::{DuckLakeMaintenanceConfig, PipelineReplicatorResourceOverrideConfig},
     },
     k8s::{
         DestinationType, DuckLakeMaintenanceResourceConfig, K8sClient, K8sError,
         PipelineRuntimeIdentity, PodPhase, PodStatus, ReplicatorConfigMapFile,
-        ReplicatorStatefulSetConfig,
+        ReplicatorWorkloadConfig,
+        resources::{ReplicatorStatefulSetResourceRequirements, ReplicatorVpaResourcePolicy},
     },
 };
 
@@ -133,118 +132,16 @@ const DUCKLAKE_MAINTENANCE_GROUP: &str = "etl.supabase.com";
 const DUCKLAKE_MAINTENANCE_VERSION: &str = "v1alpha1";
 /// DuckLake maintenance CRD kind.
 const DUCKLAKE_MAINTENANCE_KIND: &str = "DuckLakeMaintenance";
-/// Maximum time to wait for a deleted DuckLake maintenance CR to disappear.
-const DUCKLAKE_MAINTENANCE_DELETE_TIMEOUT: Duration = Duration::from_secs(300);
-/// Interval between checks for a deleted DuckLake maintenance CR.
-const DUCKLAKE_MAINTENANCE_DELETE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Maximum time to wait for a deleted Kubernetes resource to disappear.
+const RESOURCE_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Interval between checks for a deleted Kubernetes resource.
+const RESOURCE_DELETE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Vertical Pod Autoscaler CRD group.
 const VERTICAL_POD_AUTOSCALER_GROUP: &str = "autoscaling.k8s.io";
 /// Vertical Pod Autoscaler CRD version.
 const VERTICAL_POD_AUTOSCALER_VERSION: &str = "v1";
 /// Vertical Pod Autoscaler CRD kind.
 const VERTICAL_POD_AUTOSCALER_KIND: &str = "VerticalPodAutoscaler";
-
-/// Minimum Kubernetes CPU quantity emitted by the API, in millicores.
-const MIN_K8S_CPU_MILLICORES: i32 = 1;
-/// Minimum Kubernetes memory quantity emitted by the API, in Mi.
-const MIN_K8S_MEMORY_MIB: i32 = 1;
-
-/// Kubernetes resource settings for all containers in a replicator StatefulSet.
-#[derive(Debug)]
-struct ReplicatorStatefulSetResourcesConfig {
-    replicator_memory_limit: String,
-    replicator_memory_request: String,
-    replicator_cpu_limit: String,
-    replicator_cpu_request: String,
-    vector_memory_limit: String,
-    vector_memory_request: String,
-    vector_cpu_limit: String,
-    vector_cpu_request: String,
-}
-
-impl ReplicatorStatefulSetResourcesConfig {
-    /// Builds StatefulSet resources from environment-specific test defaults.
-    #[cfg(test)]
-    fn for_environment(environment: &Environment) -> Result<Self, K8sError> {
-        let k8s_config = test_k8s_config(environment);
-        let default_replicator_resources =
-            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
-        Self::from_default_resources(
-            &default_replicator_resources,
-            &k8s_config.replicator_autoscaling,
-            &k8s_config.vector_resources,
-            None,
-        )
-    }
-
-    /// Builds StatefulSet resources from API defaults plus optional
-    /// pipeline-level replicator resource overrides.
-    ///
-    /// Request precedence is pipeline override first, then the mandatory API
-    /// default from `k8s.replicator_resources`. An explicit pipeline limit is
-    /// treated as another allocation floor. The larger value is emitted as
-    /// both request and limit, just as Vector limits match Vector requests, so
-    /// every generated Pod qualifies for Kubernetes Guaranteed QoS.
-    fn from_default_resources(
-        default_replicator_resources: &ResolvedReplicatorResourcesConfig,
-        autoscaling: &ReplicatorAutoscalingConfig,
-        default_vector_resources: &DefaultVectorResourcesConfig,
-        pipeline_replicator_resources: Option<&ReplicatorResourcesConfig>,
-    ) -> Result<Self, K8sError> {
-        let replicator_memory_request = pipeline_replicator_resources
-            .and_then(|config| config.memory_request_mib)
-            .unwrap_or(default_replicator_resources.memory_request_mib);
-        let replicator_cpu_request = pipeline_replicator_resources
-            .and_then(|config| config.cpu_request_millicores)
-            .unwrap_or(default_replicator_resources.cpu_request_millicores);
-        let vector_memory_request = clamp_k8s_resource_quantity(
-            default_vector_resources.memory_request_mib,
-            MIN_K8S_MEMORY_MIB,
-        );
-        let vector_cpu_request = clamp_k8s_resource_quantity(
-            default_vector_resources.cpu_request_millicores,
-            MIN_K8S_CPU_MILLICORES,
-        );
-
-        // Keep requests and limits equal even when a pipeline supplies a
-        // larger historical limit. The replicator memory monitor reads the
-        // container cgroup limit through sysinfo, so batch budgets and memory
-        // backpressure scale with this single allocation value.
-        let replicator_memory_limit = pipeline_replicator_resources
-            .and_then(|config| config.memory_limit_mib)
-            .unwrap_or(replicator_memory_request);
-        let replicator_memory_allocation = replicator_memory_request
-            .max(replicator_memory_limit)
-            .clamp(autoscaling.min_memory_mib, autoscaling.max_memory_mib);
-        let replicator_cpu_limit = pipeline_replicator_resources
-            .and_then(|config| config.cpu_limit_millicores)
-            .unwrap_or(replicator_cpu_request);
-        let replicator_cpu_allocation = replicator_cpu_request
-            .max(replicator_cpu_limit)
-            .clamp(autoscaling.min_cpu_millicores, autoscaling.max_cpu_millicores);
-
-        // Sidecars participate in pod QoS too, so Vector must also keep
-        // limits equal to requests for the pod to stay Guaranteed.
-        let vector_memory_limit = vector_memory_request;
-        let vector_cpu_limit = vector_cpu_request;
-
-        Ok(Self {
-            replicator_memory_limit: format!("{replicator_memory_allocation}Mi"),
-            replicator_memory_request: format!("{replicator_memory_allocation}Mi"),
-            replicator_cpu_limit: format!("{replicator_cpu_allocation}m"),
-            replicator_cpu_request: format!("{replicator_cpu_allocation}m"),
-            vector_memory_limit: format!("{vector_memory_limit}Mi"),
-            vector_memory_request: format!("{vector_memory_request}Mi"),
-            vector_cpu_limit: format!("{vector_cpu_limit}m"),
-            vector_cpu_request: format!("{vector_cpu_request}m"),
-        })
-    }
-}
-
-/// Clamps a Kubernetes resource quantity to the smallest value this API emits.
-fn clamp_k8s_resource_quantity(value: i32, minimum: i32) -> i32 {
-    value.max(minimum)
-}
 
 #[cfg(test)]
 fn test_k8s_config(environment: &Environment) -> K8sConfig {
@@ -257,18 +154,32 @@ fn test_k8s_config(environment: &Environment) -> K8sConfig {
         replicator_service_account_name: "etl-replicator".to_owned(),
         replicator_node_selectors: Default::default(),
         replicator_tolerations: Default::default(),
-        replicator_resources: DefaultReplicatorResourcesConfig {
+        replicator_resources: ReplicatorResourceDefaultsConfig {
             memory_request_mib,
             cpu_request_millicores,
-            destinations: Default::default(),
         },
-        replicator_autoscaling: ReplicatorAutoscalingConfig::default(),
+        replicator_autoscaling: Some(ReplicatorResourceAutoscalingConfig {
+            initial_update_mode: ReplicatorResourceAutoscalingUpdateMode::Off,
+            min_memory_mib: 768,
+            max_memory_mib: 8_192,
+            min_cpu_millicores: 250,
+            max_cpu_millicores: 2_000,
+        }),
         vector_image: "timberio/vector:0.55.0-distroless-libc".to_owned(),
-        vector_resources: DefaultVectorResourcesConfig {
+        vector_resources: VectorResourceDefaultsConfig {
             memory_request_mib: 192,
             cpu_request_millicores: 75,
         },
     }
+}
+
+/// Resolves resource requirements from environment-specific test defaults.
+#[cfg(test)]
+fn test_resource_requirements(
+    environment: &Environment,
+) -> ReplicatorStatefulSetResourceRequirements {
+    let k8s_config = test_k8s_config(environment);
+    ReplicatorStatefulSetResourceRequirements::resolve(&k8s_config, None)
 }
 
 /// HTTP-based implementation of [`K8sClient`].
@@ -828,19 +739,15 @@ impl K8sClient for HttpK8sClient {
         &self,
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
-        request: ReplicatorStatefulSetConfig,
+        workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError> {
         debug!("patching stateful set");
 
-        let replicator_image = request.replicator_image.as_str();
-        let default_replicator_resources =
-            self.k8s_config.replicator_resources_for(request.destination_type.kind());
-        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &default_replicator_resources,
-            &self.k8s_config.replicator_autoscaling,
-            &self.k8s_config.vector_resources,
-            request.replicator_resources.as_ref(),
-        )?;
+        let replicator_image = workload_config.replicator_image.as_str();
+        let resource_requirements = ReplicatorStatefulSetResourceRequirements::resolve(
+            &self.k8s_config,
+            workload_config.replicator_resource_override.as_ref(),
+        );
 
         let stateful_set_name = create_stateful_set_name(resource_prefix);
         let legacy_stateful_set_name = create_legacy_stateful_set_name(resource_prefix);
@@ -857,9 +764,9 @@ impl K8sClient for HttpK8sClient {
             resource_prefix,
             &environment,
             replicator_image,
-            request.destination_type,
-            request.ducklake_maintenance.as_ref(),
-            request.log_level,
+            workload_config.destination_type,
+            workload_config.ducklake_maintenance.as_ref(),
+            &workload_config.log_level,
         );
 
         let node_selector = node_selector_json(&self.k8s_config.replicator_node_selectors);
@@ -868,7 +775,7 @@ impl K8sClient for HttpK8sClient {
             &self.k8s_config,
             resource_prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         let volumes = create_volumes_json(resource_prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
@@ -885,7 +792,7 @@ impl K8sClient for HttpK8sClient {
             init_containers,
             volumes,
             volume_mounts,
-            &stateful_set_resources,
+            &resource_requirements,
         );
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
@@ -903,10 +810,17 @@ impl K8sClient for HttpK8sClient {
         &self,
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
+        workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError> {
         let name = create_stateful_set_name(resource_prefix);
-        let initial_update_mode =
-            self.k8s_config.replicator_autoscaling.initial_update_mode.as_k8s_value();
+        let initial_update_mode = self
+            .k8s_config
+            .replicator_autoscaling
+            .as_ref()
+            .map_or(ReplicatorResourceAutoscalingUpdateMode::Off, |config| {
+                config.initial_update_mode
+            })
+            .as_k8s_value();
         let existing_vertical_pod_autoscaler =
             self.vertical_pod_autoscalers_api.get_opt(&name).await?;
         let update_mode = existing_vertical_pod_autoscaler
@@ -922,6 +836,7 @@ impl K8sClient for HttpK8sClient {
             identity,
             &name,
             update_mode,
+            workload_config.replicator_resource_override.as_ref(),
         )?;
 
         // We are forcing the update since we are the field manager that should own the
@@ -960,7 +875,24 @@ impl K8sClient for HttpK8sClient {
             self.vertical_pod_autoscalers_api.delete(&name, &dp).await,
         )?;
 
-        Ok(())
+        match tokio::time::timeout(RESOURCE_DELETE_TIMEOUT, async {
+            loop {
+                if self.vertical_pod_autoscalers_api.get_opt(&name).await?.is_none() {
+                    return Ok(());
+                }
+
+                tokio::time::sleep(RESOURCE_DELETE_POLL_INTERVAL).await;
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(K8sError::ResourceDeletionTimeout {
+                kind: VERTICAL_POD_AUTOSCALER_KIND,
+                name,
+                timeout_seconds: RESOURCE_DELETE_TIMEOUT.as_secs(),
+            }),
+        }
     }
 
     async fn replicator_stateful_set_exists(
@@ -1013,13 +945,13 @@ impl K8sClient for HttpK8sClient {
             self.ducklake_maintenance_api.delete(&name, &dp).await,
         )?;
 
-        match tokio::time::timeout(DUCKLAKE_MAINTENANCE_DELETE_TIMEOUT, async {
+        match tokio::time::timeout(RESOURCE_DELETE_TIMEOUT, async {
             loop {
                 if self.ducklake_maintenance_api.get_opt(&name).await?.is_none() {
                     return Ok(());
                 }
 
-                tokio::time::sleep(DUCKLAKE_MAINTENANCE_DELETE_POLL_INTERVAL).await;
+                tokio::time::sleep(RESOURCE_DELETE_POLL_INTERVAL).await;
             }
         })
         .await
@@ -1028,7 +960,7 @@ impl K8sClient for HttpK8sClient {
             Err(_) => Err(K8sError::ResourceDeletionTimeout {
                 kind: DUCKLAKE_MAINTENANCE_KIND,
                 name,
-                timeout_seconds: DUCKLAKE_MAINTENANCE_DELETE_TIMEOUT.as_secs(),
+                timeout_seconds: RESOURCE_DELETE_TIMEOUT.as_secs(),
             }),
         }
     }
@@ -1473,7 +1405,7 @@ fn create_container_environment_json(
     replicator_image: &str,
     destination_type: DestinationType,
     ducklake_maintenance: Option<&DuckLakeMaintenanceConfig>,
-    log_level: LogLevel,
+    log_level: &LogLevel,
 ) -> Vec<serde_json::Value> {
     let mut container_environment = vec![
         json!({
@@ -1679,7 +1611,7 @@ fn create_init_containers_json(
     k8s_config: &K8sConfig,
     prefix: &str,
     environment: &Environment,
-    stateful_set_resources: &ReplicatorStatefulSetResourcesConfig,
+    resource_requirements: &ReplicatorStatefulSetResourceRequirements,
 ) -> serde_json::Value {
     let vector_container_name = create_vector_container_name(prefix);
     // In staging and prod, run vector init container to collect logs
@@ -1709,12 +1641,12 @@ fn create_init_containers_json(
             ],
             "resources": {
               "limits": {
-                "memory": stateful_set_resources.vector_memory_limit,
-                "cpu": stateful_set_resources.vector_cpu_limit,
+                "memory": resource_requirements.vector.memory,
+                "cpu": resource_requirements.vector.cpu,
               },
               "requests": {
-                "memory": stateful_set_resources.vector_memory_request,
-                "cpu": stateful_set_resources.vector_cpu_request,
+                "memory": resource_requirements.vector.memory,
+                "cpu": resource_requirements.vector.cpu,
               }
             },
             "volumeMounts": [
@@ -1802,7 +1734,7 @@ fn create_replicator_stateful_set_json(
     init_containers: serde_json::Value,
     volumes: Vec<serde_json::Value>,
     volume_mounts: Vec<serde_json::Value>,
-    stateful_set_resources: &ReplicatorStatefulSetResourcesConfig,
+    resource_requirements: &ReplicatorStatefulSetResourceRequirements,
 ) -> serde_json::Value {
     let replicator_app_name = create_replicator_app_name(prefix);
     let restarted_at_annotation = get_restarted_at_annotation_value();
@@ -1881,12 +1813,12 @@ fn create_replicator_stateful_set_json(
                 "volumeMounts": volume_mounts,
                 "resources": {
                   "limits": {
-                    "memory": stateful_set_resources.replicator_memory_limit,
-                    "cpu": stateful_set_resources.replicator_cpu_limit,
+                    "memory": resource_requirements.replicator.memory,
+                    "cpu": resource_requirements.replicator.cpu,
                   },
                   "requests": {
-                    "memory": stateful_set_resources.replicator_memory_request,
-                    "cpu": stateful_set_resources.replicator_cpu_request,
+                    "memory": resource_requirements.replicator.memory,
+                    "cpu": resource_requirements.replicator.cpu,
                   }
                 }
               }
@@ -1903,10 +1835,12 @@ fn create_replicator_vertical_pod_autoscaler_json(
     identity: &PipelineRuntimeIdentity,
     stateful_set_name: &str,
     update_mode: &str,
+    pipeline_resource_override: Option<&PipelineReplicatorResourceOverrideConfig>,
 ) -> Result<DynamicObject, serde_json::Error> {
     let replicator_app_name = create_replicator_app_name(prefix);
     let replicator_container_name = create_replicator_container_name(prefix);
     let identity_labels = create_replicator_identity_labels(&replicator_app_name, identity);
+    let policy = ReplicatorVpaResourcePolicy::resolve(k8s_config, pipeline_resource_override);
 
     serde_json::from_value(json!({
       "apiVersion": format!("{VERTICAL_POD_AUTOSCALER_GROUP}/{VERTICAL_POD_AUTOSCALER_VERSION}"),
@@ -1934,12 +1868,12 @@ fn create_replicator_vertical_pod_autoscaler_json(
               "controlledResources": ["cpu", "memory"],
               "controlledValues": "RequestsAndLimits",
               "minAllowed": {
-                "cpu": format!("{}m", k8s_config.replicator_autoscaling.min_cpu_millicores),
-                "memory": format!("{}Mi", k8s_config.replicator_autoscaling.min_memory_mib)
+                "cpu": format!("{}m", policy.cpu.min),
+                "memory": format!("{}Mi", policy.memory.min)
               },
               "maxAllowed": {
-                "cpu": format!("{}m", k8s_config.replicator_autoscaling.max_cpu_millicores),
-                "memory": format!("{}Mi", k8s_config.replicator_autoscaling.max_memory_mib)
+                "cpu": format!("{}m", policy.cpu.max),
+                "memory": format!("{}Mi", policy.memory.max)
               }
             },
             {
@@ -1975,11 +1909,6 @@ mod tests {
     use insta::{assert_json_snapshot, assert_snapshot};
 
     use super::*;
-    use crate::{
-        config::DefaultReplicatorResourcesOverrideConfig,
-        configs::pipeline::ReplicatorResourcesConfig,
-    };
-
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
     const PIPELINE_ID: i64 = 24;
     const REPLICATOR_ID: i64 = 42;
@@ -2189,199 +2118,6 @@ mod tests {
     }
 
     #[test]
-    fn test_replicator_stateful_set_resources_uses_api_config_requests() {
-        let prod =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Prod).unwrap();
-        let staging =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Staging).unwrap();
-
-        assert_eq!(prod.replicator_cpu_request, "500m");
-        assert_eq!(prod.replicator_memory_request, "768Mi");
-        assert_eq!(staging.replicator_cpu_request, "250m");
-        assert_eq!(staging.replicator_memory_request, "768Mi");
-        assert_eq!(prod.vector_cpu_request, "75m");
-        assert_eq!(prod.vector_memory_request, "192Mi");
-        assert_eq!(prod.vector_cpu_limit, "75m");
-        assert_eq!(prod.vector_memory_limit, "192Mi");
-    }
-
-    #[test]
-    fn test_replicator_stateful_set_resources_uses_pipeline_overrides() {
-        let overrides = ReplicatorResourcesConfig {
-            cpu_request_millicores: Some(750),
-            memory_request_mib: Some(1536),
-            ..ReplicatorResourcesConfig::default()
-        };
-        let k8s_config = test_k8s_config(&Environment::Prod);
-        let default_replicator_resources =
-            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
-
-        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &default_replicator_resources,
-            &k8s_config.replicator_autoscaling,
-            &k8s_config.vector_resources,
-            Some(&overrides),
-        )
-        .unwrap();
-
-        assert_eq!(stateful_set_resources.replicator_cpu_request, "750m");
-        assert_eq!(stateful_set_resources.replicator_memory_request, "1536Mi");
-        assert_eq!(stateful_set_resources.replicator_cpu_limit, "750m");
-        assert_eq!(stateful_set_resources.replicator_memory_limit, "1536Mi");
-    }
-
-    #[test]
-    fn test_replicator_stateful_set_resources_uses_pipeline_limits() {
-        let overrides = ReplicatorResourcesConfig {
-            cpu_request_millicores: Some(750),
-            memory_request_mib: Some(1536),
-            cpu_limit_millicores: Some(1000),
-            memory_limit_mib: Some(2048),
-        };
-        let k8s_config = test_k8s_config(&Environment::Prod);
-        let default_replicator_resources =
-            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
-
-        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &default_replicator_resources,
-            &k8s_config.replicator_autoscaling,
-            &k8s_config.vector_resources,
-            Some(&overrides),
-        )
-        .unwrap();
-
-        assert_eq!(stateful_set_resources.replicator_cpu_request, "1000m");
-        assert_eq!(stateful_set_resources.replicator_memory_request, "2048Mi");
-        assert_eq!(stateful_set_resources.replicator_cpu_limit, "1000m");
-        assert_eq!(stateful_set_resources.replicator_memory_limit, "2048Mi");
-    }
-
-    #[test]
-    fn test_replicator_stateful_set_resources_clamps_to_autoscaling_minimums() {
-        let overrides = ReplicatorResourcesConfig {
-            cpu_request_millicores: Some(0),
-            memory_request_mib: Some(-20),
-            cpu_limit_millicores: Some(0),
-            memory_limit_mib: Some(-1),
-        };
-        let k8s_config = K8sConfig {
-            replicator_resources: DefaultReplicatorResourcesConfig {
-                cpu_request_millicores: -10,
-                memory_request_mib: 0,
-                destinations: Default::default(),
-            },
-            vector_resources: DefaultVectorResourcesConfig {
-                cpu_request_millicores: 0,
-                memory_request_mib: -20,
-            },
-            ..default_k8s_config()
-        };
-        let default_replicator_resources =
-            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
-
-        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &default_replicator_resources,
-            &k8s_config.replicator_autoscaling,
-            &k8s_config.vector_resources,
-            Some(&overrides),
-        )
-        .unwrap();
-
-        assert_eq!(stateful_set_resources.replicator_cpu_request, "250m");
-        assert_eq!(stateful_set_resources.replicator_memory_request, "768Mi");
-        assert_eq!(stateful_set_resources.replicator_cpu_limit, "250m");
-        assert_eq!(stateful_set_resources.replicator_memory_limit, "768Mi");
-        assert_eq!(stateful_set_resources.vector_cpu_request, "1m");
-        assert_eq!(stateful_set_resources.vector_memory_request, "1Mi");
-        assert_eq!(stateful_set_resources.vector_cpu_limit, "1m");
-        assert_eq!(stateful_set_resources.vector_memory_limit, "1Mi");
-    }
-
-    #[test]
-    fn test_replicator_stateful_set_resources_clamps_limits_to_requests() {
-        let overrides = ReplicatorResourcesConfig {
-            cpu_request_millicores: Some(750),
-            memory_request_mib: Some(1536),
-            cpu_limit_millicores: Some(10),
-            memory_limit_mib: Some(100),
-        };
-        let k8s_config = test_k8s_config(&Environment::Prod);
-        let default_replicator_resources =
-            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
-
-        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &default_replicator_resources,
-            &k8s_config.replicator_autoscaling,
-            &k8s_config.vector_resources,
-            Some(&overrides),
-        )
-        .unwrap();
-
-        assert_eq!(stateful_set_resources.replicator_cpu_request, "750m");
-        assert_eq!(stateful_set_resources.replicator_memory_request, "1536Mi");
-        assert_eq!(stateful_set_resources.replicator_cpu_limit, "750m");
-        assert_eq!(stateful_set_resources.replicator_memory_limit, "1536Mi");
-    }
-
-    #[test]
-    fn test_replicator_resource_config_uses_api_vector_resources() {
-        let k8s_config = K8sConfig {
-            replicator_resources: DefaultReplicatorResourcesConfig {
-                cpu_request_millicores: 500,
-                memory_request_mib: 500,
-                destinations: Default::default(),
-            },
-            vector_resources: DefaultVectorResourcesConfig {
-                cpu_request_millicores: 80,
-                memory_request_mib: 192,
-            },
-            ..default_k8s_config()
-        };
-        let default_replicator_resources =
-            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
-
-        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &default_replicator_resources,
-            &k8s_config.replicator_autoscaling,
-            &k8s_config.vector_resources,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(stateful_set_resources.vector_cpu_request, "80m");
-        assert_eq!(stateful_set_resources.vector_memory_request, "192Mi");
-        assert_eq!(stateful_set_resources.vector_cpu_limit, "80m");
-        assert_eq!(stateful_set_resources.vector_memory_limit, "192Mi");
-    }
-
-    #[test]
-    fn default_replicator_allocation_can_start_at_the_autoscaling_maximum() {
-        let k8s_config = K8sConfig {
-            replicator_resources: DefaultReplicatorResourcesConfig {
-                cpu_request_millicores: 2_000,
-                memory_request_mib: 8_192,
-                destinations: Default::default(),
-            },
-            ..default_k8s_config()
-        };
-        let default_replicator_resources =
-            k8s_config.replicator_resources_for(DestinationKind::BigQuery);
-
-        let resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &default_replicator_resources,
-            &k8s_config.replicator_autoscaling,
-            &k8s_config.vector_resources,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(resources.replicator_cpu_request, "2000m");
-        assert_eq!(resources.replicator_memory_request, "8192Mi");
-        assert_eq!(resources.replicator_cpu_limit, resources.replicator_cpu_request);
-        assert_eq!(resources.replicator_memory_limit, resources.replicator_memory_request);
-    }
-
-    #[test]
     fn generated_kubernetes_labels_fit_with_max_tenant_and_replicator_ids() {
         let prefix = create_k8s_object_prefix(MAX_TENANT_ID, MAX_BIGINT_ID);
         let replicator_app_name = create_replicator_app_name(&prefix);
@@ -2405,8 +2141,7 @@ mod tests {
         );
 
         let environment = Environment::Prod;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
         let replicator_image = "supabase/replicator:1.2.3";
         let container_environment = create_container_environment_json(
             &default_k8s_config(),
@@ -2415,7 +2150,7 @@ mod tests {
             replicator_image,
             DestinationType::Ducklake,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
         let node_selector = create_node_selector_json(&environment);
         let tolerations = create_tolerations_json(&environment);
@@ -2423,7 +2158,7 @@ mod tests {
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
@@ -2530,7 +2265,8 @@ mod tests {
                         &prefix,
                         &identity,
                         &stateful_set_name,
-                        ReplicatorAutoscalingUpdateMode::Off.as_k8s_value(),
+                        ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
+                        None,
                     )
                     .unwrap(),
                 )
@@ -2550,7 +2286,7 @@ mod tests {
                     init_containers,
                     volumes,
                     volume_mounts,
-                    &stateful_set_resources,
+                    &resource_requirements,
                 ),
             ),
         ];
@@ -2656,8 +2392,7 @@ mod tests {
         }
 
         let environment = Environment::Staging;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
         let container_environment = create_container_environment_json(
             &k8s_config,
             &prefix,
@@ -2669,7 +2404,7 @@ mod tests {
                 min_active_data_files: 20,
                 ..DuckLakeMaintenanceConfig::default()
             }),
-            LogLevel::Info,
+            &LogLevel::Info,
         );
         assert!(container_environment.iter().any(|entry| {
             entry
@@ -2679,12 +2414,8 @@ mod tests {
                 })
         }));
 
-        let init_containers = create_init_containers_json(
-            &k8s_config,
-            &prefix,
-            &environment,
-            &stateful_set_resources,
-        );
+        let init_containers =
+            create_init_containers_json(&k8s_config, &prefix, &environment, &resource_requirements);
         assert_eq!(init_containers.pointer("/0/image"), Some(&json!("example.com/vector:custom")));
 
         let stateful_set = create_replicator_stateful_set_json(
@@ -2699,7 +2430,7 @@ mod tests {
             init_containers,
             create_volumes_json(&prefix, &environment),
             create_volume_mounts_json(&environment),
-            &stateful_set_resources,
+            &resource_requirements,
         );
         assert_eq!(stateful_set.pointer("/metadata/namespace"), Some(&json!("custom-data-plane")));
         assert_eq!(
@@ -2728,46 +2459,6 @@ mod tests {
                 "tenant-1-42-replicator-stateful-set-0".to_owned(),
             ]
         );
-    }
-
-    #[test]
-    fn test_replicator_resources_prefer_pipeline_then_destination_then_global_defaults() {
-        let overrides = ReplicatorResourcesConfig {
-            cpu_request_millicores: Some(900),
-            ..ReplicatorResourcesConfig::default()
-        };
-        let destinations = BTreeMap::from([(
-            DestinationKind::Ducklake,
-            DefaultReplicatorResourcesOverrideConfig {
-                cpu_request_millicores: Some(600),
-                memory_request_mib: Some(800),
-            },
-        )]);
-        let k8s_config = K8sConfig {
-            replicator_resources: DefaultReplicatorResourcesConfig {
-                cpu_request_millicores: 300,
-                memory_request_mib: 400,
-                destinations,
-            },
-            vector_resources: DefaultVectorResourcesConfig {
-                cpu_request_millicores: 80,
-                memory_request_mib: 192,
-            },
-            ..default_k8s_config()
-        };
-        let default_replicator_resources =
-            k8s_config.replicator_resources_for(DestinationKind::Ducklake);
-
-        let stateful_set_resources = ReplicatorStatefulSetResourcesConfig::from_default_resources(
-            &default_replicator_resources,
-            &k8s_config.replicator_autoscaling,
-            &k8s_config.vector_resources,
-            Some(&overrides),
-        )
-        .unwrap();
-
-        assert_eq!(stateful_set_resources.replicator_cpu_request, "900m");
-        assert_eq!(stateful_set_resources.replicator_memory_request, "800Mi");
     }
 
     #[test]
@@ -2967,7 +2658,7 @@ mod tests {
             replicator_image,
             DestinationType::BigQuery,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
 
@@ -2979,7 +2670,7 @@ mod tests {
             replicator_image,
             DestinationType::BigQuery,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
 
@@ -2991,7 +2682,7 @@ mod tests {
             replicator_image,
             DestinationType::BigQuery,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
     }
@@ -3008,7 +2699,7 @@ mod tests {
             replicator_image,
             DestinationType::Iceberg,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
 
@@ -3019,7 +2710,7 @@ mod tests {
             replicator_image,
             DestinationType::Iceberg,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
 
@@ -3030,7 +2721,7 @@ mod tests {
             replicator_image,
             DestinationType::Iceberg,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
     }
@@ -3047,7 +2738,7 @@ mod tests {
             replicator_image,
             DestinationType::Ducklake,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
 
@@ -3058,7 +2749,7 @@ mod tests {
             replicator_image,
             DestinationType::Ducklake,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
 
@@ -3069,7 +2760,7 @@ mod tests {
             replicator_image,
             DestinationType::Ducklake,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
     }
@@ -3086,7 +2777,7 @@ mod tests {
             replicator_image,
             DestinationType::ClickHouse { password_secret_required: true },
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let postgres_secret_name = create_postgres_secret_name(&prefix);
@@ -3117,7 +2808,7 @@ mod tests {
             replicator_image,
             DestinationType::ClickHouse { password_secret_required: false },
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let postgres_secret_name = create_postgres_secret_name(&prefix);
@@ -3145,7 +2836,7 @@ mod tests {
             replicator_image,
             DestinationType::Snowflake { passphrase_secret_required: true },
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let postgres_secret_name = create_postgres_secret_name(&prefix);
@@ -3182,7 +2873,7 @@ mod tests {
             replicator_image,
             DestinationType::Snowflake { passphrase_secret_required: false },
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let postgres_secret_name = create_postgres_secret_name(&prefix);
@@ -3275,8 +2966,7 @@ mod tests {
 
     #[test]
     fn replicator_stateful_set_applies_optional_scheduling_constraints() {
-        let resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Dev).unwrap();
+        let resource_requirements = test_resource_requirements(&Environment::Dev);
         let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
         let create_stateful_set = |node_selector, tolerations| {
             create_replicator_stateful_set_json(
@@ -3291,7 +2981,7 @@ mod tests {
                 json!([]),
                 Vec::new(),
                 Vec::new(),
-                &resources,
+                &resource_requirements,
             )
         };
 
@@ -3344,8 +3034,7 @@ mod tests {
 
     #[test]
     fn replicator_stateful_set_allows_in_place_cpu_and_memory_resize() {
-        let resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&Environment::Dev).unwrap();
+        let resource_requirements = test_resource_requirements(&Environment::Dev);
         let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
         let stateful_set = create_replicator_stateful_set_json(
             &default_k8s_config(),
@@ -3359,7 +3048,7 @@ mod tests {
             json!([]),
             Vec::new(),
             Vec::new(),
-            &resources,
+            &resource_requirements,
         );
 
         assert_eq!(
@@ -3383,7 +3072,8 @@ mod tests {
             "tenant-1-42",
             &identity,
             "tenant-1-42-replicator",
-            ReplicatorAutoscalingUpdateMode::Off.as_k8s_value(),
+            ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
+            None,
         )
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();
@@ -3421,6 +3111,59 @@ mod tests {
     }
 
     #[test]
+    fn omitted_autoscaling_config_fixes_vpa_to_startup_requests() {
+        let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
+        let k8s_config = K8sConfig { replicator_autoscaling: None, ..default_k8s_config() };
+        let autoscaler = create_replicator_vertical_pod_autoscaler_json(
+            &k8s_config,
+            "tenant-1-42",
+            &identity,
+            "tenant-1-42-replicator",
+            ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
+            None,
+        )
+        .unwrap();
+        let autoscaler = serde_json::to_value(autoscaler).unwrap();
+
+        assert_eq!(
+            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/minAllowed"),
+            Some(&json!({"cpu": "125m", "memory": "250Mi"}))
+        );
+        assert_eq!(
+            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/maxAllowed"),
+            Some(&json!({"cpu": "125m", "memory": "250Mi"}))
+        );
+    }
+
+    #[test]
+    fn pipeline_override_fixes_only_corresponding_vpa_bounds() {
+        let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
+        let overrides = PipelineReplicatorResourceOverrideConfig {
+            cpu_request_millicores: Some(900),
+            memory_request_mib: None,
+        };
+        let autoscaler = create_replicator_vertical_pod_autoscaler_json(
+            &default_k8s_config(),
+            "tenant-1-42",
+            &identity,
+            "tenant-1-42-replicator",
+            ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
+            Some(&overrides),
+        )
+        .unwrap();
+        let autoscaler = serde_json::to_value(autoscaler).unwrap();
+
+        assert_eq!(
+            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/minAllowed"),
+            Some(&json!({"cpu": "900m", "memory": "768Mi"}))
+        );
+        assert_eq!(
+            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/maxAllowed"),
+            Some(&json!({"cpu": "900m", "memory": "8192Mi"}))
+        );
+    }
+
+    #[test]
     fn replicator_vertical_pod_autoscaler_updates_preserve_live_mode() {
         let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
         let live: DynamicObject = serde_json::from_value(json!({
@@ -3436,6 +3179,7 @@ mod tests {
             &identity,
             "tenant-1-42-replicator",
             vpa_update_mode(&live).unwrap(),
+            None,
         )
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();
@@ -3452,35 +3196,32 @@ mod tests {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
 
         let environment = Environment::Dev;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
         let node_selector = create_init_containers_json(
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         assert_json_snapshot!(node_selector);
 
         let environment = Environment::Staging;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
         let node_selector = create_init_containers_json(
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         assert_json_snapshot!(node_selector);
 
         let environment = Environment::Prod;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
         let node_selector = create_init_containers_json(
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         assert_json_snapshot!(node_selector);
     }
@@ -3526,8 +3267,7 @@ mod tests {
 
         // Dev env
         let environment = Environment::Dev;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
 
         let container_environment = create_container_environment_json(
             &default_k8s_config(),
@@ -3536,7 +3276,7 @@ mod tests {
             replicator_image,
             DestinationType::BigQuery,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -3545,7 +3285,7 @@ mod tests {
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
@@ -3562,7 +3302,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &stateful_set_resources,
+            &resource_requirements,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -3576,8 +3316,7 @@ mod tests {
 
         // Staging env
         let environment = Environment::Staging;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
 
         let container_environment = create_container_environment_json(
             &default_k8s_config(),
@@ -3586,7 +3325,7 @@ mod tests {
             replicator_image,
             DestinationType::BigQuery,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -3595,7 +3334,7 @@ mod tests {
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
@@ -3612,7 +3351,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &stateful_set_resources,
+            &resource_requirements,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -3626,8 +3365,7 @@ mod tests {
 
         // Prod env
         let environment = Environment::Prod;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
 
         let container_environment = create_container_environment_json(
             &default_k8s_config(),
@@ -3636,7 +3374,7 @@ mod tests {
             replicator_image,
             DestinationType::BigQuery,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -3645,7 +3383,7 @@ mod tests {
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
@@ -3662,7 +3400,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &stateful_set_resources,
+            &resource_requirements,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -3684,8 +3422,7 @@ mod tests {
 
         // Dev env
         let environment = Environment::Dev;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
 
         let container_environment = create_container_environment_json(
             &default_k8s_config(),
@@ -3694,7 +3431,7 @@ mod tests {
             replicator_image,
             DestinationType::Iceberg,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -3703,7 +3440,7 @@ mod tests {
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
@@ -3720,7 +3457,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &stateful_set_resources,
+            &resource_requirements,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -3734,8 +3471,7 @@ mod tests {
 
         // Staging env
         let environment = Environment::Staging;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
 
         let container_environment = create_container_environment_json(
             &default_k8s_config(),
@@ -3744,7 +3480,7 @@ mod tests {
             replicator_image,
             DestinationType::Iceberg,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -3753,7 +3489,7 @@ mod tests {
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
@@ -3770,7 +3506,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &stateful_set_resources,
+            &resource_requirements,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -3784,8 +3520,7 @@ mod tests {
 
         // Prod env
         let environment = Environment::Prod;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
 
         let container_environment = create_container_environment_json(
             &default_k8s_config(),
@@ -3794,7 +3529,7 @@ mod tests {
             replicator_image,
             DestinationType::Iceberg,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -3803,7 +3538,7 @@ mod tests {
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
@@ -3820,7 +3555,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &stateful_set_resources,
+            &resource_requirements,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -3842,8 +3577,7 @@ mod tests {
 
         // Dev env
         let environment = Environment::Dev;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
 
         let container_environment = create_container_environment_json(
             &default_k8s_config(),
@@ -3852,7 +3586,7 @@ mod tests {
             replicator_image,
             DestinationType::Ducklake,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -3861,7 +3595,7 @@ mod tests {
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
@@ -3878,7 +3612,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &stateful_set_resources,
+            &resource_requirements,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -3892,8 +3626,7 @@ mod tests {
 
         // Staging env
         let environment = Environment::Staging;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
 
         let container_environment = create_container_environment_json(
             &default_k8s_config(),
@@ -3902,7 +3635,7 @@ mod tests {
             replicator_image,
             DestinationType::Ducklake,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -3911,7 +3644,7 @@ mod tests {
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
@@ -3928,7 +3661,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &stateful_set_resources,
+            &resource_requirements,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);
@@ -3942,8 +3675,7 @@ mod tests {
 
         // Prod env
         let environment = Environment::Prod;
-        let stateful_set_resources =
-            ReplicatorStatefulSetResourcesConfig::for_environment(&environment).unwrap();
+        let resource_requirements = test_resource_requirements(&environment);
 
         let container_environment = create_container_environment_json(
             &default_k8s_config(),
@@ -3952,7 +3684,7 @@ mod tests {
             replicator_image,
             DestinationType::Ducklake,
             None,
-            LogLevel::Info,
+            &LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -3961,7 +3693,7 @@ mod tests {
             &default_k8s_config(),
             &prefix,
             &environment,
-            &stateful_set_resources,
+            &resource_requirements,
         );
         let volumes = create_volumes_json(&prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
@@ -3978,7 +3710,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
-            &stateful_set_resources,
+            &resource_requirements,
         );
 
         assert_stateful_set_json_snapshot!(stateful_set_json);

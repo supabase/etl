@@ -1,12 +1,11 @@
 use async_trait::async_trait;
-use etl_config::shared::DestinationKind;
 use etl_maintenance::DuckLakeMaintenancePolicy;
 use thiserror::Error;
 
 use crate::configs::{
     destination::StoredDestinationConfig,
     log::LogLevel,
-    pipeline::{DuckLakeMaintenanceConfig, ReplicatorResourcesConfig},
+    pipeline::{DuckLakeMaintenanceConfig, PipelineReplicatorResourceOverrideConfig},
 };
 
 /// Errors from Kubernetes operations.
@@ -73,13 +72,13 @@ pub struct DuckLakeMaintenanceResourceConfig {
     pub policy: DuckLakeMaintenancePolicy,
 }
 
-/// Replicator StatefulSet materialization input.
+/// Input shared by the replicator StatefulSet and VPA materializers.
 #[derive(Debug, Clone)]
-pub struct ReplicatorStatefulSetConfig {
+pub struct ReplicatorWorkloadConfig {
     /// Image for the replicator container.
     pub replicator_image: String,
-    /// Optional resource overrides.
-    pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    /// Optional pipeline-level replicator resource override.
+    pub replicator_resource_override: Option<PipelineReplicatorResourceOverrideConfig>,
     /// Destination type used to select destination-specific env/secrets.
     pub destination_type: DestinationType,
     /// DuckLake maintenance policy.
@@ -112,20 +111,6 @@ pub enum DestinationType {
         /// secret entry.
         passphrase_secret_required: bool,
     },
-}
-
-impl DestinationType {
-    /// Returns the product destination kind represented by this Kubernetes
-    /// type.
-    pub const fn kind(self) -> DestinationKind {
-        match self {
-            DestinationType::BigQuery => DestinationKind::BigQuery,
-            DestinationType::Iceberg => DestinationKind::Iceberg,
-            DestinationType::ClickHouse { .. } => DestinationKind::ClickHouse,
-            DestinationType::Ducklake => DestinationKind::Ducklake,
-            DestinationType::Snowflake { .. } => DestinationKind::Snowflake,
-        }
-    }
 }
 
 impl From<&StoredDestinationConfig> for DestinationType {
@@ -333,15 +318,21 @@ pub trait K8sClient: Send + Sync {
         &self,
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
-        config: ReplicatorStatefulSetConfig,
+        workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError>;
 
     /// Creates or updates the Vertical Pod Autoscaler for the replicator
     /// `StatefulSet`.
+    ///
+    /// A pipeline request override is used as both bounds for that resource.
+    /// Other configured autoscaling bounds are independent of the StatefulSet
+    /// startup allocation. When autoscaling is omitted, the corresponding
+    /// startup allocation is used as both VPA bounds.
     async fn create_or_update_replicator_vertical_pod_autoscaler(
         &self,
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
+        workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError>;
 
     /// Deletes the replicator `StatefulSet`.
@@ -351,7 +342,8 @@ pub trait K8sClient: Send + Sync {
 
     /// Deletes the replicator Vertical Pod Autoscaler.
     ///
-    /// Does nothing if the autoscaler does not exist.
+    /// Requests deletion and waits until the Kubernetes API reports the
+    /// autoscaler absent. Does nothing if the autoscaler does not exist.
     async fn delete_replicator_vertical_pod_autoscaler(
         &self,
         resource_prefix: &str,
