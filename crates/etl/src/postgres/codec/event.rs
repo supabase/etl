@@ -1057,9 +1057,9 @@ mod tests {
             schema_snapshot_id_from_message(commit_lsn, &message),
             SnapshotId::new(commit_lsn, PgLsn::from(message_lsn))
         );
-        assert_ne!(
-            schema_snapshot_id_from_message(commit_lsn, &message),
-            SnapshotId::new(commit_lsn, PgLsn::from(wal_start))
+        assert!(
+            schema_snapshot_id_from_message(commit_lsn, &message)
+                > SnapshotId::new(commit_lsn, PgLsn::from(wal_start))
         );
     }
 

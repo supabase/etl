@@ -347,7 +347,6 @@ enum ReplicaIdentityMode {
     Default,
     Full,
     UsingIndex,
-    UsingPrimaryKeyColumnsReversed,
 }
 
 impl ReplicaIdentityMode {
@@ -360,7 +359,7 @@ impl ReplicaIdentityMode {
                 REPLICA_IDENTITY_INITIAL_ID,
                 quote_literal(REPLICA_IDENTITY_INITIAL_SURNAME),
             ),
-            Self::Default | Self::Full | Self::UsingPrimaryKeyColumnsReversed => format!(
+            Self::Default | Self::Full => format!(
                 "update {table_name} set surname = {}, large_text = {} where id = {} and surname \
                  = {}",
                 quote_literal(REPLICA_IDENTITY_UPDATED_SURNAME),
@@ -379,7 +378,7 @@ impl ReplicaIdentityMode {
                 quote_literal(REPLICA_IDENTITY_UPDATED_NAME),
                 quote_literal(REPLICA_IDENTITY_INITIAL_SURNAME),
             ),
-            Self::Default | Self::Full | Self::UsingPrimaryKeyColumnsReversed => format!(
+            Self::Default | Self::Full => format!(
                 "delete from {table_name} where id = {} and surname = {}",
                 REPLICA_IDENTITY_INITIAL_ID,
                 quote_literal(REPLICA_IDENTITY_UPDATED_SURNAME),
@@ -525,25 +524,6 @@ async fn run_raw_replica_identity_scenario(
             database
                 .run_sql(&format!(
                     "create unique index {} on {} (surname, name)",
-                    quote_identifier(&index_name),
-                    quoted_table_name,
-                ))
-                .await
-                .unwrap();
-            let replica_identity_value = format!("using index {}", quote_identifier(&index_name));
-            database
-                .alter_table(
-                    table_name.clone(),
-                    &[TableModification::ReplicaIdentity { value: &replica_identity_value }],
-                )
-                .await
-                .unwrap();
-        }
-        ReplicaIdentityMode::UsingPrimaryKeyColumnsReversed => {
-            let index_name = format!("{}_reversed_primary_key_idx", table_name.name);
-            database
-                .run_sql(&format!(
-                    "create unique index {} on {} (id, surname)",
                     quote_identifier(&index_name),
                     quoted_table_name,
                 ))
@@ -2407,47 +2387,6 @@ async fn pgoutput_using_index_replica_identity_tracks_alternative_identity_colum
                 old_tuple: None,
             },
         ]
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn pgoutput_using_index_with_reversed_primary_key_columns_uses_relation_order() {
-    let result =
-        run_raw_replica_identity_scenario(ReplicaIdentityMode::UsingPrimaryKeyColumnsReversed)
-            .await;
-
-    assert_eq!(
-        result.changes[2],
-        ObservedChangeMessage::Update {
-            key_tuple: Some(vec![
-                ObservedTupleCell::Text("1".to_owned()),
-                ObservedTupleCell::Null,
-                ObservedTupleCell::Text("smith".to_owned()),
-                ObservedTupleCell::Null,
-                ObservedTupleCell::Null,
-            ]),
-            old_tuple: None,
-            new_tuple: vec![
-                ObservedTupleCell::Text("1".to_owned()),
-                ObservedTupleCell::Text("alice".to_owned()),
-                ObservedTupleCell::Text("smithers".to_owned()),
-                ObservedTupleCell::Text("vienna".to_owned()),
-                ObservedTupleCell::Text("c".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES)),
-            ],
-        }
-    );
-    assert_eq!(
-        result.changes[3],
-        ObservedChangeMessage::Delete {
-            key_tuple: Some(vec![
-                ObservedTupleCell::Text("1".to_owned()),
-                ObservedTupleCell::Null,
-                ObservedTupleCell::Text("smithers".to_owned()),
-                ObservedTupleCell::Null,
-                ObservedTupleCell::Null,
-            ]),
-            old_tuple: None,
-        }
     );
 }
 

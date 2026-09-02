@@ -752,9 +752,9 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
         post_handoff_insert.replicated_table_schema.inner().snapshot_id,
         pending_relation.replicated_table_schema.inner().snapshot_id
     );
-    assert_ne!(
-        post_handoff_insert.replicated_table_schema.inner().snapshot_id,
-        table_sync_relation.replicated_table_schema.inner().snapshot_id
+    assert!(
+        post_handoff_insert.replicated_table_schema.inner().snapshot_id
+            > table_sync_relation.replicated_table_schema.inner().snapshot_id
     );
 
     // Only the snapshot changed. Since pgoutput sent no replacement protocol
