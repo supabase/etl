@@ -854,11 +854,9 @@ impl K8sClient for HttpK8sClient {
         debug!("deleting stateful set");
 
         let dp = DeleteParams::default();
-        for stateful_set_name in stateful_set_names_for_lookup(resource_prefix) {
-            Self::handle_delete_with_404_ignore(
-                self.stateful_sets_api.delete(&stateful_set_name, &dp).await,
-            )?;
-        }
+        Self::handle_delete_with_404_ignore(
+            self.stateful_sets_api.delete(&create_stateful_set_name(resource_prefix), &dp).await,
+        )?;
 
         Ok(())
     }
@@ -901,15 +899,10 @@ impl K8sClient for HttpK8sClient {
     ) -> Result<bool, K8sError> {
         debug!("checking stateful set existence");
 
-        for stateful_set_name in stateful_set_names_for_lookup(resource_prefix) {
-            match self.stateful_sets_api.get(&stateful_set_name).await {
-                Ok(_) => return Ok(true),
-                Err(kube::Error::Api(err)) if err.code == 404 => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
+        let stateful_set =
+            self.stateful_sets_api.get_opt(&create_stateful_set_name(resource_prefix)).await?;
 
-        Ok(false)
+        Ok(stateful_set.is_some())
     }
 
     async fn create_or_update_ducklake_maintenance(
@@ -1064,13 +1057,6 @@ fn create_legacy_pod_name(prefix: &str) -> String {
 
 fn unique_current_and_legacy_names(current: String, legacy: String) -> Vec<String> {
     if current == legacy { vec![current] } else { vec![current, legacy] }
-}
-
-fn stateful_set_names_for_lookup(prefix: &str) -> Vec<String> {
-    unique_current_and_legacy_names(
-        create_stateful_set_name(prefix),
-        create_legacy_stateful_set_name(prefix),
-    )
 }
 
 fn pod_names_for_status(prefix: &str) -> Vec<String> {
@@ -2440,18 +2426,11 @@ mod tests {
     }
 
     #[test]
-    fn replicator_workload_names_use_short_suffix_and_keep_legacy_lookup_names() {
+    fn replicator_workload_names_use_short_suffix_and_keep_legacy_pod_lookup() {
         let prefix = create_k8s_object_prefix("tenant-1", 42);
 
         assert_eq!(create_stateful_set_name(&prefix), "tenant-1-42-replicator");
         assert_eq!(create_legacy_stateful_set_name(&prefix), "tenant-1-42-replicator-stateful-set");
-        assert_eq!(
-            stateful_set_names_for_lookup(&prefix),
-            vec![
-                "tenant-1-42-replicator".to_owned(),
-                "tenant-1-42-replicator-stateful-set".to_owned(),
-            ]
-        );
         assert_eq!(
             pod_names_for_status(&prefix),
             vec![
