@@ -12,7 +12,7 @@ use crate::{
     schema::{IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableSchema},
 };
 
-/// Compact durable form of [`crate::replication::TableDecodingState`] stored at
+/// Compact durable form of `crate::replication::TableDecodingState` stored at
 /// `SyncDone`.
 ///
 /// The three fields are serialized together inside

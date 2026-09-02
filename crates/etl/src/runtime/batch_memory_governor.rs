@@ -1,14 +1,14 @@
 //! Dynamic decoded-batch memory governance.
 //!
-//! This module derives advisory batch-size targets from sampled process memory,
-//! tracked decoded bytes, and the number of batches that may coexist. It is not
-//! a memory allocator and does not grant or enforce byte reservations. Size
-//! estimates can differ from actual allocations, and an indivisible decoded
-//! item can take a batch past its target before ETL can flush it.
-//! When the governor first observes each memory-snapshot revision, it captures
-//! the then-current tracked-byte estimate and freezes one global target.
-//! Changes in active batch slots only repartition that target; the next memory
-//! snapshot recalibrates it.
+//! This module derives advisory batch-size targets from sampled memory-domain
+//! usage, tracked decoded bytes, and the number of batches that may coexist.
+//! It is not a memory allocator and does not grant or enforce byte
+//! reservations. Size estimates can differ from actual allocations, and an
+//! indivisible decoded item can take a batch past its target before ETL can
+//! flush it. When the governor first observes each memory-snapshot revision, it
+//! captures the then-current tracked-byte estimate and freezes one global
+//! target. Changes in active batch slots only repartition that target; the next
+//! memory snapshot recalibrates it.
 //!
 //! The system-memory sample and tracked-byte read are not simultaneous. Bytes
 //! may grow or drain between the monitor publishing a revision and the governor
@@ -25,7 +25,7 @@
 //! result completes (including `Accepted`, `Durable`, or an error). That
 //! completion is the accounting handoff point, not proof that physical memory
 //! was freed. Any input or derived allocation retained by a destination remains
-//! visible in the next whole-process or cgroup sample and is then treated as
+//! visible in the next selected system or cgroup sample and is then treated as
 //! non-batch memory. Normal completion handlers drop accounting handles
 //! explicitly at that boundary; [`Drop`] remains the cancellation and
 //! error-path safety net.
@@ -60,15 +60,15 @@ fn bytes_to_usize(bytes: u64) -> usize {
 /// - `L`: selected system capacity or cgroup limit.
 /// - `U`: used memory from the same coherent system or cgroup snapshot.
 /// - `R`: decoded batch bytes tracked when the governor observes the snapshot.
-/// - `T`: normal process-memory target derived from the backpressure
+/// - `T`: normal selected-memory target derived from the backpressure
 ///   thresholds.
 /// - `q`: maximum fraction of `L` targeted for decoded batches.
 ///
-/// First, `L * q` bounds the advisory target independently of other process
-/// allocations. Next, `U - R` estimates the non-batch baseline because sampled
-/// usage already includes retained decoded batches. Subtracting that baseline
-/// from `T` gives the total decoded-batch target that can coexist below the
-/// normal memory target:
+/// First, `L * q` bounds the advisory target independently of other allocations
+/// in the selected domain. Next, `U - R` estimates the non-batch baseline
+/// because sampled usage already includes retained decoded batches. Subtracting
+/// that baseline from `T` gives the total decoded-batch target that can coexist
+/// below the normal memory target:
 ///
 /// `target = min(L * q, max(T - max(U - R, 0), 0))`.
 ///
@@ -359,8 +359,8 @@ impl BatchMemoryGovernor {
 /// directly, while the operating-system reading continues to cover driver,
 /// allocator, destination, and other allocations.
 ///
-/// Tracking ends at destination acknowledgement. If the destination keeps
-/// memory after acknowledging, the sampled usage still includes it, but the
+/// Tracking ends when the destination result completes. If the destination
+/// keeps memory after completion, the sampled usage still includes it, but the
 /// governor conservatively treats it as non-batch memory from the next sample.
 #[derive(Debug)]
 pub(crate) struct BatchMemoryTracker {

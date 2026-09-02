@@ -127,9 +127,9 @@ pub trait Destination {
     /// boundary. ETL stops attributing the decoded size estimate to this batch
     /// after observing the result. This is advisory bookkeeping, not an
     /// allocator reservation. If the destination retains the rows or derived
-    /// buffers beyond that point, their memory remains covered by whole-process
-    /// or cgroup measurement and is treated as non-batch usage on the next
-    /// sample, which may reduce later batch sizes.
+    /// buffers beyond that point, their memory remains covered by the selected
+    /// system or cgroup measurement and is treated as non-batch usage on the
+    /// next sample, which may reduce later batch sizes.
     fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -207,9 +207,9 @@ pub trait Destination {
     /// boundary. ETL stops attributing the decoded size estimate to this batch
     /// after observing the result. This is advisory bookkeeping, not an
     /// allocator reservation. If the destination retains the events or derived
-    /// buffers beyond that point, their memory remains covered by whole-process
-    /// or cgroup measurement and is treated as non-batch usage on the next
-    /// sample, which may reduce later batch sizes.
+    /// buffers beyond that point, their memory remains covered by the selected
+    /// system or cgroup measurement and is treated as non-batch usage on the
+    /// next sample, which may reduce later batch sizes.
     ///
     /// During the initial copy stage, transaction boundaries are not a stable
     /// global invariant across all tables. A source transaction may be

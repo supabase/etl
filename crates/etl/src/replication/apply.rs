@@ -214,8 +214,8 @@ pub(crate) struct TableSyncWorkerContext<S> {
 
 /// Context for the worker driving the apply loop.
 ///
-/// This enum replaces the [`ApplyLoopHook`] trait, providing direct access to
-/// worker-specific resources and enabling different behavior based on the
+/// This enum replaces the former `ApplyLoopHook` trait, providing direct access
+/// to worker-specific resources and enabling different behavior based on the
 /// worker type at various points in the replication cycle.
 #[derive(Debug)]
 pub(crate) enum WorkerContext<S, D> {
@@ -733,8 +733,8 @@ struct EventBatch {
     events: Vec<Event>,
     /// Tables whose schemas are communicated by relation events in the batch.
     relation_table_ids: HashSet<TableId>,
-    /// Tracker that accounts for decoded events until destination
-    /// acknowledgement.
+    /// Tracker that accounts for decoded events until destination-result
+    /// completion.
     memory_tracker: Option<BatchMemoryTracker>,
     /// PostgreSQL tuple bytes used for source metrics and usage accounting.
     ///
@@ -823,7 +823,8 @@ struct ApplyLoopState {
     /// The highest commit end LSN that should be attached to the next
     /// destination write.
     ///
-    /// This usually comes from the [`end_lsn`] field of a [`Commit`] message.
+    /// This usually comes from the `end_lsn` field of a PostgreSQL commit
+    /// message.
     /// If a destination accepts a write without making it durable, the write's
     /// commit end LSN is re-attached here so a later durable write can advance
     /// through it.
@@ -1950,10 +1951,10 @@ where
         // Explode the result into parts which are used for handling the flush result.
         let (mut metadata, completed_at, result) = flush_result.into_parts_with_completion();
 
-        // The destination has acknowledged the write, successfully or otherwise, so
-        // ETL's decoded-input ownership has ended. Release its tracker before any
-        // checkpoint or schema-cleanup work awaits further I/O. Destination-retained
-        // allocations remain visible as non-batch memory in the next system sample.
+        // The destination result has completed, so ETL's decoded-input ownership
+        // has ended. Release its tracker before any checkpoint or schema-cleanup
+        // work awaits further I/O. Destination-retained allocations remain visible
+        // as non-batch memory in the next selected system or cgroup sample.
         if let Some(metadata) = metadata.as_mut() {
             drop(metadata.batch_memory_tracker.take());
         }
@@ -2283,7 +2284,7 @@ where
         );
 
         // Capture dispatch-time metrics; they are carried through the result channel
-        // and recorded once the destination acknowledges the batch.
+        // and recorded once the destination result completes.
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: self.state.last_commit_end_lsn.take(),
             durability,

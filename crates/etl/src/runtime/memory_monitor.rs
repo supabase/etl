@@ -256,7 +256,7 @@ struct BackpressureMonitor {
     config: MemoryBackpressureConfig,
 }
 
-/// Shared memory backpressure controller.
+/// Shared memory monitor and emergency backpressure controller.
 ///
 /// This component owns a periodic task that samples memory usage and updates a
 /// boolean backpressure signal. Consumers can subscribe and pause polling when
@@ -267,8 +267,7 @@ pub(crate) struct MemoryMonitor {
 }
 
 impl MemoryMonitor {
-    /// Creates a new memory backpressure controller and starts the refresh
-    /// task.
+    /// Creates a new memory monitor and starts its refresh task.
     pub(crate) fn new(
         mut shutdown_rx: ShutdownRx,
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
@@ -584,13 +583,12 @@ fn emit_activation_duration_metric(duration: Duration) {
 
 #[cfg(test)]
 impl MemoryMonitor {
-    /// Creates a new memory backpressure controller without spawning a refresh
-    /// task.
+    /// Creates a new memory monitor without spawning a refresh task.
     pub(crate) fn new_for_test() -> Self {
         Self::new_for_test_with_backpressure(Some(MemoryBackpressureConfig::default()))
     }
 
-    /// Creates a memory controller with configurable backpressure for tests.
+    /// Creates a memory monitor with configurable backpressure for tests.
     pub(crate) fn new_for_test_with_backpressure(config: Option<MemoryBackpressureConfig>) -> Self {
         Self {
             inner: Arc::new(MemoryMonitorInner {
@@ -968,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn omits_available_memory_when_backpressure_is_disabled() {
+    fn omits_normal_memory_target_when_backpressure_is_disabled() {
         let memory_monitor = MemoryMonitor::new_for_test_with_backpressure(None);
         memory_monitor.set_total_memory_bytes_for_test(10_000);
         memory_monitor.set_used_memory_bytes_for_test(7_500);

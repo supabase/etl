@@ -410,7 +410,7 @@ pub struct PipelineConfig {
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Whether [`Pipeline::start`] should run the source migrations that
+    /// Whether `Pipeline::start` should run the source migrations that
     /// install the schema helper functions and the `ddl_command_end` event
     /// trigger.
     ///
@@ -604,7 +604,11 @@ pub struct PipelineConfigWithoutSecrets {
     /// workers can pull new ranges as they finish.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
-    /// Number of milliseconds between one memory usage refresh and another.
+    /// Number of milliseconds between coherent memory snapshots.
+    ///
+    /// One shared sampler drives dynamic batch targets and emergency
+    /// backpressure. Batch hot paths reuse each snapshot instead of reading
+    /// operating-system or cgroup files per row.
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.
@@ -623,7 +627,7 @@ pub struct PipelineConfigWithoutSecrets {
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Whether [`Pipeline::start`] should run the source migrations. See the
+    /// Whether `Pipeline::start` should run the source migrations. See the
     /// field of the same name on [`PipelineConfig`].
     #[serde(default = "default_run_source_migrations")]
     pub run_source_migrations: bool,

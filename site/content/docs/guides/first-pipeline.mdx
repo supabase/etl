@@ -191,7 +191,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
   and `PGPASSWORD` environment variables, with local defaults where possible.
   `Pipeline::start()` installs the ETL **source-side schema helpers** before
   replication begins, even when the tutorial keeps runtime state in
-  `MemoryStore`.
+  `MemoryStore`. The 20% batch-memory ratio is one global advisory target that
+  ETL divides across accumulating and in-flight batches; 32 MiB is the preferred
+  ceiling for each batch, not a reservation. This example disables emergency
+  memory backpressure, but dynamic batch sizing remains active. A single row can
+  exceed the target because ETL checks its decoded size afterward.
 </Callout>
 
 ## Run the pipeline [#run-the-pipeline] [step]

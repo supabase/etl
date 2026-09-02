@@ -154,12 +154,14 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     pub relation_table_ids: HashSet<TableId>,
     /// PostgreSQL tuple bytes accumulated for the dispatched event batch.
     pub streaming_payload_metadata: StreamingPayloadMetadata,
-    /// Decoded bytes retained until the destination acknowledges this batch.
+    /// Tracker accounting for decoded bytes until the destination result
+    /// completes for this batch.
     ///
     /// The apply loop explicitly takes and drops this tracker immediately
     /// after observing completion. Dropping pending metadata remains the error
     /// and cancellation safety net. Destination-retained memory remains visible
-    /// to sampled whole-process or cgroup usage after this attribution ends.
+    /// to the selected system or cgroup measurement after this attribution
+    /// ends.
     pub batch_memory_tracker: Option<BatchMemoryTracker>,
     /// Instant at which the event batch was handed off to the destination.
     pub dispatched_at: Instant,

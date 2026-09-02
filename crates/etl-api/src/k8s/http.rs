@@ -206,8 +206,10 @@ impl ReplicatorStatefulSetResourcesConfig {
 
         // Keep requests and limits equal even when a pipeline supplies a
         // larger historical limit. The replicator memory monitor reads the
-        // container cgroup limit through sysinfo, so batch budgets and memory
-        // backpressure scale with this single allocation value.
+        // effective cgroup constraint visible through sysinfo. With the private
+        // cgroup namespace normally used for these pods, that is the container
+        // leaf, so batch targets and memory backpressure scale with this single
+        // allocation value.
         let replicator_memory_limit = pipeline_replicator_resources
             .and_then(|config| config.memory_limit_mib)
             .unwrap_or(replicator_memory_request);

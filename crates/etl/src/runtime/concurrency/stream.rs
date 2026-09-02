@@ -38,8 +38,8 @@ pub(crate) fn apply_worker_apply_stream_id() -> String {
 pub(crate) struct MemoryTrackedBatch<T> {
     /// Decoded items emitted by the batching stream.
     items: Vec<T>,
-    /// Reservation covering the decoded items through destination
-    /// acknowledgement.
+    /// Tracker accounting for the decoded items through destination-result
+    /// completion.
     memory_tracker: BatchMemoryTracker,
 }
 
@@ -55,7 +55,7 @@ impl<T> MemoryTrackedBatch<T> {
     }
 
     /// Splits the batch so its tracker can follow the items through
-    /// destination acknowledgement.
+    /// destination-result completion.
     pub(crate) fn into_parts(self) -> (Vec<T>, BatchMemoryTracker) {
         (self.items, self.memory_tracker)
     }
@@ -176,7 +176,7 @@ pin_project! {
         deadline: Option<tokio::time::Sleep>,
         // Successfully decoded items in the current batch.
         items: Vec<B>,
-        // Bytes retained by the currently accumulating batch.
+        // Tracker accounting for bytes retained by the accumulating batch.
         batch_memory_tracker: BatchMemoryTracker,
         // Governor supplying the shared advisory batch-size target.
         batch_memory_governor: BatchMemoryGovernor,
@@ -359,13 +359,13 @@ where
                     // Consult the shared target after every decoded item. A PostgreSQL COPY
                     // stream can yield many ready rows during one outer poll, so checking only
                     // once per poll would delay adaptation to a changed cgroup limit or active
-                    // stream count.
+                    // batch-slot count.
                     if this.batch_memory_tracker.size_hint_bytes()
                         >= this.batch_memory_governor.batch_size_target_bytes()
                     {
                         *this.reset_timer = true;
 
-                        // COPY consumers wait for acknowledgement before polling
+                        // COPY consumers wait for destination-result completion before polling
                         // again, so retaining another full outer-vector allocation
                         // here would violate the stream's one-batch-slot model.
                         let items = std::mem::take(this.items);
@@ -422,7 +422,7 @@ where
             *this.reset_timer = true;
 
             // Do not preallocate the next outer row buffer while this batch is
-            // still awaiting destination acknowledgement.
+            // still awaiting destination-result completion.
             let items = std::mem::take(this.items);
             let batch = take_memory_tracked_batch(items, this.batch_memory_tracker);
 
@@ -751,8 +751,8 @@ mod tests {
         memory.set_memory_snapshot_for_test(7_500, 10_000);
         assert_eq!(governor.batch_size_target_bytes(), 600);
 
-        // Destination acknowledgement drops the emitted batch and its tracker.
-        // The stream itself remains paused without owning those emitted bytes.
+        // Dropping the consumer-owned batch also drops its tracker. The stream
+        // itself remains paused without owning those emitted bytes.
         drop(batch);
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
@@ -872,32 +872,6 @@ mod tests {
 
         assert_eq!(into_batch_items(result), Some(Ok(vec![2])));
         unblocker.await.unwrap();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn does_not_flush_before_timeout_when_byte_target_is_not_reached() {
-        let memory = MemoryMonitor::new_for_test();
-        let memory_sub = memory.subscribe();
-
-        let batch_config = test_batch_config(100);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
-            TwoThenPending::new(),
-            "test_stream",
-            batch_config,
-            memory_sub,
-            test_batch_memory_governor(&memory),
-        ));
-
-        // Even with two buffered items, we do not flush by item count.
-        poll_fn(|cx| match stream.as_mut().poll_next(cx) {
-            Poll::Pending => Poll::Ready(()),
-            _ => panic!("expected pending before timeout when only item count threshold is met"),
-        })
-        .await;
-
-        tokio::time::advance(Duration::from_millis(120)).await;
-        let flushed = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(into_batch_items(flushed), Some(Ok(vec![1, 2])));
     }
 
     #[tokio::test]

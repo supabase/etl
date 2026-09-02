@@ -370,7 +370,7 @@ where
 {
     /// Handles a table sync worker failure using the configured retry policy.
     ///
-    /// Returns [`Some(TableSyncWorkerResult)`] when error handling terminates
+    /// Returns `Some(TableSyncWorkerResult)` when error handling terminates
     /// the worker, [`None`] when the worker should retry, or [`Err`] when
     /// the failure cannot be handled and must be propagated.
     ///

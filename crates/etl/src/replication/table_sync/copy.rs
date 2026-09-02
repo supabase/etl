@@ -660,8 +660,8 @@ where
 
     let table_copy_stream = TableCopyStream::wrap(copy_stream, replicated_column_schemas);
     let connection_updates_rx = child_replication_transaction.connection_updates_rx();
-    // A copy partition waits for destination acknowledgement before polling the
-    // next source batch, so it retains at most one batch at a time.
+    // A copy partition waits for destination-result completion before polling
+    // the next source batch, so it retains at most one batch at a time.
     let _table_copy_batch_slot = batch_memory_governor.register_batch_slots(1);
     let stream_id = table_sync_worker_copy_stream_id(table_id);
     let table_copy_stream = MemoryTrackedBatchStream::wrap(
@@ -805,9 +805,9 @@ where
                 let (batch_memory_tracker, completed_at, result) =
                     completed_flush_result.into_parts_with_completion();
 
-                // Destination acknowledgement ends ETL's ownership of this decoded
+                // Destination-result completion ends ETL's ownership of this decoded
                 // table-copy batch. Any destination-retained allocation remains visible
-                // to the next whole-process or cgroup memory sample.
+                // to the next selected system or cgroup memory sample.
                 drop(batch_memory_tracker);
                 let write_status = result?;
 

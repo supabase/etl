@@ -41,7 +41,7 @@ pub enum K8sError {
     },
 }
 
-/// A file to be stored in a [`ConfigMap`] that is used to configure a
+/// A file to be stored in a Kubernetes `ConfigMap` that is used to configure a
 /// replicator.
 ///
 /// Each file becomes a key-value pair in the config map's data section.
@@ -305,7 +305,7 @@ pub trait K8sClient: Send + Sync {
     /// Does nothing if the secret does not exist.
     async fn delete_snowflake_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
 
-    /// Creates or updates the replicator configuration [`ConfigMap`].
+    /// Creates or updates the replicator configuration `ConfigMap`.
     ///
     /// Accepts a list of files to store in the config map. Each file's filename
     /// becomes a key in the config map's data section with the content as its
@@ -317,7 +317,7 @@ pub trait K8sClient: Send + Sync {
         files: Vec<ReplicatorConfigMapFile>,
     ) -> Result<(), K8sError>;
 
-    /// Deletes the replicator configuration [`ConfigMap`].
+    /// Deletes the replicator configuration `ConfigMap`.
     ///
     /// Does nothing if the config map does not exist.
     async fn delete_replicator_config_map(&self, resource_prefix: &str) -> Result<(), K8sError>;
