@@ -157,11 +157,22 @@ both the replicator and Vector containers, so every generated Pod has
 Kubernetes Guaranteed QoS. Limits are derived from requests and are not
 independently configurable.
 
+The former pipeline fields `cpu_limit_millicores` and `memory_limit_mib` are no
+longer used. They are ignored if they remain in stored pipeline configurations
+or appear in create and update requests, and they are omitted when the
+configuration is serialized again. Likewise, the former
+`k8s.replicator_resources.destinations` service configuration is ignored after
+upgrade; remove it and move any required sizing into the API-wide requests or
+pipeline request overrides.
+
 Supplying either pipeline request override makes the entire workload fixed. The
-API removes any existing VPA before applying the StatefulSet and does not create
-a new VPA while the override remains. A partial pipeline override still
-disables VPA for both resources; the resource without an override inherits its
-API-wide request default.
+API requests deletion of any existing VPA and waits until the Kubernetes API
+reports it absent before applying the StatefulSet. It does not create a new VPA
+while the override remains. A partial pipeline override still disables VPA for
+both resources; the resource without an override inherits its API-wide request
+default. This wait confirms removal from the Kubernetes API; the upstream VPA
+admission controller consumes changes through its own informer cache and may
+observe that removal shortly afterward.
 
 For workloads without pipeline request overrides, the API creates a VPA and its
 CPU and memory bounds resolve independently:
@@ -219,11 +230,19 @@ restarts and configuration updates that restart a running replicator. Source
 connection, query, or state-decoding failures preserve the VPA rather than
 making the restart less reliable.
 
-Kubernetes- or controller-initiated Pod restarts do not pass through the API
-restart path and therefore keep the learned VPA recommendation. Stopping and
-starting a pipeline still deletes the autoscaler resource: stop deletes the
-StatefulSet and VPA, and start recreates the VPA only when the pipeline has no
-resource override.
+Kubelet container restarts and Kubernetes- or controller-initiated Pod
+replacements do not pass through the API restart path, so they do not delete the
+VPA. A container restarted within the same Pod keeps that Pod's current
+resources. A replacement Pod is created from the StatefulSet template, but VPA
+admission may replace those resources with the existing recommendation. If a
+replacement happens while table copy will repeat, the API cannot reset the VPA
+to the initial configuration first. This is a known limitation of keeping the
+copy-aware decision at the API boundary. A future Kubernetes controller with
+access to durable table state could own this lifecycle.
+
+Stopping and starting a pipeline still deletes the autoscaler resource: stop
+deletes the StatefulSet and VPA, and start recreates the VPA only when the
+pipeline has no resource override.
 
 ### Encryption Keys
 

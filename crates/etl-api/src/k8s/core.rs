@@ -566,8 +566,8 @@ async fn create_or_update_replicator_workload(
         .is_some_and(PipelineReplicatorResourceOverrideConfig::overrides_any_request);
 
     if has_pipeline_resource_override {
-        // Remove the VPA before applying the StatefulSet so admission cannot
-        // replace the explicitly configured requests.
+        // Wait for VPA API-object removal before applying the StatefulSet with
+        // explicitly configured requests.
         k8s_client.delete_replicator_vertical_pod_autoscaler(resource_prefix).await?;
     } else {
         // Apply the VPA first so newly admitted Pods observe its intended update mode.

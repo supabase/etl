@@ -342,7 +342,8 @@ pub trait K8sClient: Send + Sync {
 
     /// Deletes the replicator Vertical Pod Autoscaler.
     ///
-    /// Does nothing if the autoscaler does not exist.
+    /// Requests deletion and waits until the Kubernetes API reports the
+    /// autoscaler absent. Does nothing if the autoscaler does not exist.
     async fn delete_replicator_vertical_pod_autoscaler(
         &self,
         resource_prefix: &str,

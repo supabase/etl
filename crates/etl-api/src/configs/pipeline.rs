@@ -66,7 +66,7 @@ fn default_replication_slot() -> ReplicationSlotConfig {
 
 /// Optional pipeline-level overrides for replicator CPU and memory.
 ///
-/// Requests inherit from the destination-aware API defaults when omitted.
+/// Requests inherit from the API-wide defaults when omitted.
 /// Supplying either request disables the pipeline's VPA, making the workload's
 /// resolved requests fixed. The generated StatefulSet always copies its
 /// resolved requests into its limits to preserve Guaranteed QoS.
@@ -74,17 +74,17 @@ fn default_replication_slot() -> ReplicationSlotConfig {
 pub struct PipelineReplicatorResourceOverrideConfig {
     /// CPU request for the replicator container, in millicores.
     ///
-    /// When unset, the replicator uses the destination-aware default from the
-    /// ETL API service configuration. When set, the pipeline does not use a
-    /// VPA and this value becomes its fixed CPU allocation.
+    /// When unset, the replicator uses the API-wide default from the ETL API
+    /// service configuration. When set, the pipeline does not use a VPA and
+    /// this value becomes its fixed CPU allocation.
     #[schema(example = 500)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_request_millicores: Option<i32>,
     /// Memory request for the replicator container, in MiB.
     ///
-    /// When unset, the replicator uses the destination-aware default from the
-    /// ETL API service configuration. When set, the pipeline does not use a
-    /// VPA and this value becomes its fixed memory allocation.
+    /// When unset, the replicator uses the API-wide default from the ETL API
+    /// service configuration. When set, the pipeline does not use a VPA and
+    /// this value becomes its fixed memory allocation.
     #[schema(example = 2000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_request_mib: Option<i32>,
@@ -970,19 +970,30 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_resource_override_ignores_removed_persisted_limit_keys() {
-        let persisted = serde_json::json!({
-            "cpu_request_millicores": 500,
-            "memory_request_mib": 2000,
-            "cpu_limit_millicores": 1000,
-            "memory_limit_mib": 2400
+    fn api_pipeline_resource_override_ignores_removed_limit_keys() {
+        let request = serde_json::json!({
+            "publication_name": "publication",
+            "replicator_resources": {
+                "cpu_request_millicores": 500,
+                "memory_request_mib": 2000,
+                "cpu_limit_millicores": 1000,
+                "memory_limit_mib": 2400
+            }
         });
 
-        let config: PipelineReplicatorResourceOverrideConfig =
-            serde_json::from_value(persisted).unwrap();
+        let config: ApiPipelineConfig = serde_json::from_value(request).unwrap();
+
+        let resources = config.replicator_resources.unwrap();
 
         assert_eq!(
-            serde_json::to_value(config).unwrap(),
+            resources,
+            PipelineReplicatorResourceOverrideConfig {
+                cpu_request_millicores: Some(500),
+                memory_request_mib: Some(2000),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(resources).unwrap(),
             serde_json::json!({
                 "cpu_request_millicores": 500,
                 "memory_request_mib": 2000
