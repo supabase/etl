@@ -31,14 +31,6 @@ pub fn meets_version(server_version: Option<NonZeroI32>, required_version: i32) 
     server_version.is_some_and(|v| v.get() >= required_version)
 }
 
-/// Returns [`true`] if the known server version is below the required version.
-///
-/// An unavailable server version returns [`false`] so it is not classified as a
-/// known older version.
-pub fn is_below_version(server_version: Option<NonZeroI32>, required_version: i32) -> bool {
-    server_version.is_some_and(|v| v.get() < required_version)
-}
-
 /// Checks if the server version meets or exceeds the required version.
 ///
 /// This macro provides ergonomic version checking by accepting various input
@@ -54,12 +46,13 @@ macro_rules! requires_version {
 /// Checks if the server version is below the specified version.
 ///
 /// This macro is useful for conditional logic when features are not available
-/// in older PostgreSQL versions. It returns [`false`] when the server version
-/// is unavailable.
+/// in older PostgreSQL versions. An unavailable server version is not
+/// considered below the required version, so this macro returns [`false`] for
+/// [`None`].
 #[macro_export]
 macro_rules! below_version {
     ($server_version:expr, $required:expr) => {
-        $crate::version::is_below_version($server_version, $required)
+        ($server_version).is_some_and(|version| version.get() < ($required))
     };
 }
 
