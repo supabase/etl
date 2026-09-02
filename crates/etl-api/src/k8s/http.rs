@@ -29,10 +29,7 @@ use crate::config::{
 };
 use crate::{
     config::{K8sConfig, ReplicatorResourceAutoscalingUpdateMode},
-    configs::{
-        log::LogLevel,
-        pipeline::{DuckLakeMaintenanceConfig, PipelineReplicatorResourceOverrideConfig},
-    },
+    configs::{log::LogLevel, pipeline::DuckLakeMaintenanceConfig},
     k8s::{
         DestinationType, DuckLakeMaintenanceResourceConfig, K8sClient, K8sError,
         PipelineRuntimeIdentity, PodPhase, PodStatus, ReplicatorConfigMapFile,
@@ -837,7 +834,6 @@ impl K8sClient for HttpK8sClient {
             &name,
             update_mode,
             workload_config.destination_type,
-            workload_config.replicator_resource_override.as_ref(),
         )?;
 
         // We are forcing the update since we are the field manager that should own the
@@ -1936,16 +1932,11 @@ fn create_replicator_vertical_pod_autoscaler_json(
     stateful_set_name: &str,
     update_mode: &str,
     destination_type: DestinationType,
-    pipeline_resource_override: Option<&PipelineReplicatorResourceOverrideConfig>,
 ) -> Result<DynamicObject, serde_json::Error> {
     let replicator_app_name = create_replicator_app_name(prefix);
     let replicator_container_name = create_replicator_container_name(prefix);
     let identity_labels = create_replicator_identity_labels(&replicator_app_name, identity);
-    let policy = ReplicatorVpaResourcePolicy::resolve(
-        k8s_config,
-        destination_type,
-        pipeline_resource_override,
-    );
+    let policy = ReplicatorVpaResourcePolicy::resolve(k8s_config, destination_type);
 
     serde_json::from_value(json!({
       "apiVersion": format!("{VERTICAL_POD_AUTOSCALER_GROUP}/{VERTICAL_POD_AUTOSCALER_VERSION}"),
@@ -2014,8 +2005,6 @@ mod tests {
     use insta::{assert_json_snapshot, assert_snapshot};
 
     use super::*;
-    use crate::configs::pipeline::PipelineReplicatorResourceOverrideConfig;
-
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
     const PIPELINE_ID: i64 = 24;
     const REPLICATOR_ID: i64 = 42;
@@ -2352,7 +2341,6 @@ mod tests {
                         &stateful_set_name,
                         ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
                         DestinationType::BigQuery,
-                        None,
                     )
                     .unwrap(),
                 )
@@ -3190,7 +3178,6 @@ mod tests {
             "tenant-1-42-replicator",
             ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
             DestinationType::BigQuery,
-            None,
         )
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();
@@ -3238,7 +3225,6 @@ mod tests {
             "tenant-1-42-replicator",
             ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
             DestinationType::BigQuery,
-            None,
         )
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();
@@ -3250,65 +3236,6 @@ mod tests {
         assert_eq!(
             autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/maxAllowed"),
             Some(&json!({"cpu": "125m", "memory": "250Mi"}))
-        );
-    }
-
-    #[test]
-    fn replicator_vertical_pod_autoscaler_pins_overridden_resources() {
-        let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
-        let resource_override = PipelineReplicatorResourceOverrideConfig {
-            cpu_request_millicores: Some(500),
-            memory_request_mib: Some(16_384),
-        };
-        let autoscaler = create_replicator_vertical_pod_autoscaler_json(
-            &default_k8s_config(),
-            "tenant-1-42",
-            &identity,
-            "tenant-1-42-replicator",
-            ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
-            DestinationType::BigQuery,
-            Some(&resource_override),
-        )
-        .unwrap();
-        let autoscaler = serde_json::to_value(autoscaler).unwrap();
-
-        // Request overrides pin independently of the global autoscaling range.
-        assert_eq!(
-            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/minAllowed"),
-            Some(&json!({"cpu": "500m", "memory": "16384Mi"}))
-        );
-        assert_eq!(
-            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/maxAllowed"),
-            Some(&json!({"cpu": "500m", "memory": "16384Mi"}))
-        );
-    }
-
-    #[test]
-    fn replicator_vertical_pod_autoscaler_keeps_bounds_for_resources_without_overrides() {
-        let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
-        let resource_override = PipelineReplicatorResourceOverrideConfig {
-            cpu_request_millicores: Some(500),
-            ..Default::default()
-        };
-        let autoscaler = create_replicator_vertical_pod_autoscaler_json(
-            &default_k8s_config(),
-            "tenant-1-42",
-            &identity,
-            "tenant-1-42-replicator",
-            ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
-            DestinationType::BigQuery,
-            Some(&resource_override),
-        )
-        .unwrap();
-        let autoscaler = serde_json::to_value(autoscaler).unwrap();
-
-        assert_eq!(
-            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/minAllowed"),
-            Some(&json!({"cpu": "500m", "memory": "768Mi"}))
-        );
-        assert_eq!(
-            autoscaler.pointer("/spec/resourcePolicy/containerPolicies/0/maxAllowed"),
-            Some(&json!({"cpu": "500m", "memory": "8192Mi"}))
         );
     }
 
@@ -3329,7 +3256,6 @@ mod tests {
             "tenant-1-42-replicator",
             vpa_update_mode(&live).unwrap(),
             DestinationType::BigQuery,
-            None,
         )
         .unwrap();
         let autoscaler = serde_json::to_value(autoscaler).unwrap();

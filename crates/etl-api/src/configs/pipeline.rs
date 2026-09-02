@@ -66,31 +66,36 @@ fn default_replication_slot() -> ReplicationSlotConfig {
 
 /// Optional pipeline-level overrides for replicator CPU and memory.
 ///
-/// Requests inherit from the destination-aware API defaults when omitted. A
-/// request override also pins that resource to the same value in the pipeline
-/// VPA. The generated StatefulSet always copies its resolved requests into its
-/// limits to preserve Guaranteed QoS.
+/// Requests inherit from the destination-aware API defaults when omitted.
+/// Supplying either request disables the pipeline's VPA, making the workload's
+/// resolved requests fixed. The generated StatefulSet always copies its
+/// resolved requests into its limits to preserve Guaranteed QoS.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
 pub struct PipelineReplicatorResourceOverrideConfig {
     /// CPU request for the replicator container, in millicores.
     ///
-    /// When unset, the replicator uses the default request from the ETL API
-    /// service configuration. When set, the resolved CPU allocation is also
-    /// pinned as both the minimum and maximum in the pipeline's VPA.
+    /// When unset, the replicator uses the destination-aware default from the
+    /// ETL API service configuration. When set, the pipeline does not use a
+    /// VPA and this value becomes its fixed CPU allocation.
     #[schema(example = 500)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_request_millicores: Option<i32>,
     /// Memory request for the replicator container, in MiB.
     ///
-    /// When unset, the replicator uses the default request from the ETL API
-    /// service configuration. When set, the resolved memory allocation is also
-    /// pinned as both the minimum and maximum in the pipeline's VPA.
+    /// When unset, the replicator uses the destination-aware default from the
+    /// ETL API service configuration. When set, the pipeline does not use a
+    /// VPA and this value becomes its fixed memory allocation.
     #[schema(example = 2000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_request_mib: Option<i32>,
 }
 
 impl PipelineReplicatorResourceOverrideConfig {
+    /// Returns whether at least one resource request is overridden.
+    pub(crate) fn overrides_any_request(&self) -> bool {
+        self.cpu_request_millicores.is_some() || self.memory_request_mib.is_some()
+    }
+
     /// Validates that configured resource overrides are positive.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(cpu_request_millicores) = self.cpu_request_millicores
@@ -253,6 +258,9 @@ pub struct ApiPipelineConfig {
     pub table_sync_copy: Option<TableSyncCopyConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invalidated_slot_behavior: Option<InvalidatedSlotBehavior>,
+    /// Optional fixed resource requests for this pipeline.
+    ///
+    /// Supplying either request disables the pipeline's VPA.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replicator_resources: Option<PipelineReplicatorResourceOverrideConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,6 +322,10 @@ pub struct UpdateApiPipelineConfig {
     pub table_sync_copy: UpdateField<TableSyncCopyConfig>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub invalidated_slot_behavior: UpdateField<InvalidatedSlotBehavior>,
+    /// Patch for the pipeline's optional fixed resource requests.
+    ///
+    /// A resulting configuration with either request disables the pipeline's
+    /// VPA.
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub replicator_resources: UpdateField<PipelineReplicatorResourceOverrideConfig>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
@@ -490,6 +502,9 @@ pub struct StoredPipelineConfig {
     pub table_sync_copy: TableSyncCopyConfig,
     #[serde(default = "default_invalidated_slot_behavior")]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
+    /// Optional fixed resource requests for this pipeline.
+    ///
+    /// Supplying either request disables the pipeline's VPA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicator_resources: Option<PipelineReplicatorResourceOverrideConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

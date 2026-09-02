@@ -121,18 +121,19 @@ pub struct K8sConfig {
     /// Tolerations applied to every replicator pod.
     #[serde(default)]
     pub replicator_tolerations: Vec<TolerationConfig>,
-    /// API-wide request defaults for replicator workloads.
+    /// API-wide startup request defaults for replicator workloads.
     ///
     /// This key remains `replicator_resources` in API configuration files. It
-    /// provides the mandatory baseline CPU and memory requests used for every
-    /// replicator pod unless a destination-kind default or pipeline-level
-    /// override supplies one of those request values.
+    /// provides the mandatory baseline CPU and memory requests written to each
+    /// replicator pod template unless a destination-kind default or
+    /// pipeline-level override supplies one of those request values.
     pub replicator_resources: ReplicatorResourceDefaultsConfig,
-    /// Optional API-wide autoscaling interval for replicator CPU and memory.
+    /// Optional API-wide VPA interval for replicator CPU and memory.
     ///
-    /// When omitted, each generated VPA is fixed to the workload's resolved
-    /// startup requests. When present, resources without pipeline overrides
-    /// use the configured minimum and maximum.
+    /// Workloads with pipeline request overrides do not use a VPA. For all
+    /// other workloads, omission fixes the VPA bounds to the resolved startup
+    /// requests, while a configured interval defines the allowed range for VPA
+    /// recommendations independently of those startup requests.
     #[serde(default)]
     pub replicator_autoscaling: Option<ReplicatorResourceAutoscalingConfig>,
     /// Vector image used by the logging sidecar.
@@ -142,12 +143,14 @@ pub struct K8sConfig {
     pub vector_resources: VectorResourceDefaultsConfig,
 }
 
-/// API-wide autoscaling interval for replicator resources.
+/// API-wide VPA recommendation interval for replicator resources.
 ///
 /// These bounds configure generated VPAs and are independent of the startup
-/// requests in [`ReplicatorResourceDefaultsConfig`]. A pipeline request
-/// override replaces both bounds for that resource; resources without pipeline
-/// overrides retain the corresponding API-wide range.
+/// requests in [`ReplicatorResourceDefaultsConfig`]. Global and
+/// destination-specific startup requests are expected to lie within this
+/// interval, but the API does not validate or clamp that relationship. Once
+/// VPA actuation begins, an out-of-range request may be moved inside these
+/// bounds. Pipelines with request overrides do not use a VPA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct ReplicatorResourceAutoscalingConfig {
     /// Update mode assigned when a per-pipeline VPA is first created.
@@ -165,10 +168,11 @@ pub struct ReplicatorResourceAutoscalingConfig {
 
 /// Initial Kubernetes VPA update mode for a replicator workload.
 ///
-/// The API creates a VPA for every replicator. [`Self::Off`] keeps that VPA in
-/// recommendation-only mode; every other mode allows it to apply resource
-/// recommendations. Reconciliation preserves the update mode already present
-/// on a live VPA, so this setting only chooses the mode at creation time.
+/// The API creates a VPA for replicators without pipeline request overrides.
+/// [`Self::Off`] keeps that VPA in recommendation-only mode; every other mode
+/// allows it to apply resource recommendations. Reconciliation preserves the
+/// update mode already present on a live VPA, so this setting only chooses the
+/// mode at creation time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplicatorResourceAutoscalingUpdateMode {
@@ -230,35 +234,37 @@ pub struct TolerationConfig {
     pub effect: String,
 }
 
-/// API-wide request defaults for replicator workloads.
+/// API-wide startup request defaults for replicator workloads.
 ///
 /// The mandatory CPU and memory values are the final fallback for every
 /// destination. Entries in [`Self::destinations`] may replace either request
-/// for one destination kind. Pipeline-level overrides are applied later.
+/// for one destination kind. Pipeline-level overrides are applied later. For
+/// autoscaled pipelines, these values do not change the configured VPA bounds.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ReplicatorResourceDefaultsConfig {
-    /// Replicator memory request, in Mi.
+    /// Replicator startup memory request, in Mi.
     pub memory_request_mib: i32,
-    /// Replicator CPU request, in millicores.
+    /// Replicator startup CPU request, in millicores.
     pub cpu_request_millicores: i32,
-    /// Partial request defaults keyed by destination kind.
+    /// Partial startup request defaults keyed by destination kind.
     #[serde(default)]
     pub destinations: BTreeMap<DestinationKind, DestinationReplicatorResourceDefaultsConfig>,
 }
 
-/// Partial API request defaults for one destination kind.
+/// Partial API startup request defaults for one destination kind.
 ///
 /// Each omitted request inherits from the API-wide
-/// [`ReplicatorResourceDefaultsConfig`].
+/// [`ReplicatorResourceDefaultsConfig`]. These values choose the pod template's
+/// initial allocation and do not define destination-specific VPA bounds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub struct DestinationReplicatorResourceDefaultsConfig {
-    /// Optional replicator memory request, in Mi.
+    /// Optional replicator startup memory request, in Mi.
     pub memory_request_mib: Option<i32>,
-    /// Optional replicator CPU request, in millicores.
+    /// Optional replicator startup CPU request, in millicores.
     pub cpu_request_millicores: Option<i32>,
 }
 
-/// Complete API request defaults selected for one destination kind.
+/// Complete API startup request defaults selected for one destination kind.
 ///
 /// This is the result of applying destination defaults to the API-wide
 /// fallback. It does not yet include pipeline-level overrides.

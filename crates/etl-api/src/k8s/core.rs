@@ -15,7 +15,7 @@ use thiserror::Error;
 use crate::{
     configs::{
         destination::{StoredDestinationConfig, StoredIcebergConfig},
-        pipeline::StoredPipelineConfig,
+        pipeline::{PipelineReplicatorResourceOverrideConfig, StoredPipelineConfig},
         source::StoredSourceConfig,
     },
     data::{
@@ -111,10 +111,10 @@ pub enum Secrets {
 
 /// Creates or updates the Kubernetes runtime for a pipeline.
 ///
-/// The runtime currently consists of secrets, configuration, maintenance,
-/// autoscaling, and the StatefulSet running the replicator. Updating the
-/// StatefulSet intentionally forces pod recreation so the replicator observes
-/// the latest runtime configuration.
+/// The runtime currently consists of secrets, configuration, maintenance, the
+/// StatefulSet running the replicator, and autoscaling when the pipeline has no
+/// resource request override. Updating the StatefulSet intentionally forces pod
+/// recreation so the replicator observes the latest runtime configuration.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_or_update_pipeline_runtime_in_k8s(
     k8s_client: &dyn K8sClient,
@@ -560,14 +560,26 @@ async fn create_or_update_replicator_workload(
     identity: &PipelineRuntimeIdentity,
     workload_config: ReplicatorWorkloadConfig,
 ) -> Result<(), K8sCoreError> {
-    // Apply the VPA first so newly admitted Pods observe its intended update mode.
-    k8s_client
-        .create_or_update_replicator_vertical_pod_autoscaler(
-            resource_prefix,
-            identity,
-            &workload_config,
-        )
-        .await?;
+    let has_pipeline_resource_override = workload_config
+        .replicator_resource_override
+        .as_ref()
+        .is_some_and(PipelineReplicatorResourceOverrideConfig::overrides_any_request);
+
+    if has_pipeline_resource_override {
+        // Remove the VPA before applying the StatefulSet so admission cannot
+        // replace the explicitly configured requests.
+        k8s_client.delete_replicator_vertical_pod_autoscaler(resource_prefix).await?;
+    } else {
+        // Apply the VPA first so newly admitted Pods observe its intended update mode.
+        k8s_client
+            .create_or_update_replicator_vertical_pod_autoscaler(
+                resource_prefix,
+                identity,
+                &workload_config,
+            )
+            .await?;
+    }
+
     create_or_update_replicator_stateful_set(
         k8s_client,
         resource_prefix,
@@ -1089,6 +1101,55 @@ mod tests {
             ReplicatorWorkloadConfig {
                 replicator_image: "etl-replicator:test".to_owned(),
                 replicator_resource_override: None,
+                destination_type: DestinationType::ClickHouse { password_secret_required: false },
+                ducklake_maintenance: None,
+                log_level: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.calls(), vec!["vpa:tenant-42", "stateful-set:tenant-42"]);
+    }
+
+    #[tokio::test]
+    async fn pipeline_resource_override_removes_vpa_before_applying_stateful_set() {
+        let client = RecordingK8sClient::default();
+
+        create_or_update_replicator_workload(
+            &client,
+            "tenant-42",
+            &pipeline_runtime_identity(),
+            ReplicatorWorkloadConfig {
+                replicator_image: "etl-replicator:test".to_owned(),
+                replicator_resource_override: Some(PipelineReplicatorResourceOverrideConfig {
+                    cpu_request_millicores: Some(500),
+                    memory_request_mib: None,
+                }),
+                destination_type: DestinationType::ClickHouse { password_secret_required: false },
+                ducklake_maintenance: None,
+                log_level: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.calls(), vec!["delete-vpa:tenant-42", "stateful-set:tenant-42"]);
+    }
+
+    #[tokio::test]
+    async fn empty_pipeline_resource_override_keeps_vpa_enabled() {
+        let client = RecordingK8sClient::default();
+
+        create_or_update_replicator_workload(
+            &client,
+            "tenant-42",
+            &pipeline_runtime_identity(),
+            ReplicatorWorkloadConfig {
+                replicator_image: "etl-replicator:test".to_owned(),
+                replicator_resource_override: Some(
+                    PipelineReplicatorResourceOverrideConfig::default(),
+                ),
                 destination_type: DestinationType::ClickHouse { password_secret_required: false },
                 ducklake_maintenance: None,
                 log_level: Default::default(),
