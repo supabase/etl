@@ -78,6 +78,8 @@ const SNOWFLAKE_PRIVATE_KEY_NAME: &str = "private-key";
 const SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME: &str = "private-key-passphrase";
 /// Secret name suffix for the Postgres password.
 const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
+/// Name of the password in the Postgres secret and its reference.
+const POSTGRES_PASSWORD_NAME: &str = "password";
 /// ConfigMap name suffix for the replicator configuration files.
 const REPLICATOR_CONFIG_MAP_NAME_SUFFIX: &str = "replicator-config";
 /// StatefulSet name suffix for the replicator workload.
@@ -1214,7 +1216,7 @@ fn create_postgres_secret_json(
       },
       "type": "Opaque",
       "data": {
-        "password": encoded_postgres_password,
+        POSTGRES_PASSWORD_NAME: encoded_postgres_password,
       }
     })
 }
@@ -1447,6 +1449,23 @@ fn create_ducklake_maintenance_json(
     })
 }
 
+/// Creates a required secret-backed container environment entry.
+fn create_required_secret_env_var_json(
+    env_var_name: &str,
+    secret_name: &str,
+    secret_key_name: &str,
+) -> serde_json::Value {
+    json!({
+      "name": env_var_name,
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": secret_name,
+          "key": secret_key_name
+        }
+      }
+    })
+}
+
 fn create_container_environment_json(
     k8s_config: &K8sConfig,
     prefix: &str,
@@ -1517,69 +1536,71 @@ fn create_container_environment_json(
         }
     }
 
+    let postgres_secret_name = create_postgres_secret_name(prefix);
+    container_environment.push(create_required_secret_env_var_json(
+        "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+        &postgres_secret_name,
+        POSTGRES_PASSWORD_NAME,
+    ));
+
     match destination_type {
         DestinationType::BigQuery => {
-            let postgres_secret_name = create_postgres_secret_name(prefix);
-            let postgres_secret_env_var_json =
-                create_postgres_secret_env_var_json(&postgres_secret_name);
-            container_environment.push(postgres_secret_env_var_json);
-
             let bq_secret_name = create_bq_secret_name(prefix);
-            let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
-            container_environment.push(bq_secret_env_var_json);
+            container_environment.push(create_required_secret_env_var_json(
+                "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
+                &bq_secret_name,
+                BQ_SERVICE_ACCOUNT_KEY_NAME,
+            ));
         }
         DestinationType::ClickHouse { password_secret_required } => {
-            let postgres_secret_name = create_postgres_secret_name(prefix);
-            let postgres_secret_env_var_json =
-                create_postgres_secret_env_var_json(&postgres_secret_name);
-            container_environment.push(postgres_secret_env_var_json);
-
             if password_secret_required {
                 let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
-                let clickhouse_secret_env_var_json =
-                    create_clickhouse_secret_env_var_json(&clickhouse_secret_name);
-                container_environment.push(clickhouse_secret_env_var_json);
+                container_environment.push(create_required_secret_env_var_json(
+                    "APP_DESTINATION__CLICKHOUSE__PASSWORD",
+                    &clickhouse_secret_name,
+                    CLICKHOUSE_PASSWORD_NAME,
+                ));
             }
         }
         DestinationType::Iceberg => {
-            let postgres_secret_name = create_postgres_secret_name(prefix);
-            let postgres_secret_env_var_json =
-                create_postgres_secret_env_var_json(&postgres_secret_name);
-
-            container_environment.push(postgres_secret_env_var_json);
             let iceberg_secret_name = create_iceberg_secret_name(prefix);
-
-            let iceberg_catlog_token_env_var_json =
-                create_iceberg_catlog_token_env_var_json(&iceberg_secret_name);
-            container_environment.push(iceberg_catlog_token_env_var_json);
-
-            let iceberg_s3_access_key_id_env_var_json =
-                create_iceberg_s3_access_key_id_env_var_json(&iceberg_secret_name);
-            container_environment.push(iceberg_s3_access_key_id_env_var_json);
-
-            let iceberg_s3_secret_access_key_env_var_json =
-                create_iceberg_s3_secret_access_key_env_var_json(&iceberg_secret_name);
-            container_environment.push(iceberg_s3_secret_access_key_env_var_json);
+            container_environment.extend([
+                create_required_secret_env_var_json(
+                    "APP_DESTINATION__ICEBERG__SUPABASE__CATALOG_TOKEN",
+                    &iceberg_secret_name,
+                    ICEBERG_CATALOG_TOKEN_KEY_NAME,
+                ),
+                create_required_secret_env_var_json(
+                    "APP_DESTINATION__ICEBERG__SUPABASE__S3_ACCESS_KEY_ID",
+                    &iceberg_secret_name,
+                    ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME,
+                ),
+                create_required_secret_env_var_json(
+                    "APP_DESTINATION__ICEBERG__SUPABASE__S3_SECRET_ACCESS_KEY",
+                    &iceberg_secret_name,
+                    ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME,
+                ),
+            ]);
         }
         DestinationType::Ducklake => {
-            let postgres_secret_name = create_postgres_secret_name(prefix);
-            let postgres_secret_env_var_json =
-                create_postgres_secret_env_var_json(&postgres_secret_name);
-            container_environment.push(postgres_secret_env_var_json);
-
             let ducklake_secret_name = create_ducklake_secret_name(prefix);
-
-            let ducklake_catalog_url_env_var_json =
-                create_ducklake_catalog_url_env_var_json(&ducklake_secret_name);
-            container_environment.push(ducklake_catalog_url_env_var_json);
-
-            let ducklake_s3_access_key_id_env_var_json =
-                create_ducklake_s3_access_key_id_env_var_json(&ducklake_secret_name);
-            container_environment.push(ducklake_s3_access_key_id_env_var_json);
-
-            let ducklake_s3_secret_access_key_env_var_json =
-                create_ducklake_s3_secret_access_key_env_var_json(&ducklake_secret_name);
-            container_environment.push(ducklake_s3_secret_access_key_env_var_json);
+            container_environment.extend([
+                create_required_secret_env_var_json(
+                    "APP_DESTINATION__DUCKLAKE__CATALOG_URL",
+                    &ducklake_secret_name,
+                    DUCKLAKE_CATALOG_URL_KEY_NAME,
+                ),
+                create_required_secret_env_var_json(
+                    "APP_DESTINATION__DUCKLAKE__S3_ACCESS_KEY_ID",
+                    &ducklake_secret_name,
+                    DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME,
+                ),
+                create_required_secret_env_var_json(
+                    "APP_DESTINATION__DUCKLAKE__S3_SECRET_ACCESS_KEY",
+                    &ducklake_secret_name,
+                    DUCKLAKE_S3_SECRET_ACCESS_KEY_KEY_NAME,
+                ),
+            ]);
 
             if let Some(ducklake_maintenance) = ducklake_maintenance {
                 container_environment.push(json!({
@@ -1601,17 +1622,18 @@ fn create_container_environment_json(
             }
         }
         DestinationType::Snowflake { passphrase_secret_required } => {
-            let postgres_secret_name = create_postgres_secret_name(prefix);
-            let postgres_secret_env_var_json =
-                create_postgres_secret_env_var_json(&postgres_secret_name);
-            container_environment.push(postgres_secret_env_var_json);
-
             let snowflake_secret_name = create_snowflake_secret_name(prefix);
-            container_environment
-                .push(create_snowflake_private_key_env_var_json(&snowflake_secret_name));
+            container_environment.push(create_required_secret_env_var_json(
+                "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY",
+                &snowflake_secret_name,
+                SNOWFLAKE_PRIVATE_KEY_NAME,
+            ));
             if passphrase_secret_required {
-                container_environment
-                    .push(create_snowflake_passphrase_env_var_json(&snowflake_secret_name));
+                container_environment.push(create_required_secret_env_var_json(
+                    "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY_PASSPHRASE",
+                    &snowflake_secret_name,
+                    SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME,
+                ));
             }
         }
     }
@@ -1765,142 +1787,6 @@ fn create_volume_mounts_json(environment: &Environment) -> Vec<serde_json::Value
     }
 
     volume_mounts
-}
-
-fn create_postgres_secret_env_var_json(postgres_secret_name: &str) -> serde_json::Value {
-    json!({
-      "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
-      "valueFrom": {
-        "secretKeyRef": {
-          "name": postgres_secret_name,
-          "key": "password"
-        }
-      }
-    })
-}
-
-fn create_bq_secret_env_var_json(bq_secret_name: &str) -> serde_json::Value {
-    json!({
-      "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
-      "valueFrom": {
-        "secretKeyRef": {
-          "name": bq_secret_name,
-          "key": BQ_SERVICE_ACCOUNT_KEY_NAME
-        }
-      }
-    })
-}
-
-fn create_clickhouse_secret_env_var_json(clickhouse_secret_name: &str) -> serde_json::Value {
-    json!({
-      "name": "APP_DESTINATION__CLICKHOUSE__PASSWORD",
-      "valueFrom": {
-        "secretKeyRef": {
-          "name": clickhouse_secret_name,
-          "key": CLICKHOUSE_PASSWORD_NAME
-        }
-      }
-    })
-}
-
-fn create_iceberg_catlog_token_env_var_json(iceberg_secret_name: &str) -> serde_json::Value {
-    json!({
-      "name": "APP_DESTINATION__ICEBERG__SUPABASE__CATALOG_TOKEN",
-      "valueFrom": {
-        "secretKeyRef": {
-          "name": iceberg_secret_name,
-          "key": ICEBERG_CATALOG_TOKEN_KEY_NAME
-        }
-      }
-    })
-}
-
-fn create_iceberg_s3_access_key_id_env_var_json(iceberg_secret_name: &str) -> serde_json::Value {
-    json!({
-      "name": "APP_DESTINATION__ICEBERG__SUPABASE__S3_ACCESS_KEY_ID",
-      "valueFrom": {
-        "secretKeyRef": {
-          "name": iceberg_secret_name,
-          "key": ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME
-        }
-      }
-    })
-}
-
-fn create_iceberg_s3_secret_access_key_env_var_json(
-    iceberg_secret_name: &str,
-) -> serde_json::Value {
-    json!({
-      "name": "APP_DESTINATION__ICEBERG__SUPABASE__S3_SECRET_ACCESS_KEY",
-      "valueFrom": {
-        "secretKeyRef": {
-          "name": iceberg_secret_name,
-          "key": ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME
-        }
-      }
-    })
-}
-
-fn create_ducklake_catalog_url_env_var_json(ducklake_secret_name: &str) -> serde_json::Value {
-    json!({
-      "name": "APP_DESTINATION__DUCKLAKE__CATALOG_URL",
-      "valueFrom": {
-        "secretKeyRef": {
-          "name": ducklake_secret_name,
-          "key": DUCKLAKE_CATALOG_URL_KEY_NAME
-        }
-      }
-    })
-}
-
-fn create_ducklake_s3_access_key_id_env_var_json(ducklake_secret_name: &str) -> serde_json::Value {
-    json!({
-      "name": "APP_DESTINATION__DUCKLAKE__S3_ACCESS_KEY_ID",
-      "valueFrom": {
-        "secretKeyRef": {
-          "name": ducklake_secret_name,
-          "key": DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME
-        }
-      }
-    })
-}
-
-fn create_ducklake_s3_secret_access_key_env_var_json(
-    ducklake_secret_name: &str,
-) -> serde_json::Value {
-    json!({
-      "name": "APP_DESTINATION__DUCKLAKE__S3_SECRET_ACCESS_KEY",
-      "valueFrom": {
-        "secretKeyRef": {
-          "name": ducklake_secret_name,
-          "key": DUCKLAKE_S3_SECRET_ACCESS_KEY_KEY_NAME
-        }
-      }
-    })
-}
-
-fn create_snowflake_private_key_env_var_json(snowflake_secret_name: &str) -> serde_json::Value {
-    json!({
-      "name": "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY",
-      "valueFrom": {
-        "secretKeyRef": {
-          "name": snowflake_secret_name,
-          "key": SNOWFLAKE_PRIVATE_KEY_NAME
-        }
-      }
-    })
-}
-
-fn create_snowflake_passphrase_env_var_json(snowflake_secret_name: &str) -> serde_json::Value {
-    json!({
-      "name": "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY_PASSPHRASE",
-      "valueFrom": {
-        "secretKeyRef": {
-          "name": snowflake_secret_name,
-          "key": SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME
-        }
-      }
-    })
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -2236,6 +2122,28 @@ mod tests {
         container_environment
             .iter()
             .any(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
+    }
+
+    /// Asserts that a container environment variable uses the expected required
+    /// secret entry.
+    fn assert_container_environment_secret_ref(
+        container_environment: &[serde_json::Value],
+        env_var_name: &str,
+        secret_name: &str,
+        secret_key_name: &str,
+    ) {
+        let entry = container_environment
+            .iter()
+            .find(|entry| {
+                entry.get("name").and_then(serde_json::Value::as_str) == Some(env_var_name)
+            })
+            .unwrap();
+        let expected_secret_ref = json!({
+            "name": secret_name,
+            "key": secret_key_name,
+        });
+
+        assert_eq!(entry.pointer("/valueFrom/secretKeyRef"), Some(&expected_secret_ref));
     }
 
     fn collect_kubernetes_label_values(
@@ -3047,59 +2955,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_postgres_secret_env_var_json() {
-        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
-        let postgres_secret_name = create_postgres_secret_name(&prefix);
-
-        let postgres_env_var_json = create_postgres_secret_env_var_json(&postgres_secret_name);
-
-        assert_json_snapshot!(postgres_env_var_json);
-    }
-
-    #[test]
-    fn test_create_bq_secret_env_var_json() {
-        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
-        let bq_secret_name = create_bq_secret_name(&prefix);
-
-        let bq_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
-
-        assert_json_snapshot!(bq_env_var_json);
-    }
-
-    #[test]
-    fn test_create_iceberg_catlog_token_env_var_json() {
-        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
-        let iceberg_secret_name = create_iceberg_secret_name(&prefix);
-
-        let iceberg_catalog_token_env_var_json =
-            create_iceberg_catlog_token_env_var_json(&iceberg_secret_name);
-
-        assert_json_snapshot!(iceberg_catalog_token_env_var_json);
-    }
-
-    #[test]
-    fn test_create_iceberg_s3_access_key_id_env_var_json() {
-        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
-        let iceberg_secret_name = create_iceberg_secret_name(&prefix);
-
-        let iceberg_s3_access_key_id_env_var_json =
-            create_iceberg_s3_access_key_id_env_var_json(&iceberg_secret_name);
-
-        assert_json_snapshot!(iceberg_s3_access_key_id_env_var_json);
-    }
-
-    #[test]
-    fn test_create_iceberg_s3_secret_access_key_env_var_json() {
-        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
-        let iceberg_secret_name = create_iceberg_secret_name(&prefix);
-
-        let iceberg_s3_secret_access_key_env_var_json =
-            create_iceberg_s3_secret_access_key_env_var_json(&iceberg_secret_name);
-
-        assert_json_snapshot!(iceberg_s3_secret_access_key_env_var_json);
-    }
-
-    #[test]
     fn test_create_bq_container_environment() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
@@ -3234,14 +3089,20 @@ mod tests {
             LogLevel::Info,
         );
 
-        assert!(container_environment_has_var(
+        let postgres_secret_name = create_postgres_secret_name(&prefix);
+        let clickhouse_secret_name = create_clickhouse_secret_name(&prefix);
+        assert_container_environment_secret_ref(
             &container_environment,
             "APP_PIPELINE__PG_CONNECTION__PASSWORD",
-        ));
-        assert!(container_environment_has_var(
+            &postgres_secret_name,
+            POSTGRES_PASSWORD_NAME,
+        );
+        assert_container_environment_secret_ref(
             &container_environment,
             "APP_DESTINATION__CLICKHOUSE__PASSWORD",
-        ));
+            &clickhouse_secret_name,
+            CLICKHOUSE_PASSWORD_NAME,
+        );
     }
 
     #[test]
@@ -3259,10 +3120,13 @@ mod tests {
             LogLevel::Info,
         );
 
-        assert!(container_environment_has_var(
+        let postgres_secret_name = create_postgres_secret_name(&prefix);
+        assert_container_environment_secret_ref(
             &container_environment,
             "APP_PIPELINE__PG_CONNECTION__PASSWORD",
-        ));
+            &postgres_secret_name,
+            POSTGRES_PASSWORD_NAME,
+        );
         assert!(!container_environment_has_var(
             &container_environment,
             "APP_DESTINATION__CLICKHOUSE__PASSWORD",
@@ -3284,18 +3148,26 @@ mod tests {
             LogLevel::Info,
         );
 
-        assert!(container_environment_has_var(
+        let postgres_secret_name = create_postgres_secret_name(&prefix);
+        let snowflake_secret_name = create_snowflake_secret_name(&prefix);
+        assert_container_environment_secret_ref(
             &container_environment,
             "APP_PIPELINE__PG_CONNECTION__PASSWORD",
-        ));
-        assert!(container_environment_has_var(
+            &postgres_secret_name,
+            POSTGRES_PASSWORD_NAME,
+        );
+        assert_container_environment_secret_ref(
             &container_environment,
             "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY",
-        ));
-        assert!(container_environment_has_var(
+            &snowflake_secret_name,
+            SNOWFLAKE_PRIVATE_KEY_NAME,
+        );
+        assert_container_environment_secret_ref(
             &container_environment,
             "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY_PASSPHRASE",
-        ));
+            &snowflake_secret_name,
+            SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME,
+        );
     }
 
     #[test]
@@ -3313,14 +3185,20 @@ mod tests {
             LogLevel::Info,
         );
 
-        assert!(container_environment_has_var(
+        let postgres_secret_name = create_postgres_secret_name(&prefix);
+        let snowflake_secret_name = create_snowflake_secret_name(&prefix);
+        assert_container_environment_secret_ref(
             &container_environment,
             "APP_PIPELINE__PG_CONNECTION__PASSWORD",
-        ));
-        assert!(container_environment_has_var(
+            &postgres_secret_name,
+            POSTGRES_PASSWORD_NAME,
+        );
+        assert_container_environment_secret_ref(
             &container_environment,
             "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY",
-        ));
+            &snowflake_secret_name,
+            SNOWFLAKE_PRIVATE_KEY_NAME,
+        );
         assert!(!container_environment_has_var(
             &container_environment,
             "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY_PASSPHRASE",
