@@ -445,7 +445,7 @@ impl MemoryMonitor {
         });
 
         MemoryCapacitySnapshot {
-            revision: self.inner.snapshot_revision.load(Ordering::Acquire),
+            revision: self.inner.snapshot_revision.load(Ordering::Relaxed),
             used_memory_bytes: snapshot.used,
             total_memory_bytes: snapshot.total,
             normal_memory_target_bytes,
@@ -453,8 +453,12 @@ impl MemoryMonitor {
     }
 
     /// Returns the revision of the latest complete memory snapshot.
+    ///
+    /// The revision is only a change-detection hint. Snapshot contents are
+    /// synchronized independently by their [`RwLock`], so this load does not
+    /// publish any associated data.
     pub(crate) fn snapshot_revision(&self) -> u64 {
-        self.inner.snapshot_revision.load(Ordering::Acquire)
+        self.inner.snapshot_revision.load(Ordering::Relaxed)
     }
 
     /// Waits for the refresh task to finish after shutdown.
@@ -511,7 +515,7 @@ impl MemoryMonitor {
             // inequality, so `u64::MAX -> 0` still denotes a new snapshot. Update
             // it while the snapshot is write-locked so readers cannot pair this
             // snapshot with the preceding revision.
-            self.inner.snapshot_revision.fetch_add(1, Ordering::Release);
+            self.inner.snapshot_revision.fetch_add(1, Ordering::Relaxed);
 
             previous_source
         };
@@ -634,7 +638,7 @@ impl MemoryMonitor {
 
     /// Sets the snapshot revision directly for wrapping tests.
     pub(crate) fn set_snapshot_revision_for_test(&self, revision: u64) {
-        self.inner.snapshot_revision.store(revision, Ordering::Release);
+        self.inner.snapshot_revision.store(revision, Ordering::Relaxed);
     }
 }
 

@@ -48,6 +48,8 @@ pub(crate) const ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS: &str =
 pub(crate) const ETL_MEMORY_USED_BYTES: &str = "etl_memory_used_bytes";
 pub(crate) const ETL_MEMORY_TOTAL_BYTES: &str = "etl_memory_total_bytes";
 pub(crate) const ETL_BATCH_SIZE_TARGET_BYTES: &str = "etl_batch_size_target_bytes";
+pub(crate) const ETL_BATCH_TRACKED_BYTES: &str = "etl_batch_tracked_bytes";
+pub(crate) const ETL_BATCH_ACTIVE_SLOTS: &str = "etl_batch_active_slots";
 pub(crate) const ETL_APPLY_LOOP_RECEIVED_LAG_BYTES: &str = "etl_apply_loop_received_lag_bytes";
 pub(crate) const ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES: &str =
     "etl_apply_loop_effective_flush_lag_bytes";
@@ -317,19 +319,37 @@ pub(crate) fn register_metrics() {
         describe_gauge!(
             ETL_MEMORY_USED_BYTES,
             Unit::Bytes,
-            "Effective memory usage in bytes, labeled by the selected system or cgroup source."
+            "Current memory usage in bytes for the selected system or cgroup memory domain, \
+             labeled by source."
         );
 
         describe_gauge!(
             ETL_MEMORY_TOTAL_BYTES,
             Unit::Bytes,
-            "Effective memory capacity in bytes, labeled by the selected system or cgroup source."
+            "Current memory capacity in bytes for the selected system or cgroup memory domain, \
+             labeled by source."
         );
 
         describe_gauge!(
             ETL_BATCH_SIZE_TARGET_BYTES,
             Unit::Bytes,
-            "Current advisory decoded batch-size target in bytes."
+            "Current advisory decoded byte target for each potential accumulating or in-flight \
+             batch."
+        );
+
+        describe_gauge!(
+            ETL_BATCH_TRACKED_BYTES,
+            Unit::Bytes,
+            "Estimated decoded bytes tracked across accumulating and in-flight governed batches. \
+             Refreshed when the governor incorporates a memory snapshot or releases tracked \
+             memory."
+        );
+
+        describe_gauge!(
+            ETL_BATCH_ACTIVE_SLOTS,
+            Unit::Count,
+            "Current number of potential accumulating or in-flight batch slots used to divide the \
+             global decoded-batch budget."
         );
 
         describe_gauge!(

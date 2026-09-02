@@ -39,7 +39,9 @@ use metrics::gauge;
 use tracing::debug;
 
 use crate::{
-    observability::ETL_BATCH_SIZE_TARGET_BYTES, pipeline::PipelineId, runtime::MemoryMonitor,
+    observability::{ETL_BATCH_ACTIVE_SLOTS, ETL_BATCH_SIZE_TARGET_BYTES, ETL_BATCH_TRACKED_BYTES},
+    pipeline::PipelineId,
+    runtime::MemoryMonitor,
 };
 
 /// Converts a memory ratio into a byte count, saturating at [`u64::MAX`].
@@ -51,6 +53,11 @@ fn ratio_of_bytes(bytes: u64, ratio: f64) -> u64 {
 /// platforms.
 fn bytes_to_usize(bytes: u64) -> usize {
     usize::try_from(bytes).unwrap_or(usize::MAX)
+}
+
+/// Estimates memory not represented by decoded-batch tracking.
+fn estimate_non_batch_memory_bytes(used_memory_bytes: u64, tracked_batch_bytes: u64) -> u64 {
+    used_memory_bytes.saturating_sub(tracked_batch_bytes)
 }
 
 /// Calculates the global decoded-batch target for one memory snapshot.
@@ -77,12 +84,12 @@ fn calculate_batch_memory_target(
     total_memory_bytes: u64,
     used_memory_bytes: u64,
     normal_memory_target_bytes: Option<u64>,
-    tracked_batch_bytes: usize,
+    tracked_batch_bytes: u64,
     memory_budget_ratio: f64,
 ) -> u64 {
     let configured_batch_target_bytes = ratio_of_bytes(total_memory_bytes, memory_budget_ratio);
-    let tracked_batch_bytes = u64::try_from(tracked_batch_bytes).unwrap_or(u64::MAX);
-    let estimated_non_batch_bytes = used_memory_bytes.saturating_sub(tracked_batch_bytes);
+    let estimated_non_batch_bytes =
+        estimate_non_batch_memory_bytes(used_memory_bytes, tracked_batch_bytes);
 
     normal_memory_target_bytes.map_or(configured_batch_target_bytes, |normal_target| {
         let pressure_adjusted_target = normal_target.saturating_sub(estimated_non_batch_bytes);
@@ -170,7 +177,7 @@ impl BatchMemoryState {
             )
         };
 
-        self.batch_size_target_bytes.store(batch_size_target_bytes, Ordering::Release);
+        self.batch_size_target_bytes.store(batch_size_target_bytes, Ordering::Relaxed);
         gauge!(ETL_BATCH_SIZE_TARGET_BYTES).set(batch_size_target_bytes as f64);
     }
 
@@ -180,6 +187,7 @@ impl BatchMemoryState {
         self.active_batch_slots
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| current.checked_add(slots))
             .expect("active batch slot count should fit in usize");
+        gauge!(ETL_BATCH_ACTIVE_SLOTS).set(self.active_batch_slots.load(Ordering::Relaxed) as f64);
         self.recalculate_batch_size_target();
     }
 
@@ -189,6 +197,7 @@ impl BatchMemoryState {
         self.active_batch_slots
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| current.checked_sub(slots))
             .expect("registered batch slot count should not underflow");
+        gauge!(ETL_BATCH_ACTIVE_SLOTS).set(self.active_batch_slots.load(Ordering::Relaxed) as f64);
         self.recalculate_batch_size_target();
     }
 
@@ -211,7 +220,7 @@ impl BatchMemoryState {
             // releases cannot prove that all unrepresented bytes are gone. Keep the
             // one-byte target for the lifetime of this governor.
             self.saturated.store(true, Ordering::Relaxed);
-            self.batch_size_target_bytes.store(1, Ordering::Release);
+            self.batch_size_target_bytes.store(1, Ordering::Relaxed);
             gauge!(ETL_BATCH_SIZE_TARGET_BYTES).set(1.0);
         }
 
@@ -223,6 +232,8 @@ impl BatchMemoryState {
         self.tracked_batch_bytes
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| current.checked_sub(bytes))
             .expect("tracked batch byte count should not underflow");
+        gauge!(ETL_BATCH_TRACKED_BYTES)
+            .set(self.tracked_batch_bytes.load(Ordering::Relaxed) as f64);
     }
 }
 
@@ -255,6 +266,8 @@ impl BatchMemoryGovernor {
             0,
             f64::from(memory_budget_ratio),
         );
+        gauge!(ETL_BATCH_ACTIVE_SLOTS).set(0.0);
+        gauge!(ETL_BATCH_TRACKED_BYTES).set(0.0);
 
         Self {
             pipeline_id,
@@ -286,11 +299,13 @@ impl BatchMemoryGovernor {
     /// consistent per-slot target for all callers.
     pub(crate) fn batch_size_target_bytes(&self) -> usize {
         let memory_snapshot_revision = self.memory_monitor.snapshot_revision();
-        if memory_snapshot_revision != self.state.memory_snapshot_revision.load(Ordering::Acquire) {
+        if memory_snapshot_revision != self.state.memory_snapshot_revision.load(Ordering::Relaxed) {
             self.try_refresh_batch_size_target();
         }
 
-        self.state.batch_size_target_bytes.load(Ordering::Acquire)
+        // The target is advisory and independently atomic. Recalculation is
+        // serialized separately, so observing the preceding value briefly is safe.
+        self.state.batch_size_target_bytes.load(Ordering::Relaxed)
     }
 
     /// Creates an empty accounting handle for decoded batch memory.
@@ -320,7 +335,9 @@ impl BatchMemoryGovernor {
             return;
         }
 
-        let tracked_batch_bytes = self.state.tracked_batch_bytes.load(Ordering::Relaxed);
+        let tracked_batch_bytes =
+            u64::try_from(self.state.tracked_batch_bytes.load(Ordering::Relaxed))
+                .unwrap_or(u64::MAX);
         let snapshot_batch_target_bytes = calculate_batch_memory_target(
             memory.total_memory_bytes,
             memory.used_memory_bytes,
@@ -333,7 +350,8 @@ impl BatchMemoryGovernor {
             .snapshot_batch_target_bytes
             .store(snapshot_batch_target_bytes, Ordering::Relaxed);
         self.state.recalculate_batch_size_target();
-        self.state.memory_snapshot_revision.store(memory.revision, Ordering::Release);
+        gauge!(ETL_BATCH_TRACKED_BYTES).set(tracked_batch_bytes as f64);
+        self.state.memory_snapshot_revision.store(memory.revision, Ordering::Relaxed);
 
         debug!(
             pipeline_id = self.pipeline_id,
@@ -526,7 +544,7 @@ mod tests {
             assert!(batch_target_bytes <= 2_000);
             assert!(
                 used_memory_bytes
-                    .saturating_sub(u64::try_from(tracked_batch_bytes).unwrap())
+                    .saturating_sub(tracked_batch_bytes)
                     .saturating_add(batch_target_bytes)
                     <= 8_000
             );
@@ -578,7 +596,8 @@ mod tests {
             let normal_memory_target_bytes = ratio_of_bytes(total_memory_bytes, 0.8);
             let active_batch_slots = usize::try_from(random_state % 33 + 1).unwrap();
             let max_batch_bytes = usize::try_from(random_state % (16 * MIB) + 1).unwrap();
-            let tracked_batch_bytes = usize::try_from(tracked_batch_bytes).unwrap_or(usize::MAX);
+            let tracked_batch_bytes =
+                u64::try_from(bytes_to_usize(tracked_batch_bytes)).unwrap_or(u64::MAX);
             let batch_target_bytes = calculate_batch_memory_target(
                 total_memory_bytes,
                 used_memory_bytes,
