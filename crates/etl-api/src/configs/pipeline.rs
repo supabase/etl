@@ -33,35 +33,10 @@ const fn default_table_sync_monitor_refresh_interval_ms() -> u64 {
     PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS
 }
 
-const fn default_batch() -> BatchConfig {
-    BatchConfig {
-        max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
-        memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
-        max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
-    }
-}
-
-const fn default_memory_backpressure() -> MemoryBackpressureConfig {
-    MemoryBackpressureConfig {
-        activate_threshold: MemoryBackpressureConfig::DEFAULT_ACTIVATE_THRESHOLD,
-        resume_threshold: MemoryBackpressureConfig::DEFAULT_RESUME_THRESHOLD,
-    }
-}
-
-const fn default_memory_backpressure_option() -> Option<MemoryBackpressureConfig> {
-    Some(default_memory_backpressure())
-}
-
-const fn default_table_sync_copy() -> TableSyncCopyConfig {
-    TableSyncCopyConfig::IncludeAllTables
-}
-
-const fn default_invalidated_slot_behavior() -> InvalidatedSlotBehavior {
-    InvalidatedSlotBehavior::Error
-}
-
-fn default_replication_slot() -> ReplicationSlotConfig {
-    ReplicationSlotConfig::default()
+/// Returns the canonical non-`None` default for omitted memory-backpressure
+/// fields.
+fn default_memory_backpressure_option() -> Option<MemoryBackpressureConfig> {
+    Some(MemoryBackpressureConfig::default())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
@@ -395,8 +370,8 @@ impl UpdateApiPipelineConfig {
             )?,
             replication_slot: self
                 .replication_slot
-                .apply_to_value(stored.replication_slot, default_replication_slot),
-            batch: self.batch.apply_to_value(stored.batch, default_batch),
+                .apply_to_value(stored.replication_slot, ReplicationSlotConfig::default),
+            batch: self.batch.apply_to_value(stored.batch, BatchConfig::default),
             table_error_retry_delay_ms: self.table_error_retry_delay_ms.apply_to_value(
                 stored.table_error_retry_delay_ms,
                 default_table_error_retry_delay_ms,
@@ -422,16 +397,16 @@ impl UpdateApiPipelineConfig {
                     stored.table_sync_monitor_refresh_interval_ms,
                     default_table_sync_monitor_refresh_interval_ms,
                 ),
-            memory_backpressure: self
-                .memory_backpressure
-                .apply_to_defaulted_option(stored.memory_backpressure, default_memory_backpressure),
+            memory_backpressure: self.memory_backpressure.apply_to_defaulted_option(
+                stored.memory_backpressure,
+                MemoryBackpressureConfig::default,
+            ),
             table_sync_copy: self
                 .table_sync_copy
-                .apply_to_value(stored.table_sync_copy, default_table_sync_copy),
-            invalidated_slot_behavior: self.invalidated_slot_behavior.apply_to_value(
-                stored.invalidated_slot_behavior,
-                default_invalidated_slot_behavior,
-            ),
+                .apply_to_value(stored.table_sync_copy, TableSyncCopyConfig::default),
+            invalidated_slot_behavior: self
+                .invalidated_slot_behavior
+                .apply_to_value(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::default),
             replicator_resources: self
                 .replicator_resources
                 .apply_to_option(stored.replicator_resources),
@@ -487,7 +462,7 @@ pub struct StoredPipelineConfig {
     pub publication_name: String,
     #[serde(default)]
     pub replication_slot: ReplicationSlotConfig,
-    #[serde(default = "default_batch")]
+    #[serde(default)]
     pub batch: BatchConfig,
     #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
@@ -503,9 +478,9 @@ pub struct StoredPipelineConfig {
     pub table_sync_monitor_refresh_interval_ms: u64,
     #[serde(default = "default_memory_backpressure_option")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
-    #[serde(default = "default_table_sync_copy")]
+    #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
-    #[serde(default = "default_invalidated_slot_behavior")]
+    #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicator_resources: Option<ReplicatorResourcesConfig>,
@@ -548,7 +523,7 @@ impl Store for StoredPipelineConfig {}
 
 impl From<ApiPipelineConfig> for StoredPipelineConfig {
     fn from(value: ApiPipelineConfig) -> Self {
-        let batch = value.batch.unwrap_or_else(default_batch);
+        let batch = value.batch.unwrap_or_default();
 
         Self {
             publication_name: value.publication_name,
@@ -573,10 +548,8 @@ impl From<ApiPipelineConfig> for StoredPipelineConfig {
                 .table_sync_monitor_refresh_interval_ms
                 .unwrap_or(PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS),
             memory_backpressure: value.memory_backpressure,
-            table_sync_copy: value.table_sync_copy.unwrap_or_else(default_table_sync_copy),
-            invalidated_slot_behavior: value
-                .invalidated_slot_behavior
-                .unwrap_or_else(default_invalidated_slot_behavior),
+            table_sync_copy: value.table_sync_copy.unwrap_or_default(),
+            invalidated_slot_behavior: value.invalidated_slot_behavior.unwrap_or_default(),
             replicator_resources: value.replicator_resources,
             ducklake_maintenance: value.ducklake_maintenance,
             log_level: value.log_level,
@@ -773,12 +746,19 @@ mod tests {
     }
 
     #[test]
-    fn stored_pipeline_config_defaults_replication_slot_for_existing_rows() {
+    fn stored_pipeline_config_uses_canonical_defaults_for_existing_rows() {
         let stored: StoredPipelineConfig =
             serde_json::from_value(serde_json::json!({ "publication_name": "publication" }))
                 .unwrap();
+        let batch = BatchConfig::default();
 
         assert_eq!(stored.replication_slot, ReplicationSlotConfig::default());
+        assert_eq!(stored.batch.max_fill_ms, batch.max_fill_ms);
+        assert_eq!(stored.batch.memory_budget_ratio, batch.memory_budget_ratio);
+        assert_eq!(stored.batch.max_bytes, batch.max_bytes);
+        assert_eq!(stored.memory_backpressure, Some(MemoryBackpressureConfig::default()));
+        assert_eq!(stored.table_sync_copy, TableSyncCopyConfig::default());
+        assert_eq!(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::default());
     }
 
     #[test]
@@ -914,26 +894,35 @@ mod tests {
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
             table_sync_monitor_refresh_interval_ms: None,
-            memory_backpressure: None,
-            table_sync_copy: None,
-            invalidated_slot_behavior: None,
+            memory_backpressure: Some(MemoryBackpressureConfig {
+                activate_threshold: 0.95,
+                resume_threshold: 0.9,
+            }),
+            table_sync_copy: Some(TableSyncCopyConfig::SkipAllTables),
+            invalidated_slot_behavior: Some(InvalidatedSlotBehavior::Recreate),
             replicator_resources: None,
             ducklake_maintenance: None,
             log_level: None,
         }
         .into();
         let update = UpdateApiPipelineConfig {
-            batch: UpdateField::Clear,
             replication_slot: UpdateField::Clear,
+            batch: UpdateField::Clear,
+            memory_backpressure: UpdateField::Clear,
+            table_sync_copy: UpdateField::Clear,
+            invalidated_slot_behavior: UpdateField::Clear,
             ..UpdateApiPipelineConfig::default()
         };
 
         let updated = update.merge_into_stored(stored).unwrap();
 
+        assert_eq!(updated.replication_slot, ReplicationSlotConfig::default());
         assert_eq!(updated.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
         assert_eq!(updated.batch.memory_budget_ratio, BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO);
         assert_eq!(updated.batch.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
-        assert_eq!(updated.replication_slot, ReplicationSlotConfig::default());
+        assert_eq!(updated.memory_backpressure, Some(MemoryBackpressureConfig::default()));
+        assert_eq!(updated.table_sync_copy, TableSyncCopyConfig::default());
+        assert_eq!(updated.invalidated_slot_behavior, InvalidatedSlotBehavior::default());
     }
 
     #[test]
