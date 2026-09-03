@@ -515,12 +515,10 @@ impl Store for StoredPipelineConfig {}
 
 impl From<ApiPipelineConfig> for StoredPipelineConfig {
     fn from(value: ApiPipelineConfig) -> Self {
-        let batch = value.batch.unwrap_or_default();
-
         Self {
             publication_name: value.publication_name,
             replication_slot: value.replication_slot.unwrap_or_default(),
-            batch,
+            batch: value.batch.unwrap_or_default(),
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
                 .unwrap_or(PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS),
