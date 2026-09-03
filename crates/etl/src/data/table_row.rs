@@ -2,15 +2,6 @@ use std::mem::size_of;
 
 use crate::data::{ArrayCell, Cell, PgNumeric, PgTimeTz, SizeHint, owned_heap_size_hint};
 
-/// Maximum key/value slots in one node of serde_json's default BTreeMap.
-const JSON_OBJECT_BTREE_NODE_CAPACITY: usize = 11;
-
-/// Estimated occupied child edges per non-root BTreeMap node.
-const JSON_OBJECT_BTREE_ESTIMATED_FANOUT: usize = 8;
-
-/// Maximum child edges in the root node of serde_json's default BTreeMap.
-const JSON_OBJECT_BTREE_ROOT_FANOUT: usize = JSON_OBJECT_BTREE_NODE_CAPACITY + 1;
-
 /// Represents a complete row of data from a database table.
 ///
 /// [`TableRow`] contains a vector of [`Cell`] values corresponding to the
@@ -20,7 +11,7 @@ const JSON_OBJECT_BTREE_ROOT_FANOUT: usize = JSON_OBJECT_BTREE_NODE_CAPACITY + 1
 pub struct TableRow {
     /// Cached decoded in-memory size, or zero after mutable access.
     size_hint_bytes: usize,
-    /// Column values in table column order
+    /// Column values in table column order.
     values: Vec<Cell>,
 }
 
@@ -134,11 +125,6 @@ impl PartialTableRow {
     pub fn into_parts(self) -> (TableRow, Vec<usize>) {
         (self.table_row, self.missing_column_indexes)
     }
-
-    /// Consumes the row and returns the present values.
-    pub fn into_values(self) -> Vec<Cell> {
-        self.table_row.into_values()
-    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -174,11 +160,6 @@ pub enum UpdatedTableRow {
 }
 
 impl UpdatedTableRow {
-    /// Returns whether this row image is partial.
-    pub fn is_partial(&self) -> bool {
-        matches!(self, Self::Partial(_))
-    }
-
     /// Returns the full row when available.
     pub fn as_full(&self) -> Option<&TableRow> {
         match self {
@@ -223,40 +204,11 @@ pub enum OldTableRow {
 }
 
 impl OldTableRow {
-    /// Returns whether this image contains only replica-identity columns.
-    pub fn is_key(&self) -> bool {
-        matches!(self, Self::Key(_))
-    }
-
     /// Returns the full row payload when available.
     pub fn as_full(&self) -> Option<&TableRow> {
         match self {
             Self::Full(row) => Some(row),
             Self::Key(_) => None,
-        }
-    }
-
-    /// Consumes the image and returns the full row payload when available.
-    pub fn into_full(self) -> Option<TableRow> {
-        match self {
-            Self::Full(row) => Some(row),
-            Self::Key(_) => None,
-        }
-    }
-
-    /// Returns the key row payload when available.
-    pub fn as_key(&self) -> Option<&TableRow> {
-        match self {
-            Self::Full(_) => None,
-            Self::Key(row) => Some(row),
-        }
-    }
-
-    /// Consumes the image and returns the key row payload when available.
-    pub fn into_key(self) -> Option<TableRow> {
-        match self {
-            Self::Full(_) => None,
-            Self::Key(row) => Some(row),
         }
     }
 }
@@ -328,57 +280,9 @@ fn estimated_pg_numeric_allocated_bytes(value: &PgNumeric) -> usize {
     }
 }
 
-/// Returns the estimated heap bytes reserved by a JSON object's BTreeMap nodes.
-fn estimate_json_object_node_allocated_bytes(entries: usize) -> usize {
-    if entries == 0 {
-        return 0;
-    }
-
-    // serde_json's default Map uses std::collections::BTreeMap. The standard
-    // library does not expose node capacity, but its current B=6 layout reserves
-    // 11 key/value slots per node. JSON preserves source key order while JSONB
-    // can arrive in PostgreSQL key order, so this model uses an eight-edge fill
-    // factor that balances randomized and ordered insertions without favoring
-    // underestimation for ordered objects.
-    let leaf_node_bytes =
-        (2 * size_of::<usize>())
-            .saturating_add(JSON_OBJECT_BTREE_NODE_CAPACITY.saturating_mul(
-                size_of::<String>().saturating_add(size_of::<serde_json::Value>()),
-            ));
-    if entries <= JSON_OBJECT_BTREE_NODE_CAPACITY {
-        return leaf_node_bytes;
-    }
-
-    let internal_node_edge_bytes = JSON_OBJECT_BTREE_ROOT_FANOUT * size_of::<usize>();
-    let internal_node_bytes = leaf_node_bytes.saturating_add(internal_node_edge_bytes);
-    let mut nodes_at_level = entries.saturating_add(1).div_ceil(JSON_OBJECT_BTREE_ESTIMATED_FANOUT);
-    let mut total = nodes_at_level.saturating_mul(leaf_node_bytes);
-
-    while nodes_at_level > 1 {
-        let parent_nodes = if nodes_at_level <= JSON_OBJECT_BTREE_ROOT_FANOUT {
-            1
-        } else {
-            nodes_at_level.div_ceil(JSON_OBJECT_BTREE_ESTIMATED_FANOUT)
-        };
-        total = total.saturating_add(parent_nodes.saturating_mul(internal_node_bytes));
-        nodes_at_level = parent_nodes;
-    }
-
-    total
-}
-
-/// Returns the estimated heap capacity of an arbitrary-precision JSON number.
+/// Returns the owned text bytes of an arbitrary-precision JSON number.
 fn estimate_json_number_allocated_bytes(value: &serde_json::Number) -> usize {
-    let text = value.as_str();
-
-    if value.is_u64() || value.is_i64() {
-        // serde_json materializes in-range integers with an exactly sized itoa
-        // string. Other numbers are scanned through a 16-byte buffer that grows
-        // geometrically before becoming the retained Number string.
-        text.len()
-    } else {
-        text.len().max(16).next_power_of_two()
-    }
+    value.as_str().len()
 }
 
 /// Returns an estimate of additional heap bytes owned by a JSON value.
@@ -395,7 +299,11 @@ fn estimate_json_allocated_bytes(value: &serde_json::Value) -> usize {
             total
         }
         serde_json::Value::Object(values) => {
-            let mut total = estimate_json_object_node_allocated_bytes(values.len());
+            // Count stable key/value storage without depending on serde_json's
+            // private map-node layout or allocation strategy.
+            let mut total = values
+                .len()
+                .saturating_mul(size_of::<String>().saturating_add(size_of::<serde_json::Value>()));
 
             for (key, value) in values {
                 total = total
@@ -563,26 +471,10 @@ mod tests {
     }
 
     #[test]
-    fn json_size_hint_covers_numbers_arrays_and_btree_nodes() {
-        let leaf_node_bytes = 2 * size_of::<usize>()
-            + JSON_OBJECT_BTREE_NODE_CAPACITY
-                * (size_of::<String>() + size_of::<serde_json::Value>());
-        let internal_node_bytes =
-            leaf_node_bytes + JSON_OBJECT_BTREE_ROOT_FANOUT * size_of::<usize>();
-        assert_eq!(estimate_json_object_node_allocated_bytes(0), 0);
-        assert_eq!(estimate_json_object_node_allocated_bytes(1), leaf_node_bytes);
-        assert_eq!(
-            estimate_json_object_node_allocated_bytes(JSON_OBJECT_BTREE_NODE_CAPACITY),
-            leaf_node_bytes
-        );
-        assert_eq!(
-            estimate_json_object_node_allocated_bytes(JSON_OBJECT_BTREE_NODE_CAPACITY + 1),
-            2 * leaf_node_bytes + internal_node_bytes
-        );
-
+    fn json_size_hint_covers_owned_numbers_arrays_and_objects() {
         let number: serde_json::Value =
             serde_json::from_str("123456789012345678901234567890").unwrap();
-        assert_eq!(estimate_json_allocated_bytes(&number), 32);
+        assert_eq!(estimate_json_allocated_bytes(&number), 30);
 
         let array: serde_json::Value =
             serde_json::from_str(r#"[1,2,3,4,5,"a string payload that owns heap memory"]"#)
@@ -600,7 +492,8 @@ mod tests {
             unreachable!();
         };
         let (key, value) = object_values.iter().next().unwrap();
-        let expected_object_bytes = estimate_json_object_node_allocated_bytes(1)
+        let expected_object_bytes = size_of::<String>()
+            + size_of::<serde_json::Value>()
             + key.capacity()
             + estimate_json_allocated_bytes(value);
         assert_eq!(estimate_json_allocated_bytes(&object), expected_object_bytes);

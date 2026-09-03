@@ -14,10 +14,7 @@ use tracing::debug;
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    runtime::{
-        BatchMemoryTracker,
-        concurrency::{ShutdownResult, ShutdownRx},
-    },
+    runtime::concurrency::{ShutdownResult, ShutdownRx},
     schema::TableId,
     source_payload_metadata::StreamingPayloadMetadata,
 };
@@ -154,15 +151,6 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     pub relation_table_ids: HashSet<TableId>,
     /// PostgreSQL tuple bytes accumulated for the dispatched event batch.
     pub streaming_payload_metadata: StreamingPayloadMetadata,
-    /// Tracker accounting for decoded bytes until the destination result
-    /// completes for this batch.
-    ///
-    /// The apply loop explicitly takes and drops this tracker immediately
-    /// after observing completion. Dropping pending metadata remains the error
-    /// and cancellation safety net. Destination-retained memory remains visible
-    /// to the selected system or cgroup measurement after this attribution
-    /// ends.
-    pub batch_memory_tracker: Option<BatchMemoryTracker>,
     /// Instant at which the event batch was handed off to the destination.
     pub dispatched_at: Instant,
 }
@@ -278,32 +266,7 @@ impl<T, M> CompletedAsyncResult<T, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{
-        BatchMemoryGovernor, MemoryMonitor, concurrency::create_shutdown_channel,
-    };
-
-    #[tokio::test]
-    async fn completed_result_retains_batch_memory_until_metadata_is_dropped() {
-        let memory_monitor = MemoryMonitor::new_for_test();
-        memory_monitor.set_memory_snapshot_for_test(7_500, 10_000);
-        let governor = BatchMemoryGovernor::new(1, memory_monitor.clone(), 1.0, 10_000);
-        let mut tracker = governor.batch_memory_tracker();
-        tracker.grow(100);
-        let (result_tx, pending_result) = WriteTableRowsResult::new(tracker);
-
-        result_tx.send(Ok(DestinationWriteStatus::Durable));
-        let completed_result = pending_result.await;
-        memory_monitor.set_memory_snapshot_for_test(7_500, 10_000);
-        assert_eq!(governor.batch_size_target_bytes(), 600);
-
-        let (tracker, _, result) = completed_result.into_parts_with_completion();
-        assert_eq!(result.unwrap(), DestinationWriteStatus::Durable);
-        assert_eq!(governor.batch_size_target_bytes(), 600);
-
-        drop(tracker);
-        memory_monitor.set_memory_snapshot_for_test(7_500, 10_000);
-        assert_eq!(governor.batch_size_target_bytes(), 500);
-    }
+    use crate::runtime::concurrency::create_shutdown_channel;
 
     #[tokio::test]
     async fn async_result_round_trips_success() {
@@ -313,7 +276,6 @@ mod tests {
             event_count: 1,
             relation_table_ids: HashSet::from([TableId::new(7)]),
             streaming_payload_metadata: StreamingPayloadMetadata::insert(7),
-            batch_memory_tracker: None,
             dispatched_at: Instant::now(),
         };
         let (result_tx, pending_result) = WriteEventsResult::new(metadata);

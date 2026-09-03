@@ -587,12 +587,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 <Callout className="etl-callout" type="info" title="Note">
   Update the database name, password, and HTTP endpoint to match your setup. The
-  20% batch-memory ratio is a global advisory target divided across accumulating
-  and in-flight batches; 32 MiB is the preferred ceiling for one batch, not a
-  reservation. ETL can reduce that target as selected system or cgroup usage
-  rises. Emergency backpressure pauses new source polling at 85% usage and
-  resumes below 75%, while already-owned destination work continues to drain. A
-  single decoded row can exceed the target because rows are indivisible.
+  20% batch-memory ratio is a global advisory target divided across potential
+  concurrent batches; 32 MiB is the preferred ceiling for one batch, not a
+  reservation. Emergency backpressure independently pauses new source polling
+  at 85% usage and resumes below 75%, while already-owned destination work
+  continues to drain. A single decoded row can exceed the target because rows
+  are indivisible.
 </Callout>
 
 ## Test the pipeline [#test-the-pipeline] [step]

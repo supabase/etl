@@ -78,16 +78,16 @@ one global advisory decoded-batch target as:
 detected_memory_capacity * 0.2
 ```
 
-The runtime divides that target across potential accumulating and in-flight
-batch slots, then caps each batch at 32 MiB. The target is advisory: size is
+The runtime divides that target across potential concurrent batch slots, then
+caps each batch at 32 MiB. The target is advisory: size is
 checked after decoding each item, so one indivisible row may exceed it. The
 detector uses the effective cgroup capacity visible to the process when it is
 running inside a limited container, and host memory otherwise.
 
-If memory backpressure is enabled, non-batch usage can reduce the global target
-as total usage approaches the normal 80% operating target. Emergency
-backpressure activates at 85% used memory and resumes below 75%, with one
-coherent memory snapshot every 100ms.
+Emergency backpressure independently activates at 85% used memory and resumes
+below 75%, with one coherent memory snapshot every 100ms. This whole-process
+signal covers destination allocations and allocator-retained memory that the
+decoded batch estimate does not model.
 
 ## Quick Smoke Run
 

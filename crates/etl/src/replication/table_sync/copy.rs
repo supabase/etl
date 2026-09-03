@@ -49,8 +49,7 @@ use crate::{
     runtime::{
         BatchMemoryGovernor, MemoryMonitor,
         concurrency::{
-            MemoryTrackedBatch, MemoryTrackedBatchStream, ShutdownResult, ShutdownRx,
-            table_sync_worker_copy_stream_id,
+            MemoryBatchStream, ShutdownResult, ShutdownRx, table_sync_worker_copy_stream_id,
         },
     },
     schema::{ReplicatedTableSchema, TableId},
@@ -664,7 +663,7 @@ where
     // the next source batch, so it retains at most one batch at a time.
     let _table_copy_batch_slot = batch_memory_governor.register_batch_slots(1);
     let stream_id = table_sync_worker_copy_stream_id(table_id);
-    let table_copy_stream = MemoryTrackedBatchStream::wrap(
+    let table_copy_stream = MemoryBatchStream::wrap(
         table_copy_stream,
         stream_id,
         batch_config,
@@ -717,7 +716,7 @@ async fn table_copy_rows_from_stream<D, S>(
 ) -> EtlResult<ShutdownResult<TableCopyProgress, TableCopyProgress>>
 where
     D: Destination + Clone + Send + 'static,
-    S: Stream<Item = EtlResult<MemoryTrackedBatch<TableCopyRow>>>,
+    S: Stream<Item = EtlResult<Vec<TableCopyRow>>>,
 {
     let mut progress = TableCopyProgress::default();
 
@@ -763,7 +762,6 @@ where
 
                 let table_copy_rows = table_rows?;
                 let row_count = table_copy_rows.len() as u64;
-                let (table_copy_rows, batch_memory_tracker) = table_copy_rows.into_parts();
                 let mut table_copy_batch_metadata = TableCopyPayloadMetadata::default();
                 let table_rows = table_copy_rows
                     .into_iter()
@@ -784,8 +782,7 @@ where
                 .increment(row_count);
 
                 let dispatched_at = Instant::now();
-                let (flush_result, pending_flush_result) =
-                    WriteTableRowsResult::new(batch_memory_tracker);
+                let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
                 let batch_id = batch_id_generator.next_batch_id()?;
 
                 destination
@@ -802,13 +799,8 @@ where
                 else {
                     return Ok(ShutdownResult::Shutdown(progress));
                 };
-                let (batch_memory_tracker, completed_at, result) =
+                let (_, completed_at, result) =
                     completed_flush_result.into_parts_with_completion();
-
-                // Destination-result completion ends ETL's ownership of this decoded
-                // table-copy batch. Any destination-retained allocation remains visible
-                // to the next selected system or cgroup memory sample.
-                drop(batch_memory_tracker);
                 let write_status = result?;
 
                 table_copy_batch_metadata.record_processed(D::name());

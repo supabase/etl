@@ -29,12 +29,8 @@ pub struct BatchConfig {
     /// Maximum ratio of memory capacity targeted for decoded source batches.
     ///
     /// This value is expressed as a ratio in the `(0.0, 1.0]` interval.
-    /// The resulting advisory global target includes batches being accumulated
-    /// and batches retained by asynchronous destination writes. When memory
-    /// backpressure is configured, current system or cgroup usage can reduce
-    /// this target further as usage approaches the midpoint between the
-    /// resume and activation thresholds. The effective target is divided
-    /// across potential concurrently retained batches.
+    /// The resulting global target is divided across potential concurrent
+    /// batches.
     ///
     /// Together with [`Self::max_fill_ms`], this controls stream flushes:
     /// batches flush either when their accumulated size estimate reaches
@@ -44,20 +40,10 @@ pub struct BatchConfig {
     /// This is a batching heuristic, not a memory allocator or a hard bound.
     /// ETL compares decoded size estimates with the target after each item, so
     /// actual allocations can differ and one indivisible item can overshoot it.
-    /// System memory and tracked batch bytes are sampled separately, so the
-    /// derived target may also contain temporal sampling skew. ETL freezes that
-    /// approximate global target for each memory-snapshot revision; changes in
-    /// active batch slots only repartition it until the next revision.
-    /// The goal is to keep batches approximately below the target as available
-    /// memory changes while preserving headroom for allocations beyond incoming
-    /// rows, such as destination batch building and serialization buffers.
-    ///
-    /// ETL accounts a decoded batch until the corresponding destination async
-    /// result completes. Completion is an ownership boundary, not a guarantee
-    /// that the allocator has returned physical memory. If a destination keeps
-    /// the input or derived buffers after completion, the next system or cgroup
-    /// sample still observes that memory and classifies it as non-batch usage,
-    /// which can make later batches smaller.
+    /// Changes in the detected memory capacity or active batch slots update the
+    /// effective target. The configured ratio leaves the rest of the detected
+    /// capacity for destination batch building, serialization, and other
+    /// allocations.
     #[serde(default = "default_memory_budget_ratio")]
     #[cfg_attr(feature = "utoipa", schema(example = 0.2))]
     pub memory_budget_ratio: f32,
@@ -82,9 +68,8 @@ impl BatchConfig {
     /// Default fraction used for batch byte budgeting.
     ///
     /// The governor targets at most 20% of the current system capacity or
-    /// cgroup memory limit for decoded batches, and may target less when other
-    /// allocations consume the normal operating headroom. An indivisible row
-    /// can exceed the target after it has already been decoded.
+    /// cgroup memory limit for decoded batches. An indivisible row can exceed
+    /// the target after it has already been decoded.
     pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.2;
 
     /// Default maximum preferred source batch size in bytes.
@@ -234,11 +219,11 @@ impl Validate for TableSyncCopyConfig {
 
 /// Emergency memory backpressure configuration.
 ///
-/// Dynamic batch sizing normally reduces ETL-owned decoded memory before this
-/// signal activates. The signal remains a whole-workload safety boundary for
-/// memory outside that accounting, an oversized source row, or a cgroup limit
-/// reduction. Its resume threshold provides recovery headroom before source
-/// polling restarts.
+/// Capacity-derived batch sizing limits decoded batch growth, while this signal
+/// remains the whole-workload safety boundary for destination allocations,
+/// allocator retention, an oversized source row, or a cgroup limit reduction.
+/// Its resume threshold provides recovery headroom before source polling
+/// restarts.
 ///
 /// Activating backpressure stops source polling but does not cancel destination
 /// work or prevent already buffered ETL batches from being flushed. This lets
@@ -265,15 +250,13 @@ pub struct MemoryBackpressureConfig {
 impl MemoryBackpressureConfig {
     /// Default memory usage ratio to activate backpressure.
     ///
-    /// The normal batch-sizing target is the midpoint between the default
-    /// thresholds (80%). Activating at 85% leaves a 5% margin for allocations
-    /// that have not yet appeared in a sample or decoded-batch accounting.
+    /// Activating at 85% leaves a margin before the cgroup or system capacity
+    /// is exhausted.
     pub const DEFAULT_ACTIVATE_THRESHOLD: f32 = 0.85;
     /// Default memory usage ratio to release backpressure.
     ///
-    /// Resuming below 75% restores a 5% margin below the normal batch-sizing
-    /// target. The resulting 10% hysteresis absorbs allocator lag and unbounded
-    /// allocations that are not represented by decoded-batch accounting.
+    /// Resuming below 75% provides a 10% hysteresis band that absorbs allocator
+    /// lag and allocations that appear between samples.
     pub const DEFAULT_RESUME_THRESHOLD: f32 = 0.75;
 }
 

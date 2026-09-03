@@ -34,7 +34,7 @@
 //!
 //! Emergency backpressure pauses new source polling while destination results
 //! and already-owned batches continue to drain. Resume is deliberately based
-//! on the same full-domain measurement. If non-batch memory keeps that domain
+//! on the same full-domain measurement. If measured usage keeps that domain
 //! above the resume threshold, the pipeline stays paused rather than probing
 //! with more source data and risking an OOM kill.
 
@@ -421,34 +421,13 @@ impl MemoryMonitor {
         Some(MemoryMonitorSubscription { current_rx: rx, updates })
     }
 
-    /// Returns a coherent memory capacity snapshot for batch governance.
-    ///
-    /// The used and total values always come from the same operating-system or
-    /// cgroup read, including while vertical pod autoscaling changes the memory
-    /// limit. The normal target is the midpoint between the configured resume
-    /// and activation thresholds, leaving equal operating margins on both
-    /// sides. It is [`None`] when backpressure is disabled.
-    ///
-    /// This snapshot intentionally does not include the governor's tracked
-    /// batch bytes. The governor reads that separate estimate when it first
-    /// observes this revision, so the two measurements may have a small
-    /// temporal skew.
+    /// Returns the memory capacity and revision used for batch governance.
     pub(crate) fn capacity_snapshot(&self) -> MemoryCapacitySnapshot {
         let snapshot = self.inner.snapshot.read().unwrap_or_else(PoisonError::into_inner);
-        let normal_memory_target_bytes = self.inner.backpressure.as_ref().map(|backpressure| {
-            let resume_threshold = f64::from(backpressure.config.resume_threshold);
-            let activation_threshold = f64::from(backpressure.config.activate_threshold);
-            let normal_target_threshold =
-                resume_threshold + (activation_threshold - resume_threshold) / 2.0;
-
-            (snapshot.total as f64 * normal_target_threshold) as u64
-        });
 
         MemoryCapacitySnapshot {
             revision: self.inner.snapshot_revision.load(Ordering::Relaxed),
-            used_memory_bytes: snapshot.used,
             total_memory_bytes: snapshot.total,
-            normal_memory_target_bytes,
         }
     }
 
@@ -624,13 +603,6 @@ impl MemoryMonitor {
         self.publish_snapshot(snapshot);
     }
 
-    /// Updates the used memory in tests.
-    pub(crate) fn set_used_memory_bytes_for_test(&self, used_memory_bytes: u64) {
-        let mut snapshot = *self.inner.snapshot.read().unwrap_or_else(PoisonError::into_inner);
-        snapshot.used = used_memory_bytes;
-        self.publish_snapshot(snapshot);
-    }
-
     /// Replaces the coherent memory snapshot in tests.
     pub(crate) fn set_memory_snapshot_for_test(&self, used: u64, total: u64) {
         self.publish_snapshot(MemorySnapshot { used, total, source: MemorySnapshotSource::System });
@@ -642,18 +614,13 @@ impl MemoryMonitor {
     }
 }
 
-/// Coherent system or cgroup memory capacity used for batch governance.
+/// System or cgroup memory capacity used for batch governance.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MemoryCapacitySnapshot {
     /// Revision identifying this exact coherent snapshot.
     pub(crate) revision: u64,
-    /// Latest system or cgroup memory usage in bytes.
-    pub(crate) used_memory_bytes: u64,
     /// Latest system or cgroup memory capacity in bytes.
     pub(crate) total_memory_bytes: u64,
-    /// Normal system- or cgroup-memory target in bytes, when backpressure is
-    /// configured.
-    pub(crate) normal_memory_target_bytes: Option<u64>,
 }
 
 /// Subscription to memory backpressure updates.
@@ -944,74 +911,35 @@ mod tests {
     }
 
     #[test]
-    fn threshold_hysteresis_is_stable_across_a_pressure_trajectory() {
-        let mut active = false;
-        let trajectory = [0.70, 0.80, 0.849, 0.85, 0.82, 0.75, 0.749, 0.80];
-        let expected = [false, false, false, true, true, true, false, false];
-
-        for (used_percent, expected_active) in trajectory.into_iter().zip(expected) {
-            active = compute_next_backpressure_active(active, used_percent, 0.85, 0.75);
-            assert_eq!(active, expected_active);
-        }
-    }
-
-    #[test]
-    fn computes_normal_memory_target_between_hysteresis_thresholds() {
-        let memory_monitor =
-            MemoryMonitor::new_for_test_with_backpressure(Some(MemoryBackpressureConfig {
-                activate_threshold: 0.9,
-                resume_threshold: 0.4,
-            }));
-        memory_monitor.set_total_memory_bytes_for_test(10_000);
-
-        // Ratios are floored to whole bytes, so the f32 representation of 0.9
-        // and 0.4 produces the conservative value one byte below 65%.
-        assert_eq!(memory_monitor.capacity_snapshot().normal_memory_target_bytes, Some(6_499));
-    }
-
-    #[test]
-    fn omits_normal_memory_target_when_backpressure_is_disabled() {
-        let memory_monitor = MemoryMonitor::new_for_test_with_backpressure(None);
-        memory_monitor.set_total_memory_bytes_for_test(10_000);
-        memory_monitor.set_used_memory_bytes_for_test(7_500);
-
-        assert_eq!(memory_monitor.capacity_snapshot().normal_memory_target_bytes, None);
-    }
-
-    #[test]
-    fn capacity_snapshot_keeps_vpa_usage_and_limit_coherent() {
+    fn capacity_snapshot_reflects_vertical_memory_limit_changes() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(4_000, 6_000);
 
         let snapshot = memory_monitor.capacity_snapshot();
 
         assert_eq!(snapshot.revision, memory_monitor.snapshot_revision());
-        assert_eq!(snapshot.used_memory_bytes, 4_000);
         assert_eq!(snapshot.total_memory_bytes, 6_000);
-        assert_eq!(snapshot.normal_memory_target_bytes, Some(4_800));
     }
 
     #[test]
-    fn retained_snapshot_does_not_recalibrate_the_batch_target() {
+    fn retained_snapshot_does_not_advance_the_batch_target_revision() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(790, 1_000);
         let governor = BatchMemoryGovernor::new(1, memory_monitor.clone(), 1.0, 1_000);
-        let mut tracker = governor.batch_memory_tracker();
-        tracker.grow(10);
         let revision = memory_monitor.snapshot_revision();
         let snapshot = memory_monitor.current_snapshot();
 
         memory_monitor.publish_refresh(MemoryRefresh::retained(snapshot));
 
         assert_eq!(memory_monitor.snapshot_revision(), revision);
-        assert_eq!(governor.batch_size_target_bytes(), 10);
+        assert_eq!(governor.batch_size_target_bytes(), 1_000);
 
-        // A genuinely new sample may pair the same measured usage with the
-        // current tracked-byte estimate and therefore recalibrate the target.
+        // A genuinely new sample advances the revision even when its values and
+        // resulting target are unchanged.
         memory_monitor.publish_refresh(MemoryRefresh::fresh(snapshot));
 
         assert_eq!(memory_monitor.snapshot_revision(), revision.wrapping_add(1));
-        assert_eq!(governor.batch_size_target_bytes(), 20);
+        assert_eq!(governor.batch_size_target_bytes(), 1_000);
     }
 
     #[test]
@@ -1024,14 +952,13 @@ mod tests {
         let snapshot = memory_monitor.capacity_snapshot();
 
         assert_eq!(snapshot.revision, 0);
-        assert_eq!(snapshot.used_memory_bytes, 4_000);
         assert_eq!(snapshot.total_memory_bytes, 6_000);
     }
 
     #[tokio::test]
     async fn subscription_receives_backpressure_transitions() {
         let signal = MemoryMonitor::new_for_test();
-        let mut sub = signal.subscribe().expect("backpressure subscription should exist in tests");
+        let mut sub = signal.subscribe().unwrap();
 
         signal.set_backpressure_active_for_test(true);
         let backpressure_active =

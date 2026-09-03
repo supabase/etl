@@ -79,8 +79,8 @@ use crate::{
         state::{TableState, TableStateType},
     },
     runtime::{
-        BatchMemoryGovernor, BatchMemoryTracker, MemoryMonitor, MemoryMonitorSubscription,
-        TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState,
+        BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorker,
+        TableSyncWorkerPool, TableSyncWorkerState,
         concurrency::{
             MemoryBackpressureStream, ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
             table_sync_worker_apply_stream_id,
@@ -116,11 +116,11 @@ const KEEP_ALIVE_DEADLINE_FRACTION: f64 = 0.6;
 /// deadline at that scale would make the apply loop spin sending forced keep
 /// alives, which is not operationally useful. We clamp to `100ms`.
 const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
-/// Maximum number of decoded event batches retained by one apply loop.
+/// Maximum number of decoded event batches that may coexist for one apply loop.
 ///
 /// One batch may be owned by a pending destination result while the apply loop
-/// accumulates the next batch. Registering both potential owners keeps their
-/// combined tracked bytes within the governor's global decoded-batch target.
+/// accumulates the next batch. Register both potential owners so each producer
+/// receives a share of the configured decoded-batch capacity.
 const APPLY_LOOP_BATCH_SLOTS: usize = 2;
 /// Maximum number of table schema cleanups buffered per apply loop.
 ///
@@ -733,9 +733,8 @@ struct EventBatch {
     events: Vec<Event>,
     /// Tables whose schemas are communicated by relation events in the batch.
     relation_table_ids: HashSet<TableId>,
-    /// Tracker that accounts for decoded events until destination-result
-    /// completion.
-    memory_tracker: Option<BatchMemoryTracker>,
+    /// Decoded in-memory size estimate for the accumulated events.
+    size_hint_bytes: usize,
     /// PostgreSQL tuple bytes used for source metrics and usage accounting.
     ///
     /// These are independent from the decoded [`crate::data::SizeHint`] used
@@ -749,18 +748,13 @@ impl EventBatch {
         Self {
             events: Vec::with_capacity(capacity),
             relation_table_ids: HashSet::new(),
-            memory_tracker: None,
+            size_hint_bytes: 0,
             streaming_payload_metadata: StreamingPayloadMetadata::default(),
         }
     }
 
     /// Adds an event and its source payload metadata to the batch.
-    fn push(
-        &mut self,
-        event: Event,
-        streaming_payload_metadata: StreamingPayloadMetadata,
-        batch_memory_governor: &BatchMemoryGovernor,
-    ) {
+    fn push(&mut self, event: Event, streaming_payload_metadata: StreamingPayloadMetadata) {
         if let Event::Relation(relation) = &event {
             self.relation_table_ids.insert(relation.replicated_table_schema.id());
         }
@@ -768,9 +762,7 @@ impl EventBatch {
         let event_size_hint_bytes = event.size_hint();
         self.streaming_payload_metadata.merge(streaming_payload_metadata);
         self.events.push(event);
-        self.memory_tracker
-            .get_or_insert_with(|| batch_memory_governor.batch_memory_tracker())
-            .grow(event_size_hint_bytes);
+        self.size_hint_bytes = self.size_hint_bytes.saturating_add(event_size_hint_bytes);
     }
 
     /// Returns the number of events in the batch.
@@ -785,7 +777,7 @@ impl EventBatch {
 
     /// Returns the decoded in-memory size estimate for the batch.
     fn size_hint_bytes(&self) -> usize {
-        self.memory_tracker.as_ref().map_or(0, BatchMemoryTracker::size_hint_bytes)
+        self.size_hint_bytes
     }
 
     /// Takes the current batch and leaves one with the same event capacity.
@@ -1279,7 +1271,7 @@ where
 
         // Slot registration belongs to the apply loop because its state machine
         // determines how many decoded batches can coexist. Keep the guard alive
-        // until the loop exits so the shared target includes both potential owners.
+        // until the loop exits so both potential owners divide the shared target.
         let _batch_slot_guard = batch_memory_governor.register_batch_slots(APPLY_LOOP_BATCH_SLOTS);
         let mut apply_loop = Self {
             config: Arc::clone(&config),
@@ -1949,15 +1941,7 @@ where
         let processing_paused = self.state.resume_processing();
 
         // Explode the result into parts which are used for handling the flush result.
-        let (mut metadata, completed_at, result) = flush_result.into_parts_with_completion();
-
-        // The destination result has completed, so ETL's decoded-input ownership
-        // has ended. Release its tracker before any checkpoint or schema-cleanup
-        // work awaits further I/O. Destination-retained allocations remain visible
-        // as non-batch memory in the next selected system or cgroup sample.
-        if let Some(metadata) = metadata.as_mut() {
-            drop(metadata.batch_memory_tracker.take());
-        }
+        let (metadata, completed_at, result) = flush_result.into_parts_with_completion();
 
         // If there was an error in the flushing, we return it immediately.
         let status = result?;
@@ -2187,19 +2171,13 @@ where
             // relation is written first so destinations apply the new schema
             // before the following row.
             if let Some(relation) = relation {
-                self.state.event_batch.push(
-                    Event::Relation(relation),
-                    StreamingPayloadMetadata::default(),
-                    &self.batch_memory_governor,
-                );
+                self.state
+                    .event_batch
+                    .push(Event::Relation(relation), StreamingPayloadMetadata::default());
             }
 
             // We add the element to the pending batch.
-            self.state.event_batch.push(
-                event,
-                result.streaming_payload_metadata,
-                &self.batch_memory_governor,
-            );
+            self.state.event_batch.push(event, result.streaming_payload_metadata);
 
             // We update the last end lsn of the commit that we encountered, if any.
             self.state.update_last_commit_end_lsn(result.end_lsn);
@@ -2265,7 +2243,7 @@ where
             events,
             relation_table_ids,
             streaming_payload_metadata,
-            memory_tracker: batch_memory_tracker,
+            size_hint_bytes: _,
         } = event_batch;
         let event_count = events.len();
 
@@ -2291,7 +2269,6 @@ where
             event_count,
             relation_table_ids,
             streaming_payload_metadata,
-            batch_memory_tracker,
             dispatched_at: Instant::now(),
         };
 
@@ -4687,15 +4664,12 @@ mod tests {
 
     #[test]
     fn event_batch_sums_event_size_hints() {
-        let memory_monitor = MemoryMonitor::new_for_test();
-        memory_monitor.set_total_memory_bytes_for_test(10_000_000);
-        let governor = BatchMemoryGovernor::new(1, memory_monitor, 0.2, 1_000_000);
         let mut batch = EventBatch::with_capacity(8);
 
         let event = Event::Unsupported;
         let event_size_hint_bytes = event.size_hint();
-        batch.push(event, StreamingPayloadMetadata::default(), &governor);
-        batch.push(Event::Unsupported, StreamingPayloadMetadata::default(), &governor);
+        batch.push(event, StreamingPayloadMetadata::default());
+        batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
 
         assert_eq!(batch.size_hint_bytes(), 2 * event_size_hint_bytes);
     }

@@ -11,7 +11,7 @@ use tracing::info;
 
 use crate::{
     data::SizeHint,
-    runtime::{BatchMemoryGovernor, BatchMemoryTracker, MemoryMonitorSubscription},
+    runtime::{BatchMemoryGovernor, MemoryMonitorSubscription},
     schema::TableId,
 };
 
@@ -30,43 +30,10 @@ pub(crate) fn apply_worker_apply_stream_id() -> String {
     "apply_worker_apply_stream".to_owned()
 }
 
-/// A decoded batch paired with the tracker that accounts for its memory.
-///
-/// Consumers move the tracker into destination-result ownership with the items.
-/// Dropping the batch before that transfer releases the tracked bytes.
-#[derive(Debug)]
-pub(crate) struct MemoryTrackedBatch<T> {
-    /// Decoded items emitted by the batching stream.
-    items: Vec<T>,
-    /// Tracker accounting for the decoded items through destination-result
-    /// completion.
-    memory_tracker: BatchMemoryTracker,
-}
-
-impl<T> MemoryTrackedBatch<T> {
-    /// Creates a tracked batch from decoded items and their tracker.
-    fn new(items: Vec<T>, memory_tracker: BatchMemoryTracker) -> Self {
-        Self { items, memory_tracker }
-    }
-
-    /// Returns the number of decoded items in the batch.
-    pub(crate) fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    /// Splits the batch so its tracker can follow the items through
-    /// destination-result completion.
-    pub(crate) fn into_parts(self) -> (Vec<T>, BatchMemoryTracker) {
-        (self.items, self.memory_tracker)
-    }
-}
-
-/// Moves decoded items and their accounting into an emitted batch.
-fn take_memory_tracked_batch<T>(
-    items: Vec<T>,
-    memory_tracker: &mut BatchMemoryTracker,
-) -> MemoryTrackedBatch<T> {
-    MemoryTrackedBatch::new(items, memory_tracker.take())
+/// Takes the current batch and resets its decoded-size estimate.
+fn take_batch<T>(items: &mut Vec<T>, size_hint_bytes: &mut usize) -> Vec<T> {
+    *size_hint_bytes = 0;
+    std::mem::take(items)
 }
 
 pin_project! {
@@ -160,12 +127,12 @@ impl<S: Stream> Stream for MemoryBackpressureStream<S> {
 pin_project! {
     /// A stream adapter that batches fallible items based on a size target and timeout.
     ///
-    /// This stream buffers successful values and yields [`MemoryTrackedBatch`] values whose
-    /// decoded memory remains accounted after emission. It avoids buffering `Result<B, E>`
-    /// values and then allocating a second vector to extract successful entries.
+    /// This stream buffers successful values and yields their decoded values. It
+    /// avoids buffering `Result<B, E>` values and then allocating a second
+    /// vector to extract successful entries.
     #[must_use = "streams do nothing unless polled"]
     #[derive(Debug)]
-    pub(crate) struct MemoryTrackedBatchStream<B, E, S: Stream<Item = Result<B, E>>> {
+    pub(crate) struct MemoryBatchStream<B, E, S: Stream<Item = Result<B, E>>> {
         // Fallible source stream being batched.
         #[pin]
         stream: S,
@@ -176,8 +143,8 @@ pin_project! {
         deadline: Option<tokio::time::Sleep>,
         // Successfully decoded items in the current batch.
         items: Vec<B>,
-        // Tracker accounting for bytes retained by the accumulating batch.
-        batch_memory_tracker: BatchMemoryTracker,
+        // Decoded in-memory size estimate for the accumulating batch.
+        batch_size_hint_bytes: usize,
         // Governor supplying the shared advisory batch-size target.
         batch_memory_governor: BatchMemoryGovernor,
         // Batch configuration supplying the fill timeout.
@@ -193,11 +160,11 @@ pin_project! {
     }
 }
 
-impl<B, E, S: Stream<Item = Result<B, E>>> MemoryTrackedBatchStream<B, E, S>
+impl<B, E, S: Stream<Item = Result<B, E>>> MemoryBatchStream<B, E, S>
 where
     B: SizeHint,
 {
-    /// Creates a new [`MemoryTrackedBatchStream`].
+    /// Creates a new [`MemoryBatchStream`].
     pub(crate) fn wrap(
         stream: S,
         stream_id: impl Into<String>,
@@ -205,14 +172,12 @@ where
         memory_subscription: Option<MemoryMonitorSubscription>,
         batch_memory_governor: BatchMemoryGovernor,
     ) -> Self {
-        let batch_memory_tracker = batch_memory_governor.batch_memory_tracker();
-
         Self {
             stream,
             stream_id: stream_id.into(),
             deadline: None,
             items: Vec::new(),
-            batch_memory_tracker,
+            batch_size_hint_bytes: 0,
             batch_memory_governor,
             batch_config,
             reset_timer: true,
@@ -223,11 +188,11 @@ where
     }
 }
 
-impl<B, E, S: Stream<Item = Result<B, E>>> Stream for MemoryTrackedBatchStream<B, E, S>
+impl<B, E, S: Stream<Item = Result<B, E>>> Stream for MemoryBatchStream<B, E, S>
 where
     B: SizeHint,
 {
-    type Item = Result<MemoryTrackedBatch<B>, E>;
+    type Item = Result<Vec<B>, E>;
 
     /// Polls the stream for the next batch of successful values while
     /// preserving backpressure, timeout behavior, byte-target checks, and
@@ -304,15 +269,14 @@ where
                 info!(
                     stream_id = %this.stream_id,
                     buffered_items = this.items.len(),
-                    buffered_size_hint_bytes = this.batch_memory_tracker.size_hint_bytes(),
+                    buffered_size_hint_bytes = *this.batch_size_hint_bytes,
                     "backpressure active, flushing buffered batch"
                 );
                 *this.reset_timer = true;
 
                 // If we are paused for memory, we don't want to reallocate a batch of the same
                 // size as before, to avoid increasing memory usage even more.
-                let items = std::mem::take(this.items);
-                let batch = take_memory_tracked_batch(items, this.batch_memory_tracker);
+                let batch = take_batch(this.items, this.batch_size_hint_bytes);
 
                 return Poll::Ready(Some(Ok(batch)));
             }
@@ -336,7 +300,8 @@ where
 
                     // Add the new item to the batch and track its size.
                     let item_size_hint_bytes = item.size_hint();
-                    this.batch_memory_tracker.grow(item_size_hint_bytes);
+                    *this.batch_size_hint_bytes =
+                        this.batch_size_hint_bytes.saturating_add(item_size_hint_bytes);
                     this.items.push(item);
 
                     // If backpressure activated while the source was ready, flush the
@@ -350,8 +315,7 @@ where
                         // If we are paused for memory, we don't want to reallocate a batch of the
                         // same size as before, to avoid increasing memory
                         // usage even more.
-                        let items = std::mem::take(this.items);
-                        let batch = take_memory_tracked_batch(items, this.batch_memory_tracker);
+                        let batch = take_batch(this.items, this.batch_size_hint_bytes);
 
                         return Poll::Ready(Some(Ok(batch)));
                     }
@@ -360,7 +324,7 @@ where
                     // stream can yield many ready rows during one outer poll, so checking only
                     // once per poll would delay adaptation to a changed cgroup limit or active
                     // batch-slot count.
-                    if this.batch_memory_tracker.size_hint_bytes()
+                    if *this.batch_size_hint_bytes
                         >= this.batch_memory_governor.batch_size_target_bytes()
                     {
                         *this.reset_timer = true;
@@ -368,8 +332,7 @@ where
                         // COPY consumers wait for destination-result completion before polling
                         // again, so retaining another full outer-vector allocation
                         // here would violate the stream's one-batch-slot model.
-                        let items = std::mem::take(this.items);
-                        let batch = take_memory_tracked_batch(items, this.batch_memory_tracker);
+                        let batch = take_batch(this.items, this.batch_size_hint_bytes);
 
                         return Poll::Ready(Some(Ok(batch)));
                     }
@@ -380,10 +343,9 @@ where
                     this.deadline.set(None);
 
                     // Successful values buffered before the error will never be
-                    // emitted. Drop them and transfer the tracker into an explicit
-                    // drop instead of retaining either until the stream is dropped.
+                    // emitted, so release them immediately.
                     drop(std::mem::take(this.items));
-                    drop(this.batch_memory_tracker.take());
+                    *this.batch_size_hint_bytes = 0;
 
                     return Poll::Ready(Some(Err(err)));
                 }
@@ -397,8 +359,7 @@ where
                         // reuse retained capacity. `mem::take` replaces the
                         // buffer with `Vec::new()`, which keeps zero capacity
                         // and avoids allocating a replacement vector.
-                        let items = std::mem::take(this.items);
-                        let batch = take_memory_tracked_batch(items, this.batch_memory_tracker);
+                        let batch = take_batch(this.items, this.batch_size_hint_bytes);
 
                         Some(Ok(batch))
                     };
@@ -423,8 +384,7 @@ where
 
             // Do not preallocate the next outer row buffer while this batch is
             // still awaiting destination-result completion.
-            let items = std::mem::take(this.items);
-            let batch = take_memory_tracked_batch(items, this.batch_memory_tracker);
+            let batch = take_batch(this.items, this.batch_size_hint_bytes);
 
             return Poll::Ready(Some(Ok(batch)));
         }
@@ -586,14 +546,6 @@ mod tests {
         }
     }
 
-    /// Removes memory-accounting ownership when a test only needs emitted
-    /// items.
-    fn into_batch_items<T, E>(
-        result: Option<Result<MemoryTrackedBatch<T>, E>>,
-    ) -> Option<Result<Vec<T>, E>> {
-        result.map(|result| result.map(|batch| batch.into_parts().0))
-    }
-
     #[test]
     fn builds_worker_stream_ids() {
         assert_eq!(
@@ -700,7 +652,7 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = test_batch_config(10_000);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             TwoThenPending::new(),
             "test_stream",
             batch_config,
@@ -721,16 +673,16 @@ mod tests {
         // Now backpressure is active, so the system is expected to flush its existing
         // state.
         let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(into_batch_items(batch), Some(Ok(vec![1, 2])));
+        assert_eq!(batch, Some(Ok(vec![1, 2])));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn pressure_flush_releases_retained_memory_and_resumes() {
+    async fn pressure_flushes_the_batch_and_resumes() {
         let memory = MemoryMonitor::new_for_test();
         memory.set_memory_snapshot_for_test(7_500, 10_000);
         let governor = BatchMemoryGovernor::new(1, memory.clone(), 1.0, 10_000);
         let (tx, rx) = tokio::sync::mpsc::channel(2);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             ReceiverStream::new(rx),
             "test_stream",
             test_batch_config(100),
@@ -747,22 +699,14 @@ mod tests {
 
         memory.set_backpressure_active_for_test(true);
         let batch = stream.next().await.unwrap().unwrap();
-        assert_eq!(batch.items, vec![SizedToken { value: 1, bytes: 100 }]);
-        let target_with_batch = 500 + batch.memory_tracker.size_hint_bytes();
-        memory.set_memory_snapshot_for_test(7_500, 10_000);
-        assert_eq!(governor.batch_size_target_bytes(), target_with_batch);
+        assert_eq!(batch, vec![SizedToken { value: 1, bytes: 100 }]);
 
-        // Dropping the consumer-owned batch also drops its tracker. The stream
-        // itself remains paused without owning those emitted bytes.
-        drop(batch);
+        // The stream remains paused until the memory monitor releases it.
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
             _ => panic!("expected source intake to remain paused"),
         })
         .await;
-        memory.set_memory_snapshot_for_test(7_500, 10_000);
-        assert_eq!(governor.batch_size_target_bytes(), 500);
-
         memory.set_backpressure_active_for_test(false);
         tx.send(Ok(SizedToken { value: 2, bytes: 100 })).await.unwrap();
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
@@ -773,7 +717,7 @@ mod tests {
         tokio::time::advance(Duration::from_millis(120)).await;
 
         let batch = stream.next().await.unwrap().unwrap();
-        assert_eq!(batch.items, vec![SizedToken { value: 2, bytes: 100 }]);
+        assert_eq!(batch, vec![SizedToken { value: 2, bytes: 100 }]);
     }
 
     #[tokio::test]
@@ -785,7 +729,7 @@ mod tests {
         // not return `Pending` between items, so memory pressure must be
         // observed from the current watch value inside the drain loop.
         let batch_config = test_batch_config(10_000);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             ActivatesBackpressureAfterFirst::new(memory.clone()),
             "test_stream",
             batch_config,
@@ -794,7 +738,7 @@ mod tests {
         ));
 
         let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(into_batch_items(batch), Some(Ok(vec![1])));
+        assert_eq!(batch, Some(Ok(vec![1])));
 
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
@@ -810,7 +754,7 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = test_batch_config(10_000);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(1)]),
             "test_stream",
             batch_config,
@@ -829,7 +773,7 @@ mod tests {
 
         // Memory is now back, so we should get the batch of 1 element.
         let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(into_batch_items(batch), Some(Ok(vec![1])));
+        assert_eq!(batch, Some(Ok(vec![1])));
     }
 
     #[tokio::test(start_paused = true)]
@@ -838,7 +782,7 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = test_batch_config(10_000);
-        let stream = MemoryTrackedBatchStream::wrap(
+        let stream = MemoryBatchStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(2)]),
             "test_stream",
             batch_config,
@@ -871,7 +815,7 @@ mod tests {
 
         let result = waiter.await.unwrap();
 
-        assert_eq!(into_batch_items(result), Some(Ok(vec![2])));
+        assert_eq!(result, Some(Ok(vec![2])));
         unblocker.await.unwrap();
     }
 
@@ -889,7 +833,7 @@ mod tests {
             SizedToken { value: 2, bytes: byte_size },
             SizedToken { value: 3, bytes: byte_size },
         ];
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             futures::stream::iter(items.clone().into_iter().map(Ok::<SizedToken, &'static str>)),
             "test_stream",
             batch_config,
@@ -898,10 +842,10 @@ mod tests {
         ));
 
         let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(into_batch_items(first), Some(Ok(items[..2].to_vec())));
+        assert_eq!(first, Some(Ok(items[..2].to_vec())));
 
         let second = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(into_batch_items(second), Some(Ok(items[2..].to_vec())));
+        assert_eq!(second, Some(Ok(items[2..].to_vec())));
     }
 
     #[tokio::test]
@@ -920,7 +864,7 @@ mod tests {
             SizedToken { value: 2, bytes: second },
             SizedToken { value: 3, bytes: third },
         ];
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             futures::stream::iter(items.clone().into_iter().map(Ok::<SizedToken, &'static str>)),
             "test_stream",
             batch_config,
@@ -929,7 +873,7 @@ mod tests {
         ));
 
         let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(into_batch_items(first), Some(Ok(items)));
+        assert_eq!(first, Some(Ok(items)));
     }
 
     #[tokio::test]
@@ -938,7 +882,7 @@ mod tests {
         memory.set_total_memory_bytes_for_test(5_000);
         let governor = BatchMemoryGovernor::new(1, memory.clone(), 0.2, 10_000);
         let batch_config = test_batch_config(10_000);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             ShrinksMemoryBetweenReadyItems::new(memory),
             "test_stream",
             batch_config,
@@ -952,7 +896,7 @@ mod tests {
         // already oversized batch and the third row remains unread.
         let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         assert_eq!(
-            into_batch_items(first),
+            first,
             Some(Ok(vec![
                 SizedToken { value: 1, bytes: 400 },
                 SizedToken { value: 2, bytes: 100 },
@@ -961,75 +905,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emitted_batch_owns_memory_until_it_is_dropped() {
-        let memory = MemoryMonitor::new_for_test();
-        memory.set_total_memory_bytes_for_test(10_000);
-        memory.set_used_memory_bytes_for_test(7_500);
-        let governor = BatchMemoryGovernor::new(1, memory.clone(), 1.0, 10_000);
-        let batch_config = test_batch_config(10_000);
-        let input =
-            futures::stream::iter([Ok::<_, &'static str>(SizedToken { value: 1, bytes: 100 })]);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
-            input,
-            "test_stream",
-            batch_config,
-            None,
-            governor.clone(),
-        ));
-
-        let batch = stream.next().await.unwrap().unwrap();
-        let target_with_batch = 500 + batch.memory_tracker.size_hint_bytes();
-        memory.set_memory_snapshot_for_test(7_500, 10_000);
-        assert_eq!(governor.batch_size_target_bytes(), target_with_batch);
-
-        // Polling the source again does not release an emitted batch's memory.
-        assert!(stream.next().await.is_none());
-        assert_eq!(governor.batch_size_target_bytes(), target_with_batch);
-
-        drop(batch);
-        memory.set_memory_snapshot_for_test(7_500, 10_000);
-        assert_eq!(governor.batch_size_target_bytes(), 500);
-    }
-
-    #[tokio::test]
-    async fn tracked_batch_sums_item_size_hints() {
+    async fn source_error_discards_buffered_items() {
         let memory = MemoryMonitor::new_for_test();
         let governor = test_batch_memory_governor(&memory);
-        let input = futures::stream::iter([
-            Ok::<_, &'static str>(SizedToken { value: 1, bytes: 100 }),
-            Ok(SizedToken { value: 2, bytes: 200 }),
-        ]);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
-            input,
-            "test_stream",
-            test_batch_config(300),
-            None,
-            governor,
-        ));
-
-        let batch = stream.next().await.unwrap().unwrap();
-
-        assert_eq!(batch.memory_tracker.size_hint_bytes(), 300);
-    }
-
-    #[tokio::test]
-    async fn source_error_releases_buffered_batch_memory() {
-        let memory = MemoryMonitor::new_for_test();
-        memory.set_memory_snapshot_for_test(7_500, 10_000);
-        let governor = BatchMemoryGovernor::new(1, memory.clone(), 1.0, 10_000);
         let input =
             futures::stream::iter([Ok(SizedToken { value: 1, bytes: 100 }), Err("source error")]);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             input,
             "test_stream",
             test_batch_config(10_000),
             None,
-            governor.clone(),
+            governor,
         ));
 
-        assert_eq!(into_batch_items(stream.next().await), Some(Err("source error")));
-        memory.set_memory_snapshot_for_test(7_500, 10_000);
-        assert_eq!(governor.batch_size_target_bytes(), 500);
+        assert_eq!(stream.next().await, Some(Err("source error")));
         assert!(stream.next().await.is_none());
     }
 
@@ -1039,7 +928,7 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = test_batch_config(100);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             TwoThenPending::new(),
             "test_stream",
             batch_config,
@@ -1060,7 +949,7 @@ mod tests {
         tokio::time::advance(Duration::from_millis(120)).await;
 
         let flushed = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(into_batch_items(flushed), Some(Ok(vec![1, 2])));
+        assert_eq!(flushed, Some(Ok(vec![1, 2])));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1071,7 +960,7 @@ mod tests {
         // This guards against arming the fill timer while the stream is idle.
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let batch_config = test_batch_config(100);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             ReceiverStream::new(rx),
             "test_stream",
             batch_config,
@@ -1096,7 +985,7 @@ mod tests {
 
         tokio::time::advance(Duration::from_millis(120)).await;
         let flushed = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(into_batch_items(flushed), Some(Ok(vec![1])));
+        assert_eq!(flushed, Some(Ok(vec![1])));
     }
 
     #[tokio::test]
@@ -1105,7 +994,7 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = test_batch_config(10_000);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(7), Ok(8)]),
             "test_stream",
             batch_config,
@@ -1116,7 +1005,7 @@ mod tests {
         // End-of-stream with buffered items must emit one final batch before
         // completion.
         let last = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(into_batch_items(last), Some(Ok(vec![7, 8])));
+        assert_eq!(last, Some(Ok(vec![7, 8])));
 
         // A subsequent poll must return None, proving the stream transitions to ended
         // state.
@@ -1130,7 +1019,7 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = test_batch_config(10_000);
-        let mut stream = Box::pin(MemoryTrackedBatchStream::wrap(
+        let mut stream = Box::pin(MemoryBatchStream::wrap(
             futures::stream::empty::<Result<i32, &'static str>>(),
             "test_stream",
             batch_config,
