@@ -42,25 +42,32 @@ ETL operates in **two phases**:
 
 ### Phase 1: Initial Sync
 
-When a pipeline starts, it copies all existing data from each table in the publication. Multiple **Table Sync Workers** run in parallel to copy tables concurrently. Each worker:
+When a pipeline starts, it copies existing rows from each table in the
+publication, then catches up changes that occurred while the copy was running.
+Multiple **Table Sync Workers** run in parallel. Each worker:
 
 1. Creates a replication slot to capture a consistent snapshot
-2. Copies all rows using Postgres `COPY`
-3. Sends rows to the destination via `write_table_rows()`
+2. Copies existing rows with Postgres `COPY` and sends them via `write_table_rows()`
+3. Catches up later WAL changes via `write_events()` until the table is ready
+   for the apply worker
 
 <Callout className="etl-callout" type="info" title="Note">
-  During this phase, `Begin` and `Commit` events may be delivered multiple times
+  During catch-up, `Begin` and `Commit` events may be delivered multiple times
   because workers consume slots in parallel. This is expected: destinations
   should rely on **per-table event ordering** and **idempotent writes** rather
   than treating transaction markers as a complete global transaction boundary.
 </Callout>
 
+Copy and change data capture (CDC) are replication paths, not customer-visible
+phases. Initial sync uses the copy path followed by CDC catch-up; ongoing
+replication uses the CDC path after the table is ready.
+
 ### Phase 2: Ongoing Replication
 
-Once tables are copied, the **Apply Worker** handles ongoing replication from
+Once a table is ready, the **Apply Worker** handles ongoing replication from
 the Postgres WAL. It:
 
-1. Receives change events (inserts, updates, deletes)
+1. Receives change events (inserts, updates, deletes, truncates, and schema changes)
 2. Batches events for efficiency
 3. Sends batches to the destination via `write_events()`
 
@@ -85,7 +92,7 @@ The `Destination` trait receives bulk rows during initial sync and event batches
 during catch-up and ongoing replication. Result handles let a destination distinguish
 accepted work from durable work without blocking dispatch. See [Extension
 Points](/explanation/traits/#destination) for the method contract and [Custom
-Stores and Destinations](/guides/custom-implementations/) for an implementation.
+Implementations](/guides/custom-implementations/) for an example.
 
 ### Store
 
@@ -118,19 +125,21 @@ current-state tables, upsert by the destination's chosen row key so replayed
 events converge to the same state.
 
 The `commit_lsn` and `tx_ordinal` fields on sequenced events provide stable
-**ordering and checkpointing**. For example, BigQuery destinations use the pair
-to maintain correct event order in destination tables. See [Event
+**ordering and checkpointing**. Destinations such as ClickHouse and BigQuery
+use the pair to keep replayed events ordered. See [Event
 Types](/explanation/events/#understanding-event-sequence-keys) for details.
 
 ## Table States
 
-Each table progresses through these states:
+Each table progresses through these states. See
+[Extension Points](/explanation/traits/#table-states) for which states are
+persisted across restarts.
 
 | State | Set By | Description |
 |-------|--------|-------------|
 | **Init** | Pipeline | Table discovered, ready for initial sync |
 | **DataSync** | Table Sync Worker | Initial table copy in progress |
-| **FinishedCopy** | Table Sync Worker | Initial sync complete |
+| **FinishedCopy** | Table Sync Worker | Copy complete, waiting for catch-up coordination |
 | **SyncWait** | Table Sync Worker | Waiting for Apply Worker to pause (in-memory only) |
 | **Catchup** | Apply Worker | Apply Worker paused; Table Sync Worker catching up to its LSN (in-memory only) |
 | **SyncDone** | Table Sync Worker | Catch-up complete; durable decoder retained until Apply materializes local state |

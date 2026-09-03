@@ -2,11 +2,11 @@ use anyhow::{Result, bail};
 use clap::Args;
 use xshell::{Shell, cmd};
 
-const KNOWN_EXAMPLES: &[&str] = &["bigquery", "clickhouse", "ducklake", "snowflake"];
+const KNOWN_EXAMPLES: &[&str] = &["clickhouse", "bigquery", "ducklake", "snowflake"];
 
 #[derive(Args)]
 pub(crate) struct ExampleArgs {
-    /// Example name (bigquery, clickhouse, ducklake, snowflake).
+    /// Example name (clickhouse, bigquery, ducklake, snowflake).
     name: String,
 
     /// Extra arguments passed through to the example binary.

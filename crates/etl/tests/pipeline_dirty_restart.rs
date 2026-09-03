@@ -168,9 +168,9 @@ async fn wait_for_apply_disconnect(
 
 /// Waits until the finished table sync worker's replication slot is removed.
 ///
-/// The users table becomes `Ready` while the table sync worker can still be
-/// deleting its progress row and replication slot. Slot removal is the last
-/// cleanup step, so its absence means table sync work has stopped.
+/// Slot cleanup is allowed at [`TableStateType::SyncDone`] or
+/// [`TableStateType::Ready`]. Its absence means table-sync work has stopped,
+/// not that apply has already marked the table ready.
 async fn wait_for_sync_slot_removal(
     database: &PgDatabase<Client>,
     sync_slot_name: &str,
@@ -333,6 +333,33 @@ fn assert_users_converged(
     Ok(())
 }
 
+/// Arms a Ready wait when the crashed pipeline left the table in
+/// [`TableStateType::SyncDone`].
+///
+/// A crash while the first apply write is held can land before
+/// [`TableStateType::Ready`]. Restart must finish that promotion without
+/// recopy. The notification is armed before the restarted pipeline starts.
+async fn notify_if_ready_pending(
+    store: &NotifyingStore,
+    table_id: TableId,
+) -> Result<Option<TimedNotify>, TestCaseError> {
+    let table_state = store
+        .get_table_state(table_id)
+        .await
+        .map_err(|error| TestCaseError::fail(format!("failed to read table state: {error}")))?
+        .ok_or_else(|| TestCaseError::fail("users table state was missing before restart"))?;
+
+    match TableStateType::from(&table_state) {
+        TableStateType::Ready => Ok(None),
+        TableStateType::SyncDone => {
+            Ok(Some(store.notify_on_table_state_type(table_id, TableStateType::Ready).await))
+        }
+        table_state_type => Err(TestCaseError::fail(format!(
+            "users table had incomplete state {table_state_type} before restart"
+        ))),
+    }
+}
+
 /// Runs one generated workload and dirty-restart schedule to convergence.
 async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseError> {
     let mut database = spawn_source_database().await;
@@ -363,9 +390,9 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
         .map_err(|error| TestCaseError::fail(format!("pipeline failed to start: {error}")))?;
     wait_for_notification(&users_sync_complete, "users table synchronization to complete").await?;
 
-    // Table sync completes before the worker deletes its progress row and
-    // replication slot. Wait for slot removal so the crash below hits a state
-    // where only the apply worker serves the users table.
+    // Table sync completes at `SyncDone` before the worker deletes its slot.
+    // Wait for slot removal so the crash cannot race a still-running copy
+    // worker. Apply may still promote the table to `Ready` later.
     wait_for_sync_slot_removal(&database, &sync_slot_name).await?;
 
     for user_number in 1..case.crash_after {
@@ -417,6 +444,8 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
     drop(first_destination);
     drop(held_response);
 
+    let users_ready_after_restart = notify_if_ready_pending(&store, table_id).await?;
+
     let restarted_destination = TestDestinationWrapper::wrap(memory_destination.clone());
     let mut restarted_pipeline = create_pipeline(
         &database.config,
@@ -440,6 +469,14 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
         .await?;
     }
 
+    if let Some(users_ready_after_restart) = users_ready_after_restart {
+        wait_for_notification(
+            &users_ready_after_restart,
+            "users table to become ready after restart",
+        )
+        .await?;
+    }
+
     tokio::time::timeout(DIRTY_RESTART_TIMEOUT, restarted_pipeline.shutdown_and_wait())
         .await
         .map_err(|_| TestCaseError::fail("timed out waiting for restarted pipeline shutdown"))?
@@ -455,7 +492,7 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
     prop_assert_eq!(
         TableStateType::from(&table_state),
         TableStateType::Ready,
-        "users table did not remain ready after restart"
+        "users table did not become ready after restart"
     );
     prop_assert_eq!(
         restarted_destination.write_table_rows_called().await,

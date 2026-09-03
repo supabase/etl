@@ -1,8 +1,9 @@
 # Scripts
 
-Development workflows should be exposed through the `cargo x` task runner (see
-`cargo x --help`). Shell scripts in `scripts/bin` are not the preferred way to
-add new development commands.
+Development workflows for [Supabase ETL](https://supabase.github.io/etl/) should
+be exposed through the `cargo x` task runner (see `cargo x --help` and
+[DEVELOPMENT.md](../DEVELOPMENT.md)). Shell scripts in `scripts/bin` are not the
+preferred way to add new development commands.
 
 New development commands should be added as xtask commands in
 `crates/xtask/src/commands/` rather than as shell scripts here. A shell helper
@@ -22,4 +23,4 @@ intentionally unavailable, such as a slim Docker build stage.
 | `bin/` | Executable development scripts. |
 | `docker/` | Docker Compose file and resources mounted by the local stack. |
 | `docs/` | Documentation utility scripts. |
-| `k8s/local/` | Pre-defined Kubernetes resources for local OrbStack development. |
+| `k8s/local/` | Kubernetes resources the API needs for local OrbStack development. |

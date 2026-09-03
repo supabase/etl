@@ -1,6 +1,10 @@
-# `etl` - API
+# `etl-api`
 
-This API service provides a RESTful interface for managing Postgres replication pipelines. It enables you to:
+Kubernetes control-plane HTTP API for managing [Supabase ETL](https://supabase.github.io/etl/)
+pipelines. Embed the `etl` crate or run `etl-replicator` if you do not need this
+service.
+
+The API can:
 
 - Create and manage replication pipelines between Postgres sources and destinations
 - Handle multi-tenant replication configurations
@@ -21,44 +25,47 @@ This API service provides a RESTful interface for managing Postgres replication 
 - OpenAPI descriptors generated from `utoipa` route macros
 - Integration with the core ETL system
 
-## Table of Contents
+## Local development
 
-- [Prerequisites](#prerequisites)
-- [Development](#development)
-- [API Documentation](#api-documentation)
-- [Environment Variables](#environment-variables)
-- [Authentication](#authentication)
+```bash
+cargo x setup api
+cargo x run api
+```
+
+`cargo x setup api` starts local Postgres (unless `SKIP_DOCKER=1`), runs
+migrations, applies the required Kubernetes resources, and writes gitignored
+configuration under `crates/etl-api/configuration/`. Then `cargo x run api`
+listens on `http://127.0.0.1:8010` (Swagger UI at `/swagger-ui`) and
+`http://127.0.0.1:8081`.
+
+`cargo x init` starts the local stack only. Then `cargo x setup api` writes
+this configuration. Replicator configuration is separate:
+`cargo x setup replicator` (ClickHouse by default). See
+[DEVELOPMENT.md](../../DEVELOPMENT.md).
 
 ## Prerequisites
 
-Before running the API, you must have:
+`etl-api` requires:
 
-- A running Postgres instance reachable via `DATABASE_URL`.
-- The `etl-api` database schema applied (SQLx migrations).
-- An active Kubernetes cluster accessible through the runtime's default
-  Kubernetes client configuration. Local development uses the `orbstack`
-  context.
-- The configured replicator namespace and ServiceAccount already created in
-  that cluster.
-- The `autoscaling.k8s.io/v1` Vertical Pod Autoscaler CRDs installed. The API
-  checks this prerequisite at startup before it can create pipeline workloads.
+- A running Postgres instance for the control-plane database.
+- SQLx CLI for migrations (`cargo install --version 0.9.0-alpha.1 sqlx-cli --no-default-features --features rustls,postgres --locked`).
+- The `etl-api` database schema (SQLx migrations).
+- A Kubernetes cluster. Local development uses the `orbstack` context.
+- The Kubernetes resources in `scripts/k8s/local/`.
 
-ETL API validates its Kubernetes connection and shared prerequisites during
-startup. It exits instead of serving requests when Kubernetes initialization or
-preflight validation fails.
+Startup validates those Kubernetes prerequisites and exits if they are missing.
+`cargo x setup api` applies them for OrbStack.
 
-For the full local development stack, use the setup script to start Postgres,
-run migrations, and apply the local Kubernetes resources.
+If you already have Postgres and do not want Docker:
 
 ```bash
-cargo x init
-```
-
-Alternative: if you already have a Postgres database, set `DATABASE_URL` and apply migrations manually:
-
-```bash
-export DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
-sqlx migrate run --source crates/etl-api/migrations
+export SKIP_DOCKER=1
+export POSTGRES_HOST=127.0.0.1
+export POSTGRES_PORT=5432
+export POSTGRES_USER=postgres
+export POSTGRES_PASSWORD=postgres
+export POSTGRES_DB=postgres
+cargo x setup api
 ```
 
 ## Configuration
@@ -72,7 +79,7 @@ The configuration directory is determined by:
 Configuration files are loaded in this order:
 1. `base.(yaml|yml|json)` - Base configuration for all environments
 2. `{environment}.(yaml|yml|json)` - Environment-specific overrides (environment defaults to `prod` unless `APP_ENVIRONMENT` is set to `dev`, `staging`, or `prod`)
-3. `APP_`-prefixed environment variables - Runtime overrides (nested keys use `__`, lists split on `,`)
+3. `APP_`-prefixed environment variables - Runtime overrides (nested keys use `__`, lists are comma-separated)
 
 ### Examples
 
