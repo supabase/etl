@@ -26,10 +26,10 @@ egress = ["etl/egress"]
 [dependencies]
 
 configcat = { workspace = true }
-etl = { workspace = true }
+etl = { workspace = true, features = ["tls-rustls-ring"] }
 etl-config = { workspace = true, features = ["supabase"] }
-etl-destinations = { workspace = true }
-etl-maintenance = { workspace = true }
+etl-destinations = { workspace = true, features = ["tls-rustls-ring"] }
+etl-maintenance = { workspace = true, features = ["tls-rustls-ring"] }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 metrics = { workspace = true }

@@ -11,7 +11,9 @@ homepage.workspace = true
 doctest = false
 
 [features]
-default = []
+default = ["tls-rustls-ring"]
+tls-rustls-ring = ["sqlx/tls-rustls-ring", "etl/tls-rustls-ring"]
+tls-rustls-aws-lc-rs = ["sqlx/tls-rustls-aws-lc-rs", "etl/tls-rustls-aws-lc-rs"]
 ducklake = [
     "dep:duckdb",
     "dep:kube",
@@ -40,7 +42,7 @@ r2d2 = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
-sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "migrate", "chrono"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate", "chrono"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }

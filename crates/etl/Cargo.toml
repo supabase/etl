@@ -11,13 +11,13 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-tls-rustls-ring = ["sqlx/tls-rustls-ring"]
-tls-rustls-aws-lc-rs = ["sqlx/tls-rustls-aws-lc-rs"]
+default = ["tls-rustls-ring"]
+tls-rustls-ring = ["sqlx/tls-rustls-ring", "etl-postgres/tls-rustls-ring"]
+tls-rustls-aws-lc-rs = ["sqlx/tls-rustls-aws-lc-rs", "etl-postgres/tls-rustls-aws-lc-rs"]
 test-utils = ["etl-postgres/test-utils", "dep:proptest"]
 failpoints = ["fail/failpoints"]
 egress = []
 fuzzing = []
-default = ["tls-rustls-ring"]
 
 [dependencies]
 

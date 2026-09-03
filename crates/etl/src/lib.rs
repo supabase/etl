@@ -173,9 +173,23 @@
 //!
 //! # Feature Flags
 //!
+//! - `tls-rustls-ring` (default): Use `ring` as the rustls cryptography backend
+//!   for SQLx connections
+//! - `tls-rustls-aws-lc-rs`: Use `aws-lc-rs` as the rustls cryptography backend
+//!   for SQLx connections
 //! - `egress`: Enable structured billing usage logs
 //! - `test-utils`: Enable testing utilities and mock implementations
 //! - `failpoints`: Enable fault injection for testing error scenarios
+//!
+//! At least one TLS backend must be enabled; the build fails when neither is.
+//! To link only `aws-lc-rs`, disable default features and enable
+//! `tls-rustls-aws-lc-rs`. When both backends are enabled, SQLx uses `ring`.
+
+// Fail loudly instead of silently building SQLx without TLS.
+#[cfg(not(any(feature = "tls-rustls-ring", feature = "tls-rustls-aws-lc-rs")))]
+compile_error!(
+    "Either the `tls-rustls-ring` or the `tls-rustls-aws-lc-rs` feature must be enabled."
+);
 
 pub mod config;
 pub mod data;

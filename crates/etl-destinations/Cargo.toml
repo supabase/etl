@@ -14,8 +14,16 @@ doctest = false
 
 [features]
 default = ["tls-rustls-ring"]
-tls-rustls-ring = ["sqlx?/tls-rustls-ring"]
-tls-rustls-aws-lc-rs = ["sqlx?/tls-rustls-aws-lc-rs"]
+tls-rustls-ring = [
+    "etl/tls-rustls-ring",
+    "etl-maintenance?/tls-rustls-ring",
+    "sqlx?/tls-rustls-ring",
+]
+tls-rustls-aws-lc-rs = [
+    "etl/tls-rustls-aws-lc-rs",
+    "etl-maintenance?/tls-rustls-aws-lc-rs",
+    "sqlx?/tls-rustls-aws-lc-rs",
+]
 ducklake = [
     "dep:duckdb",
     "dep:etl-maintenance",
