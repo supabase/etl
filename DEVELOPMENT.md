@@ -54,7 +54,9 @@ cargo x fix              # auto-fix: clippy --fix, fmt, sort
 cargo x msrv             # verify MSRV consistency
 cargo x init             # set up local dev environment
 cargo x migrate          # run database migrations
-cargo x deploy-local     # deploy replicator to local OrbStack k8s
+cargo x deploy-local \
+  --cpu-request 125m \
+  --memory-request 250Mi # deploy replicator to local OrbStack k8s
 cargo x test-clickhouse  # run ClickHouse integration tests
 cargo x test-snowflake   # run Snowflake tests
 cargo x vendor-duckdb    # download and vendor DuckDB extensions

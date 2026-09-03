@@ -491,10 +491,6 @@ impl Destination for NullDestination {
 }
 
 /// Benchmark destination variants.
-#[cfg_attr(
-    any(feature = "bigquery", feature = "clickhouse", feature = "ducklake"),
-    expect(clippy::large_enum_variant)
-)]
 #[derive(Clone)]
 pub enum BenchDestination {
     /// Null destination variant.
